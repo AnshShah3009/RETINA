@@ -7,6 +7,12 @@ Cargo.lock
 *.swo
 *~
 
+# IDE and editor
+.idea/
+.vscode/
+.claude/
+*.iml
+
 # Archives and large binaries
 *.zip
 *.tar.gz
