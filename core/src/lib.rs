@@ -4,6 +4,7 @@
 //! This crate provides fundamental types and abstractions for computer vision operations,
 //! including point clouds, tensors, keypoints, and descriptors.
 
+pub mod buffer_handle;
 pub mod descriptor;
 pub mod frames;
 pub mod geometry;
@@ -18,6 +19,7 @@ pub mod slam;
 pub mod storage;
 pub mod tensor;
 
+pub use buffer_handle::*;
 pub use descriptor::*;
 pub use frames::*;
 pub use geometry::*;

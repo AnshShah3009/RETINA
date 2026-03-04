@@ -228,7 +228,7 @@ impl<T: Clone + Copy + fmt::Debug + 'static> CpuTensor<T> {
     }
 }
 
-impl<T: Clone + Copy + fmt::Debug + 'static, S: Storage<T>> Tensor<T, S> {
+impl<T: Clone + Copy + fmt::Debug + 'static, S: crate::storage::StorageFactory<T>> Tensor<T, S> {
     pub fn from_vec(data: Vec<T>, shape: TensorShape) -> crate::Result<Self> {
         if data.len() != shape.len() {
             return Err(crate::Error::DimensionMismatch(format!(
