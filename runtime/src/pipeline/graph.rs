@@ -28,11 +28,13 @@ impl ExecutionGraph {
         let mut buffer_producers: HashMap<BufferId, NodeId> = HashMap::new();
         let mut dependencies = Vec::new();
         let mut adjacency: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut predecessors: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         let mut in_degree: HashMap<NodeId, usize> = HashMap::new();
 
         for node in &nodes {
             in_degree.insert(*node, 0);
             adjacency.insert(*node, Vec::new());
+            predecessors.insert(*node, Vec::new());
         }
 
         for (idx, node) in pipeline_nodes.iter().enumerate() {
@@ -54,6 +56,7 @@ impl ExecutionGraph {
                     });
 
                     adjacency.entry(producer_id).or_default().push(node_id);
+                    predecessors.entry(node_id).or_default().push(producer_id);
                     *in_degree.entry(node_id).or_insert(0) += 1;
                 }
             }
@@ -71,7 +74,7 @@ impl ExecutionGraph {
 
         let topology_order = Self::topological_sort(&nodes, &adjacency, &in_degree)?;
 
-        let levels = Self::compute_levels(&topology_order, &adjacency);
+        let levels = Self::compute_levels(&topology_order, &predecessors);
 
         Ok(Self {
             nodes,
@@ -123,21 +126,20 @@ impl ExecutionGraph {
 
     fn compute_levels(
         topology_order: &[NodeId],
-        adjacency: &HashMap<NodeId, Vec<NodeId>>,
+        predecessors: &HashMap<NodeId, Vec<NodeId>>,
     ) -> HashMap<NodeId, usize> {
         let mut levels = HashMap::new();
 
         for &node in topology_order {
-            let max_pred_level = adjacency
-                .iter()
-                .filter_map(|(&pred, succs)| {
-                    if succs.contains(&node) {
-                        levels.get(&pred).copied()
-                    } else {
-                        None
-                    }
+            let max_pred_level = predecessors
+                .get(&node)
+                .map(|preds| {
+                    preds
+                        .iter()
+                        .filter_map(|p| levels.get(p).copied())
+                        .max()
+                        .unwrap_or(0)
                 })
-                .max()
                 .unwrap_or(0);
 
             levels.insert(node, max_pred_level + 1);
@@ -250,7 +252,12 @@ mod tests {
     }
 
     #[test]
-    fn test_cycle_detection() {
+    fn test_unresolved_inputs_still_builds() {
+        // This test shows that a graph with unresolved inputs (BufferId(1) is never produced)
+        // still builds successfully. The graph has no topological cycle because the
+        // unresolved dependency creates a non-existent edge (producer not found in buffer_producers).
+        // BufferId(0) → node_b → BufferId(1) → node_a, but since BufferId(1) has no producer,
+        // there's no edge node_b → node_a, so no cycle.
         let nodes = vec![
             PipelineNode::Kernel {
                 name: "a".into(),
@@ -267,9 +274,10 @@ mod tests {
         ];
 
         let result = ExecutionGraph::build(&nodes);
-        assert!(
-            result.is_ok(),
-            "Graph should build but execution would have unresolved inputs"
-        );
+        assert!(result.is_ok(), "Graph with unresolved input should build");
+
+        let graph = result.unwrap();
+        // The topological order should be valid since there's no actual cycle
+        assert_eq!(graph.topology_order.len(), 2);
     }
 }

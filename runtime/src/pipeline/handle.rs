@@ -51,6 +51,14 @@ impl AsyncPipelineHandle {
         }
     }
 
+    /// Waits for the pipeline execution to complete.
+    ///
+    /// # Deprecated
+    /// Use [`wait_for_completion`] instead, which is more idiomatic for handles.
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use `wait_for_completion` instead, which is more idiomatic for handles"
+    )]
     pub async fn await_result(mut self) -> Result<PipelineResult> {
         let rx = self
             .result_receiver

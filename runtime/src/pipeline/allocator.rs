@@ -127,6 +127,12 @@ impl TransientBufferPool {
             let size = alloc_guard.size;
             drop(alloc_guard);
 
+            // Decrement total_allocated when releasing buffer
+            {
+                let mut total = self.total_allocated.write();
+                *total = total.saturating_sub(size);
+            }
+
             let bucket = Self::size_bucket(size);
             let mut free_lists = self.free_lists.write();
             let pool = free_lists.entry(bucket).or_insert_with(Vec::new);

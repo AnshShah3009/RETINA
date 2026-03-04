@@ -100,11 +100,16 @@ impl DeviceRuntime {
     }
 
     pub fn last_completed(&self) -> SubmissionIndex {
-        self.last_completed
-            .lock()
-            .ok()
-            .map(|l| *l)
-            .unwrap_or_else(|| SubmissionIndex(0))
+        match self.last_completed.lock() {
+            Ok(l) => *l,
+            Err(_) => {
+                // Lock is poisoned. This indicates a panic occurred while holding the lock.
+                // We conservatively return 0 to avoid cascading panics in Drop or cleanup paths.
+                // NOTE: A poisoned lock means system integrity may be compromised.
+                eprintln!("WARNING: last_completed lock poisoned for device {:?}", self.id);
+                SubmissionIndex(0)
+            }
+        }
     }
 }
 

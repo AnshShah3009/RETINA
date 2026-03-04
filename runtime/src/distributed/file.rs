@@ -74,13 +74,32 @@ impl LoadCoordinator for FileCoordinator {
                     let mut content = String::new();
                     if file.read_to_string(&mut content).is_ok() {
                         for line in content.lines() {
+                            if line.is_empty() {
+                                continue;
+                            }
                             let parts: Vec<&str> = line.split(':').collect();
-                            if parts.len() == 2 {
-                                if let (Ok(dev_id), Ok(load)) =
-                                    (parts[0].parse::<u32>(), parts[1].parse::<usize>())
-                                {
+                            if parts.len() != 2 {
+                                #[cfg(feature = "tracing")]
+                                tracing::warn!(
+                                    "Malformed load entry in {}: expected 'device_id:load', got '{}'",
+                                    path.display(),
+                                    line
+                                );
+                                continue;
+                            }
+
+                            match (parts[0].parse::<u32>(), parts[1].parse::<usize>()) {
+                                (Ok(dev_id), Ok(load)) => {
                                     let entry = aggregate.entry(DeviceId(dev_id)).or_insert(0);
                                     *entry += load;
+                                }
+                                _ => {
+                                    #[cfg(feature = "tracing")]
+                                    tracing::warn!(
+                                        "Failed to parse load entry in {}: '{}'",
+                                        path.display(),
+                                        line
+                                    );
                                 }
                             }
                         }

@@ -39,6 +39,17 @@ pub fn create_coordinator(
     }
 }
 
+/// Auto-detects an appropriate coordinator based on environment variables.
+///
+/// Checks `CV_RUNTIME_COORDINATOR` (for file-based coordination) and `CV_RUNTIME_SHM`
+/// (for shared-memory coordination), in that order.
+///
+/// # Important
+/// This function creates a new coordinator instance each time it's called.
+/// To avoid creating multiple coordinators for the same resource, callers
+/// **MUST** cache the result using `OnceLock` or similar synchronization primitive.
+/// Creating duplicate coordinators for the same resource can lead to
+/// resource leaks and stale state.
 pub fn auto_detect_coordinator() -> Option<Box<dyn LoadCoordinator>> {
     if let Ok(path) = std::env::var("CV_RUNTIME_COORDINATOR") {
         let path_buf = std::path::PathBuf::from(path);

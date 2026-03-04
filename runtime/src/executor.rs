@@ -7,6 +7,16 @@ use std::time::{Duration, Instant};
 
 const RESIZE_TIMEOUT_SECS: u64 = 30;
 
+/// RAII guard that decrements the inflight job counter on drop.
+/// Ensures the counter is properly decremented even if the job panics.
+struct JobGuard(Arc<AtomicUsize>);
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct ExecutorConfig {
     pub num_threads: usize,
     pub name: String,
@@ -110,12 +120,6 @@ impl Executor {
 
         let pool = self.pool.read();
         pool.spawn(move || {
-            struct JobGuard(Arc<AtomicUsize>);
-            impl Drop for JobGuard {
-                fn drop(&mut self) {
-                    self.0.fetch_sub(1, Ordering::SeqCst);
-                }
-            }
             let _guard = JobGuard(inflight);
             f();
         });
@@ -126,11 +130,11 @@ impl Executor {
         F: FnOnce() -> R + Send,
         R: Send,
     {
-        self.inflight_jobs.fetch_add(1, Ordering::SeqCst);
+        let inflight = self.inflight_jobs.clone();
+        inflight.fetch_add(1, Ordering::SeqCst);
+        let _guard = JobGuard(inflight);
         let pool = self.pool.read();
-        let result = pool.install(f);
-        self.inflight_jobs.fetch_sub(1, Ordering::SeqCst);
-        result
+        pool.install(f)
     }
 
     pub fn load(&self) -> usize {
@@ -258,6 +262,7 @@ impl Executor {
     {
         let inflight = self.inflight_jobs.clone();
         inflight.fetch_add(1, Ordering::SeqCst);
+        let _guard = JobGuard(inflight);
 
         let pool = self.pool.read();
         pool.install(|| {
@@ -266,8 +271,6 @@ impl Executor {
                 f(item);
             });
         });
-
-        self.inflight_jobs.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

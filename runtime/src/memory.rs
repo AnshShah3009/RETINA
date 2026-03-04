@@ -354,12 +354,8 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
 
     pub fn mark_device_write(&mut self, index: SubmissionIndex) {
         self.last_write_submission = index;
-        if let Some((did, _)) = self.device_version {
-            let next_v = self
-                .host_version
-                .max(self.device_version.map(|v| v.1).unwrap_or(0))
-                + 1;
-            self.device_version = Some((did, next_v));
+        if let Some((did, dv)) = self.device_version {
+            self.device_version = Some((did, dv + 1));
         }
     }
 
@@ -388,7 +384,16 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
     }
 
     pub fn into_host_data(self) -> Vec<T> {
-        self.host_data.read().clone()
+        // Try to take ownership of the data without cloning if Arc is not shared.
+        // Since the struct implements Drop, we need to use ManuallyDrop to prevent
+        // double cleanup when we move the Arc out of self.
+        use std::mem::ManuallyDrop;
+        let this = ManuallyDrop::new(self);
+        let arc = unsafe { std::ptr::read(&this.host_data) };
+        match Arc::try_unwrap(arc) {
+            Ok(lock) => lock.into_inner(),
+            Err(arc) => arc.read().clone(),
+        }
     }
 
     pub fn share(&self) -> Arc<RwLock<Vec<T>>> {

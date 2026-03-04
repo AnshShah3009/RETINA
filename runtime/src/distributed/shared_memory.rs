@@ -90,7 +90,11 @@ impl ShmCoordinator {
             *byte = 0;
         }
 
-        let header = Self::header_mut(&mut mmap);
+        let header = Self::header_mut(&mut mmap)
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Mmap too small for shared memory header"
+            ))?;
         let magic = 0x43565254;
 
         if header.magic.load(Ordering::Relaxed) != magic {
@@ -128,18 +132,13 @@ impl ShmCoordinator {
 
     /// Get the header from the mmap with bounds validation.
     ///
-    /// # Safety
-    /// The mmap must be at least as large as `size_of::<ShmHeader>()`.
-    fn header_mut(mmap: &mut memmap2::MmapMut) -> &mut ShmHeader {
+    /// Returns None if the mmap is too small for the header.
+    fn header_mut(mmap: &mut memmap2::MmapMut) -> Option<&mut ShmHeader> {
         let header_size = std::mem::size_of::<ShmHeader>();
         if mmap.len() < header_size {
-            panic!(
-                "Mmap too small for header: {} < {}",
-                mmap.len(),
-                header_size
-            );
+            return None;
         }
-        unsafe { &mut *(mmap.as_mut_ptr() as *mut ShmHeader) }
+        Some(unsafe { &mut *(mmap.as_mut_ptr() as *mut ShmHeader) })
     }
 
     /// Get a slot at the given index with bounds validation (mutable mmap).
@@ -159,7 +158,12 @@ impl ShmCoordinator {
     }
 
     fn find_or_allocate_slot(mmap: &mut memmap2::MmapMut, pid: u32) -> io::Result<usize> {
-        let header = Self::header_mut(mmap);
+        let header = Self::header_mut(mmap).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Mmap too small for shared memory header"
+            )
+        })?;
         let num_slots = header.num_slots.load(Ordering::Relaxed) as usize;
 
         for i in 0..num_slots.min(MAX_PROCESSES) {
@@ -214,8 +218,17 @@ impl ShmCoordinator {
         {
             std::path::Path::new(&format!("/proc/{}", pid)).exists()
         }
+        #[cfg(target_family = "unix")]
         #[cfg(not(target_os = "linux"))]
         {
+            // Use libc::kill with signal 0 to check if process exists on macOS/BSD.
+            // Returns true if process is alive, false if it doesn't exist.
+            unsafe { libc::kill(pid as i32, 0) == 0 }
+        }
+        #[cfg(not(target_family = "unix"))]
+        {
+            // Windows: conservatively assume process is alive to avoid premature slot reuse.
+            // A stale timeout will eventually clean up if the process is gone.
             let _ = pid;
             true
         }
@@ -230,16 +243,15 @@ impl ShmCoordinator {
     }
 
     /// Get the header from the mmap (read-only) with bounds validation.
-    fn header(&self) -> &ShmHeader {
+    fn header(&self) -> io::Result<&ShmHeader> {
         let header_size = std::mem::size_of::<ShmHeader>();
         if self.mmap.len() < header_size {
-            panic!(
-                "Mmap too small for header: {} < {}",
-                self.mmap.len(),
-                header_size
-            );
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Mmap too small for shared memory header"
+            ));
         }
-        unsafe { &*(self.mmap.as_ptr() as *const ShmHeader) }
+        Ok(unsafe { &*(self.mmap.as_ptr() as *const ShmHeader) })
     }
 
     /// Get a slot at the given index (read-only) with bounds validation.
@@ -285,7 +297,7 @@ impl LoadCoordinator for ShmCoordinator {
         let now = Self::current_timestamp();
         let stale_timeout = 30_000u64;
 
-        let header = self.header();
+        let header = self.header()?;
         let num_slots = header.num_slots.load(Ordering::Relaxed) as usize;
 
         for i in 0..num_slots {
@@ -299,10 +311,12 @@ impl LoadCoordinator for ShmCoordinator {
             }
 
             let timestamp = slot.timestamp.load(Ordering::Relaxed);
-            if now.saturating_sub(timestamp) > stale_timeout {
-                if !Self::is_process_alive(slot_pid) {
-                    continue;
-                }
+            // Skip if timestamp is in the future (clock skew).
+            // Skip if timestamp is stale and process is dead.
+            // Keep if data is recent or process is still alive.
+            let is_stale = timestamp <= now && (now - timestamp) > stale_timeout;
+            if is_stale && !Self::is_process_alive(slot_pid) {
+                continue;
             }
 
             let device_id = slot.device_id.load(Ordering::Relaxed);

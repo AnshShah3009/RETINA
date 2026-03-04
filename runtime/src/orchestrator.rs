@@ -8,6 +8,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+/// Timeout for device recovery after failure. If a device has been marked as failed
+/// for longer than this period, it will be re-tried.
+const DEVICE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Priority level for a resource group
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TaskPriority {
@@ -178,7 +182,9 @@ pub struct TaskScheduler {
     mode: OrchestratorMode,
     coordinator: Option<Box<dyn LoadCoordinator>>,
     global_load_cache: Mutex<(HashMap<DeviceId, usize>, Instant)>,
-    failed_devices: Mutex<std::collections::HashSet<DeviceId>>,
+    /// Maps failed devices to the time of failure. Devices are considered recovered
+    /// after DEVICE_RECOVERY_TIMEOUT has elapsed.
+    failed_devices: Mutex<HashMap<DeviceId, Instant>>,
 }
 
 pub enum RuntimeRunner {
@@ -319,7 +325,7 @@ impl TaskScheduler {
                 HashMap::new(),
                 Instant::now() - Duration::from_secs(3600),
             )),
-            failed_devices: Mutex::new(std::collections::HashSet::new()),
+            failed_devices: Mutex::new(HashMap::new()),
         }
     }
 
@@ -329,12 +335,25 @@ impl TaskScheduler {
 
     pub fn report_failure(&self, device_id: DeviceId) {
         let mut failed = self.failed_devices.lock();
-        failed.insert(device_id);
+        failed.insert(device_id, Instant::now());
     }
 
     pub fn is_device_healthy(&self, device_id: DeviceId) -> bool {
-        let failed = self.failed_devices.lock();
-        !failed.contains(&device_id)
+        let mut failed = self.failed_devices.lock();
+
+        // If device has never failed, it's healthy
+        match failed.get(&device_id) {
+            None => true,
+            Some(&failure_time) => {
+                // If device failed but has recovered (timeout elapsed), mark it as healthy
+                if failure_time.elapsed() > DEVICE_RECOVERY_TIMEOUT {
+                    failed.remove(&device_id);
+                    true
+                } else {
+                    false
+                }
+            }
+        }
     }
 
     pub fn create_group(
@@ -379,7 +398,7 @@ impl TaskScheduler {
             runtime
                 .executors()
                 .lock()
-                .unwrap()
+                .map_err(|_| crate::Error::ConcurrencyError("Device runtime executor pool lock poisoned".into()))?
                 .add_executor(group.executor.clone());
         }
 
@@ -437,6 +456,15 @@ impl TaskScheduler {
         let global_load = self.get_global_load();
         let groups = self.groups.lock();
 
+        // Pre-compute local load per device to avoid O(n²) in the loop
+        let local_load_by_device: HashMap<DeviceId, usize> = {
+            let mut map = HashMap::new();
+            for group in groups.values() {
+                *map.entry(group.device_id()).or_insert(0) += group.load();
+            }
+            map
+        };
+
         let mut best_group: Option<Arc<ResourceGroup>> = None;
         let mut max_priority = TaskPriority::Background;
         let mut min_load = usize::MAX;
@@ -463,13 +491,8 @@ impl TaskScheduler {
                     continue; // Skip low priority for latency sensitive
                 }
 
-                // Load calculation: Local group load + remote load for this device
-                let local_device_load: usize = groups
-                    .values()
-                    .filter(|g| g.device_id() == device_id)
-                    .map(|g| g.load())
-                    .sum();
-
+                // Load calculation: Local device load + remote load for this device
+                let local_device_load = local_load_by_device.get(&device_id).copied().unwrap_or(0);
                 let remote_load = global_load
                     .get(&device_id)
                     .copied()
