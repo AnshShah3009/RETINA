@@ -16,9 +16,11 @@ impl MlxContext {
     pub fn new() -> Option<Self> {
         #[cfg(feature = "mlx")]
         {
-            // Placeholder for actual mlx-rs initialization
+            // Placeholder for actual mlx-rs initialization.
+            // Use DeviceId(2) to avoid colliding with CpuBackend (DeviceId 0) and
+            // GpuContext (DeviceId 0) in the device registry HashMap.
             Some(Self {
-                device_id: DeviceId(0),
+                device_id: DeviceId(2),
             })
         }
         #[cfg(not(feature = "mlx"))]

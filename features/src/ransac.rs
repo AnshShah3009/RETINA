@@ -6,14 +6,19 @@
 use cv_core::{Matches, Ransac, RobustConfig, RobustModel};
 use nalgebra::{Matrix3, Vector3};
 
+/// RANSAC configuration — re-exported from [`cv_core::RobustConfig`].
 pub type RansacConfig = RobustConfig;
 
+/// A correspondence between a source and destination 2-D point.
 #[derive(Clone, Debug)]
 pub struct MatchPair {
+    /// Source point (x, y) in the query image.
     pub src: (f64, f64),
+    /// Destination point (x, y) in the training image.
     pub dst: (f64, f64),
 }
 
+/// RANSAC-compatible estimator for projective homographies (DLT, 4-point minimum).
 pub struct HomographyEstimator;
 
 impl RobustModel<MatchPair> for HomographyEstimator {
@@ -59,6 +64,7 @@ impl RobustModel<MatchPair> for HomographyEstimator {
     }
 }
 
+/// RANSAC-compatible estimator for fundamental matrices (8-point algorithm with rank-2 enforcement).
 pub struct FundamentalEstimator;
 
 impl RobustModel<MatchPair> for FundamentalEstimator {
@@ -415,13 +421,14 @@ pub fn filter_matches_by_inliers(matches: &Matches, inliers: &[bool]) -> Matches
     filtered
 }
 
-/// RANSAC matcher that filters matches based on geometric consistency
+/// Convenience wrapper that runs RANSAC and returns the geometrically consistent subset of matches.
 pub struct RansacMatcher {
     config: RansacConfig,
     use_fundamental: bool,
 }
 
 impl RansacMatcher {
+    /// Create a new `RansacMatcher` using the default config and homography estimation.
     pub fn new() -> Self {
         Self {
             config: RansacConfig::default(),
@@ -429,16 +436,19 @@ impl RansacMatcher {
         }
     }
 
+    /// Switch to fundamental matrix estimation instead of homography.
     pub fn with_fundamental(mut self) -> Self {
         self.use_fundamental = true;
         self
     }
 
+    /// Override the default RANSAC configuration.
     pub fn with_config(mut self, config: RansacConfig) -> Self {
         self.config = config;
         self
     }
 
+    /// Filter matches using RANSAC, returning inlier matches and the estimated model.
     pub fn filter_matches(
         &self,
         matches: &Matches,

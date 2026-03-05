@@ -3,6 +3,13 @@ use cv_core::KeyPoint;
 use image::GrayImage;
 use rayon::prelude::*;
 
+/// Detect corners using the Harris corner detector.
+///
+/// Computes the Harris response `det(M) - k * trace(M)^2` at each pixel using
+/// a 3×3 Sobel gradient window and returns keypoints whose response exceeds `threshold`.
+///
+/// * `k` - Harris sensitivity parameter (typically 0.04–0.06)
+/// * `threshold` - Minimum response value for a pixel to be returned as a keypoint
 pub fn harris_detect(
     image: &GrayImage,
     _block_size: i32,
@@ -53,6 +60,10 @@ pub fn harris_detect(
     KeyPoints { keypoints: kps }
 }
 
+/// Detect corners using the Shi-Tomasi (Good Features to Track) criterion.
+///
+/// Delegates to [`harris_detect`] with `k = 0.04` and a threshold derived from
+/// `quality_level * 255^2`.
 pub fn shi_tomasi_detect(
     image: &GrayImage,
     _max_corners: usize,

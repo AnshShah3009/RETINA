@@ -648,6 +648,9 @@ fn convert_to_f32_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         .map_err(|e| Error::FeatureError(format!("Failed to create f32 tensor: {}", e)))
 }
 
+/// Detect SIFT keypoints using an optional GPU compute context.
+///
+/// Falls back to CPU detection when no GPU context is available.
 pub fn sift_detect_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
     ctx: &ComputeDevice,
     image: &Tensor<u8, S>,

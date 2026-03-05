@@ -6,8 +6,11 @@ use crate::line_matcher::LineDescriptor;
 use image::GrayImage;
 use rayon::prelude::*;
 
+/// Parameters for the LBD (Line Binary Descriptor) extractor.
 pub struct LbdParams {
+    /// Number of scale layers used when sampling orthogonal gradients.
     pub n_layers: usize,
+    /// Width of the sampling band around each line segment (in pixels).
     pub n_bandwidth: usize,
 }
 
@@ -20,15 +23,21 @@ impl Default for LbdParams {
     }
 }
 
+/// Line Binary Descriptor extractor.
 pub struct Lbd {
     _params: LbdParams,
 }
 
 impl Lbd {
+    /// Create a new LBD extractor with the given parameters.
     pub fn new(params: LbdParams) -> Self {
         Self { _params: params }
     }
 
+    /// Compute LBD descriptors for a set of line segments in the image.
+    ///
+    /// For each segment, samples gradient magnitudes orthogonally along the line and
+    /// packs binary comparisons into a 256-bit (32-byte) descriptor.
     pub fn compute(
         &self,
         image: &GrayImage,

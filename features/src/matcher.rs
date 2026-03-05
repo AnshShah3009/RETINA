@@ -2,11 +2,15 @@ use crate::descriptor::Descriptors;
 use cv_core::{FeatureMatch, Matches};
 use rayon::prelude::*;
 
+/// Matching strategy used by [`Matcher`].
 pub enum MatchType {
+    /// Brute-force L2 distance matching (for float descriptors).
     BruteForce,
+    /// Brute-force Hamming distance matching (for binary descriptors).
     BruteForceHamming,
 }
 
+/// Feature descriptor matcher with optional ratio test and cross-check filtering.
 pub struct Matcher {
     match_type: MatchType,
     cross_check: bool,
@@ -14,6 +18,7 @@ pub struct Matcher {
 }
 
 impl Matcher {
+    /// Create a new matcher with the given matching strategy.
     pub fn new(match_type: MatchType) -> Self {
         Self {
             match_type,
@@ -22,16 +27,19 @@ impl Matcher {
         }
     }
 
+    /// Enable cross-check filtering (keep a match only if it is the best match in both directions).
     pub fn with_cross_check(mut self) -> Self {
         self.cross_check = true;
         self
     }
 
+    /// Enable Lowe's ratio test: discard matches where `best / second_best > threshold`.
     pub fn with_ratio_test(mut self, threshold: f32) -> Self {
         self.ratio_threshold = Some(threshold);
         self
     }
 
+    /// Match each query descriptor to the best training descriptor.
     pub fn match_descriptors(&self, query: &Descriptors, train: &Descriptors) -> Matches {
         match self.match_type {
             MatchType::BruteForce | MatchType::BruteForceHamming => {
@@ -126,6 +134,7 @@ impl Matcher {
     }
 }
 
+/// Match descriptors using brute-force Hamming distance with an optional ratio test.
 pub fn match_descriptors(
     query: &Descriptors,
     train: &Descriptors,
@@ -140,6 +149,7 @@ pub fn match_descriptors(
     matcher.match_descriptors(query, train)
 }
 
+/// K-nearest-neighbour matching: return the `k` closest training descriptors for each query.
 pub fn knn_match(query: &Descriptors, train: &Descriptors, k: usize) -> Vec<Vec<FeatureMatch>> {
     let mut all_matches: Vec<Vec<FeatureMatch>> = Vec::with_capacity(query.len());
 
@@ -166,10 +176,14 @@ pub fn knn_match(query: &Descriptors, train: &Descriptors, k: usize) -> Vec<Vec<
     all_matches
 }
 
+/// Remove all matches with a distance greater than `max_distance`.
 pub fn filter_matches_by_distance(matches: &mut Matches, max_distance: f32) {
     matches.filter_by_distance(max_distance);
 }
 
+/// Apply Lowe's ratio test to KNN match results.
+///
+/// Keeps a match from the `k=2` result only if `best.distance < ratio * second.distance`.
 pub fn filter_matches_by_ratio_test(
     matches: &[Vec<FeatureMatch>],
     ratio: f32,

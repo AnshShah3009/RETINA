@@ -4,6 +4,10 @@ use image::GrayImage;
 use rand::thread_rng;
 use rand::Rng;
 
+/// BRIEF binary descriptor extractor.
+///
+/// Generates binary descriptors by comparing randomly sampled pixel pairs
+/// within a patch around each keypoint.
 pub struct BriefDescriptor {
     pairs: Vec<(i32, i32, i32, i32)>,
     patch_size: i32,
@@ -11,6 +15,10 @@ pub struct BriefDescriptor {
 }
 
 impl BriefDescriptor {
+    /// Create a new BRIEF extractor with randomly sampled pixel-pair patterns.
+    ///
+    /// * `descriptor_size` - Number of bytes in the output descriptor (bits = `descriptor_size × 8`)
+    /// * `patch_size` - Side length in pixels of the patch sampled around each keypoint
     pub fn new(descriptor_size: usize, patch_size: i32) -> Self {
         let num_pairs = descriptor_size * 8;
         let mut rng = thread_rng();
@@ -88,6 +96,10 @@ impl DescriptorExtractor for BriefDescriptor {
     }
 }
 
+/// Extract BRIEF descriptors for a set of keypoints in a single call.
+///
+/// Uses a default patch size of 31 pixels. Keypoints too close to the image
+/// border to fit a full patch are silently skipped.
 pub fn extract_brief(
     image: &GrayImage,
     keypoints: &KeyPoints,

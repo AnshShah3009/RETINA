@@ -35,11 +35,17 @@ pub fn is_gpu_enabled() -> bool {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuCandidate {
+    /// Left edge of the candidate bounding box (inclusive).
     pub min_x: u32,
+    /// Top edge of the candidate bounding box (inclusive).
     pub min_y: u32,
+    /// Right edge of the candidate bounding box (inclusive).
     pub max_x: u32,
+    /// Bottom edge of the candidate bounding box (inclusive).
     pub max_y: u32,
+    /// Total grid dimension (payload + 2 × border bits).
     pub grid_size: u32,
+    /// Number of payload bits per row/column.
     pub payload_bits: u32,
 }
 
@@ -47,12 +53,18 @@ pub struct GpuCandidate {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct GpuMarkerResult {
+    /// Lower 32 bits of the sampled marker bitmask.
     pub bitmask: u32,
+    /// Upper 32 bits of the sampled marker bitmask (for payloads > 32 bits).
     pub bitmask_high: u32,
+    /// Index of the best-matching code in the dictionary.
     pub best_id: u32,
+    /// Clockwise rotation (0–3) applied to match the best code.
     pub rotation: u32,
+    /// Match confidence score (lower Hamming distance → higher confidence).
     pub confidence: f32,
-    pub status: u32, // 0=invalid, 1=valid, 2=border_fail, 3=no_match
+    /// Detection status: 0 = invalid, 1 = valid, 2 = border check failed, 3 = no dictionary match.
+    pub status: u32,
 }
 
 impl GpuMarkerResult {

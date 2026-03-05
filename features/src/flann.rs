@@ -256,6 +256,7 @@ pub struct FlannMatcher {
 }
 
 impl FlannMatcher {
+    /// Create a new `FlannMatcher` with default FLANN index parameters (4 trees, branching factor 32).
     pub fn new() -> Self {
         Self {
             index: FlannIndex::new(32, 4), // 4 trees, branching factor 32
@@ -263,6 +264,7 @@ impl FlannMatcher {
         }
     }
 
+    /// Enable Lowe's ratio test: discard matches where `best / second_best > threshold`.
     pub fn with_ratio_test(mut self, threshold: f32) -> Self {
         self.ratio_threshold = Some(threshold);
         self

@@ -1,6 +1,11 @@
 use cv_core::{KeyPoint, KeyPoints};
 use image::GrayImage;
 
+/// Detect corners using the Good Features to Track (Shi-Tomasi) criterion.
+///
+/// Returns at most `max_corners` keypoints with a minimum quality of
+/// `quality_level` (fraction of the strongest response) and spaced at least
+/// `min_distance` pixels apart.
 pub fn gftt_detect(
     image: &GrayImage,
     max_corners: usize,

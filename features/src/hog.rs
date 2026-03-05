@@ -2,9 +2,13 @@ use image::GrayImage;
 use rayon::prelude::*;
 use std::f32::consts::PI;
 
+/// Parameters for HOG (Histogram of Oriented Gradients) descriptor computation.
 pub struct HogParams {
+    /// Width/height in pixels of each HOG cell.
     pub cell_size: usize,
+    /// Number of cells per block edge (block is `block_size × block_size` cells).
     pub block_size: usize,
+    /// Number of orientation bins per cell histogram (unsigned gradients, 0–180°).
     pub n_bins: usize,
 }
 
@@ -18,6 +22,10 @@ impl Default for HogParams {
     }
 }
 
+/// Compute the HOG descriptor for a grayscale image.
+///
+/// Divides the image into cells, accumulates gradient orientation histograms per cell,
+/// L2-normalizes over overlapping blocks, and concatenates the result into a flat vector.
 pub fn compute_hog(image: &GrayImage, params: &HogParams) -> Vec<f32> {
     let width = image.width() as usize;
     let height = image.height() as usize;

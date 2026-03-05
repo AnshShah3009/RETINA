@@ -12,51 +12,81 @@ pub mod gpu;
 #[cfg(feature = "gpu")]
 pub use gpu::*;
 
+/// ArUco marker dictionary variant.
 #[derive(Debug, Clone, Copy)]
 pub enum ArucoDictionary {
+    /// 4×4 bit payload, 50-marker dictionary.
     Dict4x4_50,
 }
 
+/// Result of detecting a single ArUco marker in an image.
 #[derive(Debug, Clone, Copy)]
 pub struct ArucoDetection {
+    /// Dictionary ID of the detected marker.
     pub id: u16,
+    /// Clockwise rotation (0–3, in multiples of 90°) that aligns the detected bits to the canonical code.
     pub rotation_cw: u8,
+    /// Image-space corners of the marker bounding box (top-left, top-right, bottom-right, bottom-left).
     pub corners: [Point2<f32>; 4],
+    /// Image-space centroid of the detected marker.
     pub center: Point2<f32>,
 }
 
+/// AprilTag family variant.
 #[derive(Debug, Clone, Copy)]
 pub enum AprilTagFamily {
+    /// 16-bit payload, minimum Hamming distance 5.
     Tag16h5,
+    /// 36-bit payload, minimum Hamming distance 11.
     Tag36h11,
 }
 
+/// Result of detecting a single AprilTag in an image.
 #[derive(Debug, Clone, Copy)]
 pub struct AprilTagDetection {
+    /// Dictionary ID of the detected tag.
     pub id: u16,
+    /// Clockwise rotation (0–3) that aligns the detected bits to the canonical code.
     pub rotation_cw: u8,
+    /// Hamming distance to the nearest code in the dictionary (0 = perfect match).
     pub hamming: u8,
+    /// Image-space corners of the tag bounding box.
     pub corners: [Point2<f32>; 4],
+    /// Image-space centroid of the detected tag.
     pub center: Point2<f32>,
 }
 
+/// A ChArUco calibration board composed of a chessboard pattern with embedded ArUco markers.
 #[derive(Debug, Clone)]
 pub struct CharucoBoard {
+    /// Number of chessboard squares along the X axis.
     pub squares_x: u32,
+    /// Number of chessboard squares along the Y axis.
     pub squares_y: u32,
+    /// Side length of each chessboard square in world units (e.g. metres).
     pub square_length: f32,
+    /// Side length of each embedded ArUco marker in world units.
     pub marker_length: f32,
+    /// ArUco dictionary used for the embedded markers.
     pub dictionary: ArucoDictionary,
+    /// IDs of the ArUco markers placed on the board, in order.
     pub marker_ids: Vec<u16>,
     marker_cells: Vec<(u32, u32)>,
 }
 
+/// A detected interior corner of a ChArUco board.
 #[derive(Debug, Clone, Copy)]
 pub struct CharucoCorner {
+    /// Corner ID (row-major index of the interior chessboard corner).
     pub id: u16,
+    /// Image-space position of the corner.
     pub point: Point2<f32>,
 }
 
+/// Create a [`CharucoBoard`] with the given layout and marker dictionary.
+///
+/// Returns an error if the board is smaller than 2×2, the lengths are invalid,
+/// or the dictionary does not have enough codes for the number of markers.
 pub fn create_charuco_board(
     squares_x: u32,
     squares_y: u32,
@@ -110,6 +140,10 @@ pub fn create_charuco_board(
     })
 }
 
+/// Render a ChArUco board to a grayscale image.
+///
+/// Each chessboard square is drawn at `pixel_per_square` pixels wide/tall.
+/// Returns an error if `pixel_per_square` is 0.
 pub fn draw_charuco_board(board: &CharucoBoard, pixel_per_square: u32) -> Result<GrayImage> {
     if pixel_per_square == 0 {
         return Err(Error::FeatureError(
@@ -153,6 +187,11 @@ pub fn draw_charuco_board(board: &CharucoBoard, pixel_per_square: u32) -> Result
     Ok(img)
 }
 
+/// Detect ChArUco interior corners in an image.
+///
+/// First detects ArUco markers to estimate a homography, then projects all
+/// interior chessboard corners into the image. Returns an empty list if fewer
+/// than 4 marker correspondences are found.
 pub fn detect_charuco_corners(
     image: &GrayImage,
     board: &CharucoBoard,
@@ -202,6 +241,10 @@ pub fn detect_charuco_corners(
     Ok(out)
 }
 
+/// Render a single ArUco marker to a grayscale image.
+///
+/// `cell_size` controls the pixel size of each grid cell (including the border).
+/// Returns an error if `id` is out of range for the dictionary.
 pub fn draw_aruco_marker(
     dictionary: ArucoDictionary,
     id: u16,
@@ -216,6 +259,10 @@ pub fn draw_aruco_marker(
     Ok(draw_marker_bits(code, payload_bits, border_bits, cell_size))
 }
 
+/// Detect all ArUco markers belonging to the given dictionary in an image.
+///
+/// Uses the GPU path when available (and enabled via [`markers::gpu::use_gpu`]),
+/// otherwise falls back to parallel CPU detection.
 pub fn detect_aruco_markers(
     image: &GrayImage,
     dictionary: ArucoDictionary,
@@ -361,6 +408,10 @@ fn detect_aruco_markers_gpu(
     Ok(detections)
 }
 
+/// Render a single AprilTag to a grayscale image.
+///
+/// `cell_size` controls the pixel size of each grid cell.
+/// Returns an error if `id` is out of range for the family.
 pub fn draw_apriltag(family: AprilTagFamily, id: u16, cell_size: u32) -> Result<GrayImage> {
     let (payload_bits, codes) = apriltag_family_codes(family);
     let border_bits = 1usize;
@@ -371,6 +422,10 @@ pub fn draw_apriltag(family: AprilTagFamily, id: u16, cell_size: u32) -> Result<
     Ok(draw_marker_bits(code, payload_bits, border_bits, cell_size))
 }
 
+/// Detect all AprilTags of the given family in an image.
+///
+/// Uses the GPU path when available, otherwise falls back to parallel CPU detection.
+/// Accepts markers with up to 1-bit error (Hamming distance ≤ 1).
 pub fn detect_apriltags(
     image: &GrayImage,
     family: AprilTagFamily,

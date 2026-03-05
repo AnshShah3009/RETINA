@@ -30,9 +30,12 @@ pub struct Orb {
     fast_threshold: u8,
 }
 
+/// Keypoint scoring method used to rank and filter ORB keypoints.
 #[derive(Clone, Copy)]
 pub enum ScoreType {
+    /// Rank keypoints by Harris corner response.
     Harris,
+    /// Rank keypoints by FAST corner response.
     Fast,
 }
 
@@ -53,25 +56,30 @@ impl Default for Orb {
 }
 
 impl Orb {
+    /// Create a new ORB detector/extractor with default parameters.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set the maximum number of keypoints to retain.
     pub fn with_n_features(mut self, n: usize) -> Self {
         self.n_features = n;
         self
     }
 
+    /// Set the number of scale pyramid levels.
     pub fn with_n_levels(mut self, n: usize) -> Self {
         self.n_levels = n;
         self
     }
 
+    /// Set the scale factor between pyramid levels (must be > 1.0).
     pub fn with_scale_factor(mut self, factor: f32) -> Self {
         self.scale_factor = factor;
         self
     }
 
+    /// Set the FAST detection threshold (lower = more keypoints).
     pub fn with_fast_threshold(mut self, threshold: u8) -> Self {
         self.fast_threshold = threshold;
         self
@@ -270,6 +278,9 @@ fn extract_keypoints_from_score_map<S: Storage<u8> + cv_core::StorageFactory<u8>
     Ok(KeyPoints { keypoints: kps })
 }
 
+/// Detect ORB keypoints and compute descriptors using an optional GPU compute context.
+///
+/// Falls back to CPU detection when no GPU context is available.
 pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
     orb: &Orb,
     ctx: &cv_hal::compute::ComputeDevice,
@@ -617,6 +628,7 @@ fn scale_image(image: &GrayImage, scale: f32) -> GrayImage {
     )
 }
 
+/// Detect ORB keypoints and compute descriptors on the CPU.
 pub fn orb_detect_and_compute(image: &GrayImage, n_features: usize) -> (KeyPoints, Descriptors) {
     let orb = Orb::new().with_n_features(n_features);
     let mut keypoints = orb.detect(image);

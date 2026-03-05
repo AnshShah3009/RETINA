@@ -1,4 +1,4 @@
-use cv_core::{KeyPoint, KeyPoints, Matches};
+use cv_core::{KeyPoints, Matches};
 use image::{GrayImage, Rgb, RgbImage};
 use std::cmp::max;
 
