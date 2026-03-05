@@ -3,8 +3,8 @@ use crate::Result;
 use cv_core::BufferHandle;
 use cv_hal::DeviceId;
 use parking_lot::RwLock;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use wgpu::BufferUsages;
 
 /// Atomic counter for generating unique BufferHandle IDs for UnifiedBuffer.
@@ -553,8 +553,7 @@ mod tests {
 
     #[test]
     fn test_unified_buffer_from_storage() {
-        let cpu_storage =
-            cv_core::CpuStorage::from_vec(vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
+        let cpu_storage = cv_core::CpuStorage::from_vec(vec![1.0f32, 2.0, 3.0, 4.0]).unwrap();
         let buf = UnifiedBuffer::from_storage(cpu_storage);
 
         assert_eq!(buf.len(), 4);

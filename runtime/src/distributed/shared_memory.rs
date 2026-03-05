@@ -90,11 +90,12 @@ impl ShmCoordinator {
             *byte = 0;
         }
 
-        let header = Self::header_mut(&mut mmap)
-            .ok_or_else(|| io::Error::new(
+        let header = Self::header_mut(&mut mmap).ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Mmap too small for shared memory header"
-            ))?;
+                "Mmap too small for shared memory header",
+            )
+        })?;
         let magic = 0x43565254;
 
         if header.magic.load(Ordering::Relaxed) != magic {
@@ -161,7 +162,7 @@ impl ShmCoordinator {
         let header = Self::header_mut(mmap).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Mmap too small for shared memory header"
+                "Mmap too small for shared memory header",
             )
         })?;
         let num_slots = header.num_slots.load(Ordering::Relaxed) as usize;
@@ -248,7 +249,7 @@ impl ShmCoordinator {
         if self.mmap.len() < header_size {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Mmap too small for shared memory header"
+                "Mmap too small for shared memory header",
             ));
         }
         Ok(unsafe { &*(self.mmap.as_ptr() as *const ShmHeader) })

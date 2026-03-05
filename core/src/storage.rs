@@ -501,8 +501,7 @@ mod tests {
 
     #[test]
     fn test_downcast_ref_preserves_shape() {
-        let cpu_storage =
-            CpuStorage::from_vec_with_shape(vec![1.0f32; 12], vec![3, 4]).unwrap();
+        let cpu_storage = CpuStorage::from_vec_with_shape(vec![1.0f32; 12], vec![3, 4]).unwrap();
         let any_ref = cpu_storage.as_any();
 
         let downcast: Option<&CpuStorage<f32>> = CpuStorage::downcast_ref(any_ref);

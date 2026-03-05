@@ -1,6 +1,6 @@
+use crate::pipeline::NodeId;
 use cv_hal::{DeviceId, SubmissionIndex};
 use std::time::Instant;
-use crate::pipeline::NodeId;
 
 /// Runtime events for observability and debugging
 #[derive(Debug, Clone)]

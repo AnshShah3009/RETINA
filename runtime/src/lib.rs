@@ -11,7 +11,7 @@ pub mod pipeline;
 pub use device_registry::{registry, DeviceRegistry, DeviceRuntime, SubmissionIndex};
 pub use error::ErrorContext;
 pub use memory::UnifiedBuffer;
-pub use observe::{observability, ObservabilityLayer, Metrics, RuntimeEvent};
+pub use observe::{observability, Metrics, ObservabilityLayer, RuntimeEvent};
 pub use orchestrator::{
     best_runner, default_runner, scheduler, try_best_runner, try_default_runner, GroupPolicy,
     ResourceGroup, RuntimeRunner, TaskPriority, TaskScheduler, WorkloadHint,

@@ -355,7 +355,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn subtract<
+        T: Clone + Copy + bytemuck::Pod + std::fmt::Debug,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _a: &Tensor<T, S>,
         _b: &Tensor<T, S>,
@@ -455,7 +458,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn akaze_contrast_k<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(&self, _input: &Tensor<f32, S>) -> Result<f32> {
+    fn akaze_contrast_k<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
+        &self,
+        _input: &Tensor<f32, S>,
+    ) -> Result<f32> {
         Err(Error::NotSupported(
             "MLX akaze_contrast_k not implemented".into(),
         ))

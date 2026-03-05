@@ -1,6 +1,6 @@
-use cv_hal::{DeviceId, SubmissionIndex};
-use std::time::{Instant, Duration};
 use crate::ErrorContext;
+use cv_hal::{DeviceId, SubmissionIndex};
+use std::time::{Duration, Instant};
 
 /// Tracks lifecycle of a single submission (GPU operation or pipeline node)
 /// Automatically publishes completion event on drop
@@ -41,7 +41,8 @@ impl SubmissionContext {
 
     /// Get duration if completed
     pub fn duration(&self) -> Option<Duration> {
-        self.completed_at.map(|end| end.duration_since(self.created_at))
+        self.completed_at
+            .map(|end| end.duration_since(self.created_at))
     }
 
     /// Check if completed
@@ -95,22 +96,14 @@ mod tests {
 
     #[test]
     fn test_submission_context_creation() {
-        let ctx = SubmissionContext::new(
-            SubmissionIndex(1),
-            DeviceId(0),
-            "test_kernel",
-        );
+        let ctx = SubmissionContext::new(SubmissionIndex(1), DeviceId(0), "test_kernel");
         assert!(!ctx.is_completed());
         assert!(ctx.duration().is_none());
     }
 
     #[test]
     fn test_submission_mark_completed() {
-        let mut ctx = SubmissionContext::new(
-            SubmissionIndex(1),
-            DeviceId(0),
-            "test_kernel",
-        );
+        let mut ctx = SubmissionContext::new(SubmissionIndex(1), DeviceId(0), "test_kernel");
 
         std::thread::sleep(Duration::from_millis(10));
         let duration = ctx.mark_completed();
@@ -122,11 +115,7 @@ mod tests {
 
     #[test]
     fn test_submission_error_marking() {
-        let mut ctx = SubmissionContext::new(
-            SubmissionIndex(1),
-            DeviceId(0),
-            "test_kernel",
-        );
+        let mut ctx = SubmissionContext::new(SubmissionIndex(1), DeviceId(0), "test_kernel");
 
         let error = crate::ErrorContext::new(
             "Test error",

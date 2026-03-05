@@ -361,7 +361,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn subtract<
+        T: Clone + Copy + bytemuck::Pod + std::fmt::Debug,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         a: &Tensor<T, S>,
         b: &Tensor<T, S>,

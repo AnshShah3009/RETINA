@@ -106,7 +106,10 @@ impl DeviceRuntime {
                 // Lock is poisoned. This indicates a panic occurred while holding the lock.
                 // We conservatively return 0 to avoid cascading panics in Drop or cleanup paths.
                 // NOTE: A poisoned lock means system integrity may be compromised.
-                eprintln!("WARNING: last_completed lock poisoned for device {:?}", self.id);
+                eprintln!(
+                    "WARNING: last_completed lock poisoned for device {:?}",
+                    self.id
+                );
                 SubmissionIndex(0)
             }
         }

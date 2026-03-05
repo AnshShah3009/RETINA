@@ -1063,7 +1063,10 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn subtract<
+        T: Clone + Copy + bytemuck::Pod + std::fmt::Debug,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         a: &Tensor<T, S>,
         b: &Tensor<T, S>,

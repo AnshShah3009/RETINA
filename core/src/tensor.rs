@@ -417,7 +417,6 @@ impl One for i32 {
     }
 }
 
-
 impl Tensor<f32, CpuStorage<f32>> {
     /// SIMD-accelerated element-wise addition.
     pub fn add(&self, other: &Self) -> crate::Result<Self> {
@@ -1069,8 +1068,7 @@ mod tests {
         fn test_tensor_storage_device_type() {
             let data = vec![1.0f32; 24];
             let shape = TensorShape::new(2, 3, 4);
-            let tensor: Tensor<f32, CpuStorage<f32>> =
-                Tensor::from_vec(data, shape).unwrap();
+            let tensor: Tensor<f32, CpuStorage<f32>> = Tensor::from_vec(data, shape).unwrap();
 
             // Verify the storage is CPU-based
             assert_eq!(tensor.storage.device(), DeviceType::Cpu);
@@ -1080,8 +1078,7 @@ mod tests {
         fn test_tensor_storage_capacity() {
             let data = vec![1.0f32, 2.0, 3.0];
             let shape = TensorShape::new(1, 1, 3);
-            let tensor: Tensor<f32, CpuStorage<f32>> =
-                Tensor::from_vec(data, shape).unwrap();
+            let tensor: Tensor<f32, CpuStorage<f32>> = Tensor::from_vec(data, shape).unwrap();
 
             // Verify storage capacity matches data length
             assert_eq!(tensor.storage.capacity(), 3);
@@ -1124,8 +1121,7 @@ mod tests {
         fn test_cpu_as_mut_slice() {
             let data = vec![1.0f32, 2.0, 3.0, 4.0];
             let shape = TensorShape::new(1, 2, 2);
-            let mut tensor =
-                Tensor::<f32, CpuStorage<f32>>::from_vec(data, shape).unwrap();
+            let mut tensor = Tensor::<f32, CpuStorage<f32>>::from_vec(data, shape).unwrap();
 
             let slice = tensor.cpu_as_mut_slice();
             slice[0] = 42.0;
@@ -1166,8 +1162,7 @@ mod tests {
         fn test_cpu_convenience_with_different_types() {
             let data_i32 = vec![1i32, 2, 3, 4];
             let shape = TensorShape::new(2, 2, 1);
-            let tensor = Tensor::<i32, CpuStorage<i32>>::from_vec(data_i32.clone(), shape)
-                .unwrap();
+            let tensor = Tensor::<i32, CpuStorage<i32>>::from_vec(data_i32.clone(), shape).unwrap();
 
             assert_eq!(tensor.cpu_as_slice(), &[1, 2, 3, 4]);
             assert_eq!(tensor.cpu_to_vec(), data_i32);

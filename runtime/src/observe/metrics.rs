@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Metrics collection for runtime monitoring
@@ -29,7 +29,12 @@ impl Metrics {
         // Update peak if necessary
         let mut peak = self.peak_allocated.load(Ordering::SeqCst);
         while new_total > peak {
-            match self.peak_allocated.compare_exchange(peak, new_total, Ordering::SeqCst, Ordering::SeqCst) {
+            match self.peak_allocated.compare_exchange(
+                peak,
+                new_total,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
                 Ok(_) => break,
                 Err(actual) => peak = actual,
             }

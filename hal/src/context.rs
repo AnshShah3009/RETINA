@@ -87,7 +87,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Vec<cv_core::HoughCircle>>;
 
     /// Template matching
-    fn match_template<S: Storage<u8> + 'static, OS: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
+    fn match_template<
+        S: Storage<u8> + 'static,
+        OS: Storage<f32> + cv_core::StorageFactory<f32> + 'static,
+    >(
         &self,
         image: &Tensor<u8, S>,
         template: &Tensor<u8, S>,
@@ -248,7 +251,10 @@ pub trait ComputeContext: Send + Sync {
     /// Elementwise Subtraction (A - B)
     /// Input: Signed output often needed for DoG, but we might use f32 or i16.
     /// For SIFT DoG, we usually use f32.
-    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn subtract<
+        T: Clone + Copy + bytemuck::Pod + std::fmt::Debug,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         a: &Tensor<T, S>,
         b: &Tensor<T, S>,
@@ -327,7 +333,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<(Tensor<f32, S>, Tensor<f32, S>, Tensor<f32, S>)>;
 
     /// Compute AKAZE Contrast K factor (70th percentile)
-    fn akaze_contrast_k<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(&self, input: &Tensor<f32, S>) -> Result<f32>;
+    fn akaze_contrast_k<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
+        &self,
+        input: &Tensor<f32, S>,
+    ) -> Result<f32>;
 
     /// Sparse Matrix-Vector Multiply (y = A * x)
     fn spmv<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
@@ -347,7 +356,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<()>;
 
     /// Compute disparity map from stereo pairs
-    fn stereo_match<S: Storage<u8> + 'static, OS: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
+    fn stereo_match<
+        S: Storage<u8> + 'static,
+        OS: Storage<f32> + cv_core::StorageFactory<f32> + 'static,
+    >(
         &self,
         left: &Tensor<u8, S>,
         right: &Tensor<u8, S>,
@@ -355,7 +367,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<f32, OS>>;
 
     /// Triangulate 3D points from 2D correspondences
-    fn triangulate_points<S: Storage<f32> + 'static, OS: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
+    fn triangulate_points<
+        S: Storage<f32> + 'static,
+        OS: Storage<f32> + cv_core::StorageFactory<f32> + 'static,
+    >(
         &self,
         proj_left: &[[f32; 4]; 3],
         proj_right: &[[f32; 4]; 3],

@@ -36,11 +36,9 @@ fn test_sift_gpu() {
     }
 
     // Create tensor on CPU then transfer to GPU
-    let cpu_tensor = Tensor::<u8, CpuStorage<u8>>::from_vec(
-        image_data,
-        TensorShape::new(1, height, width),
-    )
-    .expect("Failed to create CPU tensor");
+    let cpu_tensor =
+        Tensor::<u8, CpuStorage<u8>>::from_vec(image_data, TensorShape::new(1, height, width))
+            .expect("Failed to create CPU tensor");
 
     let gpu_tensor = cpu_tensor
         .to_gpu_ctx(ctx)
@@ -80,11 +78,9 @@ fn test_orb_gpu() {
     let height = 100usize;
     let image_data = vec![100u8; width * height];
 
-    let cpu_tensor = Tensor::<u8, CpuStorage<u8>>::from_vec(
-        image_data,
-        TensorShape::new(1, height, width),
-    )
-    .expect("Failed to create CPU tensor");
+    let cpu_tensor =
+        Tensor::<u8, CpuStorage<u8>>::from_vec(image_data, TensorShape::new(1, height, width))
+            .expect("Failed to create CPU tensor");
 
     let gpu_tensor = cpu_tensor
         .to_gpu_ctx(ctx)
@@ -122,11 +118,9 @@ fn test_akaze_gpu() {
     let height = 100usize;
     let image_data = vec![80u8; width * height];
 
-    let cpu_tensor = Tensor::<u8, CpuStorage<u8>>::from_vec(
-        image_data,
-        TensorShape::new(1, height, width),
-    )
-    .expect("Failed to create CPU tensor");
+    let cpu_tensor =
+        Tensor::<u8, CpuStorage<u8>>::from_vec(image_data, TensorShape::new(1, height, width))
+            .expect("Failed to create CPU tensor");
 
     let gpu_tensor = cpu_tensor
         .to_gpu_ctx(ctx)

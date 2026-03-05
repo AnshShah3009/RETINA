@@ -1,4 +1,4 @@
-use super::{RuntimeEvent, Metrics};
+use super::{Metrics, RuntimeEvent};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Global observability layer
