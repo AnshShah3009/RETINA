@@ -7,11 +7,8 @@ description = "3D file format I/O for point clouds and meshes (PLY, OBJ, STL, PC
 
 [dependencies]
 cv-core = { path = "../core" }
-cv-runtime = { path = "../runtime" }
 cv-3d = { path = "../3d" }
 nalgebra = { workspace = true }
-thiserror = { workspace = true }
-rayon = { workspace = true }
 
 [features]
 default = []

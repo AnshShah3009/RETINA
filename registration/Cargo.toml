@@ -9,8 +9,6 @@ license = "MIT OR Apache-2.0"
 nalgebra = { workspace = true }
 cv-core = { path = "../core" }
 cv-hal = { path = "../hal" }
-thiserror = { workspace = true }
-rand = "0.8"
 rayon = { workspace = true }
 
 [dev-dependencies]

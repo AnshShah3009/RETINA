@@ -5,11 +5,7 @@ edition = "2021"
 
 [dependencies]
 cv-core = { path = "../core" }
-cv-hal = { path = "../hal" }
 cv-runtime = { path = "../runtime" }
 cv-imgproc = { path = "../imgproc" }
 image = { workspace = true }
 tract-onnx = "0.21.7"
-thiserror = { workspace = true }
-rayon = { workspace = true }
-ndarray = { workspace = true }

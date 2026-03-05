@@ -9,23 +9,13 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.21", features = ["extension-module", "abi3-py37"] }
-numpy = "0.21"
 cv-core = { path = "../core" }
-cv-imgproc = { path = "../imgproc" }
 cv-features = { path = "../features" }
 cv-3d = { path = "../3d" }
 cv-runtime = { path = "../runtime" }
 cv-slam = { path = "../slam" }
-cv-scientific = { path = "../scientific" }
-cv-registration = { path = "../registration" }
-cv-calib3d = { path = "../calib3d" }
-cv-stereo = { path = "../stereo" }
-cv-hal = { path = "../hal" }
 cv-videoio = { path = "../videoio" }
 cv-dnn = { path = "../dnn" }
 cv-optimize = { path = "../optimize" }
 nalgebra = { workspace = true }
 image = { workspace = true }
-thiserror = { workspace = true }
-ndarray = { workspace = true }
-geo = "0.28"

@@ -7,10 +7,6 @@ description = "Video processing and optical flow algorithms"
 
 [dependencies]
 cv-core = { path = "../core" }
-cv-imgproc = { path = "../imgproc" }
 cv-hal = { path = "../hal" }
 nalgebra = { workspace = true }
-rayon = { workspace = true }
 image = { workspace = true }
-
-thiserror = "2.0"

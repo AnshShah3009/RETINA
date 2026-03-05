@@ -6,11 +6,6 @@ license = "MIT OR Apache-2.0"
 description = "Unified point cloud operations crate"
 
 [dependencies]
-nalgebra = { workspace = true }
-ndarray = { workspace = true }
-thiserror = { workspace = true }
-rayon = { workspace = true }
-cv-core = { path = "../core" }
 cv-scientific = { path = "../scientific" }
 cv-3d = { path = "../3d" }
 

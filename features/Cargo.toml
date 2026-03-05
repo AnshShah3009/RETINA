@@ -14,7 +14,6 @@ nalgebra = { workspace = true }
 rayon = { workspace = true }
 image = { workspace = true }
 
-thiserror = "2.0"
 rand = "0.8"
 bytemuck = { version = "1.14", features = ["derive"] }
 

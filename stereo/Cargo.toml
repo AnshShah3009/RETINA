@@ -15,8 +15,6 @@ nalgebra = { workspace = true }
 rayon = { workspace = true }
 image = { workspace = true }
 wide = { workspace = true }
-
-thiserror = "2.0"
 wgpu = { workspace = true, optional = true }
 bytemuck = { version = "1.16", features = ["derive"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }

@@ -55,12 +55,8 @@ cv-core = { path = "../core" }
 cv-registration = { path = "../registration" }
 cv-rendering = { path = "../rendering" }
 cv-scientific = { path = "../scientific" }
-cv-optimize = { path = "../optimize" }
 cv-3d = { path = "../3d" }
-cv-imgproc = { path = "../imgproc" }
 cv-features = { path = "../features", features = ["gpu"] }
-cv-stereo = { path = "../stereo" }
-cv-calib3d = { path = "../calib3d" }
 cv-hal = { path = "../hal" }
 cv-runtime = { path = "../runtime" }
 nalgebra = "0.33"

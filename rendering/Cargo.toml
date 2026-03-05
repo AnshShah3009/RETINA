@@ -7,8 +7,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 nalgebra = { workspace = true }
-cv-core = { path = "../core" }
-thiserror = { workspace = true }
 rand = "0.8"
 
 [dev-dependencies]

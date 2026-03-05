@@ -5,6 +5,4 @@ edition = "2021"
 
 [dependencies]
 cv-core = { path = "../core" }
-cv-imgproc = { path = "../imgproc" }
 image = { workspace = true }
-thiserror = { workspace = true }

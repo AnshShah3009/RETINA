@@ -18,8 +18,6 @@ cv-sfm = { path = "./sfm" }
 cv-slam = { path = "./slam" }
 cv-runtime = { path = "./runtime" }
 cv-optimize = { path = "./optimize" }
-rayon = { workspace = true }
-
 [dev-dependencies]
 criterion = { workspace = true }
 image = { workspace = true }
@@ -76,9 +74,7 @@ nalgebra = "0.33"
 image = "0.25"
 wgpu = "28.0.0"
 bytemuck = { version = "1.21.0", features = ["derive"] }
-ort = "2.0.0-rc.11"
 wide = "0.7"
-pulp = "0.5"
 futures = "0.3.31"
 thiserror = "2.0"
 criterion = { version = "0.5", default-features = false, features = ["rayon", "cargo_bench_support", "async_tokio"] }

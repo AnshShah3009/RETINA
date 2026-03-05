@@ -8,5 +8,3 @@ cv-core = { path = "../core" }
 cv-imgproc = { path = "../imgproc" }
 image = { workspace = true }
 rayon = { workspace = true }
-nalgebra = { workspace = true }
-thiserror = { workspace = true }

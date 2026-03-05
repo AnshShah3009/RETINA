@@ -6,7 +6,6 @@ description = "Plotting and visualization (matplotlib/plotly equivalent)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-nalgebra = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
