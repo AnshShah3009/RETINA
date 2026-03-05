@@ -33,7 +33,7 @@ impl Tracker {
         }
     }
 
-    pub fn process_frame<S: Storage<u8> + 'static>(
+    pub fn process_frame<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &mut self,
         image: &Tensor<u8, S>,
         map: &mut WorldMap,
@@ -181,7 +181,7 @@ impl Tracker {
     }
 }
 
-fn convert_to_cpu<S: Storage<u8> + 'static>(
+fn convert_to_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
     device: &ComputeDevice,
     tensor: &Tensor<u8, S>,
 ) -> std::result::Result<Tensor<u8, cv_core::storage::CpuStorage<u8>>, String> {

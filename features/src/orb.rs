@@ -115,7 +115,7 @@ impl Orb {
     }
 
     /// Detect keypoints using FAST at multiple scales with acceleration
-    pub fn detect_ctx<S: Storage<u8> + 'static>(
+    pub fn detect_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
@@ -202,7 +202,7 @@ impl Orb {
     }
 }
 
-fn extract_keypoints_from_score_map<S: Storage<u8> + 'static>(
+fn extract_keypoints_from_score_map<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
     ctx: &ComputeDevice,
     score_map: &Tensor<u8, S>,
     max_kps: usize,
@@ -270,7 +270,7 @@ fn extract_keypoints_from_score_map<S: Storage<u8> + 'static>(
     Ok(KeyPoints { keypoints: kps })
 }
 
-pub fn detect_and_compute_ctx<S: Storage<u8> + 'static>(
+pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
     orb: &Orb,
     ctx: &cv_hal::compute::ComputeDevice,
     _group: &cv_runtime::orchestrator::ResourceGroup,
@@ -448,7 +448,7 @@ fn generate_gpu_brief_pattern(patch_size: i32) -> Vec<cv_hal::gpu_kernels::brief
         .collect()
 }
 
-fn convert_to_cpu_image<S: Storage<u8> + 'static>(
+fn convert_to_cpu_image<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
     ctx: &ComputeDevice,
     tensor: &Tensor<u8, S>,
 ) -> Tensor<u8, cv_core::storage::CpuStorage<u8>> {

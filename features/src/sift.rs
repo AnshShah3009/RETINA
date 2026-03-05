@@ -89,7 +89,7 @@ impl Sift {
     ///
     /// Between octaves, the image is downsampled 2x. Within each octave,
     /// sigma increases by factor `k = 2^(1/n_layers)`.
-    pub fn build_scale_space<S: Storage<u8> + 'static>(
+    pub fn build_scale_space<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
@@ -153,7 +153,7 @@ impl Sift {
     ///
     /// For input with n_layers per octave, produces (n_layers-1) DoG layers per octave.
     /// All DoG tensors are converted to f32 CPU storage for subsequent processing.
-    pub fn compute_dog<S: Storage<u8> + 'static>(
+    pub fn compute_dog<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         ctx: &ComputeDevice,
         gaussian_pyramid: &[Vec<Tensor<u8, S>>],
@@ -210,7 +210,7 @@ impl Sift {
     /// - Scale (size) derived from octave and layer
     /// - Octave and layer indices
     /// - Contrast-weighted response value
-    pub fn detect_and_refine<S: Storage<u8> + 'static>(
+    pub fn detect_and_refine<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
@@ -309,7 +309,7 @@ impl Sift {
     ///
     /// Uses GPU when available (faster), falls back to CPU. MLX backend is not
     /// currently supported for descriptor computation.
-    pub fn detect_and_compute<S: Storage<u8> + 'static>(
+    pub fn detect_and_compute<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
@@ -428,7 +428,7 @@ impl Sift {
     /// May fail if:
     /// - Device selection fails (returns CPU fallback)
     /// - Keypoint detection fails
-    pub fn detect<S: Storage<u8> + 'static>(
+    pub fn detect<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         image: &Tensor<u8, S>,
     ) -> crate::Result<KeyPoints> {
@@ -474,7 +474,7 @@ impl Sift {
     ///
     /// This method uses the cv-runtime scheduler to select between GPU and CPU
     /// based on current system load and availability.
-    pub fn compute<S: Storage<u8> + 'static>(
+    pub fn compute<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         image: &Tensor<u8, S>,
     ) -> crate::Result<(KeyPoints, Descriptors)> {
@@ -600,7 +600,7 @@ fn refine_point(
     )
 }
 
-fn convert_to_f32_cpu<S: Storage<u8> + 'static>(
+fn convert_to_f32_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
     ctx: &ComputeDevice,
     input: &Tensor<u8, S>,
 ) -> crate::Result<Tensor<f32, cv_core::storage::CpuStorage<f32>>> {
@@ -648,7 +648,7 @@ fn convert_to_f32_cpu<S: Storage<u8> + 'static>(
         .map_err(|e| Error::FeatureError(format!("Failed to create f32 tensor: {}", e)))
 }
 
-pub fn sift_detect_ctx<S: Storage<u8> + 'static>(
+pub fn sift_detect_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
     ctx: &ComputeDevice,
     image: &Tensor<u8, S>,
     params: &Sift,

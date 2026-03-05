@@ -135,7 +135,7 @@ impl Akaze {
     /// - GPU operations fail (memory allocation, transfer, computation)
     /// - Tensor operations fail (shape mismatch, memory access)
     /// - Image dimensions are invalid
-    pub fn detect_ctx<S: Storage<u8> + 'static>(
+    pub fn detect_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
@@ -172,7 +172,7 @@ impl Akaze {
     ///
     /// Each descriptor is 64 bytes (8 4D vectors: dx, dy, |dx|, |dy| for 4x4 regions),
     /// normalized to zero mean and unit variance.
-    pub fn detect_and_compute_ctx<S: Storage<u8> + 'static>(
+    pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
@@ -186,7 +186,7 @@ impl Akaze {
         Ok((KeyPoints { keypoints }, descriptors))
     }
 
-    fn create_scale_space<S: Storage<u8> + 'static>(
+    fn create_scale_space<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
@@ -493,7 +493,7 @@ struct EvolutionLevel {
 }
 
 #[allow(dead_code)]
-fn to_cpu_f32<S: Storage<f32> + 'static>(
+fn to_cpu_f32<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
     ctx: &ComputeDevice,
     tensor: &Tensor<f32, S>,
 ) -> crate::Result<CpuTensor<f32>> {
