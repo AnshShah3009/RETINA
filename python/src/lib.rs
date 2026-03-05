@@ -9,6 +9,7 @@ use cv_runtime::orchestrator::{scheduler, WorkloadHint};
 use cv_slam::Slam as RustSlam;
 use cv_videoio::{open_video, VideoCapture};
 use nalgebra::{Point3, Vector3};
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use std::sync::Arc;
 
@@ -720,6 +721,125 @@ fn estimate_normals_from_depth(
     ))
 }
 
+// ── NumPy-native normal estimation ───────────────────────────────────────────
+// These accept an (n,3) float32 ndarray and return an (n,3) float32 ndarray.
+// No Python tuple/list allocation — minimal overhead between numpy and Rust.
+//
+// Usage:
+//   normals = cv_native.estimate_normals_np(pts_np, k=15)   # pts_np: (n,3) float32
+
+fn ndarray_to_points(pts: &PyReadonlyArray2<f32>) -> Vec<Point3<f32>> {
+    let arr = pts.as_array();
+    let n = arr.shape()[0];
+    (0..n)
+        .map(|i| Point3::new(arr[[i, 0]], arr[[i, 1]], arr[[i, 2]]))
+        .collect()
+}
+
+fn normals_to_ndarray<'py>(
+    py: Python<'py>,
+    normals: Vec<Vector3<f32>>,
+) -> Bound<'py, PyArray2<f32>> {
+    use numpy::ndarray::Array2;
+    let n = normals.len();
+    let mut arr = Array2::<f32>::zeros((n, 3));
+    for (i, v) in normals.iter().enumerate() {
+        arr[[i, 0]] = v.x;
+        arr[[i, 1]] = v.y;
+        arr[[i, 2]] = v.z;
+    }
+    arr.into_pyarray_bound(py)
+}
+
+/// Estimate normals — numpy array in, numpy array out (fastest Python path).
+/// Auto-selects GPU if available, else CPU.
+///
+/// Args:
+///     points: (n, 3) float32 ndarray.
+///     k:      neighbour count (default 15).
+/// Returns:
+///     (n, 3) float32 ndarray of unit normals.
+#[pyfunction]
+#[pyo3(signature = (points, k=15))]
+fn estimate_normals_np<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<f32>,
+    k: usize,
+) -> Bound<'py, PyArray2<f32>> {
+    let pts = ndarray_to_points(&points);
+    normals_to_ndarray(py, cv_point_cloud::estimate_normals_auto(&pts, k))
+}
+
+/// CPU normals — numpy array in/out.
+#[pyfunction]
+#[pyo3(signature = (points, k=15))]
+fn estimate_normals_cpu_np<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<f32>,
+    k: usize,
+) -> Bound<'py, PyArray2<f32>> {
+    let pts = ndarray_to_points(&points);
+    normals_to_ndarray(py, cv_point_cloud::estimate_normals_cpu(&pts, k))
+}
+
+/// GPU normals — numpy array in/out.
+#[pyfunction]
+#[pyo3(signature = (points, k=15))]
+fn estimate_normals_gpu_np<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<f32>,
+    k: usize,
+) -> Bound<'py, PyArray2<f32>> {
+    let pts = ndarray_to_points(&points);
+    normals_to_ndarray(py, cv_point_cloud::estimate_normals_gpu(&pts, k))
+}
+
+/// Hybrid normals — numpy array in/out.
+#[pyfunction]
+#[pyo3(signature = (points, k=15))]
+fn estimate_normals_hybrid_np<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<f32>,
+    k: usize,
+) -> Bound<'py, PyArray2<f32>> {
+    let pts = ndarray_to_points(&points);
+    normals_to_ndarray(py, cv_point_cloud::estimate_normals_hybrid(&pts, k))
+}
+
+/// Fast approximate (cross-product) normals — numpy array in/out.
+#[pyfunction]
+fn estimate_normals_approx_cross_np<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<f32>,
+) -> Bound<'py, PyArray2<f32>> {
+    let pts = ndarray_to_points(&points);
+    normals_to_ndarray(py, cv_point_cloud::estimate_normals_approx_cross(&pts))
+}
+
+/// Depth image normals — numpy array in/out (O(n), fastest path for RGBD).
+///
+/// Args:
+///     depth:  (H*W,) float32 ndarray, row-major, metric depth.
+///     width, height: image dimensions.
+///     fx, fy, cx, cy: pinhole camera intrinsics.
+/// Returns:
+///     (H*W, 3) float32 ndarray.
+#[pyfunction]
+fn estimate_normals_from_depth_np<'py>(
+    py: Python<'py>,
+    depth: PyReadonlyArray1<f32>,
+    width: usize,
+    height: usize,
+    fx: f32,
+    fy: f32,
+    cx: f32,
+    cy: f32,
+) -> Bound<'py, PyArray2<f32>> {
+    let d = depth.as_slice().unwrap();
+    let normals = cv_point_cloud::estimate_normals_from_depth(d, width, height, fx, fy, cx, cy);
+    normals_to_ndarray(py, normals)
+}
+
 #[pymodule]
 fn cv_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorkloadHint>()?;
@@ -742,5 +862,12 @@ fn cv_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(estimate_normals_approx_cross, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_normals_approx_integral, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_normals_from_depth, m)?)?;
+    // NumPy-native versions (fastest — no Python list/tuple allocation)
+    m.add_function(wrap_pyfunction!(estimate_normals_np, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_normals_cpu_np, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_normals_gpu_np, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_normals_hybrid_np, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_normals_approx_cross_np, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_normals_from_depth_np, m)?)?;
     Ok(())
 }

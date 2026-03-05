@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.21", features = ["extension-module", "abi3-py37"] }
+numpy = "0.21"
 cv-core = { path = "../core" }
 cv-features = { path = "../features" }
 cv-3d = { path = "../3d" }
