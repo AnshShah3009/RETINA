@@ -20,6 +20,7 @@ pub struct Tracker {
     pub last_frame: Option<TrackingFrame<cv_core::storage::CpuStorage<u8>>>,
     pub intrinsics: CameraIntrinsics,
     pub detector: Orb,
+    pub last_depth: Option<Tensor<f32, cv_core::storage::CpuStorage<f32>>>,
 }
 
 impl Tracker {
@@ -30,6 +31,7 @@ impl Tracker {
             last_frame: None,
             intrinsics,
             detector: Orb::default().with_n_features(500),
+            last_depth: None,
         }
     }
 
@@ -178,6 +180,147 @@ impl Tracker {
             .as_ref()
             .map(|f| (f.pose, tracked_indices))
             .ok_or_else(|| "Frame not set after tracking".to_string())
+    }
+
+    pub fn process_frame_with_depth<
+        S: Storage<u8> + cv_core::StorageFactory<u8> + 'static,
+        D: Storage<f32> + cv_core::StorageFactory<f32> + 'static,
+    >(
+        &mut self,
+        image: &Tensor<u8, S>,
+        depth: &Tensor<f32, D>,
+        map: &mut WorldMap,
+    ) -> Result<(Pose, Vec<usize>), String> {
+        use cv_core::storage::CpuStorage;
+        use cv_hal::storage::GpuStorage;
+        use cv_hal::tensor_ext::TensorToCpu;
+
+        // First, perform sparse feature tracking
+        let (mut pose, tracked_indices) = self.process_frame(image, map)?;
+
+        // Convert depth to CPU if needed for ICP
+        let depth_cpu = if let Some(gpu_storage) =
+            depth.storage.as_any().downcast_ref::<GpuStorage<f32>>()
+        {
+            let input_gpu = Tensor {
+                storage: gpu_storage.clone(),
+                shape: depth.shape,
+                dtype: depth.dtype,
+                _phantom: std::marker::PhantomData,
+            };
+            let device = self
+                .group
+                .device()
+                .map_err(|e| format!("Failed to get compute device: {}", e))?;
+            let gpu_ctx = match device {
+                ComputeDevice::Gpu(g) => g,
+                _ => return Ok((pose, tracked_indices)),
+            };
+            input_gpu
+                .to_cpu_ctx(gpu_ctx)
+                .map_err(|e| format!("Depth GPU download failed: {}", e))?
+        } else if let Some(cpu_storage) = depth.storage.as_any().downcast_ref::<CpuStorage<f32>>() {
+            Tensor {
+                storage: cpu_storage.clone(),
+                shape: depth.shape,
+                dtype: depth.dtype,
+                _phantom: std::marker::PhantomData,
+            }
+        } else {
+            return Ok((pose, tracked_indices));
+        };
+
+        // Attempt ICP refinement if we have GPU support and previous depth data
+        if let Some(ref last_depth) = self.last_depth {
+            // Try to refine pose using dense ICP
+            if let Err(e) = self.refine_pose_with_icp(&mut pose, last_depth, &depth_cpu) {
+                // If ICP fails, just continue with sparse tracking result
+                eprintln!("ICP refinement failed: {}", e);
+            }
+        }
+
+        // Store current depth for next frame
+        self.last_depth = Some(depth_cpu);
+
+        Ok((pose, tracked_indices))
+    }
+
+    fn refine_pose_with_icp(
+        &self,
+        pose: &mut Pose,
+        prev_depth: &Tensor<f32, cv_core::storage::CpuStorage<f32>>,
+        curr_depth: &Tensor<f32, cv_core::storage::CpuStorage<f32>>,
+    ) -> Result<(), String> {
+        use cv_hal::tensor_ext::TensorToGpu;
+
+        let device = self
+            .group
+            .device()
+            .map_err(|e| format!("Failed to get compute device: {}", e))?;
+
+        let gpu_ctx = match device {
+            ComputeDevice::Gpu(g) => g,
+            ComputeDevice::Cpu(_) | ComputeDevice::Mlx(_) => return Ok(()),
+        };
+
+        // Convert depth tensors to GPU
+        let prev_depth_gpu = prev_depth
+            .to_gpu_ctx(gpu_ctx)
+            .map_err(|e| format!("Previous depth GPU upload failed: {}", e))?;
+        let curr_depth_gpu = curr_depth
+            .to_gpu_ctx(gpu_ctx)
+            .map_err(|e| format!("Current depth GPU upload failed: {}", e))?;
+
+        // Build intrinsics array [fx, fy, cx, cy]
+        let intrinsics = [
+            self.intrinsics.fx as f32,
+            self.intrinsics.fy as f32,
+            self.intrinsics.cx as f32,
+            self.intrinsics.cy as f32,
+        ];
+
+        // Convert current pose to initial guess for ICP (convert to f32)
+        let pose_matrix_f64 = pose.matrix();
+        let pose_matrix_f32 =
+            nalgebra::Matrix4::from_iterator(pose_matrix_f64.iter().map(|&x| x as f32));
+
+        // Call dense ICP
+        let (ata, atb) = cv_hal::gpu_kernels::icp::dense_step(
+            gpu_ctx,
+            &prev_depth_gpu,
+            &curr_depth_gpu,
+            &intrinsics,
+            &pose_matrix_f32,
+            0.05,                  // max_dist: 5cm
+            30.0_f32.to_radians(), // max_angle: 30 degrees
+        )
+        .map_err(|e| format!("ICP step failed: {}", e))?;
+
+        // Solve the linear system for pose update: atA * delta_pose = atb
+        let delta = ata
+            .try_inverse()
+            .ok_or_else(|| "ICP AtA matrix not invertible".to_string())?
+            * atb;
+
+        // Update pose with delta (parameterized as [omega (rotation), v (translation)])
+        // Small angle approximation for rotation from omega
+        let omega = nalgebra::Vector3::new(delta[0] as f64, delta[1] as f64, delta[2] as f64);
+        let translation = nalgebra::Vector3::new(delta[3] as f64, delta[4] as f64, delta[5] as f64);
+
+        // Create rotation matrix from axis-angle (small angle)
+        let angle = omega.norm();
+        let rot_update = if angle > 1e-6 {
+            let axis = omega / angle;
+            nalgebra::Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(axis), angle)
+        } else {
+            nalgebra::Rotation3::identity()
+        };
+
+        // Update the pose
+        pose.rotation = pose.rotation * nalgebra::UnitQuaternion::from_rotation_matrix(&rot_update);
+        pose.translation = pose.translation + translation;
+
+        Ok(())
     }
 }
 
