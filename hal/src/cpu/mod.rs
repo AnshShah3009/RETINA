@@ -161,7 +161,7 @@ impl ComputeContext for CpuBackend {
         crate::SubmissionIndex(0)
     }
 
-    fn convolve_2d<S: Storage<f32> + 'static>(
+    fn convolve_2d<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         kernel: &Tensor<f32, S>,
@@ -210,7 +210,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn sobel<S: Storage<u8> + 'static>(
+    fn sobel<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         dx: i32,
@@ -274,7 +274,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn canny<S: Storage<u8> + 'static>(
+    fn canny<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _low_threshold: f32,
@@ -285,7 +285,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn hough_lines<S: Storage<u8> + 'static>(
+    fn hough_lines<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _rho: f32,
@@ -297,7 +297,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn hough_circles<S: Storage<u8> + 'static>(
+    fn hough_circles<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _min_radius: f32,
@@ -320,7 +320,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn detect_objects<S: Storage<u8> + 'static>(
+    fn detect_objects<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _threshold: f32,
@@ -353,7 +353,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn find_chessboard_corners<S: Storage<u8> + 'static>(
+    fn find_chessboard_corners<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _image: &Tensor<u8, S>,
         _pattern_size: (usize, usize),
@@ -363,7 +363,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn dispatch<S: Storage<u8> + 'static>(
+    fn dispatch<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _name: &str,
         _buffers: &[&Tensor<u8, S>],
@@ -375,7 +375,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn threshold<S: Storage<u8> + 'static>(
+    fn threshold<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         thresh: u8,
@@ -474,7 +474,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn morphology<S: Storage<u8> + 'static>(
+    fn morphology<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         typ: MorphologyType,
@@ -585,7 +585,7 @@ impl ComputeContext for CpuBackend {
         Ok(result)
     }
 
-    fn warp<S: Storage<u8> + 'static>(
+    fn warp<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         matrix: &[[f32; 3]; 3],
@@ -643,7 +643,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn nms<S: Storage<f32> + 'static>(
+    fn nms<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         threshold: f32,
@@ -701,7 +701,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn nms_boxes<S: Storage<f32> + 'static>(
+    fn nms_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         iou_threshold: f32,
@@ -767,7 +767,7 @@ impl ComputeContext for CpuBackend {
         Ok(kept)
     }
 
-    fn nms_rotated_boxes<S: Storage<f32> + 'static>(
+    fn nms_rotated_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         iou_threshold: f32,
@@ -880,7 +880,7 @@ impl ComputeContext for CpuBackend {
         Ok(kept)
     }
 
-    fn pointcloud_transform<S: Storage<f32> + 'static>(
+    fn pointcloud_transform<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         points: &Tensor<f32, S>,
         transform: &[[f32; 4]; 4],
@@ -930,7 +930,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn pointcloud_normals<S: Storage<f32> + 'static>(
+    fn pointcloud_normals<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         points: &Tensor<f32, S>,
         k_neighbors: u32,
@@ -1029,7 +1029,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn tsdf_integrate<S: Storage<f32> + 'static>(
+    fn tsdf_integrate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         depth_image: &Tensor<f32, S>,
         camera_pose: &[[f32; 4]; 4], // World-to-camera
@@ -1121,7 +1121,7 @@ impl ComputeContext for CpuBackend {
         Ok(())
     }
 
-    fn tsdf_raycast<S: Storage<f32> + 'static>(
+    fn tsdf_raycast<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _tsdf_volume: &Tensor<f32, S>,
         _camera_pose: &[[f32; 4]; 4],
@@ -1136,7 +1136,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn tsdf_extract_mesh<S: Storage<f32> + 'static>(
+    fn tsdf_extract_mesh<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _tsdf_volume: &Tensor<f32, S>,
         _voxel_size: f32,
@@ -1148,7 +1148,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn optical_flow_lk<S: Storage<f32> + 'static>(
+    fn optical_flow_lk<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         prev_pyramid: &[Tensor<f32, S>],
         next_pyramid: &[Tensor<f32, S>],
@@ -1245,7 +1245,7 @@ impl ComputeContext for CpuBackend {
         Ok(results)
     }
 
-    fn dense_icp_step<S: Storage<f32> + 'static>(
+    fn dense_icp_step<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _source_depth: &Tensor<f32, S>,
         _target_data: &Tensor<f32, S>,
@@ -1259,7 +1259,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn cvt_color<S: Storage<u8> + 'static>(
+    fn cvt_color<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         code: ColorConversion,
@@ -1337,7 +1337,7 @@ impl ComputeContext for CpuBackend {
         }
     }
 
-    fn resize<S: Storage<u8> + 'static>(
+    fn resize<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         new_shape: (usize, usize),
@@ -1384,7 +1384,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn bilateral_filter<S: Storage<u8> + 'static>(
+    fn bilateral_filter<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         d: i32,
@@ -1448,7 +1448,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn fast_detect<S: Storage<u8> + 'static>(
+    fn fast_detect<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         threshold: u8,
@@ -1577,7 +1577,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn gaussian_blur<S: Storage<u8> + 'static>(
+    fn gaussian_blur<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         sigma: f32,
@@ -1604,7 +1604,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + 'static>(
+    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
         a: &Tensor<T, S>,
         b: &Tensor<T, S>,
@@ -1659,7 +1659,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn match_descriptors<S: Storage<u8> + 'static>(
+    fn match_descriptors<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         query: &Tensor<u8, S>,
         train: &Tensor<u8, S>,
@@ -1717,7 +1717,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn sift_extrema<S: Storage<f32> + 'static>(
+    fn sift_extrema<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         dog_prev: &Tensor<f32, S>,
         dog_curr: &Tensor<f32, S>,
@@ -1799,7 +1799,7 @@ impl ComputeContext for CpuBackend {
             .map_err(|e| crate::Error::RuntimeError(e.to_string()))?)
     }
 
-    fn compute_sift_descriptors<S: Storage<f32> + 'static>(
+    fn compute_sift_descriptors<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         image: &Tensor<f32, S>,
         keypoints: &cv_core::KeyPoints,
@@ -1882,7 +1882,7 @@ impl ComputeContext for CpuBackend {
         Ok(cv_core::Descriptors { descriptors: descs })
     }
 
-    fn icp_correspondences<S: Storage<f32> + 'static>(
+    fn icp_correspondences<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         src: &Tensor<f32, S>,
         tgt: &Tensor<f32, S>,
@@ -1937,7 +1937,7 @@ impl ComputeContext for CpuBackend {
         Ok(correspondences)
     }
 
-    fn icp_accumulate<S: Storage<f32> + 'static>(
+    fn icp_accumulate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         source: &Tensor<f32, S>,
         target: &Tensor<f32, S>,
@@ -1996,7 +1996,7 @@ impl ComputeContext for CpuBackend {
         Ok((ata, atb))
     }
 
-    fn akaze_diffusion<S: Storage<f32> + 'static>(
+    fn akaze_diffusion<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         k: f32,
@@ -2055,7 +2055,7 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn akaze_derivatives<S: Storage<f32> + 'static>(
+    fn akaze_derivatives<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
     ) -> crate::Result<(Tensor<f32, S>, Tensor<f32, S>, Tensor<f32, S>)> {
@@ -2143,7 +2143,7 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn akaze_contrast_k<S: Storage<f32> + 'static>(
+    fn akaze_contrast_k<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
     ) -> crate::Result<f32> {
@@ -2176,7 +2176,7 @@ impl ComputeContext for CpuBackend {
         Ok(mags[idx.min(mags.len() - 1)])
     }
 
-    fn spmv<S: Storage<f32> + 'static>(
+    fn spmv<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         row_ptr: &[u32],
         col_indices: &[u32],

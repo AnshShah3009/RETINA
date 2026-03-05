@@ -34,13 +34,13 @@ impl GpuContext {
     ) -> crate::Result<Tensor<T, S>> {
         use std::marker::PhantomData;
 
-        // Always use Box-based downcast for safety.
-        // The performance cost of one allocation per kernel launch is negligible compared to GPU execution time.
-        let storage_any = Box::new(result_gpu.storage).boxed_any();
+        // Always use downcasting for safety.
+        // The performance cost is negligible compared to GPU execution time.
+        let storage_any = result_gpu.storage.as_any();
 
-        if let Ok(storage_s) = storage_any.downcast::<S>() {
+        if let Some(storage_s) = storage_any.downcast_ref::<S>() {
             Ok(Tensor {
-                storage: *storage_s,
+                storage: storage_s.clone(),
                 shape: result_gpu.shape,
                 dtype: result_gpu.dtype,
                 _phantom: PhantomData,
@@ -114,7 +114,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn dispatch<S: Storage<u8> + 'static>(
+    fn dispatch<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         shader_source: &str,
         buffers: &[&Tensor<u8, S>],
@@ -184,7 +184,7 @@ impl ComputeContext for GpuContext {
         Ok(())
     }
 
-    fn threshold<S: Storage<u8> + 'static>(
+    fn threshold<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         thresh: u8,
@@ -212,7 +212,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn sobel<S: Storage<u8> + 'static>(
+    fn sobel<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         dx: i32,
@@ -243,7 +243,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn canny<S: Storage<u8> + 'static>(
+    fn canny<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         low_threshold: f32,
@@ -270,7 +270,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn hough_lines<S: Storage<u8> + 'static>(
+    fn hough_lines<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         rho: f32,
@@ -296,7 +296,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn hough_circles<S: Storage<u8> + 'static>(
+    fn hough_circles<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         min_radius: f32,
@@ -361,7 +361,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn detect_objects<S: Storage<u8> + 'static>(
+    fn detect_objects<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _threshold: f32,
@@ -419,7 +419,7 @@ impl ComputeContext for GpuContext {
         ))
     }
 
-    fn find_chessboard_corners<S: Storage<u8> + 'static>(
+    fn find_chessboard_corners<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _image: &Tensor<u8, S>,
         _pattern_size: (usize, usize),
@@ -429,7 +429,7 @@ impl ComputeContext for GpuContext {
         ))
     }
 
-    fn morphology<S: Storage<u8> + 'static>(
+    fn morphology<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         typ: MorphologyType,
@@ -471,7 +471,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn warp<S: Storage<u8> + 'static>(
+    fn warp<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         matrix: &[[f32; 3]; 3],
@@ -499,7 +499,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn nms<S: Storage<f32> + 'static>(
+    fn nms<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         threshold: f32,
@@ -526,7 +526,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn nms_boxes<S: Storage<f32> + 'static>(
+    fn nms_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         iou_threshold: f32,
@@ -550,7 +550,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn nms_rotated_boxes<S: Storage<f32> + 'static>(
+    fn nms_rotated_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         iou_threshold: f32,
@@ -678,7 +678,7 @@ impl ComputeContext for GpuContext {
         Ok(kept)
     }
 
-    fn pointcloud_transform<S: Storage<f32> + 'static>(
+    fn pointcloud_transform<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         points: &Tensor<f32, S>,
         transform: &[[f32; 4]; 4],
@@ -704,7 +704,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn pointcloud_normals<S: Storage<f32> + 'static>(
+    fn pointcloud_normals<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         points: &Tensor<f32, S>,
         k_neighbors: u32,
@@ -730,7 +730,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn tsdf_integrate<S: Storage<f32> + 'static>(
+    fn tsdf_integrate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         depth_image: &Tensor<f32, S>,
         camera_pose: &[[f32; 4]; 4],
@@ -783,7 +783,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn tsdf_raycast<S: Storage<f32> + 'static>(
+    fn tsdf_raycast<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         tsdf_volume: &Tensor<f32, S>,
         camera_pose: &[[f32; 4]; 4],
@@ -826,7 +826,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn tsdf_extract_mesh<S: Storage<f32> + 'static>(
+    fn tsdf_extract_mesh<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         voxel_volume: &Tensor<f32, S>,
         voxel_size: f32,
@@ -862,7 +862,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn optical_flow_lk<S: Storage<f32> + 'static>(
+    fn optical_flow_lk<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         prev_pyramid: &[Tensor<f32, S>],
         next_pyramid: &[Tensor<f32, S>],
@@ -916,7 +916,7 @@ impl ComputeContext for GpuContext {
         )
     }
 
-    fn cvt_color<S: Storage<u8> + 'static>(
+    fn cvt_color<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         code: ColorConversion,
@@ -941,7 +941,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn resize<S: Storage<u8> + 'static>(
+    fn resize<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         new_shape: (usize, usize),
@@ -966,7 +966,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn bilateral_filter<S: Storage<u8> + 'static>(
+    fn bilateral_filter<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         d: i32,
@@ -999,7 +999,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn fast_detect<S: Storage<u8> + 'static>(
+    fn fast_detect<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         threshold: u8,
@@ -1030,7 +1030,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn gaussian_blur<S: Storage<u8> + 'static>(
+    fn gaussian_blur<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         sigma: f32,
@@ -1063,7 +1063,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + 'static>(
+    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
         a: &Tensor<T, S>,
         b: &Tensor<T, S>,
@@ -1092,10 +1092,10 @@ impl ComputeContext for GpuContext {
 
                 let result_gpu = crate::gpu_kernels::subtract::subtract(self, &a_gpu, &b_gpu)?;
 
-                let storage_any = Box::new(result_gpu.storage).boxed_any();
-                if let Ok(storage_s) = storage_any.downcast::<S>() {
+                let storage_any = result_gpu.storage.as_any();
+                if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                     Ok(Tensor {
-                        storage: *storage_s,
+                        storage: storage_s.clone(),
                         shape: result_gpu.shape,
                         dtype: result_gpu.dtype,
                         _phantom: PhantomData,
@@ -1117,7 +1117,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn match_descriptors<S: Storage<u8> + 'static>(
+    fn match_descriptors<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         query: &Tensor<u8, S>,
         train: &Tensor<u8, S>,
@@ -1151,7 +1151,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn sift_extrema<S: Storage<f32> + 'static>(
+    fn sift_extrema<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         dog_prev: &Tensor<f32, S>,
         dog_curr: &Tensor<f32, S>,
@@ -1203,7 +1203,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn compute_sift_descriptors<S: Storage<f32> + 'static>(
+    fn compute_sift_descriptors<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         image: &Tensor<f32, S>,
         keypoints: &cv_core::KeyPoints,
@@ -1329,7 +1329,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn icp_correspondences<S: Storage<f32> + 'static>(
+    fn icp_correspondences<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         src: &Tensor<f32, S>,
         tgt: &Tensor<f32, S>,
@@ -1363,7 +1363,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn icp_accumulate<S: Storage<f32> + 'static>(
+    fn icp_accumulate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         source: &Tensor<f32, S>,
         target: &Tensor<f32, S>,
@@ -1416,7 +1416,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn dense_icp_step<S: Storage<f32> + 'static>(
+    fn dense_icp_step<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         source_depth: &Tensor<f32, S>,
         target_data: &Tensor<f32, S>,
@@ -1467,7 +1467,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn akaze_diffusion<S: Storage<f32> + 'static>(
+    fn akaze_diffusion<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         k: f32,
@@ -1486,10 +1486,10 @@ impl ComputeContext for GpuContext {
 
             let result_gpu = crate::gpu_kernels::akaze::akaze_diffusion(self, &input_gpu, k, tau)?;
 
-            let storage_any = Box::new(result_gpu.storage).boxed_any();
-            if let Ok(storage_s) = storage_any.downcast::<S>() {
+            let storage_any = result_gpu.storage.as_any();
+            if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                 Ok(Tensor {
-                    storage: *storage_s,
+                    storage: storage_s.clone(),
                     shape: result_gpu.shape,
                     dtype: result_gpu.dtype,
                     _phantom: PhantomData,
@@ -1506,7 +1506,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn akaze_derivatives<S: Storage<f32> + 'static>(
+    fn akaze_derivatives<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
     ) -> crate::Result<(Tensor<f32, S>, Tensor<f32, S>, Tensor<f32, S>)> {
@@ -1524,30 +1524,30 @@ impl ComputeContext for GpuContext {
             let (lx_gpu, ly_gpu, ldet_gpu) =
                 crate::gpu_kernels::akaze::akaze_derivatives(self, &input_gpu)?;
 
-            let lx_any = Box::new(lx_gpu.storage).boxed_any();
-            let ly_any = Box::new(ly_gpu.storage).boxed_any();
-            let ldet_any = Box::new(ldet_gpu.storage).boxed_any();
+            let lx_any = lx_gpu.storage.as_any();
+            let ly_any = ly_gpu.storage.as_any();
+            let ldet_any = ldet_gpu.storage.as_any();
 
-            if let (Ok(lx_s), Ok(ly_s), Ok(ldet_s)) = (
-                lx_any.downcast::<S>(),
-                ly_any.downcast::<S>(),
-                ldet_any.downcast::<S>(),
+            if let (Some(lx_s), Some(ly_s), Some(ldet_s)) = (
+                lx_any.downcast_ref::<S>(),
+                ly_any.downcast_ref::<S>(),
+                ldet_any.downcast_ref::<S>(),
             ) {
                 Ok((
                     Tensor {
-                        storage: *lx_s,
+                        storage: lx_s.clone(),
                         shape: lx_gpu.shape,
                         dtype: lx_gpu.dtype,
                         _phantom: PhantomData,
                     },
                     Tensor {
-                        storage: *ly_s,
+                        storage: ly_s.clone(),
                         shape: ly_gpu.shape,
                         dtype: ly_gpu.dtype,
                         _phantom: PhantomData,
                     },
                     Tensor {
-                        storage: *ldet_s,
+                        storage: ldet_s.clone(),
                         shape: ldet_gpu.shape,
                         dtype: ldet_gpu.dtype,
                         _phantom: PhantomData,
@@ -1565,7 +1565,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn akaze_contrast_k<S: Storage<f32> + 'static>(
+    fn akaze_contrast_k<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
     ) -> crate::Result<f32> {
@@ -1588,7 +1588,7 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn spmv<S: Storage<f32> + 'static>(
+    fn spmv<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         row_ptr: &[u32],
         col_indices: &[u32],
@@ -1609,10 +1609,10 @@ impl ComputeContext for GpuContext {
             let result_gpu =
                 crate::gpu_kernels::sparse::spmv(self, row_ptr, col_indices, values, &x_gpu)?;
 
-            let storage_any = Box::new(result_gpu.storage).boxed_any();
-            if let Ok(storage_s) = storage_any.downcast::<S>() {
+            let storage_any = result_gpu.storage.as_any();
+            if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                 Ok(Tensor {
-                    storage: *storage_s,
+                    storage: storage_s.clone(),
                     shape: result_gpu.shape,
                     dtype: result_gpu.dtype,
                     _phantom: PhantomData,

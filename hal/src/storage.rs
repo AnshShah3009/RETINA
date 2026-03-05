@@ -4,6 +4,7 @@ use std::any::Any;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use wgpu::util::DeviceExt;
 
 /// GPU storage using wgpu buffers (legacy wgpu-based implementation).
 ///
@@ -109,6 +110,38 @@ impl<T: bytemuck::Pod + fmt::Debug + Any + 'static> Storage<T> for WgpuGpuStorag
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+impl<T: bytemuck::Pod + fmt::Debug + Any + 'static> cv_core::storage::StorageFactory<T>
+    for WgpuGpuStorage<T>
+{
+    fn from_vec(data: Vec<T>) -> std::result::Result<Self, String> {
+        let ctx = GpuContext::global()
+            .map_err(|e| format!("Failed to get global GPU context: {:?}", e))?;
+        let len = data.len();
+        let buffer = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("StorageFactory buffer"),
+                contents: bytemuck::cast_slice(&data),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            });
+        Ok(Self {
+            buffer: Some(Arc::new(buffer)),
+            len,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            _phantom: PhantomData,
+        })
+    }
+
+    fn new(size: usize, default_value: T) -> std::result::Result<Self, String> {
+        let data = vec![default_value; size];
+        Self::from_vec(data)
     }
 }
 

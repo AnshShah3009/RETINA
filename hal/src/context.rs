@@ -21,7 +21,7 @@ pub trait ComputeContext: Send + Sync {
     // --- Core Operations ---
 
     /// Execute a 2D convolution
-    fn convolve_2d<S: Storage<f32> + 'static>(
+    fn convolve_2d<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         kernel: &Tensor<f32, S>,
@@ -34,7 +34,7 @@ pub trait ComputeContext: Send + Sync {
     /// * `buffers`: List of buffers (input/output)
     /// * `uniforms`: Uniform data (constants)
     /// * `workgroups`: (x, y, z) dispatch size
-    fn dispatch<S: Storage<u8> + 'static>(
+    fn dispatch<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         name: &str,
         buffers: &[&Tensor<u8, S>],
@@ -43,7 +43,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<()>;
 
     /// Execute a threshold operation
-    fn threshold<S: Storage<u8> + 'static>(
+    fn threshold<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         thresh: u8,
@@ -52,7 +52,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<u8, S>>;
 
     /// Execute a Sobel operator
-    fn sobel<S: Storage<u8> + 'static>(
+    fn sobel<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         dx: i32,
@@ -61,7 +61,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<(Tensor<u8, S>, Tensor<u8, S>)>;
 
     /// Execute Canny edge detection
-    fn canny<S: Storage<u8> + 'static>(
+    fn canny<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         low_threshold: f32,
@@ -69,7 +69,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<u8, S>>;
 
     /// Execute Hough line transform
-    fn hough_lines<S: Storage<u8> + 'static>(
+    fn hough_lines<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         rho: f32,
@@ -78,7 +78,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Vec<cv_core::HoughLine>>;
 
     /// Execute Hough circle transform
-    fn hough_circles<S: Storage<u8> + 'static>(
+    fn hough_circles<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         min_radius: f32,
@@ -87,7 +87,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Vec<cv_core::HoughCircle>>;
 
     /// Template matching
-    fn match_template<S: Storage<u8> + 'static, OS: Storage<f32> + 'static>(
+    fn match_template<S: Storage<u8> + 'static, OS: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         image: &Tensor<u8, S>,
         template: &Tensor<u8, S>,
@@ -95,7 +95,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<f32, OS>>;
 
     /// Execute a morphological operation
-    fn morphology<S: Storage<u8> + 'static>(
+    fn morphology<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         typ: MorphologyType,
@@ -104,7 +104,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<u8, S>>;
 
     /// Execute a warp operation (affine or perspective)
-    fn warp<S: Storage<u8> + 'static>(
+    fn warp<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         matrix: &[[f32; 3]; 3],
@@ -113,7 +113,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<u8, S>>;
 
     /// Execute Non-Maximum Suppression
-    fn nms<S: Storage<f32> + 'static>(
+    fn nms<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         threshold: f32,
@@ -122,7 +122,7 @@ pub trait ComputeContext: Send + Sync {
 
     /// Execute Bounding Box NMS
     /// input: (N, 5) tensor [x1, y1, x2, y2, score]
-    fn nms_boxes<S: Storage<f32> + 'static>(
+    fn nms_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         iou_threshold: f32,
@@ -130,7 +130,7 @@ pub trait ComputeContext: Send + Sync {
 
     /// Execute Rotated Bounding Box NMS
     /// input: (N, 6) tensor [cx, cy, w, h, angle, score]
-    fn nms_rotated_boxes<S: Storage<f32> + 'static>(
+    fn nms_rotated_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         iou_threshold: f32,
@@ -146,21 +146,21 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Vec<usize>>;
 
     /// Transform a point cloud
-    fn pointcloud_transform<S: Storage<f32> + 'static>(
+    fn pointcloud_transform<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         points: &Tensor<f32, S>,
         transform: &[[f32; 4]; 4],
     ) -> Result<Tensor<f32, S>>;
 
     /// Compute normals for a point cloud
-    fn pointcloud_normals<S: Storage<f32> + 'static>(
+    fn pointcloud_normals<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         points: &Tensor<f32, S>,
         k_neighbors: u32,
     ) -> Result<Tensor<f32, S>>;
 
     /// TSDF Volume Integration
-    fn tsdf_integrate<S: Storage<f32> + 'static>(
+    fn tsdf_integrate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         depth_image: &Tensor<f32, S>,
         camera_pose: &[[f32; 4]; 4],
@@ -171,13 +171,13 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<()>;
 
     /// Execute object detection (e.g., via a loaded ONNX/TensorRT model)
-    fn detect_objects<S: Storage<u8> + 'static>(
+    fn detect_objects<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         threshold: f32,
     ) -> Result<Vec<cv_core::Detection>>;
 
-    fn tsdf_raycast<S: Storage<f32> + 'static>(
+    fn tsdf_raycast<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         tsdf_volume: &Tensor<f32, S>,
         camera_pose: &[[f32; 4]; 4],
@@ -188,7 +188,7 @@ pub trait ComputeContext: Send + Sync {
         truncation: f32,
     ) -> Result<Tensor<f32, S>>;
 
-    fn tsdf_extract_mesh<S: Storage<f32> + 'static>(
+    fn tsdf_extract_mesh<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         tsdf_volume: &Tensor<f32, S>,
         voxel_size: f32,
@@ -196,7 +196,7 @@ pub trait ComputeContext: Send + Sync {
         max_triangles: u32,
     ) -> Result<Vec<crate::gpu_kernels::marching_cubes::Vertex>>;
 
-    fn optical_flow_lk<S: Storage<f32> + 'static>(
+    fn optical_flow_lk<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         prev_pyramid: &[Tensor<f32, S>],
         next_pyramid: &[Tensor<f32, S>],
@@ -206,21 +206,21 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Vec<[f32; 2]>>;
 
     /// Color space conversion
-    fn cvt_color<S: Storage<u8> + 'static>(
+    fn cvt_color<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         code: ColorConversion,
     ) -> Result<Tensor<u8, S>>;
 
     /// Resize an image
-    fn resize<S: Storage<u8> + 'static>(
+    fn resize<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         new_shape: (usize, usize),
     ) -> Result<Tensor<u8, S>>;
 
     /// Bilateral Filter
-    fn bilateral_filter<S: Storage<u8> + 'static>(
+    fn bilateral_filter<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         d: i32,
@@ -230,7 +230,7 @@ pub trait ComputeContext: Send + Sync {
 
     /// FAST Keypoint Detection
     /// Returns a score map (1 channel, same size as input)
-    fn fast_detect<S: Storage<u8> + 'static>(
+    fn fast_detect<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         threshold: u8,
@@ -238,7 +238,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<u8, S>>;
 
     /// Gaussian Blur
-    fn gaussian_blur<S: Storage<u8> + 'static>(
+    fn gaussian_blur<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         sigma: f32,
@@ -248,14 +248,14 @@ pub trait ComputeContext: Send + Sync {
     /// Elementwise Subtraction (A - B)
     /// Input: Signed output often needed for DoG, but we might use f32 or i16.
     /// For SIFT DoG, we usually use f32.
-    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + 'static>(
+    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
         a: &Tensor<T, S>,
         b: &Tensor<T, S>,
     ) -> Result<Tensor<T, S>>;
 
     /// Feature Matching
-    fn match_descriptors<S: Storage<u8> + 'static>(
+    fn match_descriptors<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         query: &Tensor<u8, S>,
         train: &Tensor<u8, S>,
@@ -265,7 +265,7 @@ pub trait ComputeContext: Send + Sync {
     /// SIFT Local Extrema Detection
     /// Finds local maxima/minima in 3x3x3 scale-space neighborhood.
     /// Returns a U8 score map on CPU for refinement.
-    fn sift_extrema<S: Storage<f32> + 'static>(
+    fn sift_extrema<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         dog_prev: &Tensor<f32, S>,
         dog_curr: &Tensor<f32, S>,
@@ -276,7 +276,7 @@ pub trait ComputeContext: Send + Sync {
 
     /// SIFT Descriptor Computation
     /// Returns a descriptor tensor (num_kps x 128)
-    fn compute_sift_descriptors<S: Storage<f32> + 'static>(
+    fn compute_sift_descriptors<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         image: &Tensor<f32, S>,
         keypoints: &cv_core::KeyPoints,
@@ -284,7 +284,7 @@ pub trait ComputeContext: Send + Sync {
 
     /// ICP Point Correspondence
     /// Finds nearest neighbors from src points to tgt points
-    fn icp_correspondences<S: Storage<f32> + 'static>(
+    fn icp_correspondences<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         src: &Tensor<f32, S>,
         tgt: &Tensor<f32, S>,
@@ -293,7 +293,7 @@ pub trait ComputeContext: Send + Sync {
 
     /// ICP Jacobian Accumulation
     /// Accumulates J^T * J and J^T * r for point-to-plane ICP
-    fn icp_accumulate<S: Storage<f32> + 'static>(
+    fn icp_accumulate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         source: &Tensor<f32, S>,
         target: &Tensor<f32, S>,
@@ -302,7 +302,7 @@ pub trait ComputeContext: Send + Sync {
         transform: &nalgebra::Matrix4<f32>,
     ) -> Result<(nalgebra::Matrix6<f32>, nalgebra::Vector6<f32>)>;
 
-    fn dense_icp_step<S: Storage<f32> + 'static>(
+    fn dense_icp_step<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         source_depth: &Tensor<f32, S>,
         target_data: &Tensor<f32, S>,
@@ -313,7 +313,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<(nalgebra::Matrix6<f32>, nalgebra::Vector6<f32>)>;
 
     /// AKAZE Non-linear Diffusion step
-    fn akaze_diffusion<S: Storage<f32> + 'static>(
+    fn akaze_diffusion<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         k: f32,
@@ -321,16 +321,16 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<f32, S>>;
 
     /// AKAZE Derivatives and Hessian Determinant
-    fn akaze_derivatives<S: Storage<f32> + 'static>(
+    fn akaze_derivatives<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
     ) -> Result<(Tensor<f32, S>, Tensor<f32, S>, Tensor<f32, S>)>;
 
     /// Compute AKAZE Contrast K factor (70th percentile)
-    fn akaze_contrast_k<S: Storage<f32> + 'static>(&self, input: &Tensor<f32, S>) -> Result<f32>;
+    fn akaze_contrast_k<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(&self, input: &Tensor<f32, S>) -> Result<f32>;
 
     /// Sparse Matrix-Vector Multiply (y = A * x)
-    fn spmv<S: Storage<f32> + 'static>(
+    fn spmv<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         row_ptr: &[u32],
         col_indices: &[u32],
@@ -347,7 +347,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<()>;
 
     /// Compute disparity map from stereo pairs
-    fn stereo_match<S: Storage<u8> + 'static, OS: Storage<f32> + 'static>(
+    fn stereo_match<S: Storage<u8> + 'static, OS: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         left: &Tensor<u8, S>,
         right: &Tensor<u8, S>,
@@ -355,7 +355,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<f32, OS>>;
 
     /// Triangulate 3D points from 2D correspondences
-    fn triangulate_points<S: Storage<f32> + 'static, OS: Storage<f32> + 'static>(
+    fn triangulate_points<S: Storage<f32> + 'static, OS: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         proj_left: &[[f32; 4]; 3],
         proj_right: &[[f32; 4]; 3],
@@ -364,7 +364,7 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<f32, OS>>;
 
     /// Accelerated chessboard corner detection
-    fn find_chessboard_corners<S: Storage<u8> + 'static>(
+    fn find_chessboard_corners<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         image: &Tensor<u8, S>,
         pattern_size: (usize, usize),

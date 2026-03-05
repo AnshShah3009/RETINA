@@ -35,7 +35,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn convolve_2d<S: Storage<f32> + 'static>(
+    pub fn convolve_2d<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         kernel: &Tensor<f32, S>,
@@ -48,7 +48,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn threshold<S: Storage<u8> + 'static>(
+    pub fn threshold<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         thresh: u8,
@@ -62,7 +62,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn sobel<S: Storage<u8> + 'static>(
+    pub fn sobel<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         dx: i32,
@@ -76,7 +76,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn morphology<S: Storage<u8> + 'static>(
+    pub fn morphology<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         typ: MorphologyType,
@@ -90,7 +90,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn warp<S: Storage<u8> + 'static>(
+    pub fn warp<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         matrix: &[[f32; 3]; 3],
@@ -104,7 +104,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn nms<S: Storage<f32> + 'static>(
+    pub fn nms<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         threshold: f32,
@@ -117,7 +117,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn nms_boxes<S: Storage<f32> + 'static>(
+    pub fn nms_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         iou_threshold: f32,
@@ -129,7 +129,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn nms_rotated_boxes<S: Storage<f32> + 'static>(
+    pub fn nms_rotated_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         iou_threshold: f32,
@@ -154,7 +154,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn pointcloud_transform<S: Storage<f32> + 'static>(
+    pub fn pointcloud_transform<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         points: &Tensor<f32, S>,
         transform: &[[f32; 4]; 4],
@@ -166,7 +166,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn pointcloud_normals<S: Storage<f32> + 'static>(
+    pub fn pointcloud_normals<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         points: &Tensor<f32, S>,
         k_neighbors: u32,
@@ -178,7 +178,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn tsdf_integrate<S: Storage<f32> + 'static>(
+    pub fn tsdf_integrate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         depth_image: &Tensor<f32, S>,
         camera_pose: &[[f32; 4]; 4],
@@ -215,7 +215,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn tsdf_raycast<S: Storage<f32> + 'static>(
+    pub fn tsdf_raycast<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         tsdf_volume: &Tensor<f32, S>,
         camera_pose: &[[f32; 4]; 4],
@@ -256,7 +256,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn tsdf_extract_mesh<S: Storage<f32> + 'static>(
+    pub fn tsdf_extract_mesh<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         tsdf_volume: &Tensor<f32, S>,
         voxel_size: f32,
@@ -276,7 +276,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn optical_flow_lk<S: Storage<f32> + 'static>(
+    pub fn optical_flow_lk<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         prev_pyramid: &[Tensor<f32, S>],
         next_pyramid: &[Tensor<f32, S>],
@@ -297,7 +297,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn cvt_color<S: Storage<u8> + 'static>(
+    pub fn cvt_color<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         code: ColorConversion,
@@ -309,7 +309,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn resize<S: Storage<u8> + 'static>(
+    pub fn resize<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         new_shape: (usize, usize),
@@ -321,7 +321,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn bilateral_filter<S: Storage<u8> + 'static>(
+    pub fn bilateral_filter<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         d: i32,
@@ -335,7 +335,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn fast_detect<S: Storage<u8> + 'static>(
+    pub fn fast_detect<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         threshold: u8,
@@ -348,7 +348,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn gaussian_blur<S: Storage<u8> + 'static>(
+    pub fn gaussian_blur<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         input: &Tensor<u8, S>,
         sigma: f32,
@@ -361,7 +361,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + 'static>(
+    pub fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
         a: &Tensor<T, S>,
         b: &Tensor<T, S>,
@@ -373,7 +373,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn match_descriptors<S: Storage<u8> + 'static>(
+    pub fn match_descriptors<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         query: &Tensor<u8, S>,
         train: &Tensor<u8, S>,
@@ -386,7 +386,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn sift_extrema<S: Storage<f32> + 'static>(
+    pub fn sift_extrema<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         dog_prev: &Tensor<f32, S>,
         dog_curr: &Tensor<f32, S>,
@@ -407,7 +407,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn compute_sift_descriptors<S: Storage<f32> + 'static>(
+    pub fn compute_sift_descriptors<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         image: &Tensor<f32, S>,
         keypoints: &cv_core::KeyPoints,
@@ -419,7 +419,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn icp_correspondences<S: Storage<f32> + 'static>(
+    pub fn icp_correspondences<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         src: &Tensor<f32, S>,
         tgt: &Tensor<f32, S>,
@@ -432,7 +432,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn icp_accumulate<S: Storage<f32> + 'static>(
+    pub fn icp_accumulate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         source: &Tensor<f32, S>,
         target: &Tensor<f32, S>,
@@ -453,7 +453,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn dense_icp_step<S: Storage<f32> + 'static>(
+    pub fn dense_icp_step<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         source_depth: &Tensor<f32, S>,
         target_data: &Tensor<f32, S>,
@@ -490,7 +490,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn akaze_diffusion<S: Storage<f32> + 'static>(
+    pub fn akaze_diffusion<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
         k: f32,
@@ -503,7 +503,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn akaze_derivatives<S: Storage<f32> + 'static>(
+    pub fn akaze_derivatives<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
     ) -> Result<(Tensor<f32, S>, Tensor<f32, S>, Tensor<f32, S>)> {
@@ -514,7 +514,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn akaze_contrast_k<S: Storage<f32> + 'static>(
+    pub fn akaze_contrast_k<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         input: &Tensor<f32, S>,
     ) -> Result<f32> {
@@ -525,7 +525,7 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn spmv<S: Storage<f32> + 'static>(
+    pub fn spmv<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         row_ptr: &[u32],
         col_indices: &[u32],

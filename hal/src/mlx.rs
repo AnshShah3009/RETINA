@@ -56,7 +56,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn dispatch<S: Storage<u8> + 'static>(
+    fn dispatch<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _name: &str,
         _buffers: &[&Tensor<u8, S>],
@@ -66,7 +66,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX dispatch not implemented".into()))
     }
 
-    fn threshold<S: Storage<u8> + 'static>(
+    fn threshold<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _thresh: u8,
@@ -76,7 +76,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX threshold not implemented".into()))
     }
 
-    fn sobel<S: Storage<u8> + 'static>(
+    fn sobel<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _dx: i32,
@@ -86,7 +86,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX sobel not implemented".into()))
     }
 
-    fn canny<S: Storage<u8> + 'static>(
+    fn canny<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _low_threshold: f32,
@@ -95,7 +95,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX canny not implemented".into()))
     }
 
-    fn hough_lines<S: Storage<u8> + 'static>(
+    fn hough_lines<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _rho: f32,
@@ -107,7 +107,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn hough_circles<S: Storage<u8> + 'static>(
+    fn hough_circles<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _min_radius: f32,
@@ -130,7 +130,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn detect_objects<S: Storage<u8> + 'static>(
+    fn detect_objects<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _threshold: f32,
@@ -163,7 +163,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn find_chessboard_corners<S: Storage<u8> + 'static>(
+    fn find_chessboard_corners<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _image: &Tensor<u8, S>,
         _pattern_size: (usize, usize),
@@ -173,7 +173,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn morphology<S: Storage<u8> + 'static>(
+    fn morphology<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _typ: MorphologyType,
@@ -183,7 +183,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX morphology not implemented".into()))
     }
 
-    fn warp<S: Storage<u8> + 'static>(
+    fn warp<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _matrix: &[[f32; 3]; 3],
@@ -193,7 +193,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX warp not implemented".into()))
     }
 
-    fn nms<S: Storage<f32> + 'static>(
+    fn nms<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _input: &Tensor<f32, S>,
         _threshold: f32,
@@ -202,7 +202,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX nms not implemented".into()))
     }
 
-    fn nms_boxes<S: Storage<f32> + 'static>(
+    fn nms_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _input: &Tensor<f32, S>,
         _iou_threshold: f32,
@@ -210,7 +210,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX nms_boxes not implemented".into()))
     }
 
-    fn nms_rotated_boxes<S: Storage<f32> + 'static>(
+    fn nms_rotated_boxes<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _input: &Tensor<f32, S>,
         _iou_threshold: f32,
@@ -231,7 +231,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn pointcloud_transform<S: Storage<f32> + 'static>(
+    fn pointcloud_transform<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _points: &Tensor<f32, S>,
         _transform: &[[f32; 4]; 4],
@@ -241,7 +241,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn pointcloud_normals<S: Storage<f32> + 'static>(
+    fn pointcloud_normals<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _points: &Tensor<f32, S>,
         _k_neighbors: u32,
@@ -251,7 +251,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn tsdf_integrate<S: Storage<f32> + 'static>(
+    fn tsdf_integrate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _depth_image: &Tensor<f32, S>,
         _camera_pose: &[[f32; 4]; 4],
@@ -265,7 +265,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn tsdf_raycast<S: Storage<f32> + 'static>(
+    fn tsdf_raycast<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _tsdf_volume: &Tensor<f32, S>,
         _camera_pose: &[[f32; 4]; 4],
@@ -280,7 +280,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn tsdf_extract_mesh<S: Storage<f32> + 'static>(
+    fn tsdf_extract_mesh<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _tsdf_volume: &Tensor<f32, S>,
         _voxel_size: f32,
@@ -292,7 +292,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn optical_flow_lk<S: Storage<f32> + 'static>(
+    fn optical_flow_lk<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _prev_pyramid: &[Tensor<f32, S>],
         _next_pyramid: &[Tensor<f32, S>],
@@ -305,7 +305,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn cvt_color<S: Storage<u8> + 'static>(
+    fn cvt_color<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _code: ColorConversion,
@@ -313,7 +313,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX cvt_color not implemented".into()))
     }
 
-    fn resize<S: Storage<u8> + 'static>(
+    fn resize<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _new_shape: (usize, usize),
@@ -321,7 +321,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX resize not implemented".into()))
     }
 
-    fn bilateral_filter<S: Storage<u8> + 'static>(
+    fn bilateral_filter<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _d: i32,
@@ -333,7 +333,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn fast_detect<S: Storage<u8> + 'static>(
+    fn fast_detect<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _threshold: u8,
@@ -344,7 +344,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn gaussian_blur<S: Storage<u8> + 'static>(
+    fn gaussian_blur<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _input: &Tensor<u8, S>,
         _sigma: f32,
@@ -355,7 +355,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + 'static>(
+    fn subtract<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
         _a: &Tensor<T, S>,
         _b: &Tensor<T, S>,
@@ -363,7 +363,7 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX subtract not implemented".into()))
     }
 
-    fn match_descriptors<S: Storage<u8> + 'static>(
+    fn match_descriptors<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         _query: &Tensor<u8, S>,
         _train: &Tensor<u8, S>,
@@ -374,7 +374,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn sift_extrema<S: Storage<f32> + 'static>(
+    fn sift_extrema<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _dog_prev: &Tensor<f32, S>,
         _dog_curr: &Tensor<f32, S>,
@@ -387,7 +387,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn compute_sift_descriptors<S: Storage<f32> + 'static>(
+    fn compute_sift_descriptors<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _image: &Tensor<f32, S>,
         _keypoints: &cv_core::KeyPoints,
@@ -397,7 +397,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn icp_correspondences<S: Storage<f32> + 'static>(
+    fn icp_correspondences<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _src: &Tensor<f32, S>,
         _tgt: &Tensor<f32, S>,
@@ -408,7 +408,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn icp_accumulate<S: Storage<f32> + 'static>(
+    fn icp_accumulate<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _source: &Tensor<f32, S>,
         _target: &Tensor<f32, S>,
@@ -421,7 +421,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn dense_icp_step<S: Storage<f32> + 'static>(
+    fn dense_icp_step<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _source_depth: &Tensor<f32, S>,
         _target_data: &Tensor<f32, S>,
@@ -435,7 +435,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn akaze_diffusion<S: Storage<f32> + 'static>(
+    fn akaze_diffusion<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _input: &Tensor<f32, S>,
         _k: f32,
@@ -446,7 +446,7 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn akaze_derivatives<S: Storage<f32> + 'static>(
+    fn akaze_derivatives<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _input: &Tensor<f32, S>,
     ) -> Result<(Tensor<f32, S>, Tensor<f32, S>, Tensor<f32, S>)> {
@@ -455,13 +455,13 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn akaze_contrast_k<S: Storage<f32> + 'static>(&self, _input: &Tensor<f32, S>) -> Result<f32> {
+    fn akaze_contrast_k<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(&self, _input: &Tensor<f32, S>) -> Result<f32> {
         Err(Error::NotSupported(
             "MLX akaze_contrast_k not implemented".into(),
         ))
     }
 
-    fn spmv<S: Storage<f32> + 'static>(
+    fn spmv<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
         &self,
         _row_ptr: &[u32],
         _col_indices: &[u32],
