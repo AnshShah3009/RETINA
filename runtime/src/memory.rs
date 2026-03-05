@@ -425,12 +425,19 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
     }
 
     pub fn into_host_data(self) -> Vec<T> {
-        // Try to take ownership of the data without cloning if Arc is not shared.
-        // Since the struct implements Drop, we need to use ManuallyDrop to prevent
-        // double cleanup when we move the Arc out of self.
-        use std::mem::ManuallyDrop;
-        let this = ManuallyDrop::new(self);
-        let arc = unsafe { std::ptr::read(&this.host_data) };
+        // Clone the Arc before consuming self so we hold a reference across the drop.
+        // This is the safe, correct way to move out of a field in a type with Drop:
+        //
+        //   1. Clone bumps strong_count: N → N+1.
+        //   2. `drop(self)` runs Drop normally — GPU buffer is retired, strong_count: N+1 → N.
+        //   3. `Arc::try_unwrap` succeeds (zero-copy) when strong_count is now 1,
+        //      i.e. when this UnifiedBuffer was the sole owner.
+        //   4. Otherwise falls back to a single Vec clone.
+        //
+        // The original implementation used `ManuallyDrop` + `unsafe ptr::read` which
+        // bypassed the Drop impl, silently leaking any associated GPU buffer.
+        let arc = Arc::clone(&self.host_data);
+        drop(self); // runs Drop — retires GPU buffer if present
         match Arc::try_unwrap(arc) {
             Ok(lock) => lock.into_inner(),
             Err(arc) => arc.read().clone(),
