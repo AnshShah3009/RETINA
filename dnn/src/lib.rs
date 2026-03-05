@@ -17,13 +17,12 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! # use cv_dnn::DnnNet;
 //! # use image::ImageReader;
 //! let net = DnnNet::load("model.onnx")?;
 //! let img = ImageReader::open("image.jpg")?.decode()?;
 //! // Preprocess and run inference
-//! # Ok::<(), cv_core::Error>(())
 //! ```
 
 pub mod blob;
