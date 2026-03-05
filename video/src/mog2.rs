@@ -169,13 +169,19 @@ impl Mog2 {
     ///
     /// # Example
     ///
-    /// ```no_run
+    /// ```ignore
     /// # use cv_video::mog2::Mog2;
     /// # use cv_hal::cpu::CpuBackend;
+    /// # use cv_core::{Tensor, TensorShape};
+    /// # use cv_runtime::CpuStorage;
     /// # use cv_hal::compute::ComputeDevice;
     /// # let cpu = CpuBackend::new().unwrap();
     /// # let device = ComputeDevice::Cpu(&cpu);
-    /// # let frame_tensor = todo!();
+    /// # let frame_data = vec![0u8; 640 * 480];
+    /// # let frame_tensor: Tensor<u8, CpuStorage<u8>> = Tensor::from_vec(
+    /// #     frame_data,
+    /// #     TensorShape::new(1, 480, 640),
+    /// # ).unwrap();
     /// let mut mog2 = Mog2::new(100, 16.0, false);
     /// let mask = mog2.apply_ctx(&frame_tensor, -1.0, &device)?;
     /// // mask contains foreground (255) and background (0) pixels
