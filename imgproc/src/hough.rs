@@ -82,13 +82,10 @@ pub fn hough_circles_ctx(
     threshold: u32,
     group: &ResourceGroup,
 ) -> Vec<cv_core::HoughCircle> {
-    match group.device() {
-        Ok(ComputeDevice::Gpu(gpu)) => {
-            if let Ok(res) = hough_circles_gpu(gpu, src, min_radius, max_radius, threshold) {
-                return res;
-            }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        if let Ok(res) = hough_circles_gpu(gpu, src, min_radius, max_radius, threshold) {
+            return res;
         }
-        _ => {}
     }
 
     let edges = canny(src, 50, 150);
@@ -181,13 +178,10 @@ pub fn hough_lines_ctx(
     threshold: u32,
     group: &ResourceGroup,
 ) -> Vec<Line> {
-    match group.device() {
-        Ok(ComputeDevice::Gpu(gpu)) => {
-            if let Ok(res) = hough_lines_gpu(gpu, src, rho_res, theta_res, threshold) {
-                return res;
-            }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        if let Ok(res) = hough_lines_gpu(gpu, src, rho_res, theta_res, threshold) {
+            return res;
         }
-        _ => {}
     }
 
     let edges = canny(src, 50, 150);

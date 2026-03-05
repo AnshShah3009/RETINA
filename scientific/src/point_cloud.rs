@@ -414,12 +414,7 @@ pub fn compute_normals_from_depth(
         .collect()
 }
 
-/// Simple PLY reader/writer using internal implementation or ply-rs.
-/// For simplicity and to avoid complex dependency usage if not needed, we will use ply-rs as planned.
-/// But adding `ply-rs` might have failed if crate version mismatch.
-/// Let's assume we use a simple ASCII writer for now to save complexity if `ply-rs` usage is complex.
-/// Actually, to be robust, let's implement a very simple PLY ASCII reader/writer tailored for xyz/rgb/nxnynz.
-
+/// Write a point cloud to a PLY ASCII file.
 pub fn write_ply(pc: &PointCloud, path: &str) -> std::io::Result<()> {
     let mut file = BufWriter::new(File::create(path)?);
 
@@ -481,7 +476,7 @@ pub fn read_ply(path: &str) -> std::io::Result<PointCloud> {
     let mut header_ended = false;
 
     // Parse Header
-    while let Some(line) = lines.next() {
+    for line in lines.by_ref() {
         let line = line?;
         if line.starts_with("element vertex") {
             let parts: Vec<&str> = line.split_whitespace().collect();

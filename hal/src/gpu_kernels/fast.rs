@@ -30,7 +30,7 @@ pub fn fast_detect(
     }
 
     let out_len = w * h;
-    let byte_size = ((out_len + 3) / 4 * 4) as u64;
+    let byte_size = (out_len.div_ceil(4) * 4) as u64;
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("FAST Output"),
         size: byte_size,
@@ -84,8 +84,8 @@ pub fn fast_detect(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = ((w as u32 + 3) / 4 + 15) / 16;
-        let y = (h as u32 + 15) / 16;
+        let x = (w as u32).div_ceil(4).div_ceil(16);
+        let y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(x, y, 1);
     }
     ctx.submit(encoder);
@@ -137,8 +137,8 @@ pub fn fast_detect(
             });
             pass.set_pipeline(&nms_pipeline);
             pass.set_bind_group(0, &nms_bind_group, &[]);
-            let x = ((w as u32 + 3) / 4 + 15) / 16;
-            let y = (h as u32 + 15) / 16;
+            let x = (w as u32).div_ceil(4).div_ceil(16);
+            let y = (h as u32).div_ceil(16);
             pass.dispatch_workgroups(x, y, 1);
         }
         ctx.submit(nms_encoder);
@@ -172,7 +172,7 @@ pub fn extract_keypoints(
     if num_pixels == 0 {
         return Ok(Vec::new());
     }
-    let num_u32 = (num_pixels + 3) / 4;
+    let num_u32 = num_pixels.div_ceil(4);
 
     // 1. Count pass
     let usages =
@@ -240,7 +240,7 @@ pub fn extract_keypoints(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&count_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((num_u32 as u32 + 255) / 256, 1, 1);
+        pass.dispatch_workgroups((num_u32 as u32).div_ceil(256), 1, 1);
     }
     ctx.submit(encoder);
 
@@ -251,11 +251,11 @@ pub fn extract_keypoints(
         &ctx.queue,
         &counts_buffer,
         0,
-        (num_u32 as usize) * 4,
+        num_u32 * 4,
     ))?;
 
     let mut total = 0u32;
-    let mut indices = Vec::with_capacity(num_u32 as usize);
+    let mut indices = Vec::with_capacity(num_u32);
     for &c in &counts_data {
         indices.push(total);
         if c <= 4 {
@@ -332,7 +332,7 @@ pub fn extract_keypoints(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&collect_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((num_u32 as u32 + 255) / 256, 1, 1);
+        pass.dispatch_workgroups((num_u32 as u32).div_ceil(256), 1, 1);
     }
     ctx.submit(encoder);
 

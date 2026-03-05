@@ -90,7 +90,7 @@ pub fn match_descriptors(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (q_len as u32 + 63) / 64;
+        let x = (q_len as u32).div_ceil(64);
         pass.dispatch_workgroups(x, 1, 1);
     }
     ctx.submit(encoder);

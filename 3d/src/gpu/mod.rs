@@ -141,7 +141,7 @@ pub mod point_cloud {
                     candidates.truncate(k);
                 }
 
-                compute_pca_normal(&center, &candidates, points)
+                compute_pca_normal(center, &candidates, points)
             })
             .collect()
     }
@@ -498,11 +498,12 @@ pub mod point_cloud {
         let runner = cv_runtime::best_runner().ok();
         if let Some(ref r) = runner {
             if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = r.device() {
-                match cv_hal::gpu_kernels::pointcloud::compute_normals_from_covariances_gpu(
-                    gpu, &covs,
-                ) {
-                    Ok(normals) => return normals,
-                    Err(_) => {}
+                if let Ok(normals) =
+                    cv_hal::gpu_kernels::pointcloud::compute_normals_from_covariances_gpu(
+                        gpu, &covs,
+                    )
+                {
+                    return normals;
                 }
             }
         }

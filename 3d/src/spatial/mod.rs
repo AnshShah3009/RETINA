@@ -76,11 +76,11 @@ impl<T: Clone> KDTree<T> {
     pub fn nearest_neighbor(&self, query: &Point3<f32>) -> Option<(Point3<f32>, T, f32)> {
         self.root.as_ref().map(|root| {
             let mut best = (
-                root.point.clone(),
+                root.point,
                 root.data.clone(),
                 squared_distance(&root.point, query),
             );
-            Self::nearest_recursive(&root, query, &mut best);
+            Self::nearest_recursive(root, query, &mut best);
             best
         })
     }
@@ -88,7 +88,7 @@ impl<T: Clone> KDTree<T> {
     fn nearest_recursive(node: &KDNode<T>, query: &Point3<f32>, best: &mut (Point3<f32>, T, f32)) {
         let dist = squared_distance(&node.point, query);
         if dist < best.2 {
-            *best = (node.point.clone(), node.data.clone(), dist);
+            *best = (node.point, node.data.clone(), dist);
         }
 
         let diff = match node.axis {
@@ -134,7 +134,7 @@ impl<T: Clone> KDTree<T> {
     ) {
         let dist = squared_distance(&node.point, query);
         if dist <= radius_sq {
-            results.push((node.point.clone(), node.data.clone(), dist));
+            results.push((node.point, node.data.clone(), dist));
         }
 
         let diff = match node.axis {
@@ -179,7 +179,7 @@ impl<T: Clone> KDTree<T> {
         results: &mut Vec<(Point3<f32>, T, f32)>,
     ) {
         let dist = squared_distance(&node.point, query);
-        results.push((node.point.clone(), node.data.clone(), dist));
+        results.push((node.point, node.data.clone(), dist));
 
         let diff = match node.axis {
             0 => query.x - node.point.x,

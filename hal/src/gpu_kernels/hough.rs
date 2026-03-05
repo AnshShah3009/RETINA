@@ -114,8 +114,8 @@ pub fn hough_lines(
         });
         pass.set_pipeline(&vote_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let wg_x = (w as u32 + 15) / 16;
-        let wg_y = (h as u32 + 15) / 16;
+        let wg_x = (w as u32).div_ceil(16);
+        let wg_y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
 
@@ -145,11 +145,14 @@ pub fn hough_lines(
                         }
                         let nr = r as i32 + dr;
                         let nt = t as i32 + dt;
-                        if nr >= 0 && nr < num_rho as i32 && nt >= 0 && nt < num_theta as i32 {
-                            if acc_data[(nr as u32 * num_theta + nt as u32) as usize] > val {
-                                is_local_max = false;
-                                break;
-                            }
+                        if nr >= 0
+                            && nr < num_rho as i32
+                            && nt >= 0
+                            && nt < num_theta as i32
+                            && acc_data[(nr as u32 * num_theta + nt as u32) as usize] > val
+                        {
+                            is_local_max = false;
+                            break;
                         }
                     }
                     if !is_local_max {

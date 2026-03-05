@@ -24,7 +24,7 @@ pub fn radix_sort_u32(
     }
 
     let workgroup_size = 256;
-    let num_workgroups = (num_elements + workgroup_size - 1) / workgroup_size;
+    let num_workgroups = num_elements.div_ceil(workgroup_size);
     let histogram_size = num_workgroups * 256;
 
     let buffer_size = (num_elements as u64) * 4;
@@ -219,7 +219,7 @@ pub fn gpu_exclusive_scan(
     }
 
     let block_size = 512;
-    let num_workgroups = (num_elements + block_size - 1) / block_size;
+    let num_workgroups = num_elements.div_ceil(block_size);
 
     // Create temporary block sums buffer
     let usages =

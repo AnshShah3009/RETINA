@@ -225,12 +225,13 @@ impl Pipeline {
                         }
                     }
                 }
-                PipelineNode::Barrier => match device_runtime.context() {
-                    crate::device_registry::BackendContext::Gpu(gpu_ctx) => {
+                PipelineNode::Barrier => {
+                    if let crate::device_registry::BackendContext::Gpu(gpu_ctx) =
+                        device_runtime.context()
+                    {
                         let _ = gpu_ctx.wait_idle();
                     }
-                    _ => {}
-                },
+                }
             }
         }
 

@@ -86,7 +86,7 @@ pub fn spmv(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (rows as u32 + 255) / 256;
+        let x = (rows as u32).div_ceil(256);
         pass.dispatch_workgroups(x, 1, 1);
     }
     ctx.submit(encoder);

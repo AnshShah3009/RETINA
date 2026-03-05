@@ -32,7 +32,7 @@ pub fn resize(
     }
 
     let out_len = dst_w * dst_h * c;
-    let byte_size = ((out_len + 3) / 4 * 4) as u64;
+    let byte_size = (out_len.div_ceil(4) * 4) as u64;
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Resize Output"),
         size: byte_size,
@@ -88,8 +88,8 @@ pub fn resize(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = ((dst_w as u32 + 3) / 4 + 15) / 16;
-        let y = (dst_h as u32 + 15) / 16;
+        let x = (dst_w as u32).div_ceil(4).div_ceil(16);
+        let y = (dst_h as u32).div_ceil(16);
         pass.dispatch_workgroups(x, y, 1);
     }
     ctx.submit(encoder);

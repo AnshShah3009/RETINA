@@ -193,7 +193,7 @@ impl KdTree {
         node: &KdTreeNode,
         query: &[u8],
         k: usize,
-        max_checks: usize,
+        _max_checks: usize, // TODO: implement backtrack budget to limit checks
         results: &mut BinaryHeap<SearchResult>,
     ) {
         match node {
@@ -221,19 +221,15 @@ impl KdTree {
                 };
 
                 // Search the closer side first
-                self.search_knn(first, query, k, max_checks, results);
+                self.search_knn(first, query, k, _max_checks, results);
 
                 // Check if we need to search the other side
                 if results.len() < k || results.peek().map(|r| r.distance).unwrap_or(u32::MAX) > 0 {
-                    let diff = if query_val > *threshold {
-                        query_val - *threshold
-                    } else {
-                        *threshold - query_val
-                    };
+                    let diff = query_val.abs_diff(*threshold);
 
                     // Simple heuristic: if dimension difference is small, check other side
                     if diff < 128 {
-                        self.search_knn(second, query, k, max_checks, results);
+                        self.search_knn(second, query, k, _max_checks, results);
                     }
                 }
             }

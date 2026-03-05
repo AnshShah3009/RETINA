@@ -95,8 +95,8 @@ pub fn match_template(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (out_w as u32 + 15) / 16;
-        let y = (out_h as u32 + 15) / 16;
+        let x = (out_w as u32).div_ceil(16);
+        let y = (out_h as u32).div_ceil(16);
         pass.dispatch_workgroups(x, y, 1);
     }
     ctx.submit(encoder);

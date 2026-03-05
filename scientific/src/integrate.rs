@@ -12,7 +12,7 @@ pub fn quad(f: impl Fn(f64) -> f64, a: f64, b: f64) -> (f64, f64) {
 }
 
 pub fn simpson(f: impl Fn(f64) -> f64, a: f64, b: f64, n: usize) -> f64 {
-    let n = if n % 2 == 0 { n } else { n + 1 };
+    let n = if n.is_multiple_of(2) { n } else { n + 1 };
     let h = (b - a) / n as f64;
     let mut sum = f(a) + f(b);
 

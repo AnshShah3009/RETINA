@@ -80,7 +80,7 @@ pub fn read_pcd<R: BufRead>(reader: R) -> Result<PointCloud> {
                 points_count = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             }
             "DATA" => {
-                data_format = match parts.get(1).map(|s| *s) {
+                data_format = match parts.get(1).copied() {
                     Some("binary") => PcdData::Binary,
                     Some("binary_compressed") => PcdData::BinaryCompressed,
                     _ => PcdData::Ascii,

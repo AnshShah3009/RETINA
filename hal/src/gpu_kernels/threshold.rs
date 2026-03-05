@@ -27,7 +27,7 @@ pub fn threshold(
 
     // Create output buffer
     // Byte size should be multiple of 4 for u32 packing in shader
-    let byte_size = ((len + 3) / 4 * 4) as u64;
+    let byte_size = (len.div_ceil(4) * 4) as u64;
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Threshold Output Buffer Unique"),
         size: byte_size,
@@ -98,7 +98,7 @@ pub fn threshold(
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
 
-        let wg_x = ((len as u32 + 3) / 4 + 63) / 64;
+        let wg_x = (len as u32).div_ceil(4).div_ceil(64);
         pass.dispatch_workgroups(wg_x, 1, 1);
     }
 

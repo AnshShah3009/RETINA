@@ -83,7 +83,7 @@ pub fn nms_boxes(
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
 
-        let wg = (num_boxes as u32 + 15) / 16;
+        let wg = (num_boxes as u32).div_ceil(16);
         pass.dispatch_workgroups(wg, wg, 1);
     }
     ctx.submit(encoder);
@@ -195,8 +195,8 @@ pub fn nms_pixel(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (w as u32 + 15) / 16;
-        let y = (h as u32 + 15) / 16;
+        let x = (w as u32).div_ceil(16);
+        let y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(x, y, 1);
     }
     ctx.submit(encoder);

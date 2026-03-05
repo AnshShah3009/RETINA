@@ -79,8 +79,8 @@ pub fn akaze_diffusion(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let wg_x = (w as u32 + 15) / 16;
-        let wg_y = (h as u32 + 15) / 16;
+        let wg_x = (w as u32).div_ceil(16);
+        let wg_y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
     ctx.submit(encoder);
@@ -173,8 +173,8 @@ pub fn akaze_derivatives(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let wg_x = (w as u32 + 15) / 16;
-        let wg_y = (h as u32 + 15) / 16;
+        let wg_x = (w as u32).div_ceil(16);
+        let wg_y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
     ctx.submit(encoder);
@@ -258,8 +258,8 @@ pub fn akaze_contrast_k(ctx: &GpuContext, input: &Tensor<f32, GpuStorage<f32>>) 
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let wg_x = (w as u32 + 15) / 16;
-        let wg_y = (h as u32 + 15) / 16;
+        let wg_x = (w as u32).div_ceil(16);
+        let wg_y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
     ctx.submit(encoder);

@@ -149,7 +149,7 @@ pub fn lucas_kanade(
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups((num_points as u32 + 63) / 64, 1, 1);
+            pass.dispatch_workgroups((num_points as u32).div_ceil(64), 1, 1);
         }
 
         // If not the last level (0), we need to scale up the results for the next iteration
@@ -232,7 +232,7 @@ pub fn lucas_kanade(
                     scale_enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
                 pass.set_pipeline(&scale_pipeline);
                 pass.set_bind_group(0, &scale_bg, &[]);
-                pass.dispatch_workgroups((num_points as u32 + 63) / 64, 1, 1);
+                pass.dispatch_workgroups((num_points as u32).div_ceil(64), 1, 1);
             }
             ctx.submit(scale_enc);
 

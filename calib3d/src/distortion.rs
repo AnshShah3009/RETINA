@@ -83,8 +83,8 @@ pub fn init_undistort_rectify_map(
         .for_each(|(y, (row_x, row_y))| {
             for x in 0..width {
                 let dst = Vector3::new(x as f64, y as f64, 1.0);
-                let rectified_norm = &k_new_inv * dst;
-                let original_norm = &r_inv * rectified_norm;
+                let rectified_norm = k_new_inv * dst;
+                let original_norm = r_inv * rectified_norm;
 
                 if original_norm[2].abs() <= 1e-12 {
                     continue;
@@ -125,8 +125,8 @@ pub fn fisheye_init_undistort_rectify_map(
         .for_each(|(y, (row_x, row_y))| {
             for x in 0..width {
                 let dst = Vector3::new(x as f64, y as f64, 1.0);
-                let rectified_norm = &k_new_inv * dst;
-                let original_norm = &r_inv * rectified_norm;
+                let rectified_norm = k_new_inv * dst;
+                let original_norm = r_inv * rectified_norm;
 
                 let xn = original_norm[0] / original_norm[2];
                 let yn = original_norm[1] / original_norm[2];

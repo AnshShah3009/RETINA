@@ -84,10 +84,8 @@ fn has_n_contiguous(
             if p > high_threshold {
                 binary[i] = 1;
             }
-        } else {
-            if p < low_threshold {
-                binary[i] = 1;
-            }
+        } else if p < low_threshold {
+            binary[i] = 1;
         }
     }
 
@@ -140,7 +138,7 @@ pub fn corner_score(image: &GrayImage, x: i32, y: i32, _threshold: u8) -> u8 {
         let px = (x + dx) as u32;
         let py = (y + dy) as u32;
         let val = image.get_pixel(px, py)[0];
-        let diff = if val > p { val - p } else { p - val };
+        let diff = val.abs_diff(p);
         min_diff = min_diff.min(diff);
     }
 

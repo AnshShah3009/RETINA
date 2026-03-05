@@ -1296,7 +1296,7 @@ impl ComputeContext for GpuContext {
                 });
                 pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &bind_group, &[]);
-                let x = (kp_data.len() as u32 + 63) / 64;
+                let x = (kp_data.len() as u32).div_ceil(64);
                 pass.dispatch_workgroups(x, 1, 1);
             }
             self.submit(encoder);
@@ -1318,10 +1318,7 @@ impl ComputeContext for GpuContext {
                     .iter()
                     .map(|&v| (v * 512.0).min(255.0) as u8)
                     .collect();
-                descs.push(cv_core::Descriptor::new(
-                    data,
-                    keypoints.keypoints[i].clone(),
-                ));
+                descs.push(cv_core::Descriptor::new(data, keypoints.keypoints[i]));
             }
 
             Ok(cv_core::Descriptors { descriptors: descs })

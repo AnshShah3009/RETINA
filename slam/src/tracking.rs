@@ -145,8 +145,8 @@ impl Tracker {
             for (i, desc) in frame.descriptors.descriptors.iter().enumerate() {
                 // Back-project to z=1.0
                 let kp = &desc.keypoint;
-                let x = (kp.x as f64 - self.intrinsics.cx) / self.intrinsics.fx;
-                let y = (kp.y as f64 - self.intrinsics.cy) / self.intrinsics.fy;
+                let x = (kp.x - self.intrinsics.cx) / self.intrinsics.fx;
+                let y = (kp.y - self.intrinsics.cy) / self.intrinsics.fy;
                 let pos = Point3::new(x as f32, y as f32, 1.0);
 
                 let desc_data = desc.data.clone();
@@ -317,8 +317,8 @@ impl Tracker {
         };
 
         // Update the pose
-        pose.rotation = pose.rotation * nalgebra::UnitQuaternion::from_rotation_matrix(&rot_update);
-        pose.translation = pose.translation + translation;
+        pose.rotation *= nalgebra::UnitQuaternion::from_rotation_matrix(&rot_update);
+        pose.translation += translation;
 
         Ok(())
     }

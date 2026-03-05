@@ -83,7 +83,7 @@ pub fn icp_correspondences(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (num_src as u32 + 63) / 64;
+        let x = (num_src as u32).div_ceil(64);
         pass.dispatch_workgroups(x, 1, 1);
     }
     ctx.submit(encoder);
@@ -213,7 +213,7 @@ pub fn icp_accumulate(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (num_corr as u32 + 255) / 256;
+        let x = (num_corr as u32).div_ceil(256);
         pass.dispatch_workgroups(x, 1, 1);
     }
     ctx.submit(encoder);
@@ -370,7 +370,7 @@ pub fn dense_step(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((w as u32 + 15) / 16, (h as u32 + 15) / 16, 1);
+        pass.dispatch_workgroups((w as u32).div_ceil(16), (h as u32).div_ceil(16), 1);
     }
     ctx.submit(encoder);
 
@@ -382,7 +382,7 @@ pub fn dense_step(
     let mut current_input = scratch_buffer;
 
     while current_elements > 1 {
-        let workgroups = (current_elements + 127) / 128;
+        let workgroups = current_elements.div_ceil(128);
         let out_size = (workgroups * 27 * 4) as u64;
         let out_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Reduction Step"),

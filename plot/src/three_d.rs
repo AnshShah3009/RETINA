@@ -373,7 +373,7 @@ impl Plot3D {
         let mut js_points = String::new();
         let mut js_colors = String::new();
 
-        for (_idx, pc) in self.point_clouds.iter().enumerate() {
+        for pc in self.point_clouds.iter() {
             for point in &pc.points {
                 js_points.push_str(&format!("{{x:{},y:{},z:{}}},", point.x, point.y, point.z));
                 let c = &point.color;

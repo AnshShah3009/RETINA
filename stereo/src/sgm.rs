@@ -210,7 +210,7 @@ impl SgmMatcher {
                                 let rx = rx_i32 as usize;
                                 let left_val = left_data[ly * width + lx] as i32;
                                 let right_val = right_data[ly * width + rx] as i32;
-                                cost += (left_val - right_val).abs() as u32;
+                                cost += (left_val - right_val).unsigned_abs();
                             }
                         }
 
@@ -276,8 +276,8 @@ impl SgmMatcher {
         while y != y_end {
             let mut x = x_start;
             while x != x_end {
-                let px = x as i32 - dx;
-                let py = y as i32 - dy;
+                let px = x - dx;
+                let py = y - dy;
                 let idx_base = (y as usize * width + x as usize) * num_disparities;
 
                 if px >= 0 && px < width as i32 && py >= 0 && py < height as i32 {

@@ -80,6 +80,7 @@ impl ShmCoordinator {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&path)?;
 
         file.set_len(size as u64)?;
@@ -168,9 +169,8 @@ impl ShmCoordinator {
         let num_slots = header.num_slots.load(Ordering::Relaxed) as usize;
 
         for i in 0..num_slots.min(MAX_PROCESSES) {
-            let slot = Self::get_slot_mut_at(mmap, i).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Other, "Invalid slot offset in shared memory")
-            })?;
+            let slot = Self::get_slot_mut_at(mmap, i)
+                .ok_or_else(|| io::Error::other("Invalid slot offset in shared memory"))?;
 
             let slot_pid = slot.pid.load(Ordering::Relaxed);
 
@@ -178,21 +178,18 @@ impl ShmCoordinator {
                 return Ok(i);
             }
 
-            if slot_pid == 0 || !Self::is_process_alive(slot_pid) {
-                if slot.try_lock() {
-                    let current_pid = slot.pid.load(Ordering::Relaxed);
-                    if current_pid == 0 || !Self::is_process_alive(current_pid) {
-                        slot.pid.store(pid, Ordering::Relaxed);
-                        slot.unlock();
-                        return Ok(i);
-                    }
+            if (slot_pid == 0 || !Self::is_process_alive(slot_pid)) && slot.try_lock() {
+                let current_pid = slot.pid.load(Ordering::Relaxed);
+                if current_pid == 0 || !Self::is_process_alive(current_pid) {
+                    slot.pid.store(pid, Ordering::Relaxed);
                     slot.unlock();
+                    return Ok(i);
                 }
+                slot.unlock();
             }
         }
 
-        Err(io::Error::new(
-            io::ErrorKind::Other,
+        Err(io::Error::other(
             "No available slots in shared memory coordinator",
         ))
     }

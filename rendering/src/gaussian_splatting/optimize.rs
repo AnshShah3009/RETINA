@@ -149,7 +149,9 @@ impl GaussianOptimizer {
         self.iteration += 1;
 
         if self.config.densification.enabled
-            && self.iteration % self.config.densification.densification_interval == 0
+            && self
+                .iteration
+                .is_multiple_of(self.config.densification.densification_interval)
         {
             self.densify(cloud);
         }
@@ -159,7 +161,9 @@ impl GaussianOptimizer {
         }
 
         if self.config.opacity_reset.enabled
-            && self.iteration % self.config.opacity_reset.interval == 0
+            && self
+                .iteration
+                .is_multiple_of(self.config.opacity_reset.interval)
         {
             self.reset_opacity(cloud);
         }

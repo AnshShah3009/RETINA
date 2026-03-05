@@ -173,7 +173,7 @@ impl TensorCast for Tensor<u8, GpuStorage<u8>> {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = (size as u32 + 255) / 256;
+            let workgroups = (size as u32).div_ceil(256);
             pass.dispatch_workgroups(workgroups, 1, 1);
         }
         ctx.submit(encoder);
@@ -235,7 +235,7 @@ impl TensorCast for Tensor<f32, GpuStorage<f32>> {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            let workgroups = ((size as u32 / 4) + 255) / 256;
+            let workgroups = (size as u32 / 4).div_ceil(256);
             pass.dispatch_workgroups(workgroups.max(1), 1, 1);
         }
         ctx.submit(encoder);

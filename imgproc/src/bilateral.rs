@@ -61,7 +61,7 @@ pub fn bilateral_filter_depth(
             // Absolute fallback: use the CPU registry if available
             cv_runtime::registry()
                 .ok()
-                .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
                 .unwrap_or_else(|| {
                     // If even registry fails, create a minimal CPU runner (id = 0)
                     cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0))
@@ -167,7 +167,7 @@ pub fn bilateral_filter_rgb(
             // Absolute fallback: use the CPU registry if available
             cv_runtime::registry()
                 .ok()
-                .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
                 .unwrap_or_else(|| {
                     // If even registry fails, create a minimal CPU runner (id = 0)
                     cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0))
@@ -286,7 +286,7 @@ pub fn joint_bilateral_filter(
             // Absolute fallback: use the CPU registry if available
             cv_runtime::registry()
                 .ok()
-                .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
                 .unwrap_or_else(|| {
                     // If even registry fails, create a minimal CPU runner (id = 0)
                     cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0))

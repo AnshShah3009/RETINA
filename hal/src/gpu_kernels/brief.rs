@@ -115,7 +115,7 @@ pub fn compute_brief(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((num_kp + 255) / 256, 1, 1);
+        pass.dispatch_workgroups(num_kp.div_ceil(256), 1, 1);
     }
     ctx.submit(encoder);
 

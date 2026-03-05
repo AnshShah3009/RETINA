@@ -156,7 +156,7 @@ impl Isam2 {
         let mut delta = bias.clone();
         for _ in 0..100 {
             let gradient = hessian.transpose() * &delta;
-            delta = delta - 0.001 * gradient;
+            delta -= 0.001 * gradient;
         }
 
         drop(nodes);

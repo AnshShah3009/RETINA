@@ -22,7 +22,7 @@ pub struct CameraCalibrationResult {
     pub rms_reprojection_error: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CameraCalibrationOptions {
     /// Enforce fx/fy to match this ratio (fx = ratio * fy).
     pub fix_aspect_ratio: Option<f64>,
@@ -40,21 +40,6 @@ pub struct CameraCalibrationOptions {
     pub fix_k2: bool,
     /// Fix radial distortion coefficient k3
     pub fix_k3: bool,
-}
-
-impl Default for CameraCalibrationOptions {
-    fn default() -> Self {
-        Self {
-            fix_aspect_ratio: None,
-            fix_principal_point: None,
-            use_intrinsic_guess: false,
-            zero_tangent_dist: false,
-            fix_focal_length: false,
-            fix_k1: false,
-            fix_k2: false,
-            fix_k3: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

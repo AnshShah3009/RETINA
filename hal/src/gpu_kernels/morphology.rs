@@ -33,7 +33,7 @@ pub fn morphology(
     let len = input.shape.len();
     let (h, w) = input.shape.hw();
     let (kh, kw) = kernel.shape.hw();
-    let byte_size = ((len + 3) / 4 * 4) as u64;
+    let byte_size = (len.div_ceil(4) * 4) as u64;
 
     // Handle Open/Close
     if typ == MorphologyType::Open || typ == MorphologyType::Close {
@@ -136,8 +136,8 @@ pub fn morphology(
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            let wg_x = ((w as u32 + 3) / 4 + 15) / 16;
-            let wg_y = (h as u32 + 15) / 16;
+            let wg_x = (w as u32).div_ceil(4).div_ceil(16);
+            let wg_y = (h as u32).div_ceil(16);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
         ctx.submit(encoder);

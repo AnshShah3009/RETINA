@@ -241,7 +241,7 @@ pub fn integrate(
         pass.set_pipeline(&compute_pipeline);
         pass.set_bind_group(0, &bind_group_0, &[]);
         pass.set_bind_group(1, &bind_group_1, &[]);
-        pass.dispatch_workgroups((vx + 7) / 8, (vy + 7) / 8, (vz + 3) / 4);
+        pass.dispatch_workgroups(vx.div_ceil(8), vy.div_ceil(8), vz.div_ceil(4));
     }
     ctx.submit(encoder);
 
@@ -459,7 +459,7 @@ pub fn raycast(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((w + 15) / 16, (h + 15) / 16, 1);
+        pass.dispatch_workgroups(w.div_ceil(16), h.div_ceil(16), 1);
     }
     ctx.submit(encoder);
 

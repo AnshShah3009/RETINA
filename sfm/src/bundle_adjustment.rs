@@ -84,7 +84,7 @@ impl SfMState {
                     continue;
                 }
 
-                let projected = self.intrinsics.project(&pt_cam.into());
+                let projected = self.intrinsics.project(&pt_cam);
                 let err = (projected.x - obs.x).powi(2) + (projected.y - obs.y).powi(2);
                 total_err += err;
                 count += 1;
@@ -106,7 +106,7 @@ impl SfMState {
         for (i, cam) in self.cameras.iter().enumerate() {
             let rotation = cam.rotation.to_rotation_matrix();
             let axis_angle = rotation.scaled_axis();
-            params[6 * i + 0] = axis_angle.x;
+            params[6 * i] = axis_angle.x;
             params[6 * i + 1] = axis_angle.y;
             params[6 * i + 2] = axis_angle.z;
             params[6 * i + 3] = cam.translation.x;
@@ -116,7 +116,7 @@ impl SfMState {
 
         let offset = 6 * n_cam;
         for (i, lm) in self.landmarks.iter().enumerate() {
-            params[offset + 3 * i + 0] = lm.position.x;
+            params[offset + 3 * i] = lm.position.x;
             params[offset + 3 * i + 1] = lm.position.y;
             params[offset + 3 * i + 2] = lm.position.z;
         }
@@ -159,7 +159,7 @@ impl SfMState {
 
                 let cam = &self.cameras[*cam_idx];
                 let pt_cam = cam.rotation * landmark.position + cam.translation;
-                let projected = self.intrinsics.project(&pt_cam.into());
+                let projected = self.intrinsics.project(&pt_cam);
                 residuals.push(projected.x - obs.x);
                 residuals.push(projected.y - obs.y);
             }
@@ -255,7 +255,7 @@ impl SfMState {
 
                     let base_pt = self.cameras[*cam_idx].rotation * lm.position
                         + self.cameras[*cam_idx].translation;
-                    let base_proj = self.intrinsics.project(&base_pt.into());
+                    let base_proj = self.intrinsics.project(&base_pt);
 
                     triplets.push(Triplet::new(
                         res_idx,
@@ -279,7 +279,7 @@ impl SfMState {
 
                     let base_pt = self.cameras[*cam_idx].rotation * lm.position
                         + self.cameras[*cam_idx].translation;
-                    let base_proj = self.intrinsics.project(&base_pt.into());
+                    let base_proj = self.intrinsics.project(&base_pt);
 
                     triplets.push(Triplet::new(
                         res_idx,
@@ -326,7 +326,7 @@ impl SfMState {
         );
 
         let pt_cam = rot * lm_pos + trans;
-        let proj = self.intrinsics.project(&pt_cam.into());
+        let proj = self.intrinsics.project(&pt_cam);
         (proj, proj) // Dummy second for signature parity
     }
 
@@ -356,7 +356,7 @@ impl SfMState {
             let pt_cam = cam.rotation * lm.position + cam.translation;
 
             if pt_cam.z > 0.0 {
-                let proj = self.intrinsics.project(&pt_cam.into());
+                let proj = self.intrinsics.project(&pt_cam);
                 error += (proj.x - obs.x).powi(2) + (proj.y - obs.y).powi(2);
                 count += 1;
             }

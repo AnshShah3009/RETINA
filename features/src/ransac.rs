@@ -35,7 +35,7 @@ impl RobustModel<MatchPair> for HomographyEstimator {
             let (x2, y2) = m.dst;
             let row1 = i * 2;
             let row2 = i * 2 + 1;
-            a[row1 * 9 + 0] = -x1;
+            a[row1 * 9] = -x1;
             a[row1 * 9 + 1] = -y1;
             a[row1 * 9 + 2] = -1.0;
             a[row1 * 9 + 6] = x2 * x1;
@@ -79,7 +79,7 @@ impl RobustModel<MatchPair> for FundamentalEstimator {
         for (i, m) in data.iter().enumerate() {
             let (x1, y1) = m.src;
             let (x2, y2) = m.dst;
-            a[i * 9 + 0] = x2 * x1;
+            a[i * 9] = x2 * x1;
             a[i * 9 + 1] = x2 * y1;
             a[i * 9 + 2] = x2;
             a[i * 9 + 3] = y2 * x1;
@@ -178,7 +178,7 @@ fn compute_homography_4pt(
         let row2 = i * 2 + 1;
 
         // Row for x constraint: [-x1, -y1, -1, 0, 0, 0, x2*x1, x2*y1, x2]
-        a[row1 * 9 + 0] = -x1;
+        a[row1 * 9] = -x1;
         a[row1 * 9 + 1] = -y1;
         a[row1 * 9 + 2] = -1.0;
         a[row1 * 9 + 6] = x2 * x1;
@@ -249,7 +249,7 @@ fn compute_fundamental_8pt(
         let (x2, y2) = dst_points[m.train_idx as usize];
 
         // Row: [x2*x1, x2*y1, x2, y2*x1, y2*y1, y2, x1, y1, 1]
-        a[i * 9 + 0] = x2 * x1;
+        a[i * 9] = x2 * x1;
         a[i * 9 + 1] = x2 * y1;
         a[i * 9 + 2] = x2;
         a[i * 9 + 3] = y2 * x1;
@@ -289,7 +289,7 @@ fn solve_dlt_fundamental(a: &[f64], n_rows: usize) -> Option<Matrix3<f64>> {
     let mut svd_f = f.svd(true, true);
     svd_f.singular_values[2] = 0.0;
 
-    Some(svd_f.recompose().ok()?)
+    svd_f.recompose().ok()
 }
 
 /// Count inliers for homography

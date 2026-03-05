@@ -198,7 +198,7 @@ pub fn sobel_with_border(src: &GrayImage, border: BorderMode) -> (GrayImage, Gra
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     let gx = sobel_ex_ctx(src, 1, 0, 3, 1.0, 0.0, border, &runner);
@@ -215,7 +215,7 @@ pub fn scharr_with_border(src: &GrayImage, border: BorderMode) -> (GrayImage, Gr
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     let gx = scharr_ex_ctx(src, 1, 0, 1.0, 0.0, border, &runner);
@@ -232,7 +232,7 @@ pub fn sobel_magnitude(gx: &GrayImage, gy: &GrayImage) -> GrayImage {
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     sobel_magnitude_ctx(gx, gy, &runner)
@@ -265,7 +265,7 @@ pub fn laplacian(src: &GrayImage) -> GrayImage {
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     laplacian_ctx(src, &runner)
@@ -495,7 +495,7 @@ pub fn canny(src: &GrayImage, low_threshold: u8, high_threshold: u8) -> GrayImag
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     canny_ctx(src, low_threshold, high_threshold, &runner)
@@ -507,13 +507,10 @@ pub fn canny_ctx(
     high_threshold: u8,
     group: &RuntimeRunner,
 ) -> GrayImage {
-    match group.device() {
-        Ok(ComputeDevice::Gpu(gpu)) => {
-            if let Ok(res) = canny_gpu(gpu, src, low_threshold as f32, high_threshold as f32) {
-                return res;
-            }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        if let Ok(res) = canny_gpu(gpu, src, low_threshold as f32, high_threshold as f32) {
+            return res;
         }
-        _ => {}
     }
 
     let blurred = gaussian_blur_ctx(src, 1.0, BorderMode::Reflect101, group);

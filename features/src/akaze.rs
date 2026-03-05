@@ -469,7 +469,7 @@ impl Akaze {
             desc[i] = ((float_desc[i] / norm) * 128.0 + 128.0).clamp(0.0, 255.0) as u8;
         }
 
-        Ok(Some(Descriptor::new(desc, kp.clone())))
+        Ok(Some(Descriptor::new(desc, *kp)))
     }
 }
 

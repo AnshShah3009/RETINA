@@ -131,7 +131,7 @@ pub fn warp_perspective_ex(
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     warp_perspective_ex_ctx(src, matrix, width, height, interpolation, border, &runner)
@@ -147,22 +147,19 @@ pub fn warp_perspective_ex_ctx(
     group: &RuntimeRunner,
 ) -> GrayImage {
     // Check for GPU acceleration
-    match group.device() {
-        Ok(ComputeDevice::Gpu(gpu)) => {
-            if interpolation == Interpolation::Linear && border == BorderMode::Constant(0) {
-                if let Ok(result) = warp_gpu(
-                    gpu,
-                    src,
-                    matrix,
-                    width,
-                    height,
-                    cv_hal::context::WarpType::Perspective,
-                ) {
-                    return result;
-                }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        if interpolation == Interpolation::Linear && border == BorderMode::Constant(0) {
+            if let Ok(result) = warp_gpu(
+                gpu,
+                src,
+                matrix,
+                width,
+                height,
+                cv_hal::context::WarpType::Perspective,
+            ) {
+                return result;
             }
         }
-        _ => {}
     }
 
     let mut dst = GrayImage::new(width, height);
@@ -249,7 +246,7 @@ pub fn warp_affine(
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     warp_affine_ctx(src, matrix_2x3, width, height, &runner)
@@ -285,7 +282,7 @@ pub fn warp_affine_ex(
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     warp_affine_ex_ctx(

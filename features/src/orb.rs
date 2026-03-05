@@ -170,7 +170,7 @@ impl Orb {
 
     /// Compute orientations for keypoints using intensity centroid (Parallelized)
     pub fn compute_orientations(&self, image: &GrayImage, keypoints: &mut KeyPoints) {
-        let patch_size = self.patch_size as i32;
+        let patch_size = self.patch_size;
         let half_patch = patch_size / 2;
 
         keypoints.keypoints.par_iter_mut().for_each(|kp| {
@@ -404,7 +404,7 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
 
                 let desc_data = descriptors_u8[i * 32..(i + 1) * 32].to_vec();
 
-                all_keypoints.push(kp.clone());
+                all_keypoints.push(kp);
                 all_descriptors.push(Descriptor::new(desc_data, kp));
             }
         }
@@ -613,7 +613,7 @@ fn compute_orb_descriptor(
         }
     }
 
-    Some(Descriptor::new(descriptor_data, kp.clone()))
+    Some(Descriptor::new(descriptor_data, *kp))
 }
 
 fn scale_image(image: &GrayImage, scale: f32) -> GrayImage {

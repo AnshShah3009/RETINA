@@ -10,18 +10,10 @@ use nalgebra::{DMatrix, Matrix3, Point2, Point3, Vector3};
 use rayon::prelude::*;
 
 /// Options for projection with optional Jacobian computation
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ProjectPointsOptions {
     /// Compute Jacobian matrices (adds computational cost)
     pub compute_jacobians: bool,
-}
-
-impl Default for ProjectPointsOptions {
-    fn default() -> Self {
-        Self {
-            compute_jacobians: false,
-        }
-    }
 }
 
 /// Result from projection with optional Jacobians

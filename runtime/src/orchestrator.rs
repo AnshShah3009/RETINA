@@ -212,7 +212,7 @@ impl RuntimeRunner {
         E: From<crate::Error> + Send,
     {
         let f_cloned = f.clone();
-        let res = self.run(move || f_cloned());
+        let res = self.run(f_cloned);
         if res.is_err() {
             // Signal failure to scheduler for future calls
             if let Ok(s) = scheduler() {
@@ -222,7 +222,7 @@ impl RuntimeRunner {
             let reg = registry().map_err(E::from)?;
             let cpu_id = reg.default_cpu().id();
             if cpu_id != self.device_id() {
-                return Ok(f()?);
+                return f();
             }
         }
         res
@@ -300,6 +300,12 @@ pub fn try_default_runner() -> Result<RuntimeRunner> {
     Err(crate::Error::RuntimeError(
         "Could not initialize even basic device registry".into(),
     ))
+}
+
+impl Default for TaskScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TaskScheduler {
@@ -508,11 +514,9 @@ impl TaskScheduler {
                     max_priority = priority;
                     min_load = total_device_load;
                     best_group = Some(group.clone());
-                } else if priority == max_priority {
-                    if total_device_load < min_load {
-                        min_load = total_device_load;
-                        best_group = Some(group.clone());
-                    }
+                } else if priority == max_priority && total_device_load < min_load {
+                    min_load = total_device_load;
+                    best_group = Some(group.clone());
                 }
             }
         }

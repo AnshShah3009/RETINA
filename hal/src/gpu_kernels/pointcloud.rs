@@ -355,7 +355,7 @@ pub fn transform_points(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (num_points as u32 + 255) / 256;
+        let x = (num_points as u32).div_ceil(256);
         pass.dispatch_workgroups(x, 1, 1);
     }
     ctx.submit(encoder);
@@ -500,7 +500,7 @@ pub fn compute_normals_from_covariances_gpu(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((n as u32 + 255) / 256, 1, 1);
+        pass.dispatch_workgroups((n as u32).div_ceil(256), 1, 1);
     }
     queue.submit(std::iter::once(encoder.finish()));
 

@@ -960,7 +960,7 @@ impl Triangulator {
         max_iters: usize,
     ) -> Pose {
         // Implementation using numerical differentiation for projection to support distortion
-        let mut current_pose = initial_pose.clone();
+        let mut current_pose = *initial_pose;
         let mut lambda = 0.001;
 
         let n = object_points.len();

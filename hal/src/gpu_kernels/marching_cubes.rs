@@ -215,7 +215,7 @@ pub fn extract_mesh(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((vx + 7) / 8, (vy + 7) / 8, (vz + 3) / 4);
+        pass.dispatch_workgroups(vx.div_ceil(8), vy.div_ceil(8), vz.div_ceil(4));
     }
     ctx.submit(encoder);
 

@@ -252,7 +252,7 @@ impl Mog2 {
                         .map_err(|_| Error::VideoError("Failed to get frame slice".to_string()))?;
                     for i in 0..(width * height) {
                         let base = i * self.n_mixtures * 3;
-                        data[base + 0] = 1.0;
+                        data[base] = 1.0;
                         data[base + 1] = frame_raw[i] as f32 / 255.0;
                         data[base + 2] = self.var_init / 255.0;
                     }
@@ -357,7 +357,7 @@ impl Mog2 {
                         .map_err(|_| Error::VideoError("Failed to get frame slice".to_string()))?;
                     for i in 0..(width * height) {
                         let base = i * self.n_mixtures * 3;
-                        data[base + 0] = 1.0;
+                        data[base] = 1.0;
                         data[base + 1] = frame_raw[i] as f32 / 255.0;
                         data[base + 2] = self.var_init / 255.0;
                     }

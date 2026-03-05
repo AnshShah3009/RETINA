@@ -98,8 +98,8 @@ pub fn convolve_2d(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let wg_x = (w as u32 + 15) / 16;
-        let wg_y = (h as u32 + 15) / 16;
+        let wg_x = (w as u32).div_ceil(16);
+        let wg_y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
     ctx.submit(encoder);
@@ -239,8 +239,8 @@ pub fn gaussian_blur(
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    let wg_x = (w as u32 + 15) / 16;
-    let wg_y = (h as u32 + 15) / 16;
+    let wg_x = (w as u32).div_ceil(16);
+    let wg_y = (h as u32).div_ceil(16);
 
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

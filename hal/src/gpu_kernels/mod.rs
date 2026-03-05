@@ -10,21 +10,21 @@ pub const WORKGROUP_SIZE_3D: u32 = 8;
 
 /// Compute dispatch helpers
 pub fn dispatch_size_1d(count: u32) -> u32 {
-    (count + WORKGROUP_SIZE_1D - 1) / WORKGROUP_SIZE_1D
+    count.div_ceil(WORKGROUP_SIZE_1D)
 }
 
 pub fn dispatch_size_2d(width: u32, height: u32) -> (u32, u32) {
     (
-        (width + WORKGROUP_SIZE_2D - 1) / WORKGROUP_SIZE_2D,
-        (height + WORKGROUP_SIZE_2D - 1) / WORKGROUP_SIZE_2D,
+        width.div_ceil(WORKGROUP_SIZE_2D),
+        height.div_ceil(WORKGROUP_SIZE_2D),
     )
 }
 
 pub fn dispatch_size_3d(width: u32, height: u32, depth: u32) -> (u32, u32, u32) {
     (
-        (width + WORKGROUP_SIZE_3D - 1) / WORKGROUP_SIZE_3D,
-        (height + WORKGROUP_SIZE_3D - 1) / WORKGROUP_SIZE_3D,
-        (depth + WORKGROUP_SIZE_3D - 1) / WORKGROUP_SIZE_3D,
+        width.div_ceil(WORKGROUP_SIZE_3D),
+        height.div_ceil(WORKGROUP_SIZE_3D),
+        depth.div_ceil(WORKGROUP_SIZE_3D),
     )
 }
 
@@ -166,7 +166,7 @@ pub fn mog2_update(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((params.width + 15) / 16, (params.height + 15) / 16, 1);
+        pass.dispatch_workgroups(params.width.div_ceil(16), params.height.div_ceil(16), 1);
     }
     ctx.submit(encoder);
     Ok(())
@@ -311,6 +311,12 @@ pub mod buffer_utils {
         buckets: Mutex<HashMap<BufferUsages, HashMap<u64, Vec<Buffer>>>>,
     }
 
+    impl Default for GpuBufferPool {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl GpuBufferPool {
         pub fn new() -> Self {
             Self {
@@ -323,7 +329,7 @@ pub mod buffer_utils {
             if size <= 1024 * 1024 {
                 size.next_power_of_two().max(256)
             } else {
-                ((size + 1024 * 1024 - 1) / (1024 * 1024)) * 1024 * 1024
+                size.div_ceil(1024 * 1024) * 1024 * 1024
             }
         }
 
@@ -772,7 +778,7 @@ pub mod pointcloud_gpu {
         });
 
         // Step 5: Dispatch
-        let workgroups = (num_points + 255) / 256;
+        let workgroups = num_points.div_ceil(256);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());

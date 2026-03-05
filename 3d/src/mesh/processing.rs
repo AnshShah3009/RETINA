@@ -219,7 +219,7 @@ pub fn loop_subdivision(mesh: &mut TriangleMesh) {
             let v1 = face[(i + 1) % 3];
             let edge = (v0.min(v1), v0.max(v1));
 
-            if !edge_vertices.contains_key(&edge) {
+            if let std::collections::hash_map::Entry::Vacant(e) = edge_vertices.entry(edge) {
                 // Find opposite vertices
                 let mut opposite_vertices = Vec::new();
                 for other_face in &mesh.faces {
@@ -248,7 +248,7 @@ pub fn loop_subdivision(mesh: &mut TriangleMesh) {
 
                 let new_idx = new_vertices.len();
                 new_vertices.push(new_pos);
-                edge_vertices.insert(edge, new_idx);
+                e.insert(new_idx);
             }
         }
     }

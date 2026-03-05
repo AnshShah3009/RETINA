@@ -28,7 +28,7 @@ pub fn match_template(
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     match_template_ctx(image, templ, method, &runner)
@@ -53,13 +53,10 @@ pub fn match_template_ctx(
     let out_h = image.height() - templ.height() + 1;
 
     // Check for GPU acceleration
-    match group.device() {
-        Ok(ComputeDevice::Gpu(gpu)) => {
-            if let Ok(res) = match_template_gpu(gpu, image, templ, method) {
-                return res;
-            }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        if let Ok(res) = match_template_gpu(gpu, image, templ, method) {
+            return res;
         }
-        _ => {}
     }
 
     let mut out = vec![0.0f32; (out_w * out_h) as usize];

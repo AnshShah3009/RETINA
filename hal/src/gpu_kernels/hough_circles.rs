@@ -116,8 +116,8 @@ pub fn hough_circles(
         });
         pass.set_pipeline(&vote_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let wg_x = (w as u32 + 15) / 16;
-        let wg_y = (h as u32 + 15) / 16;
+        let wg_x = (w as u32).div_ceil(16);
+        let wg_y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
     }
 

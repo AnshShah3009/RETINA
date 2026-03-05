@@ -4,6 +4,12 @@ pub struct JitCompiler {
     funcs: std::collections::HashMap<String, FnPtr>,
 }
 
+impl Default for JitCompiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JitCompiler {
     pub fn new() -> Self {
         Self {

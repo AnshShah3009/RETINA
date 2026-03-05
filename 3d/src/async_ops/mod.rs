@@ -324,10 +324,7 @@ pub mod pipeline {
         future: impl Future<Output = T>,
         dur: std::time::Duration,
     ) -> Option<T> {
-        match tokio::time::timeout(dur, future).await {
-            Ok(result) => Some(result),
-            Err(_) => None,
-        }
+        tokio::time::timeout(dur, future).await.ok()
     }
 }
 

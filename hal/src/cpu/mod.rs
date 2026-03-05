@@ -21,7 +21,7 @@ impl CpuBackend {
         let num_threads = std::env::var("RUSTCV_CPU_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| rayon::current_num_threads());
+            .unwrap_or_else(rayon::current_num_threads);
 
         Some(Self {
             device_id: DeviceId(0),
@@ -180,7 +180,7 @@ impl ComputeContext for CpuBackend {
         let (kh, kw) = kernel.shape.hw();
 
         let mut output_storage =
-            S::new(input.shape.len(), 0.0).map_err(|e| crate::Error::MemoryError(e))?;
+            S::new(input.shape.len(), 0.0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -223,10 +223,8 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
 
-        let mut gx_storage =
-            S::new(input.shape.len(), 0).map_err(|e| crate::Error::MemoryError(e))?;
-        let mut gy_storage =
-            S::new(input.shape.len(), 0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut gx_storage = S::new(input.shape.len(), 0).map_err(crate::Error::MemoryError)?;
+        let mut gy_storage = S::new(input.shape.len(), 0).map_err(crate::Error::MemoryError)?;
         let gx_slice = gx_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Gx output not on CPU".into()))?;
@@ -388,7 +386,7 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let len = src.len();
 
-        let mut output_storage = S::new(len, 0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut output_storage = S::new(len, 0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -576,7 +574,7 @@ impl ComputeContext for CpuBackend {
         }
 
         let result = Tensor {
-            storage: S::from_vec(current).map_err(|e| crate::Error::MemoryError(e))?,
+            storage: S::from_vec(current).map_err(crate::Error::MemoryError)?,
             shape: input.shape,
             dtype: input.dtype,
             _phantom: std::marker::PhantomData,
@@ -598,7 +596,7 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
         let (nw, nh) = (new_shape.0, new_shape.1);
-        let mut output_storage = S::new(nw * nh, 0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut output_storage = S::new(nw * nh, 0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -655,7 +653,7 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
         let mut output_storage =
-            S::new(input.shape.len(), 0.0).map_err(|e| crate::Error::MemoryError(e))?;
+            S::new(input.shape.len(), 0.0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -676,11 +674,14 @@ impl ComputeContext for CpuBackend {
                         }
                         let sy = y as isize + j;
                         let sx = x as isize + i;
-                        if sy >= 0 && sy < h as isize && sx >= 0 && sx < w as isize {
-                            if src[sy as usize * w + sx as usize] > val {
-                                is_max = false;
-                                break;
-                            }
+                        if sy >= 0
+                            && sy < h as isize
+                            && sx >= 0
+                            && sx < w as isize
+                            && src[sy as usize * w + sx as usize] > val
+                        {
+                            is_max = false;
+                            break;
                         }
                     }
                     if !is_max {
@@ -890,8 +891,7 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Points not on CPU".into()))?;
         let num_points = points.shape.height;
-        let mut output_storage =
-            S::new(num_points * 4, 0.0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut output_storage = S::new(num_points * 4, 0.0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -942,8 +942,7 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Points not on CPU".into()))?;
         let num_points = points.shape.height;
-        let mut normals_storage =
-            S::new(num_points * 4, 0.0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut normals_storage = S::new(num_points * 4, 0.0).map_err(crate::Error::MemoryError)?;
         let dst = normals_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1257,8 +1256,7 @@ impl ComputeContext for CpuBackend {
 
                             // Spatial gradient on prev image
                             let i_x = (prev_data[idx + 1] - prev_data[idx - 1]) * 0.5;
-                            let i_y =
-                                (prev_data[idx + w as usize] - prev_data[idx - w as usize]) * 0.5;
+                            let i_y = (prev_data[idx + w] - prev_data[idx - w]) * 0.5;
 
                             // Temporal gradient
                             // Ideally interpolate next at (u+dx, v+dy)
@@ -1325,8 +1323,7 @@ impl ComputeContext for CpuBackend {
                         "RgbToGray requires 3 channels".into(),
                     ));
                 }
-                let mut output_storage =
-                    S::new(h * w, 0).map_err(|e| crate::Error::MemoryError(e))?;
+                let mut output_storage = S::new(h * w, 0).map_err(crate::Error::MemoryError)?;
                 let dst = output_storage
                     .as_mut_slice()
                     .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1357,8 +1354,7 @@ impl ComputeContext for CpuBackend {
                         "GrayToRgb requires 1 channel".into(),
                     ));
                 }
-                let mut output_storage =
-                    S::new(h * w * 3, 0).map_err(|e| crate::Error::MemoryError(e))?;
+                let mut output_storage = S::new(h * w * 3, 0).map_err(crate::Error::MemoryError)?;
                 let dst = output_storage
                     .as_mut_slice()
                     .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1397,8 +1393,7 @@ impl ComputeContext for CpuBackend {
         let c = input.shape.channels;
         let (nw, nh) = new_shape;
 
-        let mut output_storage =
-            S::new(nw * nh * c, 0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut output_storage = S::new(nw * nh * c, 0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1450,7 +1445,7 @@ impl ComputeContext for CpuBackend {
             ));
         }
 
-        let mut output_storage = S::new(h * w, 0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut output_storage = S::new(h * w, 0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1506,7 +1501,7 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
-        let mut output_storage = S::new(h * w, 0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut output_storage = S::new(h * w, 0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1523,15 +1518,12 @@ impl ComputeContext for CpuBackend {
                 // High-speed early exit test: check 1, 9, 5, 13
                 let p1 = src[(y - 3) * w + x];
                 let p9 = src[(y + 3) * w + x];
+                // Count pixels that differ (brighter OR darker) from center.
                 let mut count = 0;
-                if p1 > high {
-                    count += 1;
-                } else if p1 < low {
+                if p1 > high || p1 < low {
                     count += 1;
                 }
-                if p9 > high {
-                    count += 1;
-                } else if p9 < low {
+                if p9 > high || p9 < low {
                     count += 1;
                 }
                 if count < 1 {
@@ -1540,14 +1532,10 @@ impl ComputeContext for CpuBackend {
 
                 let p5 = src[y * w + x + 3];
                 let p13 = src[y * w + x - 3];
-                if p5 > high {
-                    count += 1;
-                } else if p5 < low {
+                if p5 > high || p5 < low {
                     count += 1;
                 }
-                if p13 > high {
-                    count += 1;
-                } else if p13 < low {
+                if p13 > high || p13 < low {
                     count += 1;
                 }
                 if count < 3 {
@@ -1582,7 +1570,7 @@ impl ComputeContext for CpuBackend {
                 if has_9_contiguous(&vals, high, low) {
                     let mut score = 0u32;
                     for &v in &vals {
-                        score += (v as i32 - p as i32).abs() as u32;
+                        score += (v as i32 - p as i32).unsigned_abs();
                     }
                     row_out[x] = (score / 16).min(255) as u8;
                 }
@@ -1635,7 +1623,7 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
-        let mut output_storage = S::new(h * w, 0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut output_storage = S::new(h * w, 0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1669,7 +1657,7 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("B not on CPU".into()))?;
 
         let mut output_storage =
-            S::new(a.shape.len(), T::zeroed()).map_err(|e| crate::Error::MemoryError(e))?;
+            S::new(a.shape.len(), T::zeroed()).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1845,8 +1833,7 @@ impl ComputeContext for CpuBackend {
             }
         });
 
-        Ok(Tensor::from_vec(dst, dog_curr.shape)
-            .map_err(|e| crate::Error::RuntimeError(e.to_string()))?)
+        Tensor::from_vec(dst, dog_curr.shape).map_err(|e| crate::Error::RuntimeError(e.to_string()))
     }
 
     fn compute_sift_descriptors<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
@@ -1903,7 +1890,7 @@ impl ComputeContext for CpuBackend {
                             let iy = r_bin_y.floor() as i32;
                             let io = o_bin.floor() as i32;
 
-                            if ix >= 0 && ix < 4 && iy >= 0 && iy < 4 {
+                            if (0..4).contains(&ix) && (0..4).contains(&iy) {
                                 let bin_idx = (iy * 4 + ix) * 8 + (io % 8);
                                 hist[bin_idx as usize] += mag;
                             }
@@ -1925,7 +1912,7 @@ impl ComputeContext for CpuBackend {
                     })
                     .collect();
 
-                cv_core::Descriptor::new(data, kp.clone())
+                cv_core::Descriptor::new(data, *kp)
             })
             .collect();
 
@@ -2058,7 +2045,7 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
         let mut output_storage =
-            S::new(input.shape.len(), 0.0).map_err(|e| crate::Error::MemoryError(e))?;
+            S::new(input.shape.len(), 0.0).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -2115,12 +2102,9 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
 
-        let mut lx_storage =
-            S::new(input.shape.len(), 0.0).map_err(|e| crate::Error::MemoryError(e))?;
-        let mut ly_storage =
-            S::new(input.shape.len(), 0.0).map_err(|e| crate::Error::MemoryError(e))?;
-        let mut ldet_storage =
-            S::new(input.shape.len(), 0.0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut lx_storage = S::new(input.shape.len(), 0.0).map_err(crate::Error::MemoryError)?;
+        let mut ly_storage = S::new(input.shape.len(), 0.0).map_err(crate::Error::MemoryError)?;
+        let mut ldet_storage = S::new(input.shape.len(), 0.0).map_err(crate::Error::MemoryError)?;
 
         let lx_slice = lx_storage
             .as_mut_slice()
@@ -2238,7 +2222,7 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("X not on CPU".into()))?;
         let rows = row_ptr.len() - 1;
-        let mut y_storage = S::new(rows, 0.0).map_err(|e| crate::Error::MemoryError(e))?;
+        let mut y_storage = S::new(rows, 0.0).map_err(crate::Error::MemoryError)?;
         let y_slice = y_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -2306,7 +2290,7 @@ impl ComputeContext for CpuBackend {
 
                     for m in 0..n_mixtures {
                         let m_base = m * 3;
-                        let weight = pix_model[m_base + 0];
+                        let weight = pix_model[m_base];
                         let mean = pix_model[m_base + 1];
                         let var = pix_model[m_base + 2];
 
@@ -2331,16 +2315,16 @@ impl ComputeContext for CpuBackend {
                         for m in 0..n_mixtures {
                             let m_base = m * 3;
                             if m == idx {
-                                let w_val = pix_model[m_base + 0];
+                                let w_val = pix_model[m_base];
                                 let alpha_m = alpha / w_val.max(1e-5);
-                                pix_model[m_base + 0] += alpha * (1.0 - w_val);
+                                pix_model[m_base] += alpha * (1.0 - w_val);
                                 let diff = pixel - pix_model[m_base + 1];
                                 pix_model[m_base + 1] += alpha_m * diff;
                                 let new_var: f32 = pix_model[m_base + 2]
                                     + alpha_m * (diff * diff - pix_model[m_base + 2]);
                                 pix_model[m_base + 2] = new_var.clamp(var_min, var_max);
                             } else {
-                                pix_model[m_base + 0] *= 1.0 - alpha;
+                                pix_model[m_base] *= 1.0 - alpha;
                             }
                         }
                     } else {
@@ -2353,7 +2337,7 @@ impl ComputeContext for CpuBackend {
                             }
                         }
                         let m_base = min_w_idx * 3;
-                        pix_model[m_base + 0] = alpha;
+                        pix_model[m_base] = alpha;
                         pix_model[m_base + 1] = pixel;
                         pix_model[m_base + 2] = var_init;
                     }

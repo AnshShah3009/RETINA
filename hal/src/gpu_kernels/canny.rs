@@ -23,7 +23,7 @@ pub fn canny(
 ) -> Result<Tensor<u8, GpuStorage<u8>>> {
     let (h, w) = input.shape.hw();
     let len = input.shape.len();
-    let byte_size_u8 = ((len + 3) / 4 * 4) as u64;
+    let byte_size_u8 = (len.div_ceil(4) * 4) as u64;
     let byte_size_f32 = (len * 4) as u64;
 
     // 1. Intermediate buffers (pooled)
@@ -166,8 +166,8 @@ pub fn canny(
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Canny Dispatch"),
         });
-    let wg_x = (w as u32 + 15) / 16;
-    let wg_y = (h as u32 + 15) / 16;
+    let wg_x = (w as u32).div_ceil(16);
+    let wg_y = (h as u32).div_ceil(16);
 
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -196,7 +196,7 @@ pub fn canny(
         });
         pass.set_pipeline(&hysteresis_pipeline);
         pass.set_bind_group(0, &bind_group_3, &[]);
-        let wg_x_hyst = ((w as u32 + 3) / 4 + 15) / 16;
+        let wg_x_hyst = (w as u32).div_ceil(4).div_ceil(16);
         pass.dispatch_workgroups(wg_x_hyst, wg_y, 1);
     }
 

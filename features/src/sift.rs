@@ -354,12 +354,12 @@ impl Sift {
                             ))
                         })?;
                     for d in descs.descriptors {
-                        let mut restored_kp = d.keypoint.clone();
+                        let mut restored_kp = d.keypoint;
                         let scale = 2.0f64.powi(octave as i32);
                         restored_kp.x *= scale;
                         restored_kp.y *= scale;
                         restored_kp.size *= scale;
-                        all_descriptors.push(cv_core::Descriptor::new(d.data, restored_kp.clone()));
+                        all_descriptors.push(cv_core::Descriptor::new(d.data, restored_kp));
                         valid_keypoints.push(restored_kp);
                     }
                 }
@@ -383,12 +383,12 @@ impl Sift {
                             ))
                         })?;
                     for d in descs.descriptors {
-                        let mut restored_kp = d.keypoint.clone();
+                        let mut restored_kp = d.keypoint;
                         let scale = 2.0f64.powi(octave as i32);
                         restored_kp.x *= scale;
                         restored_kp.y *= scale;
                         restored_kp.size *= scale;
-                        all_descriptors.push(cv_core::Descriptor::new(d.data, restored_kp.clone()));
+                        all_descriptors.push(cv_core::Descriptor::new(d.data, restored_kp));
                         valid_keypoints.push(restored_kp);
                     }
                 }
@@ -515,18 +515,9 @@ fn refine_point(
     for _ in 0..5 {
         let (h, w) = dog_layers[0].shape.hw();
 
-        let d_s = match dog_layers[curr_s].storage.as_slice() {
-            Some(s) => s,
-            None => return None,
-        };
-        let d_prev = match dog_layers[curr_s - 1].storage.as_slice() {
-            Some(s) => s,
-            None => return None,
-        };
-        let d_next = match dog_layers[curr_s + 1].storage.as_slice() {
-            Some(s) => s,
-            None => return None,
-        };
+        let d_s = dog_layers[curr_s].storage.as_slice()?;
+        let d_prev = dog_layers[curr_s - 1].storage.as_slice()?;
+        let d_next = dog_layers[curr_s + 1].storage.as_slice()?;
 
         let dx = (d_s[curr_y * w + curr_x + 1] - d_s[curr_y * w + curr_x - 1]) / 2.0;
         let dy = (d_s[(curr_y + 1) * w + curr_x] - d_s[(curr_y - 1) * w + curr_x]) / 2.0;

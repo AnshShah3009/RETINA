@@ -157,7 +157,7 @@ impl LinearSolver for CgSolver {
             }
             let alpha = rsold / pap;
             x += alpha * &p;
-            residual = residual - alpha * &ap;
+            residual -= alpha * &ap;
 
             let rsnew = residual.dot(&residual);
             if rsnew.sqrt() < self.tolerance {

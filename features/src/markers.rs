@@ -634,7 +634,7 @@ fn find_marker_candidates(image: &GrayImage, min_grid: usize) -> Result<Vec<Cand
             }
             let box_area = (bw as usize) * (bh as usize);
             let fill = count as f32 / box_area.max(1) as f32;
-            if fill < 0.18 || fill > 0.95 {
+            if !(0.18..=0.95).contains(&fill) {
                 continue;
             }
 

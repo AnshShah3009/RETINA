@@ -33,7 +33,7 @@ pub fn cvt_color(
     }
 
     let out_len = num_pixels * out_channels;
-    let byte_size = ((out_len + 3) / 4 * 4) as u64;
+    let byte_size = (out_len.div_ceil(4) * 4) as u64;
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Color Cvt Output"),
         size: byte_size,
@@ -86,7 +86,7 @@ pub fn cvt_color(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = ((num_pixels as u32 + 3) / 4 + 63) / 64;
+        let x = (num_pixels as u32).div_ceil(4).div_ceil(64);
         pass.dispatch_workgroups(x, 1, 1);
     }
     ctx.submit(encoder);

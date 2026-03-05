@@ -14,6 +14,12 @@ pub struct Edge {
     pub information: Matrix6<f64>,
 }
 
+impl Default for PoseGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PoseGraph {
     pub fn new() -> Self {
         Self {
@@ -157,7 +163,7 @@ impl PoseGraph {
                     // If e = log(Z^-1 * Xi^-1 * Xj), then updates are:
                     // Xi = Xi * exp(dxi)
                     // Xj = Xj * exp(dxj)
-                    *pose = (*pose) * delta;
+                    *pose *= delta;
                 }
             }
 

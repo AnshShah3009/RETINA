@@ -25,7 +25,7 @@ pub fn sift_extrema(
 ) -> Result<Tensor<u8, GpuStorage<u8>>> {
     let (h, w) = dog_curr.shape.hw();
     let out_len = w * h;
-    let byte_size = ((out_len + 3) / 4 * 4) as u64;
+    let byte_size = (out_len.div_ceil(4) * 4) as u64;
 
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("SIFT Extrema Output"),
@@ -89,8 +89,8 @@ pub fn sift_extrema(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = ((w as u32 + 3) / 4 + 15) / 16;
-        let y = (h as u32 + 15) / 16;
+        let x = (w as u32).div_ceil(4).div_ceil(16);
+        let y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(x, y, 1);
     }
     ctx.submit(encoder);

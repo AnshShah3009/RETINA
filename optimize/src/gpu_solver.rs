@@ -14,6 +14,12 @@ pub struct GpuCgSolver {
     pub max_iterations: usize,
 }
 
+impl Default for GpuCgSolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GpuCgSolver {
     pub fn new() -> Self {
         Self {

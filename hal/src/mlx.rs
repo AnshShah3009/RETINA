@@ -278,7 +278,7 @@ impl ComputeContext for MlxContext {
             crate::gpu_kernels::pointcloud::compute_normals_morton_gpu_or_cpu(&vecs, k as u32);
 
         // Write normals back to output storage (same type S).
-        let mut out = S::new(num_points * 4, 0.0).map_err(|e| Error::MemoryError(e))?;
+        let mut out = S::new(num_points * 4, 0.0).map_err(Error::MemoryError)?;
         if let Some(dst) = out.as_mut_slice() {
             for (i, n) in normals.iter().enumerate() {
                 dst[i * 4] = n.x;

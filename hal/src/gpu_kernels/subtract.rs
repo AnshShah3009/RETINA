@@ -53,7 +53,7 @@ pub fn subtract(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let workgroups = (size as u32 + 255) / 256;
+        let workgroups = (size as u32).div_ceil(256);
         pass.dispatch_workgroups(workgroups, 1, 1);
     }
     ctx.submit(encoder);

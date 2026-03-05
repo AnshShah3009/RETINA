@@ -161,7 +161,7 @@ pub fn write_ply_gaussian_cloud<P: AsRef<Path>>(
             gaussian.rotation.z,
             gaussian.rotation.w,
             log_opacity,
-            gaussian.spherical_harmonics.coeffs.get(0).unwrap_or(&0.8),
+            gaussian.spherical_harmonics.coeffs.first().unwrap_or(&0.8),
             gaussian.spherical_harmonics.coeffs.get(1).unwrap_or(&0.8),
             gaussian.spherical_harmonics.coeffs.get(2).unwrap_or(&0.8),
         )
@@ -221,7 +221,7 @@ pub fn gaussian_cloud_to_ply_string(cloud: &GaussianCloud) -> String {
             gaussian.rotation.z,
             gaussian.rotation.w,
             log_opacity,
-            gaussian.spherical_harmonics.coeffs.get(0).unwrap_or(&0.8),
+            gaussian.spherical_harmonics.coeffs.first().unwrap_or(&0.8),
             gaussian.spherical_harmonics.coeffs.get(1).unwrap_or(&0.8),
             gaussian.spherical_harmonics.coeffs.get(2).unwrap_or(&0.8),
         ));

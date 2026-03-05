@@ -184,7 +184,7 @@ pub fn convolve_with_border(image: &GrayImage, kernel: &Kernel, border: BorderMo
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     convolve_ctx(image, kernel, border, &runner)
@@ -228,7 +228,7 @@ pub fn convolve_with_border_into(
         // Fallback: use CPU registry if available
         cv_runtime::registry()
             .ok()
-            .and_then(|reg| Some(cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id())))
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
     convolve_into_ctx(image, output, kernel, border, &runner);

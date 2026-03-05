@@ -101,7 +101,7 @@ pub fn find_essential_mat_ransac(
     max_iters: usize,
 ) -> Result<(Matrix3<f64>, Vec<bool>)> {
     let (n1, n2) = normalize_with_intrinsics(pts1, pts2, intrinsics);
-    let data: Vec<(Point2<f64>, Point2<f64>)> = n1.into_iter().zip(n2.into_iter()).collect();
+    let data: Vec<(Point2<f64>, Point2<f64>)> = n1.into_iter().zip(n2).collect();
 
     let f = 0.5 * (intrinsics.fx + intrinsics.fy);
     let thresh_norm = threshold_px / f.max(1e-12);

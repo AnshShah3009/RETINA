@@ -135,8 +135,8 @@ impl GaussianRasterizer {
     }
 
     pub fn num_tiles(&self) -> (u32, u32) {
-        let tiles_x = (self.camera.width + self.tile_width - 1) / self.tile_width;
-        let tiles_y = (self.camera.height + self.tile_height - 1) / self.tile_height;
+        let tiles_x = self.camera.width.div_ceil(self.tile_width);
+        let tiles_y = self.camera.height.div_ceil(self.tile_height);
         (tiles_x, tiles_y)
     }
 
@@ -249,8 +249,8 @@ impl GaussianRasterizer {
                         let pixel_idx = (py * self.camera.width + px) as usize;
                         let color = pg.color;
 
-                        output_image[pixel_idx] = output_image[pixel_idx] + color * weight;
-                        output_alpha[pixel_idx] = output_alpha[pixel_idx] + weight;
+                        output_image[pixel_idx] += color * weight;
+                        output_alpha[pixel_idx] += weight;
                         output_depth[pixel_idx] = output_depth[pixel_idx].min(pg.depth);
                     }
                 }
@@ -259,7 +259,7 @@ impl GaussianRasterizer {
 
         for i in 0..output_image.len() {
             if output_alpha[i] > 0.0 {
-                output_image[i] = output_image[i] / output_alpha[i].min(1.0);
+                output_image[i] /= output_alpha[i].min(1.0);
             }
             output_alpha[i] = 1.0 - (-output_alpha[i] as f32).exp();
         }

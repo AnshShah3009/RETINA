@@ -35,15 +35,12 @@ pub fn resize_ctx(
         return GrayImage::new(0, 0);
     }
 
-    match group.device() {
-        Ok(ComputeDevice::Gpu(gpu)) => {
-            if interpolation == Interpolation::Linear {
-                if let Ok(result) = resize_gpu(gpu, src, width, height) {
-                    return result;
-                }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        if interpolation == Interpolation::Linear {
+            if let Ok(result) = resize_gpu(gpu, src, width, height) {
+                return result;
             }
         }
-        _ => {}
     }
 
     group.run(|| resize_linear(src, width, height))

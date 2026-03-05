@@ -23,7 +23,7 @@ impl Slam {
     ) -> Self {
         Self {
             map: WorldMap::default(),
-            tracker: Tracker::new(group, intrinsics.clone()),
+            tracker: Tracker::new(group, intrinsics),
             intrinsics,
         }
     }

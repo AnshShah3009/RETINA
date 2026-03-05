@@ -67,7 +67,7 @@ pub fn disparity_to_pointcloud(
         }
     }
 
-    Ok(PointCloud::new(points).with_colors(colors)?)
+    PointCloud::new(points).with_colors(colors)
 }
 
 /// Reproject 3D point to image coordinates

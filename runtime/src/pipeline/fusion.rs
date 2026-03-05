@@ -252,7 +252,7 @@ impl KernelFuser {
             }
         }
 
-        while let Some(fused_kernel) = fused_iter.next() {
+        for fused_kernel in fused_iter {
             let last_fused = optimized.last().and_then(|n| {
                 if let PipelineNode::Kernel { name, .. } = n {
                     Some(name.clone())

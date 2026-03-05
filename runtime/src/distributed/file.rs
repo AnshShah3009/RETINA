@@ -88,19 +88,11 @@ impl LoadCoordinator for FileCoordinator {
                                 continue;
                             }
 
-                            match (parts[0].parse::<u32>(), parts[1].parse::<usize>()) {
-                                (Ok(dev_id), Ok(load)) => {
-                                    let entry = aggregate.entry(DeviceId(dev_id)).or_insert(0);
-                                    *entry += load;
-                                }
-                                _ => {
-                                    #[cfg(feature = "tracing")]
-                                    tracing::warn!(
-                                        "Failed to parse load entry in {}: '{}'",
-                                        path.display(),
-                                        line
-                                    );
-                                }
+                            if let (Ok(dev_id), Ok(load)) =
+                                (parts[0].parse::<u32>(), parts[1].parse::<usize>())
+                            {
+                                let entry = aggregate.entry(DeviceId(dev_id)).or_insert(0);
+                                *entry += load;
                             }
                         }
                     }

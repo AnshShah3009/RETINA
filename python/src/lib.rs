@@ -4,7 +4,6 @@ use cv_core::{CameraIntrinsics, KeyPoint};
 use cv_dnn::DnnNet;
 use cv_features::{fast, gftt, harris};
 use cv_optimize::isam2::Isam2;
-use cv_point_cloud;
 use cv_runtime::orchestrator::{scheduler, WorkloadHint};
 use cv_slam::Slam as RustSlam;
 use cv_videoio::{open_video, VideoCapture};

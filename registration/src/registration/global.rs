@@ -75,7 +75,7 @@ fn compute_spfh(
         return histogram;
     }
 
-    let normal = normal.copied().unwrap_or_else(|| Vector3::z());
+    let normal = normal.copied().unwrap_or_else(Vector3::z);
 
     for (_neighbor_point, neighbor_idx, _dist) in neighbors {
         if *neighbor_idx >= _points.len() {
@@ -403,7 +403,7 @@ fn random_sample(n: usize, max: usize) -> Vec<usize> {
     let mut rng = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs() as u64;
+        .as_secs();
 
     let mut indices = HashSet::new();
     while indices.len() < n && indices.len() < max {
@@ -480,10 +480,7 @@ pub fn compute_iss_features(cloud: &PointCloud, detector: ISSDetector) -> Vec<IS
         let vx = (p.x / voxel_size).floor() as i32;
         let vy = (p.y / voxel_size).floor() as i32;
         let vz = (p.z / voxel_size).floor() as i32;
-        voxel_grid
-            .entry((vx, vy, vz))
-            .or_insert_with(Vec::new)
-            .push(i);
+        voxel_grid.entry((vx, vy, vz)).or_default().push(i);
     }
 
     // Compute saliency (determinant of scatter matrix) for each point

@@ -36,7 +36,7 @@ impl TransientBufferPool {
         if size <= 1024 * 1024 {
             size.next_power_of_two().max(256)
         } else {
-            ((size + 1024 * 1024 - 1) / (1024 * 1024)) * 1024 * 1024
+            size.div_ceil(1024 * 1024) * 1024 * 1024
         }
     }
 
@@ -135,7 +135,7 @@ impl TransientBufferPool {
 
             let bucket = Self::size_bucket(size);
             let mut free_lists = self.free_lists.write();
-            let pool = free_lists.entry(bucket).or_insert_with(Vec::new);
+            let pool = free_lists.entry(bucket).or_default();
 
             if pool.len() < 16 {
                 pool.push(buffer);

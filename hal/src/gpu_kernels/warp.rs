@@ -35,7 +35,7 @@ pub fn warp(
     }
 
     let out_len = dst_w * dst_h;
-    let byte_size = ((out_len + 3) / 4 * 4) as u64;
+    let byte_size = (out_len.div_ceil(4) * 4) as u64;
     let usages =
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
     let output_buffer = ctx.get_buffer(byte_size, usages);
@@ -117,8 +117,8 @@ pub fn warp(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = ((dst_w as u32 + 3) / 4 + 15) / 16;
-        let y = (dst_h as u32 + 15) / 16;
+        let x = (dst_w as u32).div_ceil(4).div_ceil(16);
+        let y = (dst_h as u32).div_ceil(16);
         pass.dispatch_workgroups(x, y, 1);
     }
     ctx.submit(encoder);

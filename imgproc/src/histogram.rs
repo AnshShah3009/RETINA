@@ -32,7 +32,7 @@ pub fn histogram_equalization(image: &GrayImage) -> GrayImage {
     let cdf = compute_cdf(&hist);
 
     let cdf_min = cdf.iter().find(|&&x| x > 0).copied().unwrap_or(0);
-    let total = image.width() * image.height() as u32;
+    let total = image.width() * image.height();
 
     let mut lut = [0u8; 256];
     if total > cdf_min {

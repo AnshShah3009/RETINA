@@ -4,19 +4,14 @@ use crate::style::Style;
 use crate::PlotError;
 
 /// Type of plot to create
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum PlotType {
+    #[default]
     Line,
     Scatter,
     Bar,
     Histogram,
     Heatmap,
-}
-
-impl Default for PlotType {
-    fn default() -> Self {
-        PlotType::Line
-    }
 }
 
 /// A data series for plotting

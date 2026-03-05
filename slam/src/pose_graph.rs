@@ -129,7 +129,7 @@ impl PoseGraph {
         // Convert slam poses to cv_optimize's Isometry3 representation
         let mut opt_graph = OptimizePoseGraph::new();
         for (i, pose) in self.poses.iter().enumerate() {
-            let iso = Isometry3::from(pose.clone());
+            let iso = Isometry3::from(*pose);
             opt_graph.add_node(i, iso);
         }
 
@@ -138,7 +138,7 @@ impl PoseGraph {
 
         // Add edges from constraints
         for edge in &self.edges {
-            let iso_measurement = Isometry3::from(edge.relative_pose.clone());
+            let iso_measurement = Isometry3::from(edge.relative_pose);
             opt_graph.add_edge(edge.from, edge.to, iso_measurement, edge.information);
         }
 
@@ -148,7 +148,7 @@ impl PoseGraph {
         // Convert optimized poses back to cv_core::Pose
         for (i, pose) in self.poses.iter_mut().enumerate() {
             if let Some(optimized_iso) = opt_graph.nodes.get(&i) {
-                *pose = Pose::from(optimized_iso.clone());
+                *pose = Pose::from(*optimized_iso);
             }
         }
 
