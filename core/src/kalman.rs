@@ -122,7 +122,7 @@ impl<const N: usize, const M: usize> KalmanFilter<N, M> {
         let y = z - self.h * state.x;
         let s = self.h * state.p * self.h.transpose() + self.r;
         let k = state.p * self.h.transpose() * s.try_inverse().unwrap_or(SMatrix::identity());
-        state.x = state.x + k * y;
+        state.x += k * y;
         let i = SMatrix::<f64, N, N>::identity();
         let i_kh = i - k * self.h;
         state.p = i_kh * state.p * i_kh.transpose() + k * self.r * k.transpose();
@@ -164,7 +164,7 @@ impl<const N: usize, const M: usize> ExtendedKalmanFilter<N, M> {
         let y = z - h(&state.x);
         let s = jacobian_h * state.p * jacobian_h.transpose() + self.r;
         let k = state.p * jacobian_h.transpose() * s.try_inverse().unwrap_or(SMatrix::identity());
-        state.x = state.x + k * y;
+        state.x += k * y;
         let i = SMatrix::<f64, N, N>::identity();
         let i_kh = i - k * jacobian_h;
         state.p = i_kh * state.p * i_kh.transpose() + k * self.r * k.transpose();

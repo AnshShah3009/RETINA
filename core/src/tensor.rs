@@ -54,6 +54,10 @@ impl TensorShape {
             .saturating_mul(self.width)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.channels == 0 || self.height == 0 || self.width == 0
+    }
+
     pub fn checked_len(&self) -> Option<usize> {
         self.channels
             .checked_mul(self.height)

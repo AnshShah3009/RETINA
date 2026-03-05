@@ -289,16 +289,12 @@ impl<D, M: RobustModel<D>> Prosac<D, M> {
                 sample_indices.push(n_sub - 1);
                 let mut pool: Vec<usize> = (0..n_sub - 1).collect();
                 pool.shuffle(&mut rng);
-                for i in 0..m - 1 {
-                    sample_indices.push(pool[i]);
-                }
+                sample_indices.extend(pool.iter().take(m - 1));
             } else {
                 // Standard RANSAC sampling if subset reached full data
                 let mut pool: Vec<usize> = (0..n).collect();
                 pool.shuffle(&mut rng);
-                for i in 0..m {
-                    sample_indices.push(pool[i]);
-                }
+                sample_indices.extend(pool.iter().take(m));
             }
 
             let sample: Vec<&D> = sample_indices.iter().map(|&idx| &data[idx]).collect();

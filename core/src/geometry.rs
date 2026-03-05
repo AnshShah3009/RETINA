@@ -673,7 +673,6 @@ impl Default for FisheyeDistortionF32 {
 /// These implementations enable seamless conversion between double-precision (f64)
 /// and single-precision (f32) camera parameters, supporting code that works with
 /// both precisions.
-
 impl From<CameraIntrinsics> for CameraIntrinsicsF32 {
     /// Convert double-precision camera intrinsics to single-precision.
     ///

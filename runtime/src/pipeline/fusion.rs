@@ -234,7 +234,7 @@ impl KernelFuser {
                 continue;
             }
 
-            while let Some(f) = fused_iter.peek() {
+            if let Some(f) = fused_iter.peek() {
                 if f.original_nodes.first() == Some(&i) {
                     let fused_kernel = fused_iter.next().unwrap();
                     optimized.push(PipelineNode::Kernel {
@@ -243,9 +243,6 @@ impl KernelFuser {
                         outputs: fused_kernel.outputs,
                         params: fused_kernel.combined_params,
                     });
-                    break;
-                } else {
-                    break;
                 }
             }
 
