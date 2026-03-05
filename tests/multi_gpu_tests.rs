@@ -39,6 +39,12 @@ fn test_cross_device_parity() {
             continue;
         }
 
+        // Skip Apple Paravirtual device (CI virtual GPU that doesn't support compute)
+        if info.name.contains("Paravirtual") || info.name.contains("paravirtual") {
+            println!("  ! Skipping paravirtual GPU (CI virtual device)");
+            continue;
+        }
+
         let gpu_res = block_on(GpuContext::from_adapter(adapter));
         let gpu = match gpu_res {
             Ok(g) => g,
