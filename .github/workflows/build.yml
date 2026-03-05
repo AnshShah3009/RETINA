@@ -80,14 +80,10 @@ jobs:
         toolchain: stable
         components: rustfmt, clippy
 
-    - name: Install Python development files
-      run: |
-        brew install python@3.11
-        PYTHON_PREFIX=$(brew --prefix python@3.11)
-        echo "PKG_CONFIG_PATH=${PYTHON_PREFIX}/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
-        echo "LDFLAGS=-L${PYTHON_PREFIX}/lib" >> $GITHUB_ENV
-        echo "CFLAGS=-I${PYTHON_PREFIX}/include" >> $GITHUB_ENV
-        echo "PYTHON_CONFIGURE_OPTS=--enable-shared" >> $GITHUB_ENV
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
 
     - name: Cache cargo registry
       uses: actions/cache@v4
@@ -167,14 +163,10 @@ jobs:
       with:
         toolchain: stable
 
-    - name: Install Python development files
-      run: |
-        brew install python@3.11
-        PYTHON_PREFIX=$(brew --prefix python@3.11)
-        echo "PKG_CONFIG_PATH=${PYTHON_PREFIX}/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
-        echo "LDFLAGS=-L${PYTHON_PREFIX}/lib" >> $GITHUB_ENV
-        echo "CFLAGS=-I${PYTHON_PREFIX}/include" >> $GITHUB_ENV
-        echo "PYTHON_CONFIGURE_OPTS=--enable-shared" >> $GITHUB_ENV
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
 
     - name: Cache cargo registry
       uses: actions/cache@v4
