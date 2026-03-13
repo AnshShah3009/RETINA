@@ -126,6 +126,7 @@ egui = "0.33.3"
 eframe = { version = "0.33.3", features = ["wgpu"] }
 glam = "0.29.3"
 tract-onnx = "0.21.7"
+rustfft = "6"
 
 # Internal Workspace Crates
 cv-core = { path = "./core" }

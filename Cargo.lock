@@ -1453,6 +1453,7 @@ dependencies = [
  "ndarray 0.17.2",
  "rayon",
  "rstar 0.12.2",
+ "rustfft",
 ]
 
 [[package]]

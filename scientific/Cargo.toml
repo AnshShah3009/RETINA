@@ -11,6 +11,7 @@ geo = { workspace = true }
 rstar = { workspace = true }
 geo-buffer = { workspace = true }
 rayon = { workspace = true }
+rustfft = { workspace = true }
 
 [features]
 default = []

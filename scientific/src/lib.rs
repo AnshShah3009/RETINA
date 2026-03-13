@@ -33,14 +33,21 @@
 //! - [`std`]: Standard deviation
 //! - [`lerp`]: Linear interpolation
 //! - [`Interp1d`]: 1D linear interpolation
+//! - [`fft`]: FFT (1D/2D forward, inverse, real-valued, PSD)
+//! - [`interpolate`]: Interpolation (linear, cubic spline, Akima, 2D bilinear)
+//! - [`stats`]: Statistics (descriptive, correlation, t-tests, distributions, regression)
 
+pub mod fft;
 pub mod geometry;
 pub mod integrate;
+pub mod interpolate;
 pub mod jit;
 pub mod matching;
 pub mod multiview;
+pub mod optimize;
 pub mod point_cloud;
 pub mod special;
+pub mod stats;
 
 pub type Error = cv_core::Error;
 pub type Result<T> = cv_core::Result<T>;
