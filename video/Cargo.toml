@@ -6,7 +6,10 @@ license = "MIT OR Apache-2.0"
 description = "Video processing and optical flow algorithms"
 
 [dependencies]
-cv-core = { path = "../core" }
-cv-hal = { path = "../hal" }
+cv-core = { workspace = true }
+cv-hal = { workspace = true }
 nalgebra = { workspace = true }
 image = { workspace = true }
+
+[features]
+default = []

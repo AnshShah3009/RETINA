@@ -6,22 +6,22 @@ license = "MIT OR Apache-2.0"
 description = "Stereo vision and depth estimation algorithms"
 
 [dependencies]
-cv-core = { path = "../core" }
-cv-imgproc = { path = "../imgproc" }
-cv-calib3d = { path = "../calib3d" }
-cv-hal = { path = "../hal" }
-cv-runtime = { path = "../runtime" }
+cv-core = { workspace = true }
+cv-imgproc = { workspace = true }
+cv-calib3d = { workspace = true }
+cv-hal = { workspace = true }
+cv-runtime = { workspace = true }
 nalgebra = { workspace = true }
 rayon = { workspace = true }
 image = { workspace = true }
 wide = { workspace = true }
 wgpu = { workspace = true, optional = true }
-bytemuck = { version = "1.16", features = ["derive"], optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+bytemuck = { workspace = true, features = ["derive"], optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"], optional = true }
 
 [dev-dependencies]
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]

@@ -212,7 +212,7 @@ pub fn project_points_with_jacobian(
             compute_projection_jacobians(
                 i, p_obj, &p_cam, x, y, xd, yd, intrinsics, extrinsics, distortion, rv, jr, jt, jk,
                 jd,
-            );
+            )?;
         }
     }
 
@@ -285,7 +285,7 @@ fn rodrigues_to_rotation_matrix(rvec: &Vector3<f64>) -> Matrix3<f64> {
 
 /// Compute all projection Jacobians for a single point
 #[allow(clippy::too_many_arguments)]
-fn compute_projection_jacobians(
+pub fn compute_projection_jacobians(
     point_idx: usize,
     p_obj: &Point3<f64>,
     _p_cam: &Vector3<f64>,
@@ -301,10 +301,11 @@ fn compute_projection_jacobians(
     jac_trans: &mut DMatrix<f64>,
     jac_intr: &mut DMatrix<f64>,
     jac_dist: &mut DMatrix<f64>,
-) {
+) -> cv_core::Result<()> {
     // Use numerical differentiation for now (can optimize to analytical later)
     let eps = 1e-7;
     let row = 2 * point_idx;
+
 
     // Jacobian w.r.t. rotation (3 parameters)
     for k in 0..3 {
@@ -369,7 +370,7 @@ fn compute_projection_jacobians(
             2 => dist_pert.p1 += eps,
             3 => dist_pert.p2 += eps,
             4 => dist_pert.k3 += eps,
-            _ => unreachable!(),
+            _ => return Err(cv_core::Error::AlgorithmError("Invalid distortion index".to_string())),
         }
 
         let (xd_pert, yd_pert) = dist_pert.apply(x, y);
@@ -379,4 +380,5 @@ fn compute_projection_jacobians(
         jac_dist[(row, k)] = (u_pert - u_base) / eps;
         jac_dist[(row + 1, k)] = (v_pert - v_base) / eps;
     }
+    Ok(())
 }

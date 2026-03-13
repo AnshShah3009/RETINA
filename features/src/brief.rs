@@ -1,7 +1,7 @@
 use crate::descriptor::{Descriptor, DescriptorExtractor, Descriptors};
 use cv_core::KeyPoints;
 use image::GrayImage;
-use rand::thread_rng;
+use rand::rng;
 use rand::Rng;
 
 /// BRIEF binary descriptor extractor.
@@ -21,16 +21,16 @@ impl BriefDescriptor {
     /// * `patch_size` - Side length in pixels of the patch sampled around each keypoint
     pub fn new(descriptor_size: usize, patch_size: i32) -> Self {
         let num_pairs = descriptor_size * 8;
-        let mut rng = thread_rng();
+        let mut rng = rng();
         let mut pairs = Vec::with_capacity(num_pairs);
 
         let half_size = patch_size / 2;
 
         for _ in 0..num_pairs {
-            let x1 = rng.gen_range(-half_size..half_size);
-            let y1 = rng.gen_range(-half_size..half_size);
-            let x2 = rng.gen_range(-half_size..half_size);
-            let y2 = rng.gen_range(-half_size..half_size);
+            let x1 = rng.random_range(-half_size..half_size);
+            let y1 = rng.random_range(-half_size..half_size);
+            let x2 = rng.random_range(-half_size..half_size);
+            let y2 = rng.random_range(-half_size..half_size);
             pairs.push((x1, y1, x2, y2));
         }
 

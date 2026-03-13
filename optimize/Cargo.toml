@@ -5,6 +5,10 @@ edition = "2021"
 
 [dependencies]
 nalgebra = { workspace = true }
-cv-core = { path = "../core" }
-cv-hal = { path = "../hal" }
-faer = "0.24.0"
+cv-core = { workspace = true }
+cv-hal = { workspace = true }
+faer = { workspace = true }
+pollster = { workspace = true }
+
+[features]
+default = []

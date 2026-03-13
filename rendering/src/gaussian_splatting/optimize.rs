@@ -178,11 +178,11 @@ impl GaussianOptimizer {
             let max_scale = gaussian.scale.x.max(gaussian.scale.y).max(gaussian.scale.z);
 
             if max_scale > self.config.densification.size_threshold {
-                let mut rng = rand::thread_rng();
+                let mut rng = rand::rng();
                 let offset = Vector3::new(
-                    rng.gen_range(-0.5..0.5) * max_scale,
-                    rng.gen_range(-0.5..0.5) * max_scale,
-                    rng.gen_range(-0.5..0.5) * max_scale,
+                    rng.random_range(-0.5..0.5) * max_scale,
+                    rng.random_range(-0.5..0.5) * max_scale,
+                    rng.random_range(-0.5..0.5) * max_scale,
                 );
 
                 let mut new_gaussian = gaussian.clone();

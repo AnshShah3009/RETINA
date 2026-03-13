@@ -52,25 +52,28 @@ fn resize_gpu(
     width: u32,
     height: u32,
 ) -> cv_hal::Result<GrayImage> {
-    use cv_core::storage::Storage;
+    use cv_core::{storage::Storage, Tensor};
     use cv_hal::context::ComputeContext;
     use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 
+    let src_f32: Vec<f32> = src.as_raw().iter().map(|&p| p as f32).collect();
     let input_tensor = cv_core::CpuTensor::from_vec(
-        src.as_raw().to_vec(),
+        src_f32,
         cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
     )
     .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
     let input_gpu = input_tensor.to_gpu_ctx(gpu)?;
 
     let output_gpu = gpu.resize(&input_gpu, (width as usize, height as usize))?;
-    let output_cpu = output_gpu.to_cpu_ctx(gpu)?;
+    let output_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = output_gpu.to_cpu_ctx(gpu)?;
 
-    let data = output_cpu
+    let data: Vec<u8> = output_cpu
         .storage
         .as_slice()
         .ok_or_else(|| cv_hal::Error::MemoryError("Download failed".into()))?
-        .to_vec();
+        .iter()
+        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .collect();
     GrayImage::from_raw(width, height, data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
 }
@@ -136,7 +139,7 @@ fn resize_linear(src: &GrayImage, width: u32, height: u32) -> GrayImage {
                 let v1 = v01 * (1.0 - dx) + v11 * dx;
                 let v = v0 * (1.0 - dy) + v1 * dy;
 
-                row[x as usize] = v.clamp(0.0, 255.0) as u8;
+                row[x as usize] = (v + 0.5).clamp(0.0, 255.0) as u8;
             }
         });
 

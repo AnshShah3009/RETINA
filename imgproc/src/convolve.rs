@@ -269,15 +269,16 @@ fn gaussian_blur_gpu(
     sigma: f32,
     border: BorderMode,
 ) -> cv_hal::Result<GrayImage> {
+    use cv_core::storage::Storage;
     use cv_hal::context::ComputeContext;
 
     let size = ((sigma * 6.0).ceil() as usize) | 1;
     let kernel = gaussian_kernel(sigma, size);
 
-    let input_tensor = Tensor::from_image_gray(
-        image.as_raw(),
-        image.width() as usize,
-        image.height() as usize,
+    let src_f32: Vec<f32> = image.as_raw().iter().map(|&p| p as f32).collect();
+    let input_tensor = cv_core::CpuTensor::from_vec(
+        src_f32,
+        cv_core::TensorShape::new(1, image.height() as usize, image.width() as usize),
     )
     .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
     let input_gpu = input_tensor.to_gpu_ctx(gpu)?;
@@ -298,9 +299,9 @@ fn gaussian_blur_gpu(
     };
 
     let output_gpu = gpu.convolve_2d(&input_gpu, &kernel_gpu, hal_border)?;
-    let output_cpu = output_gpu.to_cpu()?;
+    let output_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = output_gpu.to_cpu()?;
 
-    let data = output_cpu.to_image_gray().expect("Image conversion failed");
+    let data: Vec<u8> = output_cpu.storage.as_slice().unwrap().iter().map(|&v| v.clamp(0.0, 255.0) as u8).collect();
     GrayImage::from_raw(image.width(), image.height(), data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
 }
@@ -311,12 +312,13 @@ fn convolve_gpu(
     kernel: &Kernel,
     border: BorderMode,
 ) -> cv_hal::Result<GrayImage> {
+    use cv_core::storage::Storage;
     use cv_hal::context::ComputeContext;
 
-    let input_tensor = Tensor::from_image_gray(
-        image.as_raw(),
-        image.width() as usize,
-        image.height() as usize,
+    let src_f32: Vec<f32> = image.as_raw().iter().map(|&p| p as f32).collect();
+    let input_tensor = cv_core::CpuTensor::from_vec(
+        src_f32,
+        cv_core::TensorShape::new(1, image.height() as usize, image.width() as usize),
     )
     .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
     let input_gpu = input_tensor.to_gpu_ctx(gpu)?;
@@ -337,9 +339,9 @@ fn convolve_gpu(
     };
 
     let output_gpu = gpu.convolve_2d(&input_gpu, &kernel_gpu, hal_border)?;
-    let output_cpu = output_gpu.to_cpu()?;
+    let output_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = output_gpu.to_cpu()?;
 
-    let data = output_cpu.to_image_gray().expect("Image conversion failed");
+    let data: Vec<u8> = output_cpu.storage.as_slice().unwrap().iter().map(|&v| v.clamp(0.0, 255.0) as u8).collect();
     GrayImage::from_raw(image.width(), image.height(), data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
 }

@@ -6,9 +6,9 @@ license = "MIT OR Apache-2.0"
 description = "Image processing algorithms with hardware acceleration"
 
 [dependencies]
-cv-core = { path = "../core" }
-cv-hal = { path = "../hal" }
-cv-runtime = { path = "../runtime" }
+cv-core = { workspace = true }
+cv-hal = { workspace = true }
+cv-runtime = { workspace = true }
 image = { workspace = true }
 rayon = { workspace = true }
 nalgebra = { workspace = true }
@@ -17,3 +17,6 @@ rand = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+
+[features]
+default = []

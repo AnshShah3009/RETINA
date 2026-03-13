@@ -7,8 +7,8 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 nalgebra = { workspace = true }
-cv-core = { path = "../core" }
-cv-hal = { path = "../hal" }
+cv-core = { workspace = true }
+cv-hal = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]

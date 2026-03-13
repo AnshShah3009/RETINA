@@ -5,11 +5,12 @@ edition = "2021"
 
 [dependencies]
 nalgebra = { workspace = true }
-cv-core = { path = "../core" }
+cv-core = { workspace = true }
 ndarray = { workspace = true }
-geo = "0.28"
-rstar = "0.12"
-geo-buffer = "0.2"
+geo = { workspace = true }
+rstar = { workspace = true }
+geo-buffer = { workspace = true }
 rayon = { workspace = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[features]
+default = []

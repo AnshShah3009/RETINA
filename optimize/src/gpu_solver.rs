@@ -110,13 +110,87 @@ fn spmv_cpu(a: &SparseMatrix, x: &DVector<f64>) -> DVector<f64> {
 impl LinearSolver for GpuCgSolver {
     fn solve(
         &self,
-        _ctx: &ComputeDevice,
+        ctx: &ComputeDevice,
         a: &SparseMatrix,
         b: &DVector<f64>,
     ) -> Result<DVector<f64>, String> {
-        // For now, use CPU fallback
-        // GPU implementation will use the SpMV and vector_ops WGSL shaders
-        // TODO: Implement GPU dispatch when GpuContext is available
+        if let ComputeDevice::Gpu(gpu) = ctx {
+            // Convert to f32 for GPU
+            let b_f32: Vec<f32> = b.iter().map(|&v| v as f32).collect();
+            let row_ptr_u32: Vec<u32> = a.row_ptr.iter().map(|&v| v as u32).collect();
+            let col_indices_u32: Vec<u32> = a.col_indices.iter().map(|&v| v as u32).collect();
+            let values_f32: Vec<f32> = a.values.iter().map(|&v| v as f32).collect();
+
+            use cv_hal::storage::GpuStorage;
+            use cv_core::{Tensor, TensorShape, DataType};
+            use std::marker::PhantomData;
+
+            let n = b.len();
+            let mut x_gpu: Tensor<f32, GpuStorage<f32>> = Tensor {
+                storage: GpuStorage::new_with_ctx(gpu, n, 0.0f32).map_err(|e| e.to_string())?,
+                shape: TensorShape::new(1, n, 1),
+                dtype: DataType::F32,
+                _phantom: PhantomData,
+            };
+
+            let mut r_gpu: Tensor<f32, GpuStorage<f32>> = Tensor {
+                storage: GpuStorage::from_slice_ctx(gpu, &b_f32).map_err(|e| e.to_string())?,
+                shape: TensorShape::new(1, n, 1),
+                dtype: DataType::F32,
+                _phantom: PhantomData,
+            };
+
+            let mut p_gpu: Tensor<f32, GpuStorage<f32>> = Tensor {
+                storage: GpuStorage::from_slice_ctx(gpu, &b_f32).map_err(|e| e.to_string())?,
+                shape: TensorShape::new(1, n, 1),
+                dtype: DataType::F32,
+                _phantom: PhantomData,
+            };
+
+            let mut rr = cv_hal::gpu_kernels::sparse::dot(gpu, &r_gpu, &r_gpu).map_err(|e| e.to_string())?;
+
+            for _ in 0..self.max_iterations {
+                let ap_gpu = cv_hal::gpu_kernels::sparse::spmv(
+                    gpu,
+                    &row_ptr_u32,
+                    &col_indices_u32,
+                    &values_f32,
+                    &p_gpu
+                ).map_err(|e| e.to_string())?;
+
+                let p_ap = cv_hal::gpu_kernels::sparse::dot(gpu, &p_gpu, &ap_gpu).map_err(|e| e.to_string())?;
+                if p_ap.abs() < 1e-20 { break; }
+                let alpha = rr / p_ap;
+
+                // x = x + alpha * p
+                cv_hal::gpu_kernels::sparse::axpy(gpu, alpha, &p_gpu, &mut x_gpu).map_err(|e| e.to_string())?;
+                // r = r - alpha * ap
+                cv_hal::gpu_kernels::sparse::axpy(gpu, -alpha, &ap_gpu, &mut r_gpu).map_err(|e| e.to_string())?;
+
+                let rr_new = cv_hal::gpu_kernels::sparse::dot(gpu, &r_gpu, &r_gpu).map_err(|e| e.to_string())?;
+                if rr_new.sqrt() < self.tolerance as f32 {
+                    break;
+                }
+
+                let beta = rr_new / rr;
+                // p = r + beta * p
+                cv_hal::gpu_kernels::sparse::vec_scale(gpu, beta, &mut p_gpu).map_err(|e| e.to_string())?;
+                cv_hal::gpu_kernels::sparse::vec_add(gpu, &r_gpu, &mut p_gpu).map_err(|e| e.to_string())?;
+                
+                rr = rr_new;
+            }
+
+            // Read back x
+            let x_f32 = pollster::block_on(cv_hal::gpu_kernels::buffer_utils::read_buffer::<f32>(
+                gpu.device.clone(),
+                &gpu.queue,
+                x_gpu.storage.buffer(),
+                0,
+                n * 4,
+            )).map_err(|e| e.to_string())?;
+
+            return Ok(DVector::from_vec(x_f32.into_iter().map(|v| v as f64).collect()));
+        }
         self.solve_cpu(a, b)
     }
 }

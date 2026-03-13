@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-cv-core = { path = "../core" }
-cv-features = { path = "../features" }
-cv-calib3d = { path = "../calib3d" }
-cv-hal = { path = "../hal" }
-cv-runtime = { path = "../runtime" }
-cv-optimize = { path = "../optimize" }
+cv-core = { workspace = true }
+cv-features = { workspace = true }
+cv-calib3d = { workspace = true }
+cv-hal = { workspace = true }
+cv-runtime = { workspace = true }
+cv-optimize = { workspace = true }
 nalgebra = { workspace = true }
 image = { workspace = true }
+
+[features]
+default = []

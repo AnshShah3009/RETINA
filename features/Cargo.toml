@@ -6,24 +6,23 @@ license = "MIT OR Apache-2.0"
 description = "Feature detection and description algorithms"
 
 [dependencies]
-cv-core = { path = "../core" }
-cv-imgproc = { path = "../imgproc" }
-cv-hal = { path = "../hal" }
-cv-runtime = { path = "../runtime" }
+cv-core = { workspace = true }
+cv-imgproc = { workspace = true }
+cv-hal = { workspace = true }
+cv-runtime = { workspace = true }
 nalgebra = { workspace = true }
 rayon = { workspace = true }
 image = { workspace = true }
-
-rand = "0.8"
-bytemuck = { version = "1.14", features = ["derive"] }
+rand = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
 
 # Optional GPU support
 wgpu = { workspace = true, optional = true }
-pollster = { version = "0.3", optional = true }
+pollster = { workspace = true, optional = true }
 
 [features]
 default = []
 gpu = ["dep:wgpu", "dep:pollster"]
 
 [dev-dependencies]
-pollster = "0.3"
+pollster = { workspace = true }

@@ -9,8 +9,8 @@ use crate::descriptor::{Descriptor, Descriptors};
 use crate::Result;
 use cv_core::{storage::Storage, CpuTensor, Error, KeyPoint, KeyPoints, Tensor};
 use cv_hal::compute::ComputeDevice;
+use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 use cv_hal::context::ComputeContext;
-use cv_hal::tensor_ext::{TensorCast, TensorToCpu, TensorToGpu};
 use rayon::prelude::*;
 
 /// AKAZE feature detection and extraction parameters
@@ -199,18 +199,22 @@ impl Akaze {
 
         match ctx {
             ComputeDevice::Gpu(gpu) => {
-                let current_u8 = ctx.gaussian_blur(image, 1.0, 5).map_err(|e| {
+                let img_cpu = image.to_cpu().map_err(|e| {
+                    Error::FeatureError(format!("Failed to transfer input to CPU: {}", e))
+                })?;
+                let img_h_w = img_cpu.shape.clone();
+                let data: Vec<f32> = img_cpu.storage.as_slice().unwrap().iter().map(|&v| v as f32).collect();
+                let img_f32 = CpuTensor::from_vec(data, img_h_w).unwrap();
+                
+                let current_f32 = ctx.gaussian_blur(&img_f32, 1.0, 5).map_err(|e| {
                     Error::FeatureError(format!("Gaussian blur failed on GPU: {}", e))
                 })?;
-                let gpu_u8 = <Tensor<u8, S> as TensorToGpu<u8>>::to_gpu_ctx(&current_u8, gpu)
+
+                let mut current_gpu_f32 = <Tensor<f32, _> as TensorToGpu<f32>>::to_gpu_ctx(&current_f32, gpu)
                     .map_err(|e| {
                         Error::FeatureError(format!("Failed to transfer tensor to GPU: {}", e))
                     })?;
-                let mut current_f32 = <Tensor<u8, _> as TensorCast>::to_f32_ctx(&gpu_u8, gpu)
-                    .map_err(|e| {
-                        Error::FeatureError(format!("Failed to cast tensor to f32: {}", e))
-                    })?;
-                let k = ctx.akaze_contrast_k(&current_f32).unwrap_or(0.03);
+                let k = ctx.akaze_contrast_k(&current_gpu_f32).unwrap_or(0.03);
 
                 for o in 0..self.params.n_octaves {
                     for s in 0..self.params.n_sublevels {
@@ -223,8 +227,8 @@ impl Akaze {
                             let n_steps = self.get_fed_steps(dt);
                             let step_tau = dt / (n_steps as f32);
                             for _ in 0..n_steps {
-                                current_f32 = gpu
-                                    .akaze_diffusion(&current_f32, k, step_tau)
+                                current_gpu_f32 = gpu
+                                    .akaze_diffusion(&current_gpu_f32, k, step_tau)
                                     .map_err(|e| {
                                         Error::FeatureError(format!(
                                             "Diffusion failed on GPU: {}",
@@ -235,47 +239,51 @@ impl Akaze {
                             t = esigma;
                         }
 
-                        let (lx, ly, ldet) = gpu.akaze_derivatives(&current_f32).map_err(|e| {
+                        let (lx, ly, ldet) = gpu.akaze_derivatives(&current_gpu_f32).map_err(|e| {
                             Error::FeatureError(format!("Derivatives failed on GPU: {}", e))
                         })?;
 
-                        evolution.push(EvolutionLevel {
-                            image: current_f32.to_cpu_ctx(gpu).map_err(|e| {
-                                Error::FeatureError(format!(
-                                    "Failed to transfer image to CPU: {}",
-                                    e
-                                ))
-                            })?,
-                            lx: lx.to_cpu_ctx(gpu).map_err(|e| {
-                                Error::FeatureError(format!("Failed to transfer lx to CPU: {}", e))
-                            })?,
-                            ly: ly.to_cpu_ctx(gpu).map_err(|e| {
-                                Error::FeatureError(format!("Failed to transfer ly to CPU: {}", e))
-                            })?,
-                            ldet: ldet.to_cpu_ctx(gpu).map_err(|e| {
-                                Error::FeatureError(format!(
-                                    "Failed to transfer ldet to CPU: {}",
-                                    e
-                                ))
-                            })?,
-                            sigma,
-                            octave: o,
-                        });
+                            evolution.push(EvolutionLevel {
+                                image: current_gpu_f32.to_cpu_ctx(gpu).map_err(|e| {
+                                    Error::FeatureError(format!(
+                                        "Failed to transfer image to CPU: {}",
+                                        e
+                                    ))
+                                })?,
+                                lx: lx.to_cpu_ctx(gpu).map_err(|e| {
+                                    Error::FeatureError(format!("Failed to transfer lx to CPU: {}", e))
+                                })?,
+                                ly: ly.to_cpu_ctx(gpu).map_err(|e| {
+                                    Error::FeatureError(format!("Failed to transfer ly to CPU: {}", e))
+                                })?,
+                                ldet: ldet.to_cpu_ctx(gpu).map_err(|e| {
+                                    Error::FeatureError(format!(
+                                        "Failed to transfer ldet to CPU: {}",
+                                        e
+                                    ))
+                                })?,
+                                sigma,
+                                octave: o,
+                            });
+                        }
                     }
                 }
-            }
             ComputeDevice::Cpu(cpu) => {
                 let cpu_u8 = image.to_cpu().map_err(|e| {
                     Error::FeatureError(format!("Failed to download image to CPU: {}", e))
                 })?;
-                let current_u8 = cpu
-                    .gaussian_blur(&cpu_u8, 1.0, 5)
+                let img_h_w = cpu_u8.shape.clone();
+                let data: Vec<f32> = cpu_u8.storage.as_slice().unwrap().iter().map(|&v| v as f32).collect();
+                let img_f32 = CpuTensor::from_vec(data, img_h_w).unwrap();
+                
+                let cpu_f32 = cpu
+                    .gaussian_blur(&img_f32, 1.0, 5)
                     .map_err(|e| Error::FeatureError(format!("Gaussian blur failed: {}", e)))?;
-                let slice = current_u8
+                let slice = cpu_f32
                     .as_slice()
                     .map_err(|e| Error::FeatureError(format!("Failed to get slice: {}", e)))?;
-                let data: Vec<f32> = slice.iter().map(|&v| v as f32 / 255.0).collect();
-                let mut current_f32 = CpuTensor::from_vec(data, current_u8.shape)
+                let data: Vec<f32> = slice.to_vec();
+                let mut current_f32 = CpuTensor::from_vec(data, cpu_f32.shape)
                     .map_err(|e| Error::FeatureError(format!("Failed to create tensor: {}", e)))?;
 
                 let k = cpu.akaze_contrast_k(&current_f32).unwrap_or(0.03);

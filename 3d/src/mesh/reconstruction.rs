@@ -102,7 +102,7 @@ pub fn create_sphere_point_cloud(
     radius: f32,
     num_points: usize,
 ) -> PointCloud {
-    let _rng = rand::thread_rng();
+    let _rng = rand::rng();
 
     let mut points = Vec::with_capacity(num_points);
     let mut normals = Vec::with_capacity(num_points);
@@ -139,7 +139,7 @@ pub fn create_plane_point_cloud(
     num_points: usize,
 ) -> PointCloud {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let up = if normal.z.abs() < 0.9 {
         Vector3::new(0.0, 0.0, 1.0)
@@ -153,8 +153,8 @@ pub fn create_plane_point_cloud(
     let mut normals = Vec::with_capacity(num_points);
 
     for _ in 0..num_points {
-        let u = rng.gen_range(-size..size);
-        let v = rng.gen_range(-size..size);
+        let u = rng.random_range(-size..size);
+        let v = rng.random_range(-size..size);
 
         let point = origin + right * u + up * v;
         points.push(point);

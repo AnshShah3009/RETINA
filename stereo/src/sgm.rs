@@ -136,6 +136,7 @@ impl SgmMatcher {
         right: &GrayImage,
     ) -> cv_hal::Result<DisparityMap> {
         use cv_hal::context::{ComputeContext, StereoMatchMethod, StereoMatchParams};
+        use cv_hal::tensor_ext::TensorCast;
 
         let l_tensor = cv_core::CpuTensor::from_vec(
             left.as_raw().to_vec(),
@@ -151,6 +152,9 @@ impl SgmMatcher {
         let l_gpu = l_tensor.to_gpu_ctx(gpu)?;
         let r_gpu = r_tensor.to_gpu_ctx(gpu)?;
 
+        let l_f32 = l_gpu.to_f32_ctx(gpu)?;
+        let r_f32 = r_gpu.to_f32_ctx(gpu)?;
+
         let params = StereoMatchParams {
             method: StereoMatchMethod::SemiGlobalMatching,
             min_disparity: self.min_disparity,
@@ -159,7 +163,7 @@ impl SgmMatcher {
         };
 
         let res_gpu: Tensor<f32, cv_hal::storage::GpuStorage<f32>> =
-            gpu.stereo_match(&l_gpu, &r_gpu, &params)?;
+            gpu.stereo_match(&l_f32, &r_f32, &params)?;
         let res_cpu = res_gpu.to_cpu_ctx(gpu)?;
 
         Ok(DisparityMap {

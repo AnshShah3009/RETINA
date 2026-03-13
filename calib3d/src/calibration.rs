@@ -758,7 +758,7 @@ fn refine_distortion(
                         2 => d_perturbed.p1 += eps,
                         3 => d_perturbed.p2 += eps,
                         4 => d_perturbed.k3 += eps,
-                        _ => unreachable!(),
+                        _ => return Err(cv_core::Error::AlgorithmError("Invalid distortion index".to_string())),
                     }
                     let p_perturbed =
                         project_points_with_distortion(&[*p3], intrinsics, ext, &d_perturbed)?[0];

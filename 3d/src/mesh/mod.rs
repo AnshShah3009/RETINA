@@ -4,7 +4,8 @@
 
 use cv_core::point_cloud::PointCloud;
 use nalgebra::{Point3, Vector3};
-use rand::distributions::{Distribution, WeightedIndex};
+use rand_distr::weighted::WeightedIndex;
+use rand_distr::Distribution;
 use rand::Rng;
 use rayon::prelude::*;
 
@@ -154,12 +155,12 @@ impl TriangleMesh {
             .collect();
 
         // 2. Build weighted index for sampling faces
-        let dist = match WeightedIndex::new(&face_areas) {
+        let dist: WeightedIndex<f32> = match WeightedIndex::new(&face_areas) {
             Ok(d) => d,
             Err(_) => return PointCloud::new(Vec::new()), // All zero area faces
         };
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut sampled_points = Vec::with_capacity(num_points);
 
         for _ in 0..num_points {
@@ -172,8 +173,8 @@ impl TriangleMesh {
             let v2 = self.vertices[face[2]];
 
             // Random barycentric coordinates
-            let r1: f32 = rng.gen();
-            let r2: f32 = rng.gen();
+            let r1: f32 = rng.random();
+            let r2: f32 = rng.random();
 
             let (u, v) = if r1 + r2 > 1.0 {
                 (1.0 - r1, 1.0 - r2)

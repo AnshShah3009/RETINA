@@ -155,13 +155,16 @@ fn match_template_gpu(
     method: TemplateMatchMethod,
 ) -> cv_hal::Result<MatchResult> {
     use cv_hal::context::ComputeContext;
+    let img_f32: Vec<f32> = image.as_raw().iter().map(|&p| p as f32).collect();
     let img_tensor = cv_core::CpuTensor::from_vec(
-        image.as_raw().to_vec(),
+        img_f32,
         cv_core::TensorShape::new(1, image.height() as usize, image.width() as usize),
     )
     .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
+
+    let templ_f32: Vec<f32> = templ.as_raw().iter().map(|&p| p as f32).collect();
     let templ_tensor = cv_core::CpuTensor::from_vec(
-        templ.as_raw().to_vec(),
+        templ_f32,
         cv_core::TensorShape::new(1, templ.height() as usize, templ.width() as usize),
     )
     .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;

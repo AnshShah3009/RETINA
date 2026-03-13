@@ -667,13 +667,16 @@ pub mod stereo {
         runner: &RuntimeRunner,
     ) -> cv_hal::Result<::image::ImageBuffer<::image::Luma<f32>, Vec<f32>>> {
         if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = runner.device() {
+            let left_f32: Vec<f32> = left.as_raw().iter().map(|&p| p as f32).collect();
             let l_tensor = cv_core::CpuTensor::from_vec(
-                left.as_raw().to_vec(),
+                left_f32,
                 cv_core::TensorShape::new(1, left.height() as usize, left.width() as usize),
             )
             .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
+
+            let right_f32: Vec<f32> = right.as_raw().iter().map(|&p| p as f32).collect();
             let r_tensor = cv_core::CpuTensor::from_vec(
-                right.as_raw().to_vec(),
+                right_f32,
                 cv_core::TensorShape::new(1, right.height() as usize, right.width() as usize),
             )
             .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;

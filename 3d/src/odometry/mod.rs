@@ -62,9 +62,47 @@ pub fn compute_rgbd_odometry_ctx(
     method: OdometryMethod,
     group: &RuntimeRunner,
 ) -> Option<OdometryResult> {
+    // Multi-scale pyramid
+    let transformation = Matrix4::identity();
+
     // GPU Path
-    if let Ok(ComputeDevice::Gpu(_gpu)) = group.device() {
-        // TODO: Dispatch to HAL odometry kernels
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        let intrinsics_array = [
+            intrinsics.fx,
+            intrinsics.fy,
+            intrinsics.cx,
+            intrinsics.cy,
+        ];
+        
+        // Convert color to u32 for HAL if provided
+        let src_color_u32 = source_color.map(|c| {
+            c.iter().map(|v| {
+                (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16)
+            }).collect::<Vec<_>>()
+        });
+        let dst_color_u32 = target_color.map(|c| {
+            c.iter().map(|v| {
+                (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16)
+            }).collect::<Vec<_>>()
+        });
+
+        if let Ok((transform, fitness, rmse)) = cv_hal::gpu_kernels::odometry_gpu::compute_odometry(
+            gpu,
+            source_depth,
+            target_depth,
+            src_color_u32.as_deref(),
+            dst_color_u32.as_deref(),
+            &intrinsics_array,
+            width as u32,
+            height as u32,
+            &transformation,
+        ) {
+            return Some(OdometryResult {
+                transformation: transform,
+                fitness,
+                inlier_rmse: rmse,
+            });
+        }
     }
 
     // CPU Fallback (Rayon)

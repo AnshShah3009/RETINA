@@ -190,8 +190,9 @@ fn warp_gpu(
 ) -> cv_hal::Result<GrayImage> {
     use cv_hal::context::ComputeContext;
 
+    let src_f32: Vec<f32> = src.as_raw().iter().map(|&p| p as f32).collect();
     let input_tensor = cv_core::CpuTensor::from_vec(
-        src.as_raw().to_vec(),
+        src_f32,
         cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
     )
     .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
@@ -213,8 +214,8 @@ fn warp_gpu(
         typ,
     )?;
 
-    let res_cpu: Tensor<u8, cv_core::CpuStorage<u8>> = res_gpu.to_cpu()?;
-    let res_data = res_cpu.storage.as_slice().unwrap().to_vec();
+    let res_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = res_gpu.to_cpu()?;
+    let res_data: Vec<u8> = res_cpu.storage.as_slice().unwrap().iter().map(|&v| v.clamp(0.0, 255.0) as u8).collect();
 
     GrayImage::from_raw(width, height, res_data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))

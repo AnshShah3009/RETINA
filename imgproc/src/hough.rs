@@ -149,8 +149,9 @@ fn hough_circles_gpu(
     threshold: u32,
 ) -> cv_hal::Result<Vec<cv_core::HoughCircle>> {
     use cv_hal::context::ComputeContext;
+    let src_f32: Vec<f32> = src.as_raw().iter().map(|&p| p as f32).collect();
     let input_tensor = cv_core::CpuTensor::from_vec(
-        src.as_raw().to_vec(),
+        src_f32,
         cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
     )
     .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
@@ -241,8 +242,10 @@ fn hough_lines_gpu(
 ) -> cv_hal::Result<Vec<Line>> {
     use cv_hal::context::ComputeContext;
     let edges = canny(src, 50, 150);
+    let edges_f32: Vec<f32> = edges.as_raw().iter().map(|&p| p as f32).collect();
+
     let input_tensor = cv_core::CpuTensor::from_vec(
-        edges.as_raw().to_vec(),
+        edges_f32,
         cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
     )
     .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
@@ -250,6 +253,8 @@ fn hough_lines_gpu(
         .to_gpu_ctx(gpu)
         .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
 
+    // hough_lines threshold must be u32, but underlying GPU kernel takes f32 or u32 depending on signature
+    // In context.rs: fn hough_lines(..., threshold: u32)
     let res_hal = gpu.hough_lines(&input_gpu, rho_res, theta_res, threshold)?;
 
     Ok(res_hal
@@ -293,13 +298,13 @@ pub fn hough_lines_p(
 
     let mut acc = vec![0u32; num_rho * num_theta];
     let mut line_segments = Vec::new();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let mut processed_edges = vec![false; edge_data.len()];
 
     while !edge_points.is_empty() {
         // 1. Pick a random edge point
-        let idx = rng.gen_range(0..edge_points.len());
+        let idx = rng.random_range(0..edge_points.len());
         let (x, y) = edge_points.swap_remove(idx);
 
         if processed_edges[y * width as usize + x] {

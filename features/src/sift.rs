@@ -93,9 +93,9 @@ impl Sift {
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
-    ) -> crate::Result<Vec<Vec<Tensor<u8, S>>>> {
+    ) -> crate::Result<Vec<Vec<Tensor<f32, cv_core::storage::CpuStorage<f32>>>>> {
         let mut pyramid = Vec::with_capacity(self.n_octaves);
-        let mut current_base = image.clone();
+        let mut current_base = convert_to_f32_cpu(ctx, image)?;
 
         for octave in 0..self.n_octaves {
             let mut layers = Vec::with_capacity(self.n_layers + 3);
@@ -153,18 +153,18 @@ impl Sift {
     ///
     /// For input with n_layers per octave, produces (n_layers-1) DoG layers per octave.
     /// All DoG tensors are converted to f32 CPU storage for subsequent processing.
-    pub fn compute_dog<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
+    pub fn compute_dog(
         &self,
         ctx: &ComputeDevice,
-        gaussian_pyramid: &[Vec<Tensor<u8, S>>],
+        gaussian_pyramid: &[Vec<Tensor<f32, cv_core::storage::CpuStorage<f32>>>],
     ) -> crate::Result<Vec<Vec<Tensor<f32, cv_core::storage::CpuStorage<f32>>>>> {
         let mut dog_pyramid = Vec::with_capacity(gaussian_pyramid.len());
 
         for octave_layers in gaussian_pyramid {
             let mut dog_layers = Vec::with_capacity(octave_layers.len() - 1);
             for i in 0..(octave_layers.len() - 1) {
-                let a_f32 = convert_to_f32_cpu(ctx, &octave_layers[i + 1])?;
-                let b_f32 = convert_to_f32_cpu(ctx, &octave_layers[i])?;
+                let a_f32 = &octave_layers[i + 1];
+                let b_f32 = &octave_layers[i];
 
                 let diff = ctx
                     .subtract(&a_f32, &b_f32)
@@ -214,7 +214,7 @@ impl Sift {
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
-    ) -> crate::Result<(KeyPoints, Vec<Vec<Tensor<u8, S>>>)> {
+    ) -> crate::Result<(KeyPoints, Vec<Vec<Tensor<f32, cv_core::storage::CpuStorage<f32>>>>)> {
         let gaussian_pyramid = self.build_scale_space(ctx, image)?;
         let dog_pyramid = self.compute_dog(ctx, &gaussian_pyramid)?;
 
@@ -339,7 +339,7 @@ impl Sift {
 
             match ctx {
                 ComputeDevice::Cpu(cpu) => {
-                    let octave_img = convert_to_f32_cpu(ctx, &gaussian_pyramid[octave][0])?;
+                    let octave_img = &gaussian_pyramid[octave][0];
                     let descs = cpu
                         .compute_sift_descriptors(
                             &octave_img,
@@ -365,7 +365,7 @@ impl Sift {
                 }
                 ComputeDevice::Gpu(gpu) => {
                     use cv_hal::tensor_ext::TensorToGpu;
-                    let f32_cpu = convert_to_f32_cpu(ctx, &gaussian_pyramid[octave][0])?;
+                    let f32_cpu = &gaussian_pyramid[octave][0];
                     let octave_img_gpu = f32_cpu.to_gpu_ctx(gpu).map_err(|e| {
                         Error::FeatureError(format!("Failed to upload image to GPU: {}", e))
                     })?;

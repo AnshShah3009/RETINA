@@ -9,7 +9,7 @@ use crate::descriptor::{Descriptor, DescriptorExtractor, Descriptors};
 use crate::fast::fast_detect;
 use cv_core::{storage::Storage, Error, KeyPoint, KeyPoints, Tensor};
 use cv_hal::compute::ComputeDevice;
-use cv_hal::tensor_ext::TensorToCpu;
+use cv_hal::tensor_ext::{TensorCast, TensorToCpu};
 use image::GrayImage;
 use rayon::prelude::*;
 
@@ -132,15 +132,22 @@ impl Orb {
         let mut scale = 1.0f32;
 
         for level in 0..self.n_levels {
-            let scaled = if level == 0 {
-                image.clone()
+            let scaled_f32 = if level == 0 {
+                convert_to_f32_cpu(ctx, image).expect("Failed to convert image to f32")
             } else {
                 let new_w = (image.shape.width as f32 / scale) as usize;
                 let new_h = (image.shape.height as f32 / scale) as usize;
-                ctx.resize(image, (new_w, new_h)).unwrap()
+                let img_f32 = convert_to_f32_cpu(ctx, image).expect("Failed to convert image to f32");
+                let resized = ctx.resize(&img_f32, (new_w, new_h)).unwrap();
+                
+                let cpu_u8 = resized.to_cpu().unwrap();
+                let img_h_w = cpu_u8.shape.clone();
+                let data: Vec<f32> = cpu_u8.storage.as_slice().unwrap().iter().map(|&v| v as f32).collect();
+                let tensor_f32: Tensor<f32, cv_core::storage::CpuStorage<f32>> = Tensor::from_vec(data, img_h_w).unwrap();
+                tensor_f32
             };
 
-            let score_map = ctx.fast_detect(&scaled, self.fast_threshold, true).unwrap();
+            let score_map = ctx.fast_detect(&scaled_f32, self.fast_threshold as f32, true).unwrap();
             let kps = extract_keypoints_from_score_map(ctx, &score_map, self.n_features * 2)
                 .expect("Failed to extract keypoints from score map");
 
@@ -210,16 +217,16 @@ impl Orb {
     }
 }
 
-fn extract_keypoints_from_score_map<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
+fn extract_keypoints_from_score_map<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
     ctx: &ComputeDevice,
-    score_map: &Tensor<u8, S>,
+    score_map: &Tensor<f32, S>,
     max_kps: usize,
 ) -> crate::Result<KeyPoints> {
     use cv_core::storage::CpuStorage;
     use cv_hal::storage::GpuStorage;
 
     let cpu_tensor = if let Some(gpu_storage) =
-        score_map.storage.as_any().downcast_ref::<GpuStorage<u8>>()
+        score_map.storage.as_any().downcast_ref::<GpuStorage<f32>>()
     {
         let input_gpu = Tensor {
             storage: gpu_storage.clone(),
@@ -238,7 +245,7 @@ fn extract_keypoints_from_score_map<S: Storage<u8> + cv_core::StorageFactory<u8>
         input_gpu
             .to_cpu_ctx(gpu_ctx)
             .map_err(|e| Error::FeatureError(format!("GPU download failed: {}", e)))?
-    } else if let Some(cpu_storage) = score_map.storage.as_any().downcast_ref::<CpuStorage<u8>>() {
+    } else if let Some(cpu_storage) = score_map.storage.as_any().downcast_ref::<CpuStorage<f32>>() {
         let input_cpu = Tensor {
             storage: cpu_storage.clone(),
             shape: score_map.shape,
@@ -260,7 +267,7 @@ fn extract_keypoints_from_score_map<S: Storage<u8> + cv_core::StorageFactory<u8>
     for y in 0..h {
         for x in 0..w {
             let score = slice[y * w + x];
-            if score > 0 {
+            if score > 0.0 {
                 kps.push(KeyPoint::new(x as f64, y as f64).with_response(score as f64));
             }
         }
@@ -288,77 +295,66 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
     image: &Tensor<u8, S>,
 ) -> (KeyPoints, Descriptors) {
     if let ComputeDevice::Gpu(gpu) = ctx {
-        // GPU Path
-        use cv_hal::gpu_kernels::{brief, fast, orientation, pyramid};
+            use cv_hal::gpu_kernels::{brief, pyramid};
         use cv_hal::storage::GpuStorage;
 
         // Ensure input is on GPU
-        let temp_input;
-        let owned_input;
-        let input_gpu = if let Some(gpu_storage) =
+        let input_gpu_u8 = if let Some(gpu_storage) =
             image.storage.as_any().downcast_ref::<GpuStorage<u8>>()
         {
-            temp_input = Tensor {
+            Tensor {
                 storage: gpu_storage.clone(),
                 shape: image.shape,
                 dtype: image.dtype,
                 _phantom: std::marker::PhantomData,
-            };
-            &temp_input
+            }
         } else {
             use cv_core::storage::CpuStorage;
             use cv_hal::tensor_ext::TensorToGpu;
 
-            let cpu_tensor = if let Some(cpu_storage) =
-                image.storage.as_any().downcast_ref::<CpuStorage<u8>>()
-            {
-                Tensor {
-                    storage: cpu_storage.clone(),
-                    shape: image.shape,
-                    dtype: image.dtype,
-                    _phantom: std::marker::PhantomData,
-                }
-            } else {
-                eprintln!("Warning: Auto-migration to GPU from non-CPU storage not supported, results may be empty");
-                return (
-                    KeyPoints {
-                        keypoints: Vec::new(),
-                    },
-                    Descriptors {
-                        descriptors: Vec::new(),
-                    },
-                );
+            let cpu_tensor = Tensor {
+                storage: image.storage.as_any().downcast_ref::<CpuStorage<u8>>().cloned().unwrap_or_else(|| {
+                    // If not CpuStorage, convert to CpuStorage first
+                    convert_to_cpu_image(ctx, image).storage
+                }),
+                shape: image.shape,
+                dtype: image.dtype,
+                _phantom: std::marker::PhantomData,
             };
 
             match cpu_tensor.to_gpu_ctx(gpu) {
-                Ok(gpu_tensor) => {
-                    owned_input = gpu_tensor;
-                    &owned_input
-                }
+                Ok(gpu_tensor) => gpu_tensor,
                 Err(e) => {
                     eprintln!(
                         "Warning: Failed to upload tensor to GPU: {}, falling back to CPU",
                         e
                     );
-                    let mut keypoints = orb.detect_ctx(ctx, image);
-                    let cpu_img_tensor = convert_to_cpu_image(ctx, image);
-                    let (h, w) = cpu_img_tensor.shape.hw();
-                    let gray = image::GrayImage::from_raw(
-                        w as u32,
-                        h as u32,
-                        cpu_img_tensor.storage.as_slice().unwrap_or(&[]).to_vec(),
-                    )
-                    .unwrap_or_else(|| image::GrayImage::new(w as u32, h as u32));
-                    orb.compute_orientations(&gray, &mut keypoints);
-                    let descriptors = orb.extract(&gray, &keypoints);
-                    return (keypoints, descriptors);
+                    return {
+                        let mut keypoints = orb.detect_ctx(ctx, image);
+                        let cpu_img_tensor = convert_to_cpu_image(ctx, image);
+                        let (h, w) = cpu_img_tensor.shape.hw();
+                        let gray = image::GrayImage::from_raw(
+                            w as u32,
+                            h as u32,
+                            cpu_img_tensor.storage.as_slice().unwrap_or(&[]).to_vec(),
+                        )
+                        .unwrap_or_else(|| image::GrayImage::new(w as u32, h as u32));
+                        orb.compute_orientations(&gray, &mut keypoints);
+                        let descriptors = orb.extract(&gray, &keypoints);
+                        (keypoints, descriptors)
+                    };
                 }
             }
         };
 
+        let f32_tensor = match input_gpu_u8.to_f32_ctx(gpu) {
+            Ok(gpu_f32) => gpu_f32,
+            Err(_) => return (KeyPoints { keypoints: Vec::new() }, Descriptors { descriptors: Vec::new() }),
+        };
+
         // 1. Build Pyramid
         let pyramid =
-            pyramid::build_pyramid(gpu, input_gpu, orb.n_levels, orb.scale_factor).unwrap();
+            pyramid::build_pyramid(gpu, &f32_tensor, orb.n_levels, orb.scale_factor).unwrap();
 
         let mut all_keypoints = Vec::new();
         let mut all_descriptors = Vec::new();
@@ -369,17 +365,20 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
             let scale = pyramid.scales[level];
 
             // 2. FAST Detect
-            let score_map = fast::fast_detect(gpu, scaled_img, orb.fast_threshold, true).unwrap();
+            let score_map = cv_hal::gpu_kernels::fast::fast_detect::<f32>(gpu, scaled_img, orb.fast_threshold as f32, true).unwrap();
 
             // 3. Extract Keypoints
-            let mut kps_f32 = fast::extract_keypoints(gpu, &score_map).unwrap();
+            let mut kps_f32 = cv_hal::gpu_kernels::fast::extract_keypoints(gpu, &score_map).unwrap();
             if kps_f32.is_empty() {
                 continue;
             }
 
+            // Cast back to u8 for orientation and brief
+            let scaled_img_u8 = scaled_img.to_u8_ctx(gpu).unwrap();
+
             // 4. Compute Orientations
             let angles =
-                orientation::compute_orientation(gpu, scaled_img, &kps_f32, orb.patch_size / 2)
+                cv_hal::gpu_kernels::orientation::compute_orientation(gpu, &scaled_img_u8, &kps_f32, orb.patch_size / 2)
                     .unwrap();
             for (i, &angle) in angles.iter().enumerate() {
                 kps_f32[i].angle = angle;
@@ -388,7 +387,7 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
 
             // 5. Compute BRIEF
             let descriptors_u8 =
-                brief::compute_brief(gpu, scaled_img, &kps_f32, &brief_pattern).unwrap();
+                brief::compute_brief(gpu, &scaled_img_u8, &kps_f32, &brief_pattern).unwrap();
 
             // Collect
             for (i, kp_f32) in kps_f32.into_iter().enumerate() {
@@ -531,20 +530,20 @@ impl DescriptorExtractor for Orb {
 
 /// Generate BRIEF sampling pattern with rotation support
 fn generate_steered_brief_pattern(patch_size: i32) -> Vec<(f32, f32, f32, f32)> {
-    use rand::thread_rng;
+    use rand::rng;
     use rand::Rng;
 
-    let mut rng = thread_rng();
+    let mut rng = rng();
     let num_pairs = 256; // 256 bits = 32 bytes
     let half_size = patch_size as f32 / 2.0;
 
     let mut pairs = Vec::with_capacity(num_pairs);
 
     for _ in 0..num_pairs {
-        let x1 = rng.gen_range(-half_size..half_size);
-        let y1 = rng.gen_range(-half_size..half_size);
-        let x2 = rng.gen_range(-half_size..half_size);
-        let y2 = rng.gen_range(-half_size..half_size);
+        let x1 = rng.random_range(-half_size..half_size);
+        let y1 = rng.random_range(-half_size..half_size);
+        let x2 = rng.random_range(-half_size..half_size);
+        let y2 = rng.random_range(-half_size..half_size);
         pairs.push((x1, y1, x2, y2));
     }
 
@@ -635,6 +634,55 @@ pub fn orb_detect_and_compute(image: &GrayImage, n_features: usize) -> (KeyPoint
     orb.compute_orientations(image, &mut keypoints);
     let descriptors = orb.extract(image, &keypoints);
     (keypoints, descriptors)
+}
+
+fn convert_to_f32_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
+    ctx: &ComputeDevice,
+    input: &Tensor<u8, S>,
+) -> crate::Result<Tensor<f32, cv_core::storage::CpuStorage<f32>>> {
+    use cv_core::storage::CpuStorage;
+    use cv_hal::storage::GpuStorage;
+    use cv_hal::tensor_ext::TensorToCpu;
+
+    let cpu_u8 = if let Some(gpu_storage) = input.storage.as_any().downcast_ref::<GpuStorage<u8>>()
+    {
+        let input_gpu = Tensor {
+            storage: gpu_storage.clone(),
+            shape: input.shape,
+            dtype: input.dtype,
+            _phantom: std::marker::PhantomData,
+        };
+        let gpu_ctx = match ctx {
+            ComputeDevice::Gpu(g) => g,
+            _ => {
+                return Err(Error::FeatureError(
+                    "GpuStorage requires GPU context".into(),
+                ))
+            }
+        };
+        input_gpu
+            .to_cpu_ctx(gpu_ctx)
+            .map_err(|e| Error::FeatureError(format!("GPU download failed: {}", e)))?
+    } else if let Some(cpu_storage) = input.storage.as_any().downcast_ref::<CpuStorage<u8>>() {
+        let input_cpu = Tensor {
+            storage: cpu_storage.clone(),
+            shape: input.shape,
+            dtype: input.dtype,
+            _phantom: std::marker::PhantomData,
+        };
+        input_cpu.clone()
+    } else {
+        return Err(Error::FeatureError("Unsupported storage type".into()));
+    };
+
+    let slice_u8 = cpu_u8
+        .storage
+        .as_slice()
+        .ok_or_else(|| Error::FeatureError("Failed to get u8 slice".into()))?;
+    let data_f32: Vec<f32> = slice_u8.iter().map(|&v| v as f32 / 255.0).collect();
+
+    Tensor::from_vec(data_f32, input.shape)
+        .map_err(|e| Error::FeatureError(format!("Failed to create f32 tensor: {}", e)))
 }
 
 #[cfg(test)]
