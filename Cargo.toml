@@ -56,28 +56,31 @@ path = "benches/normals.rs"
 [workspace]
 resolver = "2"
 members = [
-    "hal",
-    "core",
-    "imgproc",
-    "features",
-    "stereo",
-    "video",
-    "videoio",
-    "calib3d",
-    "photo",
-    "sfm",
-    "slam",
-    "runtime",
-    "optimize",
-    "scientific",
-    "point-cloud",
-    "python",
-    "viewer",
-    "io",
-    "objdetect",
-    "dnn",
-    "3d", "rendering", "registration", "plot",
-    "examples",
+    "crates/core",
+    "crates/hal",
+    "crates/imgproc",
+    "crates/features",
+    "crates/stereo",
+    "crates/video",
+    "crates/videoio",
+    "crates/calib3d",
+    "crates/photo",
+    "crates/sfm",
+    "crates/slam",
+    "crates/runtime",
+    "crates/optimize",
+    "crates/scientific",
+    "crates/point-cloud",
+    "crates/python",
+    "crates/viewer",
+    "crates/io",
+    "crates/objdetect",
+    "crates/dnn",
+    "crates/3d",
+    "crates/rendering",
+    "crates/registration",
+    "crates/plot",
+    "crates/examples",
 ]
 
 [workspace.dependencies]
@@ -129,29 +132,29 @@ tract-onnx = "0.21.7"
 rustfft = "6"
 
 # Internal Workspace Crates
-cv-core = { path = "./core" }
-cv-hal = { path = "./hal" }
-cv-imgproc = { path = "./imgproc" }
-cv-features = { path = "./features" }
-cv-stereo = { path = "./stereo" }
-cv-video = { path = "./video" }
-cv-3d = { path = "./3d" }
-cv-calib3d = { path = "./calib3d" }
-cv-sfm = { path = "./sfm" }
-cv-slam = { path = "./slam" }
-cv-runtime = { path = "./runtime" }
-cv-optimize = { path = "./optimize" }
-cv-scientific = { path = "./scientific" }
-cv-point-cloud = { path = "./point-cloud" }
-cv-videoio = { path = "./videoio" }
-cv-photo = { path = "./photo" }
-cv-io = { path = "./io" }
-cv-objdetect = { path = "./objdetect" }
-cv-dnn = { path = "./dnn" }
-cv-rendering = { path = "./rendering" }
-cv-registration = { path = "./registration" }
-cv-plot = { path = "./plot" }
-cv-viewer = { path = "./viewer" }
+cv-core = { path = "./crates/core" }
+cv-hal = { path = "./crates/hal" }
+cv-imgproc = { path = "./crates/imgproc" }
+cv-features = { path = "./crates/features" }
+cv-stereo = { path = "./crates/stereo" }
+cv-video = { path = "./crates/video" }
+cv-3d = { path = "./crates/3d" }
+cv-calib3d = { path = "./crates/calib3d" }
+cv-sfm = { path = "./crates/sfm" }
+cv-slam = { path = "./crates/slam" }
+cv-runtime = { path = "./crates/runtime" }
+cv-optimize = { path = "./crates/optimize" }
+cv-scientific = { path = "./crates/scientific" }
+cv-point-cloud = { path = "./crates/point-cloud" }
+cv-videoio = { path = "./crates/videoio" }
+cv-photo = { path = "./crates/photo" }
+cv-io = { path = "./crates/io" }
+cv-objdetect = { path = "./crates/objdetect" }
+cv-dnn = { path = "./crates/dnn" }
+cv-rendering = { path = "./crates/rendering" }
+cv-registration = { path = "./crates/registration" }
+cv-plot = { path = "./crates/plot" }
+cv-viewer = { path = "./crates/viewer" }
 
 [profile.release]
 opt-level = 3
