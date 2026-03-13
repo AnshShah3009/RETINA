@@ -288,39 +288,363 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn canny<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn canny<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
-        _input: &Tensor<T, S>,
-        _low_threshold: T,
-        _high_threshold: T,
+        input: &Tensor<T, S>,
+        low_threshold: T,
+        high_threshold: T,
     ) -> Result<Tensor<T, S>> {
-        Err(crate::Error::NotSupported(
-            "CPU canny not yet implemented in HAL (use imgproc version)".into(),
-        ))
+        let (h, w) = input.shape.hw();
+        if h < 3 || w < 3 {
+            return Err(crate::Error::InvalidInput(
+                "Canny requires image at least 3x3".into(),
+            ));
+        }
+
+        // Step 1: Gaussian blur (sigma=1.4, ksize=5)
+        let blurred = self.gaussian_blur(input, T::from_f32(1.4), 5)?;
+
+        // Step 2: Sobel gradients
+        let (gx_tensor, gy_tensor) = self.sobel(&blurred, 1, 1, 3)?;
+        let gx = gx_tensor
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Gx not on CPU".into()))?;
+        let gy = gy_tensor
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Gy not on CPU".into()))?;
+
+        // Step 3: Compute magnitude and direction
+        let len = h * w;
+        let mut magnitude = vec![T::ZERO; len];
+        let mut direction = vec![0u8; len]; // 0=horiz, 1=diag45, 2=vert, 3=diag135
+
+        for i in 0..len {
+            let mx = gx[i].to_f32();
+            let my = gy[i].to_f32();
+            magnitude[i] = T::from_f32((mx * mx + my * my).sqrt());
+
+            // Quantize angle to 4 directions
+            let angle = my.atan2(mx).to_degrees();
+            let angle = if angle < 0.0 { angle + 180.0 } else { angle };
+            direction[i] = if angle < 22.5 || angle >= 157.5 {
+                0 // horizontal edge -> suppress vertically
+            } else if angle < 67.5 {
+                1 // 45-degree
+            } else if angle < 112.5 {
+                2 // vertical edge -> suppress horizontally
+            } else {
+                3 // 135-degree
+            };
+        }
+
+        // Step 4: Non-maximum suppression
+        let mut nms_out = vec![T::ZERO; len];
+        nms_out
+            .par_chunks_mut(w)
+            .enumerate()
+            .for_each(|(y, row_out)| {
+                if y == 0 || y >= h - 1 {
+                    return;
+                }
+                for x in 1..w - 1 {
+                    let idx = y * w + x;
+                    let mag = magnitude[idx];
+                    let (n1, n2) = match direction[idx] {
+                        0 => (magnitude[idx - 1], magnitude[idx + 1]),           // horizontal
+                        1 => (magnitude[(y - 1) * w + x + 1], magnitude[(y + 1) * w + x - 1]), // 45
+                        2 => (magnitude[(y - 1) * w + x], magnitude[(y + 1) * w + x]),         // vertical
+                        _ => (magnitude[(y - 1) * w + x - 1], magnitude[(y + 1) * w + x + 1]), // 135
+                    };
+                    if mag >= n1 && mag >= n2 {
+                        row_out[x] = mag;
+                    }
+                }
+            });
+
+        // Step 5: Hysteresis thresholding
+        // Mark strong and weak edges
+        let mut edge_map = vec![0u8; len]; // 0=none, 1=weak, 2=strong
+        for i in 0..len {
+            if nms_out[i] >= high_threshold {
+                edge_map[i] = 2;
+            } else if nms_out[i] >= low_threshold {
+                edge_map[i] = 1;
+            }
+        }
+
+        // Trace weak edges connected to strong edges using iterative flood fill
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let idx = y * w + x;
+                    if edge_map[idx] != 1 {
+                        continue;
+                    }
+                    // Check 8-connected neighbors for strong edge
+                    let has_strong = edge_map[(y - 1) * w + x - 1] == 2
+                        || edge_map[(y - 1) * w + x] == 2
+                        || edge_map[(y - 1) * w + x + 1] == 2
+                        || edge_map[y * w + x - 1] == 2
+                        || edge_map[y * w + x + 1] == 2
+                        || edge_map[(y + 1) * w + x - 1] == 2
+                        || edge_map[(y + 1) * w + x] == 2
+                        || edge_map[(y + 1) * w + x + 1] == 2;
+                    if has_strong {
+                        edge_map[idx] = 2;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // Build output: strong edges = ONE, rest = ZERO
+        let mut output_storage =
+            S::new(len, T::ZERO).map_err(crate::Error::MemoryError)?;
+        let dst = output_storage
+            .as_mut_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
+        for i in 0..len {
+            if edge_map[i] == 2 {
+                dst[i] = T::ONE;
+            }
+        }
+
+        Ok(Tensor {
+            storage: output_storage,
+            shape: TensorShape::new(1, h, w),
+            dtype: input.dtype,
+            _phantom: std::marker::PhantomData,
+        })
     }
 
-    fn hough_lines<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn hough_lines<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
-        _input: &Tensor<T, S>,
-        _rho: T,
-        _theta: T,
-        _threshold: u32,
+        input: &Tensor<T, S>,
+        rho: T,
+        theta: T,
+        threshold: u32,
     ) -> Result<Vec<cv_core::HoughLine>> {
-        Err(crate::Error::NotSupported(
-            "CPU hough_lines not yet implemented in HAL (use imgproc version)".into(),
-        ))
+        let src = input
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
+        let (h, w) = input.shape.hw();
+
+        let rho_f = rho.to_f32();
+        let theta_f = theta.to_f32();
+
+        // Accumulator dimensions
+        let diag = ((w * w + h * h) as f32).sqrt();
+        let num_rho = ((2.0 * diag) / rho_f).ceil() as usize + 1;
+        let num_theta = (std::f32::consts::PI / theta_f).ceil() as usize;
+
+        // Precompute sin/cos tables
+        let cos_table: Vec<f32> = (0..num_theta)
+            .map(|t| (t as f32 * theta_f).cos())
+            .collect();
+        let sin_table: Vec<f32> = (0..num_theta)
+            .map(|t| (t as f32 * theta_f).sin())
+            .collect();
+
+        let rho_offset = diag; // rho can be negative, shift by diagonal
+
+        // Accumulate votes (parallel per row, then merge)
+        let row_accums: Vec<Vec<u32>> = (0..h)
+            .into_par_iter()
+            .map(|y| {
+                let mut acc = vec![0u32; num_rho * num_theta];
+                for x in 0..w {
+                    if src[y * w + x] > T::ZERO {
+                        let xf = x as f32;
+                        let yf = y as f32;
+                        for t in 0..num_theta {
+                            let r = xf * cos_table[t] + yf * sin_table[t];
+                            let r_idx = ((r + rho_offset) / rho_f).round() as usize;
+                            if r_idx < num_rho {
+                                acc[t * num_rho + r_idx] += 1;
+                            }
+                        }
+                    }
+                }
+                acc
+            })
+            .collect();
+
+        // Merge accumulators
+        let mut accumulator = vec![0u32; num_rho * num_theta];
+        for row_acc in &row_accums {
+            for i in 0..accumulator.len() {
+                accumulator[i] += row_acc[i];
+            }
+        }
+
+        // Extract peaks above threshold
+        let mut lines = Vec::new();
+        for t in 0..num_theta {
+            for r in 0..num_rho {
+                let votes = accumulator[t * num_rho + r];
+                if votes >= threshold {
+                    let rho_val = r as f32 * rho_f - rho_offset;
+                    let theta_val = t as f32 * theta_f;
+                    lines.push(cv_core::HoughLine {
+                        rho: rho_val,
+                        theta: theta_val,
+                        score: votes,
+                    });
+                }
+            }
+        }
+
+        Ok(lines)
     }
 
-    fn hough_circles<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn hough_circles<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
-        _input: &Tensor<T, S>,
-        _min_radius: T,
-        _max_radius: T,
-        _threshold: u32,
+        input: &Tensor<T, S>,
+        min_radius: T,
+        max_radius: T,
+        threshold: u32,
     ) -> Result<Vec<cv_core::HoughCircle>> {
-        Err(crate::Error::NotSupported(
-            "CPU hough_circles not yet implemented in HAL (use imgproc version)".into(),
-        ))
+        let src = input
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
+        let (h, w) = input.shape.hw();
+
+        let min_r = min_radius.to_f32().max(1.0) as usize;
+        let max_r = max_radius.to_f32() as usize;
+        if min_r >= max_r {
+            return Err(crate::Error::InvalidInput(
+                "hough_circles: min_radius must be less than max_radius".into(),
+            ));
+        }
+
+        // Step 1: Compute gradients for direction voting
+        // We need Sobel, which requires bytemuck::Pod + Debug. Since we're in a generic
+        // context, compute simple central differences directly.
+        let mut gx = vec![0.0f32; h * w];
+        let mut gy = vec![0.0f32; h * w];
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                gx[y * w + x] = src[y * w + x + 1].to_f32() - src[y * w + x - 1].to_f32();
+                gy[y * w + x] = src[(y + 1) * w + x].to_f32() - src[(y - 1) * w + x].to_f32();
+            }
+        }
+
+        // Step 2: Accumulate center votes along gradient direction
+        let mut center_acc = vec![0u32; h * w];
+
+        // Collect edge pixels
+        let edge_pixels: Vec<(usize, usize)> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| src[y * w + x] > T::ZERO)
+            .collect();
+
+        for &(x, y) in &edge_pixels {
+            let dx = gx[y * w + x];
+            let dy = gy[y * w + x];
+            let mag = (dx * dx + dy * dy).sqrt();
+            if mag < 1e-6 {
+                continue;
+            }
+            let nx = dx / mag;
+            let ny = dy / mag;
+
+            // Vote along positive and negative gradient direction
+            for sign in &[1.0f32, -1.0f32] {
+                for r in min_r..=max_r {
+                    let cx = (x as f32 + sign * nx * r as f32).round() as i32;
+                    let cy = (y as f32 + sign * ny * r as f32).round() as i32;
+                    if cx >= 0 && cx < w as i32 && cy >= 0 && cy < h as i32 {
+                        center_acc[cy as usize * w + cx as usize] += 1;
+                    }
+                }
+            }
+        }
+
+        // Step 3: Find candidate centers above a center threshold
+        // Use threshold/2 for centers (since final threshold applies to radius accumulation)
+        let center_thresh = (threshold / 2).max(1);
+        let mut candidates: Vec<(usize, usize, u32)> = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let votes = center_acc[y * w + x];
+                if votes >= center_thresh {
+                    // Simple 3x3 NMS for centers
+                    let mut is_max = true;
+                    for dy in -1i32..=1 {
+                        for dx in -1i32..=1 {
+                            if dx == 0 && dy == 0 {
+                                continue;
+                            }
+                            let ny = y as i32 + dy;
+                            let nx = x as i32 + dx;
+                            if ny >= 0
+                                && ny < h as i32
+                                && nx >= 0
+                                && nx < w as i32
+                                && center_acc[ny as usize * w + nx as usize] > votes
+                            {
+                                is_max = false;
+                                break;
+                            }
+                        }
+                        if !is_max {
+                            break;
+                        }
+                    }
+                    if is_max {
+                        candidates.push((x, y, votes));
+                    }
+                }
+            }
+        }
+
+        // Step 4: For each candidate center, accumulate radius votes
+        let num_radii = max_r - min_r + 1;
+        let circles: Vec<cv_core::HoughCircle> = candidates
+            .par_iter()
+            .filter_map(|&(cx, cy, _)| {
+                let mut radius_acc = vec![0u32; num_radii];
+
+                for &(ex, ey) in &edge_pixels {
+                    let dx = ex as f32 - cx as f32;
+                    let dy = ey as f32 - cy as f32;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    let r_idx = dist.round() as usize;
+                    if r_idx >= min_r && r_idx <= max_r {
+                        radius_acc[r_idx - min_r] += 1;
+                    }
+                }
+
+                // Find best radius
+                let mut best_votes = 0u32;
+                let mut best_r = 0usize;
+                for (i, &v) in radius_acc.iter().enumerate() {
+                    if v > best_votes {
+                        best_votes = v;
+                        best_r = i + min_r;
+                    }
+                }
+
+                if best_votes >= threshold {
+                    Some(cv_core::HoughCircle {
+                        cx: cx as f32,
+                        cy: cy as f32,
+                        r: best_r as f32,
+                        score: best_votes,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(circles)
     }
 
     fn match_template<
@@ -329,13 +653,135 @@ impl ComputeContext for CpuBackend {
         OS: Storage<T> + cv_core::StorageFactory<T> + 'static,
     >(
         &self,
-        _image: &Tensor<T, S>,
-        _template: &Tensor<T, S>,
-        _method: TemplateMatchMethod,
+        image: &Tensor<T, S>,
+        template: &Tensor<T, S>,
+        method: TemplateMatchMethod,
     ) -> Result<Tensor<T, OS>> {
-        Err(crate::Error::NotSupported(
-            "CPU match_template not yet implemented in HAL (use imgproc version)".into(),
-        ))
+        let img = image
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Image not on CPU".into()))?;
+        let tmpl = template
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Template not on CPU".into()))?;
+
+        let (img_h, img_w) = image.shape.hw();
+        let (tmpl_h, tmpl_w) = template.shape.hw();
+
+        if tmpl_h > img_h || tmpl_w > img_w {
+            return Err(crate::Error::InvalidInput(
+                "Template larger than image".into(),
+            ));
+        }
+
+        let out_h = img_h - tmpl_h + 1;
+        let out_w = img_w - tmpl_w + 1;
+
+        let mut output_storage =
+            OS::new(out_h * out_w, T::ZERO).map_err(crate::Error::MemoryError)?;
+        let dst = output_storage
+            .as_mut_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
+
+        // Precompute template statistics for normalized / coefficient methods
+        let mut tmpl_sum = T::ZERO;
+        let mut tmpl_sq_sum = T::ZERO;
+        let tmpl_len_f = T::from_f32((tmpl_h * tmpl_w) as f32);
+        for ty in 0..tmpl_h {
+            for tx in 0..tmpl_w {
+                let tv = tmpl[ty * tmpl_w + tx];
+                tmpl_sum += tv;
+                tmpl_sq_sum += tv * tv;
+            }
+        }
+        let tmpl_mean = tmpl_sum / tmpl_len_f;
+        let tmpl_var = tmpl_sq_sum - tmpl_sum * tmpl_sum / tmpl_len_f;
+        let tmpl_norm = tmpl_var.sqrt();
+
+        let needs_mean = matches!(
+            method,
+            TemplateMatchMethod::Ccoeff | TemplateMatchMethod::CcoeffNormed
+        );
+
+        dst.par_chunks_mut(out_w)
+            .enumerate()
+            .for_each(|(y, row_out)| {
+                for x in 0..out_w {
+                    let mut sum_sq_diff = T::ZERO;
+                    let mut sum_ccorr = T::ZERO;
+                    let mut patch_sum = T::ZERO;
+                    let mut patch_sq_sum = T::ZERO;
+                    let mut sum_ccoeff = T::ZERO;
+
+                    // Compute patch mean first if needed for Ccoeff methods
+                    let patch_mean = if needs_mean {
+                        let mut s = T::ZERO;
+                        for ty in 0..tmpl_h {
+                            for tx in 0..tmpl_w {
+                                s += img[(y + ty) * img_w + (x + tx)];
+                            }
+                        }
+                        s / tmpl_len_f
+                    } else {
+                        T::ZERO
+                    };
+
+                    for ty in 0..tmpl_h {
+                        for tx in 0..tmpl_w {
+                            let iv = img[(y + ty) * img_w + (x + tx)];
+                            let tv = tmpl[ty * tmpl_w + tx];
+                            let diff = iv - tv;
+                            sum_sq_diff += diff * diff;
+                            sum_ccorr += iv * tv;
+                            patch_sum += iv;
+                            patch_sq_sum += iv * iv;
+                            if needs_mean {
+                                sum_ccoeff += (iv - patch_mean) * (tv - tmpl_mean);
+                            }
+                        }
+                    }
+
+                    row_out[x] = match method {
+                        TemplateMatchMethod::SqDiff => sum_sq_diff,
+                        TemplateMatchMethod::SqDiffNormed => {
+                            let denom = (patch_sq_sum * tmpl_sq_sum).sqrt();
+                            if denom > T::EPSILON {
+                                sum_sq_diff / denom
+                            } else {
+                                T::ZERO
+                            }
+                        }
+                        TemplateMatchMethod::Ccorr => sum_ccorr,
+                        TemplateMatchMethod::CcorrNormed => {
+                            let denom = (patch_sq_sum * tmpl_sq_sum).sqrt();
+                            if denom > T::EPSILON {
+                                sum_ccorr / denom
+                            } else {
+                                T::ZERO
+                            }
+                        }
+                        TemplateMatchMethod::Ccoeff => sum_ccoeff,
+                        TemplateMatchMethod::CcoeffNormed => {
+                            let patch_var =
+                                patch_sq_sum - patch_sum * patch_sum / tmpl_len_f;
+                            let denom = patch_var.sqrt() * tmpl_norm;
+                            if denom > T::EPSILON {
+                                sum_ccoeff / denom
+                            } else {
+                                T::ZERO
+                            }
+                        }
+                    };
+                }
+            });
+
+        Ok(Tensor {
+            storage: output_storage,
+            shape: TensorShape::new(1, out_h, out_w),
+            dtype: image.dtype,
+            _phantom: std::marker::PhantomData,
+        })
     }
 
     fn detect_objects<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
@@ -354,13 +800,89 @@ impl ComputeContext for CpuBackend {
         OS: Storage<T> + cv_core::StorageFactory<T> + 'static,
     >(
         &self,
-        _left: &Tensor<T, S>,
-        _right: &Tensor<T, S>,
-        _params: &StereoMatchParams,
+        left: &Tensor<T, S>,
+        right: &Tensor<T, S>,
+        params: &StereoMatchParams,
     ) -> Result<Tensor<T, OS>> {
-        Err(crate::Error::NotSupported(
-            "CPU stereo_match not yet implemented in HAL (use cv-stereo)".into(),
-        ))
+        let left_data = left
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Left image not on CPU".into()))?;
+        let right_data = right
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Right image not on CPU".into()))?;
+
+        let (h, w) = left.shape.hw();
+        let (rh, rw) = right.shape.hw();
+        if h != rh || w != rw {
+            return Err(crate::Error::InvalidInput(
+                "Left and right images must have the same dimensions".into(),
+            ));
+        }
+
+        let block_size = params.block_size;
+        let half_block = block_size / 2;
+        let min_disp = params.min_disparity;
+        let num_disp = params.num_disparities;
+
+        let mut output_storage =
+            OS::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
+        let dst = output_storage
+            .as_mut_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
+
+        // Block matching with SAD (Sum of Absolute Differences)
+        dst.par_chunks_mut(w)
+            .enumerate()
+            .for_each(|(y, row_out)| {
+                if y < half_block || y + half_block >= h {
+                    return;
+                }
+                for x in 0..w {
+                    if x < half_block || x + half_block >= w {
+                        continue;
+                    }
+
+                    let mut best_sad = T::from_f32(f32::MAX);
+                    let mut best_disp = T::ZERO;
+
+                    for d in 0..num_disp {
+                        let disp = min_disp + d;
+                        let rx = x as i32 - disp;
+                        if rx < half_block as i32 || rx + half_block as i32 >= w as i32 {
+                            continue;
+                        }
+                        let rx = rx as usize;
+
+                        let mut sad = T::ZERO;
+                        for by in 0..block_size {
+                            let sy = y - half_block + by;
+                            for bx in 0..block_size {
+                                let lx = x - half_block + bx;
+                                let rrx = rx - half_block + bx;
+                                let lv = left_data[sy * w + lx];
+                                let rv = right_data[sy * w + rrx];
+                                sad += (lv - rv).abs();
+                            }
+                        }
+
+                        if sad < best_sad {
+                            best_sad = sad;
+                            best_disp = T::from_f32(disp as f32);
+                        }
+                    }
+
+                    row_out[x] = best_disp;
+                }
+            });
+
+        Ok(Tensor {
+            storage: output_storage,
+            shape: TensorShape::new(1, h, w),
+            dtype: left.dtype,
+            _phantom: std::marker::PhantomData,
+        })
     }
 
     fn triangulate_points<
@@ -1395,16 +1917,188 @@ impl ComputeContext for CpuBackend {
 
     fn dense_icp_step<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
-        _source_depth: &Tensor<T, S>,
-        _target_data: &Tensor<T, S>,
-        _intrinsics: &[T; 4],
-        _initial_guess: &nalgebra::Matrix4<T>,
-        _max_dist: T,
-        _max_angle: T,
+        source_depth: &Tensor<T, S>,
+        target_data: &Tensor<T, S>,
+        intrinsics: &[T; 4],
+        initial_guess: &nalgebra::Matrix4<T>,
+        max_dist: T,
+        max_angle: T,
     ) -> Result<(nalgebra::Matrix6<T>, nalgebra::Vector6<T>)> {
-        Err(crate::Error::NotSupported(
-            "CPU dense_icp_step not yet implemented".into(),
-        ))
+        let src_depth = source_depth
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Source depth not on CPU".into()))?;
+        let tgt_data = target_data
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Target data not on CPU".into()))?;
+
+        let (src_h, src_w) = source_depth.shape.hw();
+
+        // target_data is expected to be (h, w) with 7 channels: depth, vx, vy, vz, nx, ny, nz
+        // or alternatively (h, w*7) — we handle both via total element count
+        let tgt_h = target_data.shape.height;
+        let tgt_w = target_data.shape.width;
+        let tgt_channels = target_data.shape.channels;
+        let tgt_stride = tgt_w * tgt_channels; // elements per row in target
+
+        let fx = intrinsics[0].to_f32();
+        let fy = intrinsics[1].to_f32();
+        let cx = intrinsics[2].to_f32();
+        let cy = intrinsics[3].to_f32();
+        let fx_inv = 1.0 / fx;
+        let fy_inv = 1.0 / fy;
+
+        let max_dist_f = max_dist.to_f32();
+        let max_angle_f = max_angle.to_f32();
+        let cos_max_angle = max_angle_f.cos();
+
+        // Convert initial_guess to f32
+        let mut tf = [[0.0f32; 4]; 4];
+        for i in 0..4 {
+            for j in 0..4 {
+                tf[i][j] = initial_guess[(i, j)].to_f32();
+            }
+        }
+
+        // Parallel accumulation using fold + reduce
+        let (jtj_upper, jtr_acc) = (0..src_h)
+            .into_par_iter()
+            .fold(
+                || ([0.0f32; 21], [0.0f32; 6]),
+                |(mut jtj_upper, mut jtr), y| {
+                    for x in 0..src_w {
+                        let d_src = src_depth[y * src_w + x].to_f32();
+                        if d_src <= 0.0 || !d_src.is_finite() {
+                            continue;
+                        }
+
+                        // Back-project source pixel to 3D
+                        let sx = d_src * (x as f32 - cx) * fx_inv;
+                        let sy = d_src * (y as f32 - cy) * fy_inv;
+                        let sz = d_src;
+
+                        // Transform source point
+                        let tx = tf[0][0] * sx + tf[0][1] * sy + tf[0][2] * sz + tf[0][3];
+                        let ty_p = tf[1][0] * sx + tf[1][1] * sy + tf[1][2] * sz + tf[1][3];
+                        let tz = tf[2][0] * sx + tf[2][1] * sy + tf[2][2] * sz + tf[2][3];
+
+                        if tz <= 0.0 {
+                            continue;
+                        }
+
+                        // Project transformed point into target image
+                        let u = tx * fx / tz + cx;
+                        let v = ty_p * fy / tz + cy;
+                        let iu = u.round() as i32;
+                        let iv = v.round() as i32;
+
+                        if iu < 0 || iu >= tgt_w as i32 || iv < 0 || iv >= tgt_h as i32 {
+                            continue;
+                        }
+
+                        // Read target vertex and normal
+                        // Layout: 7 channels per pixel [depth, vx, vy, vz, nx, ny, nz]
+                        let tgt_base = iv as usize * tgt_stride + iu as usize * tgt_channels;
+                        if tgt_base + 6 >= tgt_data.len() {
+                            continue;
+                        }
+
+                        let tgt_d = tgt_data[tgt_base].to_f32();
+                        if tgt_d <= 0.0 || !tgt_d.is_finite() {
+                            continue;
+                        }
+
+                        let tgt_vx = tgt_data[tgt_base + 1].to_f32();
+                        let tgt_vy = tgt_data[tgt_base + 2].to_f32();
+                        let tgt_vz = tgt_data[tgt_base + 3].to_f32();
+                        let nx = tgt_data[tgt_base + 4].to_f32();
+                        let ny = tgt_data[tgt_base + 5].to_f32();
+                        let nz = tgt_data[tgt_base + 6].to_f32();
+
+                        let n_len = (nx * nx + ny * ny + nz * nz).sqrt();
+                        if n_len < 1e-6 {
+                            continue;
+                        }
+
+                        // Distance check
+                        let dx = tx - tgt_vx;
+                        let dy = ty_p - tgt_vy;
+                        let dz = tz - tgt_vz;
+                        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                        if dist > max_dist_f {
+                            continue;
+                        }
+
+                        // Normal angle check: dot product between transform's Z-axis and target normal
+                        let rz_x = tf[0][2];
+                        let rz_y = tf[1][2];
+                        let rz_z = tf[2][2];
+                        let cos_angle = (rz_x * nx + rz_y * ny + rz_z * nz).abs() / n_len;
+                        if cos_angle < cos_max_angle {
+                            continue;
+                        }
+
+                        // Point-to-plane residual: (p_transformed - p_target) . n
+                        let residual = dx * nx + dy * ny + dz * nz;
+
+                        // Jacobian for point-to-plane ICP (rotation, translation)
+                        // J = [n^T, (p_transformed x n)^T]
+                        // where rotation part uses cross product of transformed point with normal
+                        let cross_x = ty_p * nz - tz * ny;
+                        let cross_y = tz * nx - tx * nz;
+                        let cross_z = tx * ny - ty_p * nx;
+
+                        let j = [nx, ny, nz, cross_x, cross_y, cross_z];
+
+                        // Accumulate upper triangle of JtJ
+                        let mut idx = 0;
+                        for row in 0..6 {
+                            for col in row..6 {
+                                jtj_upper[idx] += j[row] * j[col];
+                                idx += 1;
+                            }
+                        }
+                        // Accumulate Jtr
+                        for row in 0..6 {
+                            jtr[row] += j[row] * residual;
+                        }
+                    }
+
+                    (jtj_upper, jtr)
+                },
+            )
+            .reduce(
+                || ([0.0f32; 21], [0.0f32; 6]),
+                |(mut a_jtj, mut a_jtr), (b_jtj, b_jtr)| {
+                    for i in 0..21 {
+                        a_jtj[i] += b_jtj[i];
+                    }
+                    for i in 0..6 {
+                        a_jtr[i] += b_jtr[i];
+                    }
+                    (a_jtj, a_jtr)
+                },
+            );
+
+        // Convert to nalgebra types
+        let mut jtj = nalgebra::Matrix6::<T>::zeros();
+        let mut idx = 0;
+        for row in 0..6 {
+            for col in row..6 {
+                let v = T::from_f32(jtj_upper[idx]);
+                jtj[(row, col)] = v;
+                jtj[(col, row)] = v;
+                idx += 1;
+            }
+        }
+
+        let mut jtr_out = nalgebra::Vector6::<T>::zeros();
+        for i in 0..6 {
+            jtr_out[i] = T::from_f32(jtr_acc[i]);
+        }
+
+        Ok((jtj, jtr_out))
     }
 
     fn cvt_color<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(

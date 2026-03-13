@@ -2189,10 +2189,56 @@ impl ComputeContext for GpuContext {
 
     fn pointcloud_transform<T: cv_core::Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
-        _points: &Tensor<T, S>,
-        _transform: &[[T; 4]; 4],
+        points: &Tensor<T, S>,
+        transform: &[[T; 4]; 4],
     ) -> crate::Result<Tensor<T, S>> {
-        Err(crate::Error::NotSupported("GPU pointcloud_transform not implemented".into()))
+        use crate::storage::GpuStorage;
+        use std::any::TypeId;
+        use std::marker::PhantomData;
+
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            if let Some(input_storage) = points.storage.as_any().downcast_ref::<GpuStorage<f32>>() {
+                let input_gpu = crate::GpuTensor {
+                    storage: input_storage.clone(),
+                    shape: points.shape,
+                    dtype: points.dtype,
+                    _phantom: PhantomData::<f32>,
+                };
+
+                // Safe: we verified T is f32 via TypeId check above
+                let transform_f32: &[[f32; 4]; 4] = unsafe {
+                    &*(transform as *const [[T; 4]; 4] as *const [[f32; 4]; 4])
+                };
+
+                let result_gpu = crate::gpu_kernels::pointcloud_transform::pointcloud_transform(
+                    self,
+                    &input_gpu,
+                    transform_f32,
+                )?;
+
+                let storage_any = result_gpu.storage.as_any();
+                if let Some(storage_s) = storage_any.downcast_ref::<S>() {
+                    Ok(Tensor {
+                        storage: storage_s.clone(),
+                        shape: result_gpu.shape,
+                        dtype: result_gpu.dtype,
+                        _phantom: PhantomData,
+                    })
+                } else {
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast GPU pointcloud_transform result".into(),
+                    ))
+                }
+            } else {
+                Err(crate::Error::InvalidInput(
+                    "GpuContext requires GpuStorage tensors. Use .to_gpu() first.".into(),
+                ))
+            }
+        } else {
+            Err(crate::Error::NotSupported(
+                "GPU pointcloud_transform only supports f32".into(),
+            ))
+        }
     }
 }
 

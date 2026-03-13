@@ -70,6 +70,7 @@ pub mod odometry;
 pub mod optical_flow;
 pub mod orientation;
 pub mod pointcloud;
+pub mod pointcloud_transform;
 pub mod pyramid;
 pub mod radix_sort;
 pub mod raycasting;
