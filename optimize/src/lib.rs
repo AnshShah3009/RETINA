@@ -1,7 +1,15 @@
+pub mod factor_graph;
+pub mod factors;
 pub mod gpu_solver;
 pub mod isam2;
 pub mod pose_graph;
 pub mod sparse;
+
+// Note: isam2 has its own inline factor graph types that predate the
+// canonical types in factor_graph.rs / factors.rs.  To avoid name
+// collisions at the crate root, import from the modules directly:
+//   use cv_optimize::factor_graph::{FactorGraph, Key, Values, ...};
+//   use cv_optimize::factors::{PriorFactor, BetweenFactor, ...};
 
 use cv_hal::compute::ComputeDevice;
 use nalgebra::DVector;
