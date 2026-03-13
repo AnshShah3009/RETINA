@@ -102,11 +102,7 @@ impl Factor for BetweenFactor {
             }
             (Variable::Point3(meas), Variable::Point3(p1), Variable::Point3(p2)) => {
                 let diff = p2 - p1;
-                DVector::from_vec(vec![
-                    diff.x - meas.x,
-                    diff.y - meas.y,
-                    diff.z - meas.z,
-                ])
+                DVector::from_vec(vec![diff.x - meas.x, diff.y - meas.y, diff.z - meas.z])
             }
             _ => {
                 // Generic fallback
@@ -201,12 +197,7 @@ pub struct BearingFactor {
 impl BearingFactor {
     /// `key_pose`: the observer pose, `key_point`: the observed landmark.
     /// `measured`: (azimuth, elevation) in radians.
-    pub fn new(
-        key_pose: Key,
-        key_point: Key,
-        measured: Vector2<f64>,
-        noise: NoiseModel,
-    ) -> Self {
+    pub fn new(key_pose: Key, key_point: Key, measured: Vector2<f64>, noise: NoiseModel) -> Self {
         debug_assert_eq!(noise.dim(), 2);
         Self {
             keys: [key_pose, key_point],
@@ -298,7 +289,9 @@ impl Factor for ProjectionFactor {
     }
 
     fn error(&self, values: &Values) -> DVector<f64> {
-        let pose = values.at_pose3(&self.keys[0]).expect("camera pose not found");
+        let pose = values
+            .at_pose3(&self.keys[0])
+            .expect("camera pose not found");
         let point = values.at_point3(&self.keys[1]).expect("landmark not found");
 
         // Transform point to camera frame (pose is world-from-camera, so
@@ -360,19 +353,19 @@ mod tests {
         let k1 = Key::symbol('x', 0);
         let k2 = Key::symbol('x', 1);
         let meas = Isometry3::translation(1.0, 0.0, 0.0);
-        let factor = BetweenFactor::new(
-            k1,
-            k2,
-            Variable::Pose3(meas),
-            NoiseModel::Isotropic(0.1, 6),
-        );
+        let factor =
+            BetweenFactor::new(k1, k2, Variable::Pose3(meas), NoiseModel::Isotropic(0.1, 6));
 
         let mut values = Values::new();
         values.insert(k1, Variable::Pose3(Isometry3::identity()));
         values.insert(k2, Variable::Pose3(Isometry3::translation(1.0, 0.0, 0.0)));
 
         let err = factor.error(&values);
-        assert!(err.norm() < 1e-10, "error at exact should be zero: {:?}", err);
+        assert!(
+            err.norm() < 1e-10,
+            "error at exact should be zero: {:?}",
+            err
+        );
     }
 
     #[test]
@@ -419,15 +412,27 @@ mod tests {
 
         // Expected projection: u = fx*0/5 + cx = 320, v = fy*0/5 + cy = 240
         let measured = Vector2::new(320.0, 240.0);
-        let factor =
-            ProjectionFactor::new(kp, kl, measured, fx, fy, cx, cy, NoiseModel::Isotropic(1.0, 2));
+        let factor = ProjectionFactor::new(
+            kp,
+            kl,
+            measured,
+            fx,
+            fy,
+            cx,
+            cy,
+            NoiseModel::Isotropic(1.0, 2),
+        );
 
         let mut values = Values::new();
         values.insert(kp, Variable::Pose3(Isometry3::identity()));
         values.insert(kl, Variable::Point3(Point3::new(0.0, 0.0, 5.0)));
 
         let err = factor.error(&values);
-        assert!(err.norm() < 1e-10, "projection at center should match: {:?}", err);
+        assert!(
+            err.norm() < 1e-10,
+            "projection at center should match: {:?}",
+            err
+        );
     }
 
     #[test]
@@ -442,8 +447,16 @@ mod tests {
 
         // Point at (1, 2, 10): u = 500*1/10 + 320 = 370, v = 500*2/10 + 240 = 340
         let measured = Vector2::new(370.0, 340.0);
-        let factor =
-            ProjectionFactor::new(kp, kl, measured, fx, fy, cx, cy, NoiseModel::Isotropic(1.0, 2));
+        let factor = ProjectionFactor::new(
+            kp,
+            kl,
+            measured,
+            fx,
+            fy,
+            cx,
+            cy,
+            NoiseModel::Isotropic(1.0, 2),
+        );
 
         let mut values = Values::new();
         values.insert(kp, Variable::Pose3(Isometry3::identity()));
@@ -487,9 +500,7 @@ mod tests {
         initial.insert(x1, Variable::Pose3(Isometry3::translation(1.2, -0.1, 0.0)));
         initial.insert(x2, Variable::Pose3(Isometry3::translation(2.3, 0.1, 0.0)));
 
-        let result = graph
-            .optimize_gn(&initial, &GNConfig::default())
-            .unwrap();
+        let result = graph.optimize_gn(&initial, &GNConfig::default()).unwrap();
 
         let p0 = result.at_pose3(&x0).unwrap();
         let p1 = result.at_pose3(&x1).unwrap();
@@ -521,20 +532,10 @@ mod tests {
         ));
 
         // Range from x0 to l0: 5.0
-        graph.add(RangeFactor::new(
-            x0,
-            l0,
-            5.0,
-            NoiseModel::Isotropic(0.1, 1),
-        ));
+        graph.add(RangeFactor::new(x0, l0, 5.0, NoiseModel::Isotropic(0.1, 1)));
         // Range from x1 to l0: 3.0 (landmark at (4, 3, 0) satisfies both)
         // dist((0,0,0), (4,3,0)) = 5, dist((4,0,0), (4,3,0)) = 3
-        graph.add(RangeFactor::new(
-            x1,
-            l0,
-            3.0,
-            NoiseModel::Isotropic(0.1, 1),
-        ));
+        graph.add(RangeFactor::new(x1, l0, 3.0, NoiseModel::Isotropic(0.1, 1)));
 
         let mut initial = Values::new();
         initial.insert(x0, Variable::Point3(Point3::origin()));
@@ -542,9 +543,7 @@ mod tests {
         // Start landmark estimate with some noise
         initial.insert(l0, Variable::Point3(Point3::new(3.0, 2.0, 0.0)));
 
-        let result = graph
-            .optimize_lm(&initial, &LMParams::default())
-            .unwrap();
+        let result = graph.optimize_lm(&initial, &LMParams::default()).unwrap();
 
         let lm = result.at_point3(&l0).unwrap();
         // Landmark should converge near (4, 3, 0) (or mirror (4, -3, 0))
@@ -582,7 +581,10 @@ mod tests {
             cam,
             l0,
             Vector2::new(420.0, 240.0),
-            fx, fy, cx, cy,
+            fx,
+            fy,
+            cx,
+            cy,
             NoiseModel::Isotropic(1.0, 2),
         ));
 
@@ -591,7 +593,10 @@ mod tests {
             cam,
             l1,
             Vector2::new(320.0, 340.0),
-            fx, fy, cx, cy,
+            fx,
+            fy,
+            cx,
+            cy,
             NoiseModel::Isotropic(1.0, 2),
         ));
 
@@ -600,22 +605,12 @@ mod tests {
         initial.insert(l0, Variable::Point3(Point3::new(1.2, 0.1, 5.5)));
         initial.insert(l1, Variable::Point3(Point3::new(0.1, 1.2, 4.5)));
 
-        let result = graph
-            .optimize_lm(&initial, &LMParams::default())
-            .unwrap();
+        let result = graph.optimize_lm(&initial, &LMParams::default()).unwrap();
 
         let p0 = result.at_point3(&l0).unwrap();
         let p1 = result.at_point3(&l1).unwrap();
 
-        assert!(
-            (p0.x - 1.0).abs() < 0.5,
-            "l0.x ~ 1.0, got {}",
-            p0.x
-        );
-        assert!(
-            (p1.y - 1.0).abs() < 0.5,
-            "l1.y ~ 1.0, got {}",
-            p1.y
-        );
+        assert!((p0.x - 1.0).abs() < 0.5, "l0.x ~ 1.0, got {}", p0.x);
+        assert!((p1.y - 1.0).abs() < 0.5, "l1.y ~ 1.0, got {}", p1.y);
     }
 }

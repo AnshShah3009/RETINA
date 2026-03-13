@@ -7,7 +7,7 @@ use crate::float::Float;
 pub trait Vector<T: Float>: Sized + Clone {
     /// Returns the number of dimensions of the vector.
     fn len(&self) -> usize;
-    
+
     /// Returns `true` if the vector has zero dimensions.
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -18,19 +18,19 @@ pub trait Vector<T: Float>: Sized + Clone {
     /// The dot product is the sum of the products of the corresponding entries of the two
     /// sequences of numbers.
     fn dot(&self, other: &Self) -> T;
-    
+
     /// Computes the L2 norm (magnitude) of the vector.
     ///
     /// The L2 norm is defined as the square root of the dot product of the vector with itself.
     fn norm(&self) -> T {
         self.dot(self).sqrt()
     }
-    
+
     /// Returns a normalized version of the vector (a unit vector with the same direction).
     ///
     /// If the vector's norm is zero, the behavior depends on the implementation (usually returns the same vector).
     fn normalize(&self) -> Self;
-    
+
     /// Computes the cross product of this 3D vector with another 3D vector.
     ///
     /// This operation is only defined for 3D vectors.
@@ -47,10 +47,10 @@ pub trait Point3D<T: Float>: Sized + Clone {
     fn y(&self) -> T;
     /// Returns the Z coordinate of the point.
     fn z(&self) -> T;
-    
+
     /// Computes the Euclidean distance between this point and another point.
     fn distance_to(&self, other: &Self) -> T;
-    
+
     /// Transforms the point by a 4x4 transformation matrix.
     ///
     /// This usually involves converting the point to homogeneous coordinates [x, y, z, 1],
@@ -64,20 +64,20 @@ pub trait Point3D<T: Float>: Sized + Clone {
 pub trait Matrix3x3<T: Float>: Sized + Clone {
     /// Returns the 3x3 identity matrix.
     fn identity() -> Self;
-    
+
     /// Multiplies the matrix by a 3D vector represented as an array.
     ///
     /// Returns the resulting 3D vector as an array.
     fn mul_vector(&self, v: &[T; 3]) -> [T; 3];
-    
+
     /// Multiplies this matrix by another 3x3 matrix.
     ///
     /// Returns the resulting 3x3 matrix.
     fn mul_matrix(&self, other: &Self) -> Self;
-    
+
     /// Computes the determinant of the 3x3 matrix.
     fn determinant(&self) -> T;
-    
+
     /// Computes the inverse of the matrix, if it is invertible.
     ///
     /// Returns `Some(inverse)` if the matrix is invertible, or `None` if it is singular.
@@ -90,17 +90,17 @@ pub trait Matrix3x3<T: Float>: Sized + Clone {
 pub trait Matrix4x4<T: Float>: Sized + Clone {
     /// Returns the 4x4 identity matrix.
     fn identity() -> Self;
-    
+
     /// Multiplies the matrix by a 4D vector represented as an array.
     ///
     /// Returns the resulting 4D vector as an array.
     fn mul_vector(&self, v: &[T; 4]) -> [T; 4];
-    
+
     /// Multiplies this matrix by another 4x4 matrix.
     ///
     /// Returns the resulting 4x4 matrix.
     fn mul_matrix(&self, other: &Self) -> Self;
-    
+
     /// Computes the inverse of the matrix, if it is invertible.
     ///
     /// Returns `Some(inverse)` if the matrix is invertible, or `None` if it is singular.

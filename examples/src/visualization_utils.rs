@@ -102,11 +102,10 @@ fn draw_circle(img: &mut RgbImage, center: (i32, i32), radius: i32, color: Rgb<u
 
     for y in (cy - radius)..=(cy + radius) {
         for x in (cx - radius)..=(cx + radius) {
-            if (x - cx).pow(2) + (y - cy).pow(2) <= r2 {
-                if x >= 0 && x < img.width() as i32 && y >= 0 && y < img.height() as i32 {
+            if (x - cx).pow(2) + (y - cy).pow(2) <= r2
+                && x >= 0 && x < img.width() as i32 && y >= 0 && y < img.height() as i32 {
                     img.put_pixel(x as u32, y as u32, color);
                 }
-            }
         }
     }
 }

@@ -49,21 +49,19 @@ pub struct DeviceRuntime {
 impl DeviceRuntime {
     pub fn new(context: BackendContext) -> Self {
         let id = context.device_id();
-        
+
         // MemoryManager needs Arc<Device> for GPU pooling.
         // If it's CPU, we still need a MemoryManager but it doesn't do GPU pooling.
         // We'll provide a dummy device for CPU or handle it in MemoryManager.
         // For now, let's extract the device from the context.
-        
+
         let memory = match &context {
             BackendContext::Gpu(c) => Arc::new(MemoryManager::new(id, Some(c.device.clone()))),
             BackendContext::Mlx(_) => {
                 // MLX contexts don't use standard wgpu buffer pooling yet
                 Arc::new(MemoryManager::new(id, None))
-            },
-            BackendContext::Cpu(_) => {
-                Arc::new(MemoryManager::new(id, None))
             }
+            BackendContext::Cpu(_) => Arc::new(MemoryManager::new(id, None)),
         };
 
         Self {

@@ -117,12 +117,12 @@ impl LinearSolver for GpuCgSolver {
         if let ComputeDevice::Gpu(gpu) = ctx {
             // Convert to f32 for GPU
             let b_f32: Vec<f32> = b.iter().map(|&v| v as f32).collect();
-            let row_ptr_u32: Vec<u32> = a.row_ptr.iter().map(|&v| v as u32).collect();
-            let col_indices_u32: Vec<u32> = a.col_indices.iter().map(|&v| v as u32).collect();
+            let row_ptr_u32: Vec<u32> = a.row_ptr.iter().map(|&v| v).collect();
+            let col_indices_u32: Vec<u32> = a.col_indices.iter().map(|&v| v).collect();
             let values_f32: Vec<f32> = a.values.iter().map(|&v| v as f32).collect();
 
+            use cv_core::{DataType, Tensor, TensorShape};
             use cv_hal::storage::GpuStorage;
-            use cv_core::{Tensor, TensorShape, DataType};
             use std::marker::PhantomData;
 
             let n = b.len();
@@ -147,7 +147,8 @@ impl LinearSolver for GpuCgSolver {
                 _phantom: PhantomData,
             };
 
-            let mut rr = cv_hal::gpu_kernels::sparse::dot(gpu, &r_gpu, &r_gpu).map_err(|e| e.to_string())?;
+            let mut rr =
+                cv_hal::gpu_kernels::sparse::dot(gpu, &r_gpu, &r_gpu).map_err(|e| e.to_string())?;
 
             for _ in 0..self.max_iterations {
                 let ap_gpu = cv_hal::gpu_kernels::sparse::spmv(
@@ -155,28 +156,37 @@ impl LinearSolver for GpuCgSolver {
                     &row_ptr_u32,
                     &col_indices_u32,
                     &values_f32,
-                    &p_gpu
-                ).map_err(|e| e.to_string())?;
+                    &p_gpu,
+                )
+                .map_err(|e| e.to_string())?;
 
-                let p_ap = cv_hal::gpu_kernels::sparse::dot(gpu, &p_gpu, &ap_gpu).map_err(|e| e.to_string())?;
-                if p_ap.abs() < 1e-20 { break; }
+                let p_ap = cv_hal::gpu_kernels::sparse::dot(gpu, &p_gpu, &ap_gpu)
+                    .map_err(|e| e.to_string())?;
+                if p_ap.abs() < 1e-20 {
+                    break;
+                }
                 let alpha = rr / p_ap;
 
                 // x = x + alpha * p
-                cv_hal::gpu_kernels::sparse::axpy(gpu, alpha, &p_gpu, &mut x_gpu).map_err(|e| e.to_string())?;
+                cv_hal::gpu_kernels::sparse::axpy(gpu, alpha, &p_gpu, &mut x_gpu)
+                    .map_err(|e| e.to_string())?;
                 // r = r - alpha * ap
-                cv_hal::gpu_kernels::sparse::axpy(gpu, -alpha, &ap_gpu, &mut r_gpu).map_err(|e| e.to_string())?;
+                cv_hal::gpu_kernels::sparse::axpy(gpu, -alpha, &ap_gpu, &mut r_gpu)
+                    .map_err(|e| e.to_string())?;
 
-                let rr_new = cv_hal::gpu_kernels::sparse::dot(gpu, &r_gpu, &r_gpu).map_err(|e| e.to_string())?;
+                let rr_new = cv_hal::gpu_kernels::sparse::dot(gpu, &r_gpu, &r_gpu)
+                    .map_err(|e| e.to_string())?;
                 if rr_new.sqrt() < self.tolerance as f32 {
                     break;
                 }
 
                 let beta = rr_new / rr;
                 // p = r + beta * p
-                cv_hal::gpu_kernels::sparse::vec_scale(gpu, beta, &mut p_gpu).map_err(|e| e.to_string())?;
-                cv_hal::gpu_kernels::sparse::vec_add(gpu, &r_gpu, &mut p_gpu).map_err(|e| e.to_string())?;
-                
+                cv_hal::gpu_kernels::sparse::vec_scale(gpu, beta, &mut p_gpu)
+                    .map_err(|e| e.to_string())?;
+                cv_hal::gpu_kernels::sparse::vec_add(gpu, &r_gpu, &mut p_gpu)
+                    .map_err(|e| e.to_string())?;
+
                 rr = rr_new;
             }
 
@@ -187,9 +197,12 @@ impl LinearSolver for GpuCgSolver {
                 x_gpu.storage.buffer(),
                 0,
                 n * 4,
-            )).map_err(|e| e.to_string())?;
+            ))
+            .map_err(|e| e.to_string())?;
 
-            return Ok(DVector::from_vec(x_f32.into_iter().map(|v| v as f64).collect()));
+            return Ok(DVector::from_vec(
+                x_f32.into_iter().map(|v| v as f64).collect(),
+            ));
         }
         self.solve_cpu(a, b)
     }

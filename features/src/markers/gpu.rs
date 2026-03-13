@@ -271,9 +271,9 @@ impl MarkerGpuContext {
         // Dictionary buffer: dict_size * 8 bytes
         // Params buffer: 32 bytes
         let image_memory = gpu_utils::estimate_image_buffer_size(width, height, 4);
-        let candidates_memory = candidates.len() * std::mem::size_of::<GpuCandidate>();
+        let candidates_memory = std::mem::size_of_val(candidates);
         let results_memory = candidates.len() * std::mem::size_of::<GpuMarkerResult>();
-        let dictionary_memory = dictionary.len() * std::mem::size_of::<u64>();
+        let dictionary_memory = std::mem::size_of_val(dictionary);
         let total_memory =
             image_memory + candidates_memory + results_memory + dictionary_memory + 32;
 

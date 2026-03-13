@@ -77,9 +77,7 @@ pub fn interp1d_cubic(x: &[f64], y: &[f64], x_new: &[f64]) -> Result<Vec<f64>, S
     let mut m = vec![0.0; n]; // second derivatives
 
     if n_interior > 0 {
-        let d: Vec<f64> = (0..nm1)
-            .map(|i| (y[i + 1] - y[i]) / h[i])
-            .collect();
+        let d: Vec<f64> = (0..nm1).map(|i| (y[i + 1] - y[i]) / h[i]).collect();
 
         // Thomas algorithm
         let mut a = vec![0.0; n_interior]; // sub-diagonal
@@ -218,7 +216,9 @@ pub fn interp1d_akima(x: &[f64], y: &[f64], x_new: &[f64]) -> Result<Vec<f64>, S
 
     // Compute slopes between consecutive points
     let mut m = Vec::with_capacity(nm1 + 4);
-    let slopes: Vec<f64> = (0..nm1).map(|i| (y[i + 1] - y[i]) / (x[i + 1] - x[i])).collect();
+    let slopes: Vec<f64> = (0..nm1)
+        .map(|i| (y[i + 1] - y[i]) / (x[i + 1] - x[i]))
+        .collect();
 
     // Extend slopes at boundaries (Akima's method needs m[-2], m[-1] and m[n-1], m[n])
     // Use parabolic extrapolation at boundaries

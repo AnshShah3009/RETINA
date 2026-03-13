@@ -114,7 +114,7 @@ impl Isam2Solver {
         let mut affected: HashSet<Key> = new_keys.into_iter().collect();
 
         if self.config.enable_partial_relinearization
-            && self.update_count % self.config.relinearize_skip == 0
+            && self.update_count.is_multiple_of(self.config.relinearize_skip)
         {
             affected.extend(self.needs_relinearization());
         }
@@ -262,10 +262,7 @@ impl Isam2Solver {
 
     // -- helpers --
 
-    fn build_ordering(
-        theta: &Values,
-        ordered_keys: &[Key],
-    ) -> (HashMap<Key, usize>, usize) {
+    fn build_ordering(theta: &Values, ordered_keys: &[Key]) -> (HashMap<Key, usize>, usize) {
         let mut map = HashMap::new();
         let mut offset = 0usize;
         for &k in ordered_keys {
@@ -378,38 +375,69 @@ mod tests {
     #[test]
     fn test_1d_chain_converges() {
         let mut solver = Isam2Solver::new(Isam2Config {
-            gauss_newton_params: GNParams { max_iters: 20, tolerance: 1e-8 },
+            gauss_newton_params: GNParams {
+                max_iters: 20,
+                tolerance: 1e-8,
+            },
             ..Default::default()
         });
         let k0 = Key(0);
         let k1 = Key(1);
         let k2 = Key(2);
 
-        let prior = PriorFactor::new(k0, Variable::Vector(DVector::from_element(1, 0.0)), iso_noise(1, 0.01));
-        let b01 = BetweenFactor::new(k0, k1, Variable::Vector(DVector::from_element(1, 1.0)), iso_noise(1, 0.1));
-        let b12 = BetweenFactor::new(k1, k2, Variable::Vector(DVector::from_element(1, 2.0)), iso_noise(1, 0.1));
+        let prior = PriorFactor::new(
+            k0,
+            Variable::Vector(DVector::from_element(1, 0.0)),
+            iso_noise(1, 0.01),
+        );
+        let b01 = BetweenFactor::new(
+            k0,
+            k1,
+            Variable::Vector(DVector::from_element(1, 1.0)),
+            iso_noise(1, 0.1),
+        );
+        let b12 = BetweenFactor::new(
+            k1,
+            k2,
+            Variable::Vector(DVector::from_element(1, 2.0)),
+            iso_noise(1, 0.1),
+        );
 
         let mut init = Values::new();
         init.insert(k0, Variable::Vector(DVector::from_element(1, 0.5)));
         init.insert(k1, Variable::Vector(DVector::from_element(1, 1.5)));
         init.insert(k2, Variable::Vector(DVector::from_element(1, 3.5)));
 
-        solver.update(vec![Box::new(prior), Box::new(b01), Box::new(b12)], init).unwrap();
+        solver
+            .update(vec![Box::new(prior), Box::new(b01), Box::new(b12)], init)
+            .unwrap();
 
-        let x0 = match solver.estimate(&k0).unwrap() { Variable::Vector(v) => v[0], _ => panic!() };
+        let x0 = match solver.estimate(&k0).unwrap() {
+            Variable::Vector(v) => v[0],
+            _ => panic!(),
+        };
         assert!(x0.abs() < 0.05, "x0 = {} should be near 0.0", x0);
 
-        let x1 = match solver.estimate(&k1).unwrap() { Variable::Vector(v) => v[0], _ => panic!() };
+        let x1 = match solver.estimate(&k1).unwrap() {
+            Variable::Vector(v) => v[0],
+            _ => panic!(),
+        };
         assert!((x1 - 1.0).abs() < 0.2, "x1 = {} should be near 1.0", x1);
 
-        let x2 = match solver.estimate(&k2).unwrap() { Variable::Vector(v) => v[0], _ => panic!() };
+        let x2 = match solver.estimate(&k2).unwrap() {
+            Variable::Vector(v) => v[0],
+            _ => panic!(),
+        };
         assert!((x2 - 3.0).abs() < 0.2, "x2 = {} should be near 3.0", x2);
     }
 
     #[test]
     fn test_incremental_updates() {
         let mut solver = Isam2Solver::new(Isam2Config {
-            gauss_newton_params: GNParams { max_iters: 20, tolerance: 1e-8 },
+            gauss_newton_params: GNParams {
+                max_iters: 20,
+                tolerance: 1e-8,
+            },
             ..Default::default()
         });
         let k0 = Key(0);
@@ -420,11 +448,20 @@ mod tests {
         {
             let mut vals = Values::new();
             vals.insert(k0, Variable::Vector(DVector::from_element(1, 0.1)));
-            solver.update(
-                vec![Box::new(PriorFactor::new(k0, Variable::Vector(DVector::from_element(1, 0.0)), iso_noise(1, 0.01)))],
-                vals,
-            ).unwrap();
-            let x0 = match solver.estimate(&k0).unwrap() { Variable::Vector(v) => v[0], _ => panic!() };
+            solver
+                .update(
+                    vec![Box::new(PriorFactor::new(
+                        k0,
+                        Variable::Vector(DVector::from_element(1, 0.0)),
+                        iso_noise(1, 0.01),
+                    ))],
+                    vals,
+                )
+                .unwrap();
+            let x0 = match solver.estimate(&k0).unwrap() {
+                Variable::Vector(v) => v[0],
+                _ => panic!(),
+            };
             assert!(x0.abs() < 0.05, "x0 = {} should be near 0", x0);
         }
 
@@ -432,11 +469,21 @@ mod tests {
         {
             let mut vals = Values::new();
             vals.insert(k1, Variable::Vector(DVector::from_element(1, 0.5)));
-            solver.update(
-                vec![Box::new(BetweenFactor::new(k0, k1, Variable::Vector(DVector::from_element(1, 1.0)), iso_noise(1, 0.1)))],
-                vals,
-            ).unwrap();
-            let x1 = match solver.estimate(&k1).unwrap() { Variable::Vector(v) => v[0], _ => panic!() };
+            solver
+                .update(
+                    vec![Box::new(BetweenFactor::new(
+                        k0,
+                        k1,
+                        Variable::Vector(DVector::from_element(1, 1.0)),
+                        iso_noise(1, 0.1),
+                    ))],
+                    vals,
+                )
+                .unwrap();
+            let x1 = match solver.estimate(&k1).unwrap() {
+                Variable::Vector(v) => v[0],
+                _ => panic!(),
+            };
             assert!((x1 - 1.0).abs() < 0.3, "x1 = {} should be near 1.0", x1);
         }
 
@@ -444,11 +491,21 @@ mod tests {
         {
             let mut vals = Values::new();
             vals.insert(k2, Variable::Vector(DVector::from_element(1, 2.0)));
-            solver.update(
-                vec![Box::new(BetweenFactor::new(k1, k2, Variable::Vector(DVector::from_element(1, 2.0)), iso_noise(1, 0.1)))],
-                vals,
-            ).unwrap();
-            let x2 = match solver.estimate(&k2).unwrap() { Variable::Vector(v) => v[0], _ => panic!() };
+            solver
+                .update(
+                    vec![Box::new(BetweenFactor::new(
+                        k1,
+                        k2,
+                        Variable::Vector(DVector::from_element(1, 2.0)),
+                        iso_noise(1, 0.1),
+                    ))],
+                    vals,
+                )
+                .unwrap();
+            let x2 = match solver.estimate(&k2).unwrap() {
+                Variable::Vector(v) => v[0],
+                _ => panic!(),
+            };
             assert!((x2 - 3.0).abs() < 0.5, "x2 = {} should be near 3.0", x2);
         }
 
@@ -465,57 +522,126 @@ mod tests {
 
         // Incremental
         let mut inc = Isam2Solver::new(Isam2Config {
-            gauss_newton_params: GNParams { max_iters: 30, tolerance: 1e-10 },
+            gauss_newton_params: GNParams {
+                max_iters: 30,
+                tolerance: 1e-10,
+            },
             ..Default::default()
         });
         {
             let mut v = Values::new();
             v.insert(k0, Variable::Vector(DVector::from_element(1, 0.5)));
-            inc.update(vec![Box::new(PriorFactor::new(k0, Variable::Vector(DVector::from_element(1, 0.0)), iso_noise(1, 0.01)))], v).unwrap();
+            inc.update(
+                vec![Box::new(PriorFactor::new(
+                    k0,
+                    Variable::Vector(DVector::from_element(1, 0.0)),
+                    iso_noise(1, 0.01),
+                ))],
+                v,
+            )
+            .unwrap();
         }
         {
             let mut v = Values::new();
             v.insert(k1, Variable::Vector(DVector::from_element(1, 1.5)));
-            inc.update(vec![Box::new(BetweenFactor::new(k0, k1, Variable::Vector(DVector::from_element(1, 1.0)), iso_noise(1, sigma)))], v).unwrap();
+            inc.update(
+                vec![Box::new(BetweenFactor::new(
+                    k0,
+                    k1,
+                    Variable::Vector(DVector::from_element(1, 1.0)),
+                    iso_noise(1, sigma),
+                ))],
+                v,
+            )
+            .unwrap();
         }
         {
             let mut v = Values::new();
             v.insert(k2, Variable::Vector(DVector::from_element(1, 3.5)));
-            inc.update(vec![Box::new(BetweenFactor::new(k1, k2, Variable::Vector(DVector::from_element(1, 2.0)), iso_noise(1, sigma)))], v).unwrap();
+            inc.update(
+                vec![Box::new(BetweenFactor::new(
+                    k1,
+                    k2,
+                    Variable::Vector(DVector::from_element(1, 2.0)),
+                    iso_noise(1, sigma),
+                ))],
+                v,
+            )
+            .unwrap();
         }
 
         // Batch
         let mut batch = Isam2Solver::new(Isam2Config {
-            gauss_newton_params: GNParams { max_iters: 30, tolerance: 1e-10 },
+            gauss_newton_params: GNParams {
+                max_iters: 30,
+                tolerance: 1e-10,
+            },
             ..Default::default()
         });
-        batch.theta.insert(k0, Variable::Vector(DVector::from_element(1, 0.5)));
-        batch.theta.insert(k1, Variable::Vector(DVector::from_element(1, 1.5)));
-        batch.theta.insert(k2, Variable::Vector(DVector::from_element(1, 3.5)));
+        batch
+            .theta
+            .insert(k0, Variable::Vector(DVector::from_element(1, 0.5)));
+        batch
+            .theta
+            .insert(k1, Variable::Vector(DVector::from_element(1, 1.5)));
+        batch
+            .theta
+            .insert(k2, Variable::Vector(DVector::from_element(1, 3.5)));
         batch.last_linearized = batch.theta.clone();
 
         let fv: Vec<Box<dyn Factor>> = vec![
-            Box::new(PriorFactor::new(k0, Variable::Vector(DVector::from_element(1, 0.0)), iso_noise(1, 0.01))),
-            Box::new(BetweenFactor::new(k0, k1, Variable::Vector(DVector::from_element(1, 1.0)), iso_noise(1, sigma))),
-            Box::new(BetweenFactor::new(k1, k2, Variable::Vector(DVector::from_element(1, 2.0)), iso_noise(1, sigma))),
+            Box::new(PriorFactor::new(
+                k0,
+                Variable::Vector(DVector::from_element(1, 0.0)),
+                iso_noise(1, 0.01),
+            )),
+            Box::new(BetweenFactor::new(
+                k0,
+                k1,
+                Variable::Vector(DVector::from_element(1, 1.0)),
+                iso_noise(1, sigma),
+            )),
+            Box::new(BetweenFactor::new(
+                k1,
+                k2,
+                Variable::Vector(DVector::from_element(1, 2.0)),
+                iso_noise(1, sigma),
+            )),
         ];
         for (i, f) in fv.into_iter().enumerate() {
-            for &k in f.keys() { batch.key_to_factors.entry(k).or_default().push(i); }
+            for &k in f.keys() {
+                batch.key_to_factors.entry(k).or_default().push(i);
+            }
             batch.factors.push(f);
         }
         batch.optimize_batch().unwrap();
 
         for k in [k0, k1, k2] {
-            let vi = match inc.estimate(&k).unwrap() { Variable::Vector(v) => v[0], _ => panic!() };
-            let vb = match batch.estimate(&k).unwrap() { Variable::Vector(v) => v[0], _ => panic!() };
-            assert!((vi - vb).abs() < 0.15, "Key {:?}: inc={} batch={}", k, vi, vb);
+            let vi = match inc.estimate(&k).unwrap() {
+                Variable::Vector(v) => v[0],
+                _ => panic!(),
+            };
+            let vb = match batch.estimate(&k).unwrap() {
+                Variable::Vector(v) => v[0],
+                _ => panic!(),
+            };
+            assert!(
+                (vi - vb).abs() < 0.15,
+                "Key {:?}: inc={} batch={}",
+                k,
+                vi,
+                vb
+            );
         }
     }
 
     #[test]
     fn test_2d_pose_slam_loop() {
         let mut solver = Isam2Solver::new(Isam2Config {
-            gauss_newton_params: GNParams { max_iters: 30, tolerance: 1e-8 },
+            gauss_newton_params: GNParams {
+                max_iters: 30,
+                tolerance: 1e-8,
+            },
             ..Default::default()
         });
         let k0 = Key(0);
@@ -525,18 +651,59 @@ mod tests {
         let sigma = 0.05;
 
         let mut vals = Values::new();
-        vals.insert(k0, Variable::Vector(DVector::from_vec(vec![0.1, -0.1, 0.05])));
-        vals.insert(k1, Variable::Vector(DVector::from_vec(vec![1.1, 0.1, -0.05])));
-        vals.insert(k2, Variable::Vector(DVector::from_vec(vec![0.9, 1.1, 0.03])));
-        vals.insert(k3, Variable::Vector(DVector::from_vec(vec![-0.1, 0.9, -0.02])));
+        vals.insert(
+            k0,
+            Variable::Vector(DVector::from_vec(vec![0.1, -0.1, 0.05])),
+        );
+        vals.insert(
+            k1,
+            Variable::Vector(DVector::from_vec(vec![1.1, 0.1, -0.05])),
+        );
+        vals.insert(
+            k2,
+            Variable::Vector(DVector::from_vec(vec![0.9, 1.1, 0.03])),
+        );
+        vals.insert(
+            k3,
+            Variable::Vector(DVector::from_vec(vec![-0.1, 0.9, -0.02])),
+        );
 
-        solver.update(vec![
-            Box::new(PriorFactor::new(k0, Variable::Vector(DVector::from_vec(vec![0.0, 0.0, 0.0])), iso_noise(3, 0.01))),
-            Box::new(BetweenFactor::new(k0, k1, Variable::Vector(DVector::from_vec(vec![1.0, 0.0, 0.0])), iso_noise(3, sigma))),
-            Box::new(BetweenFactor::new(k1, k2, Variable::Vector(DVector::from_vec(vec![0.0, 1.0, 0.0])), iso_noise(3, sigma))),
-            Box::new(BetweenFactor::new(k2, k3, Variable::Vector(DVector::from_vec(vec![-1.0, 0.0, 0.0])), iso_noise(3, sigma))),
-            Box::new(BetweenFactor::new(k3, k0, Variable::Vector(DVector::from_vec(vec![0.0, -1.0, 0.0])), iso_noise(3, sigma))),
-        ], vals).unwrap();
+        solver
+            .update(
+                vec![
+                    Box::new(PriorFactor::new(
+                        k0,
+                        Variable::Vector(DVector::from_vec(vec![0.0, 0.0, 0.0])),
+                        iso_noise(3, 0.01),
+                    )),
+                    Box::new(BetweenFactor::new(
+                        k0,
+                        k1,
+                        Variable::Vector(DVector::from_vec(vec![1.0, 0.0, 0.0])),
+                        iso_noise(3, sigma),
+                    )),
+                    Box::new(BetweenFactor::new(
+                        k1,
+                        k2,
+                        Variable::Vector(DVector::from_vec(vec![0.0, 1.0, 0.0])),
+                        iso_noise(3, sigma),
+                    )),
+                    Box::new(BetweenFactor::new(
+                        k2,
+                        k3,
+                        Variable::Vector(DVector::from_vec(vec![-1.0, 0.0, 0.0])),
+                        iso_noise(3, sigma),
+                    )),
+                    Box::new(BetweenFactor::new(
+                        k3,
+                        k0,
+                        Variable::Vector(DVector::from_vec(vec![0.0, -1.0, 0.0])),
+                        iso_noise(3, sigma),
+                    )),
+                ],
+                vals,
+            )
+            .unwrap();
 
         let expected: [(Key, [f64; 3]); 4] = [
             (k0, [0.0, 0.0, 0.0]),
@@ -545,9 +712,19 @@ mod tests {
             (k3, [0.0, 1.0, 0.0]),
         ];
         for (k, gt) in &expected {
-            let est = match solver.estimate(k).unwrap() { Variable::Vector(v) => v.clone(), _ => panic!() };
+            let est = match solver.estimate(k).unwrap() {
+                Variable::Vector(v) => v.clone(),
+                _ => panic!(),
+            };
             for i in 0..3 {
-                assert!((est[i] - gt[i]).abs() < 0.15, "Key {:?}[{}]: est={} gt={}", k, i, est[i], gt[i]);
+                assert!(
+                    (est[i] - gt[i]).abs() < 0.15,
+                    "Key {:?}[{}]: est={} gt={}",
+                    k,
+                    i,
+                    est[i],
+                    gt[i]
+                );
             }
         }
         assert!(solver.total_error() < 1.0, "error={}", solver.total_error());
@@ -556,7 +733,10 @@ mod tests {
     #[test]
     fn test_pose3_between_factor() {
         let mut solver = Isam2Solver::new(Isam2Config {
-            gauss_newton_params: GNParams { max_iters: 30, tolerance: 1e-8 },
+            gauss_newton_params: GNParams {
+                max_iters: 30,
+                tolerance: 1e-8,
+            },
             ..Default::default()
         });
         let k0 = Key(0);
@@ -569,21 +749,46 @@ mod tests {
         vals.insert(k0, Variable::Pose3(Isometry3::translation(0.1, 0.0, 0.0)));
         vals.insert(k1, Variable::Pose3(Isometry3::translation(0.8, 0.1, 0.0)));
 
-        solver.update(vec![
-            Box::new(PriorFactor::new(k0, Variable::Pose3(gt0), iso_noise(6, 0.01))),
-            Box::new(BetweenFactor::new(k0, k1, Variable::Pose3(measured), iso_noise(6, 0.05))),
-        ], vals).unwrap();
+        solver
+            .update(
+                vec![
+                    Box::new(PriorFactor::new(
+                        k0,
+                        Variable::Pose3(gt0),
+                        iso_noise(6, 0.01),
+                    )),
+                    Box::new(BetweenFactor::new(
+                        k0,
+                        k1,
+                        Variable::Pose3(measured),
+                        iso_noise(6, 0.05),
+                    )),
+                ],
+                vals,
+            )
+            .unwrap();
 
         let est0 = solver.estimate_pose3(&k0).unwrap();
-        assert!(est0.translation.vector.norm() < 0.1, "Pose0 near origin: {:?}", est0.translation.vector);
+        assert!(
+            est0.translation.vector.norm() < 0.1,
+            "Pose0 near origin: {:?}",
+            est0.translation.vector
+        );
         let est1 = solver.estimate_pose3(&k1).unwrap();
-        assert!((est1.translation.vector.x - 1.0).abs() < 0.15, "Pose1.x near 1.0: {}", est1.translation.vector.x);
+        assert!(
+            (est1.translation.vector.x - 1.0).abs() < 0.15,
+            "Pose1.x near 1.0: {}",
+            est1.translation.vector.x
+        );
     }
 
     #[test]
     fn test_point3_estimation() {
         let mut solver = Isam2Solver::new(Isam2Config {
-            gauss_newton_params: GNParams { max_iters: 20, tolerance: 1e-8 },
+            gauss_newton_params: GNParams {
+                max_iters: 20,
+                tolerance: 1e-8,
+            },
             ..Default::default()
         });
         let k0 = Key(1_000_000);
@@ -593,15 +798,37 @@ mod tests {
         vals.insert(k0, Variable::Point3(Point3::new(1.2, 1.8, 3.1)));
         vals.insert(k1, Variable::Point3(Point3::new(2.0, 1.5, 3.0)));
 
-        solver.update(vec![
-            Box::new(PriorFactor::new(k0, Variable::Point3(Point3::new(1.0, 2.0, 3.0)), iso_noise(3, 0.01))),
-            Box::new(BetweenFactor::new(k0, k1, Variable::Point3(Point3::new(1.0, 0.0, 0.0)), iso_noise(3, 0.05))),
-        ], vals).unwrap();
+        solver
+            .update(
+                vec![
+                    Box::new(PriorFactor::new(
+                        k0,
+                        Variable::Point3(Point3::new(1.0, 2.0, 3.0)),
+                        iso_noise(3, 0.01),
+                    )),
+                    Box::new(BetweenFactor::new(
+                        k0,
+                        k1,
+                        Variable::Point3(Point3::new(1.0, 0.0, 0.0)),
+                        iso_noise(3, 0.05),
+                    )),
+                ],
+                vals,
+            )
+            .unwrap();
 
         let p0 = solver.estimate_point3(&k0).unwrap();
-        assert!((p0.x - 1.0).abs() < 0.1 && (p0.y - 2.0).abs() < 0.1 && (p0.z - 3.0).abs() < 0.1, "p0={:?}", p0);
+        assert!(
+            (p0.x - 1.0).abs() < 0.1 && (p0.y - 2.0).abs() < 0.1 && (p0.z - 3.0).abs() < 0.1,
+            "p0={:?}",
+            p0
+        );
         let p1 = solver.estimate_point3(&k1).unwrap();
-        assert!((p1.x - 2.0).abs() < 0.15 && (p1.y - 2.0).abs() < 0.15 && (p1.z - 3.0).abs() < 0.15, "p1={:?}", p1);
+        assert!(
+            (p1.x - 2.0).abs() < 0.15 && (p1.y - 2.0).abs() < 0.15 && (p1.z - 3.0).abs() < 0.15,
+            "p1={:?}",
+            p1
+        );
     }
 
     #[test]
@@ -624,8 +851,8 @@ mod tests {
 // Backward-compatible Isam2 wrapper (used by Python bindings)
 // ---------------------------------------------------------------------------
 
-use std::sync::RwLock;
 use crate::factors::BetweenFactor;
+use std::sync::RwLock;
 
 /// Legacy Isam2 interface for backward compatibility with Python bindings.
 pub struct Isam2 {
@@ -637,7 +864,9 @@ pub struct Isam2 {
 }
 
 impl Isam2 {
-    pub fn new() -> Self { Self::with_config(true, false) }
+    pub fn new() -> Self {
+        Self::with_config(true, false)
+    }
 
     pub fn with_config(optimize_on_update: bool, _batch_optimize: bool) -> Self {
         Self {
@@ -650,7 +879,12 @@ impl Isam2 {
 
     pub fn add_pose(&self, id: usize, initial: nalgebra::Vector3<f64>) {
         if let Ok(mut vals) = self.pending_values.write() {
-            vals.insert(Key(id as u64), Variable::Vector(DVector::from_column_slice(&[initial.x, initial.y, initial.z])));
+            vals.insert(
+                Key(id as u64),
+                Variable::Vector(DVector::from_column_slice(&[
+                    initial.x, initial.y, initial.z,
+                ])),
+            );
         }
     }
 
@@ -663,7 +897,8 @@ impl Isam2 {
     pub fn add_factor(&self, from: usize, to: usize, measurement: DVector<f64>, noise: f64) {
         let dim = measurement.len();
         let factor = BetweenFactor::new(
-            Key(from as u64), Key(to as u64),
+            Key(from as u64),
+            Key(to as u64),
             Variable::Vector(measurement),
             NoiseModel::Diagonal(DVector::from_element(dim, noise)),
         );
@@ -673,14 +908,21 @@ impl Isam2 {
     }
 
     pub fn update(&self) -> Result<(), String> {
-        let factors = std::mem::take(&mut *self.pending_factors.write().map_err(|e| e.to_string())?);
-        let values = std::mem::replace(&mut *self.pending_values.write().map_err(|e| e.to_string())?, Values::new());
+        let factors =
+            std::mem::take(&mut *self.pending_factors.write().map_err(|e| e.to_string())?);
+        let values = std::mem::replace(
+            &mut *self.pending_values.write().map_err(|e| e.to_string())?,
+            Values::new(),
+        );
         let mut solver = self.solver.write().map_err(|e| e.to_string())?;
         solver.update(factors, values)
     }
 
     pub fn optimize(&self) -> Result<(), String> {
-        self.solver.write().map_err(|e| e.to_string())?.optimize_batch()?;
+        self.solver
+            .write()
+            .map_err(|e| e.to_string())?
+            .optimize_batch()?;
         Ok(())
     }
 
@@ -704,7 +946,9 @@ impl Isam2 {
         for id in 0..1_000_000u64 {
             if let Some(var) = solver.estimate(&Key(id)) {
                 match var {
-                    Variable::Vector(v) if v.len() >= 3 => result.push((id as usize, nalgebra::Vector3::new(v[0], v[1], v[2]))),
+                    Variable::Vector(v) if v.len() >= 3 => {
+                        result.push((id as usize, nalgebra::Vector3::new(v[0], v[1], v[2])))
+                    }
                     Variable::Pose3(iso) => result.push((id as usize, iso.translation.vector)),
                     _ => {}
                 }
@@ -713,8 +957,16 @@ impl Isam2 {
         result
     }
 
-    pub fn num_nodes(&self) -> usize { self.solver.read().map(|s| s.num_variables()).unwrap_or(0) }
-    pub fn num_factors(&self) -> usize { self.solver.read().map(|s| s.num_factors()).unwrap_or(0) }
+    pub fn num_nodes(&self) -> usize {
+        self.solver.read().map(|s| s.num_variables()).unwrap_or(0)
+    }
+    pub fn num_factors(&self) -> usize {
+        self.solver.read().map(|s| s.num_factors()).unwrap_or(0)
+    }
 }
 
-impl Default for Isam2 { fn default() -> Self { Self::new() } }
+impl Default for Isam2 {
+    fn default() -> Self {
+        Self::new()
+    }
+}

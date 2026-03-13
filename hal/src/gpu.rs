@@ -75,15 +75,18 @@ impl ComputeContext for GpuContext {
         SubmissionIndex(self.last_submission.load(Ordering::SeqCst))
     }
 
-    fn convolve_2d<T: cv_core::Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn convolve_2d<
+        T: cv_core::Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         kernel: &Tensor<T, S>,
         border_mode: BorderMode<T>,
     ) -> crate::Result<Tensor<T, S>> {
         use crate::storage::GpuStorage;
-        use std::marker::PhantomData;
         use std::any::TypeId;
+        use std::marker::PhantomData;
 
         if TypeId::of::<T>() == TypeId::of::<f32>() {
             if let (Some(input_storage), Some(kernel_storage)) = (
@@ -104,7 +107,9 @@ impl ComputeContext for GpuContext {
                 };
 
                 let border_f32: crate::context::BorderMode<f32> = match border_mode {
-                    crate::context::BorderMode::Constant(v) => crate::context::BorderMode::Constant(v.to_f32()),
+                    crate::context::BorderMode::Constant(v) => {
+                        crate::context::BorderMode::Constant(v.to_f32())
+                    }
                     crate::context::BorderMode::Replicate => crate::context::BorderMode::Replicate,
                     crate::context::BorderMode::Reflect => crate::context::BorderMode::Reflect,
                     crate::context::BorderMode::Wrap => crate::context::BorderMode::Wrap,
@@ -115,7 +120,7 @@ impl ComputeContext for GpuContext {
                     &kernel_gpu,
                     border_f32,
                 )?;
-                
+
                 let storage_any = result_gpu.storage.as_any();
                 if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                     Ok(Tensor {
@@ -125,7 +130,9 @@ impl ComputeContext for GpuContext {
                         _phantom: PhantomData,
                     })
                 } else {
-                    Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast GPU result".into(),
+                    ))
                 }
             } else {
                 Err(crate::Error::InvalidInput(
@@ -133,7 +140,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU convolve_2d only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU convolve_2d only supports f32".into(),
+            ))
         }
     }
 
@@ -207,7 +216,10 @@ impl ComputeContext for GpuContext {
         Ok(())
     }
 
-    fn threshold<T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn threshold<
+        T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         thresh: T,
@@ -227,7 +239,7 @@ impl ComputeContext for GpuContext {
 
             let result_gpu =
                 crate::gpu_kernels::threshold::threshold(self, &input_gpu, thresh, max_value, typ)?;
-            
+
             let storage_any = result_gpu.storage.as_any();
             if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                 Ok(Tensor {
@@ -237,7 +249,9 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 })
             } else {
-                Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                Err(crate::Error::InvalidInput(
+                    "Failed to downcast GPU result".into(),
+                ))
             }
         } else {
             Err(crate::Error::InvalidInput(
@@ -246,7 +260,10 @@ impl ComputeContext for GpuContext {
         }
     }
 
-    fn sobel<T: cv_core::Float + bytemuck::Pod + std::fmt::Debug + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn sobel<
+        T: cv_core::Float + bytemuck::Pod + std::fmt::Debug + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         dx: i32,
@@ -268,13 +285,31 @@ impl ComputeContext for GpuContext {
 
                 let (gx_gpu, gy_gpu) =
                     crate::gpu_kernels::sobel::sobel(self, &input_gpu, dx, dy, ksize)?;
-                let gx_s = gx_gpu.storage.as_any().downcast_ref::<S>()
-                    .ok_or_else(|| crate::Error::InvalidInput("Failed to downcast gx".into()))?.clone();
-                let gy_s = gy_gpu.storage.as_any().downcast_ref::<S>()
-                    .ok_or_else(|| crate::Error::InvalidInput("Failed to downcast gy".into()))?.clone();
+                let gx_s = gx_gpu
+                    .storage
+                    .as_any()
+                    .downcast_ref::<S>()
+                    .ok_or_else(|| crate::Error::InvalidInput("Failed to downcast gx".into()))?
+                    .clone();
+                let gy_s = gy_gpu
+                    .storage
+                    .as_any()
+                    .downcast_ref::<S>()
+                    .ok_or_else(|| crate::Error::InvalidInput("Failed to downcast gy".into()))?
+                    .clone();
                 Ok((
-                    Tensor { storage: gx_s, shape: gx_gpu.shape, dtype: gx_gpu.dtype, _phantom: PhantomData },
-                    Tensor { storage: gy_s, shape: gy_gpu.shape, dtype: gy_gpu.dtype, _phantom: PhantomData },
+                    Tensor {
+                        storage: gx_s,
+                        shape: gx_gpu.shape,
+                        dtype: gx_gpu.dtype,
+                        _phantom: PhantomData,
+                    },
+                    Tensor {
+                        storage: gy_s,
+                        shape: gy_gpu.shape,
+                        dtype: gy_gpu.dtype,
+                        _phantom: PhantomData,
+                    },
                 ))
             } else {
                 Err(crate::Error::InvalidInput(
@@ -282,7 +317,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU sobel only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU sobel only supports f32".into(),
+            ))
         }
     }
 
@@ -295,10 +332,13 @@ impl ComputeContext for GpuContext {
         low_threshold: T,
         high_threshold: T,
     ) -> crate::Result<Tensor<T, S>> {
-        
         use std::marker::PhantomData;
 
-        if let Some(input_storage) = input.storage.as_any().downcast_ref::<crate::storage::GpuStorage<f32>>() {
+        if let Some(input_storage) = input
+            .storage
+            .as_any()
+            .downcast_ref::<crate::storage::GpuStorage<f32>>()
+        {
             let input_gpu: crate::GpuTensor<f32> = cv_core::Tensor {
                 storage: input_storage.clone(),
                 shape: input.shape,
@@ -321,7 +361,9 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 })
             } else {
-                Err(crate::Error::InvalidInput("Failed to downcast canny GPU result".into()))
+                Err(crate::Error::InvalidInput(
+                    "Failed to downcast canny GPU result".into(),
+                ))
             }
         } else {
             Err(crate::Error::InvalidInput(
@@ -340,10 +382,13 @@ impl ComputeContext for GpuContext {
         theta: T,
         threshold: u32,
     ) -> crate::Result<Vec<cv_core::HoughLine>> {
-        
         use std::marker::PhantomData;
 
-        if let Some(input_storage) = input.storage.as_any().downcast_ref::<crate::storage::GpuStorage<f32>>() {
+        if let Some(input_storage) = input
+            .storage
+            .as_any()
+            .downcast_ref::<crate::storage::GpuStorage<f32>>()
+        {
             let input_gpu: crate::GpuTensor<f32> = cv_core::Tensor {
                 storage: input_storage.clone(),
                 shape: input.shape,
@@ -376,10 +421,13 @@ impl ComputeContext for GpuContext {
         max_radius: T,
         threshold: u32,
     ) -> crate::Result<Vec<cv_core::HoughCircle>> {
-        
         use std::marker::PhantomData;
 
-        if let Some(input_storage) = input.storage.as_any().downcast_ref::<crate::storage::GpuStorage<f32>>() {
+        if let Some(input_storage) = input
+            .storage
+            .as_any()
+            .downcast_ref::<crate::storage::GpuStorage<f32>>()
+        {
             let input_gpu: crate::GpuTensor<f32> = cv_core::Tensor {
                 storage: input_storage.clone(),
                 shape: input.shape,
@@ -412,12 +460,17 @@ impl ComputeContext for GpuContext {
         template: &Tensor<T, S>,
         method: TemplateMatchMethod,
     ) -> crate::Result<Tensor<T, OS>> {
-        
         use std::marker::PhantomData;
 
         if let (Some(img_storage), Some(templ_storage)) = (
-            image.storage.as_any().downcast_ref::<crate::storage::GpuStorage<f32>>(),
-            template.storage.as_any().downcast_ref::<crate::storage::GpuStorage<f32>>(),
+            image
+                .storage
+                .as_any()
+                .downcast_ref::<crate::storage::GpuStorage<f32>>(),
+            template
+                .storage
+                .as_any()
+                .downcast_ref::<crate::storage::GpuStorage<f32>>(),
         ) {
             let img_gpu: crate::GpuTensor<f32> = cv_core::Tensor {
                 storage: img_storage.clone(),
@@ -444,7 +497,9 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 })
             } else {
-                Err(crate::Error::InvalidInput("Failed to downcast match_template GPU result".into()))
+                Err(crate::Error::InvalidInput(
+                    "Failed to downcast match_template GPU result".into(),
+                ))
             }
         } else {
             Err(crate::Error::InvalidInput(
@@ -476,12 +531,16 @@ impl ComputeContext for GpuContext {
         right: &Tensor<T, S>,
         params: &StereoMatchParams,
     ) -> crate::Result<Tensor<T, OS>> {
-        
         use std::marker::PhantomData;
 
         if let (Some(l_storage), Some(r_storage)) = (
-            left.storage.as_any().downcast_ref::<crate::storage::GpuStorage<f32>>(),
-            right.storage.as_any().downcast_ref::<crate::storage::GpuStorage<f32>>(),
+            left.storage
+                .as_any()
+                .downcast_ref::<crate::storage::GpuStorage<f32>>(),
+            right
+                .storage
+                .as_any()
+                .downcast_ref::<crate::storage::GpuStorage<f32>>(),
         ) {
             let l_gpu: crate::GpuTensor<f32> = cv_core::Tensor {
                 storage: l_storage.clone(),
@@ -498,7 +557,7 @@ impl ComputeContext for GpuContext {
 
             let result_gpu =
                 crate::gpu_kernels::stereo::stereo_match(self, &l_gpu, &r_gpu, params)?;
-            
+
             let storage_any = result_gpu.storage.as_any();
             if let Some(storage_s) = storage_any.downcast_ref::<OS>() {
                 Ok(Tensor {
@@ -508,7 +567,9 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 })
             } else {
-                Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                Err(crate::Error::InvalidInput(
+                    "Failed to downcast GPU result".into(),
+                ))
             }
         } else {
             Err(crate::Error::InvalidInput(
@@ -560,49 +621,56 @@ impl ComputeContext for GpuContext {
             input.storage.as_any().downcast_ref::<GpuStorage<u8>>(),
             kernel.storage.as_any().downcast_ref::<GpuStorage<u8>>(),
         ) {
-                let input_gpu = Tensor {
-                    storage: input_storage.clone(),
-                    shape: input.shape,
-                    dtype: input.dtype,
-                    _phantom: PhantomData,
-                };
-                let kernel_gpu = Tensor {
-                    storage: kernel_storage.clone(),
-                    shape: kernel.shape,
-                    dtype: kernel.dtype,
-                    _phantom: PhantomData,
-                };
+            let input_gpu = Tensor {
+                storage: input_storage.clone(),
+                shape: input.shape,
+                dtype: input.dtype,
+                _phantom: PhantomData,
+            };
+            let kernel_gpu = Tensor {
+                storage: kernel_storage.clone(),
+                shape: kernel.shape,
+                dtype: kernel.dtype,
+                _phantom: PhantomData,
+            };
 
-                let result_gpu = crate::gpu_kernels::morphology::morphology(
-                    self,
-                    &input_gpu,
-                    typ,
-                    &kernel_gpu,
-                    iterations,
-                )?;
-                // Safety: we know T is compatible here if we reached this point with GpuStorage<u8>
-                // but this is tricky with the generic T. 
-                // Given the HAL structure, we'll likely only call this with T=f32 or u8.
-                // If it's f32 and we have u8 storage, we have a problem.
-                // Let's assume for now morphology on GPU is f32-compatible or we use casts.
-                // Actually, the previous code used GpuStorage<u8>.
-                let storage_any = result_gpu.storage.as_any();
-                if let Some(storage_s) = storage_any.downcast_ref::<S>() {
-                    Ok(Tensor {
-                        storage: storage_s.clone(),
-                        shape: result_gpu.shape,
-                        dtype: result_gpu.dtype,
-                        _phantom: PhantomData,
-                    })
-                } else {
-                    Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
-                }
+            let result_gpu = crate::gpu_kernels::morphology::morphology(
+                self,
+                &input_gpu,
+                typ,
+                &kernel_gpu,
+                iterations,
+            )?;
+            // Safety: we know T is compatible here if we reached this point with GpuStorage<u8>
+            // but this is tricky with the generic T.
+            // Given the HAL structure, we'll likely only call this with T=f32 or u8.
+            // If it's f32 and we have u8 storage, we have a problem.
+            // Let's assume for now morphology on GPU is f32-compatible or we use casts.
+            // Actually, the previous code used GpuStorage<u8>.
+            let storage_any = result_gpu.storage.as_any();
+            if let Some(storage_s) = storage_any.downcast_ref::<S>() {
+                Ok(Tensor {
+                    storage: storage_s.clone(),
+                    shape: result_gpu.shape,
+                    dtype: result_gpu.dtype,
+                    _phantom: PhantomData,
+                })
             } else {
-                Err(crate::Error::InvalidInput("Morphology requires GpuStorage<u8>".into()))
+                Err(crate::Error::InvalidInput(
+                    "Failed to downcast GPU result".into(),
+                ))
             }
+        } else {
+            Err(crate::Error::InvalidInput(
+                "Morphology requires GpuStorage<u8>".into(),
+            ))
+        }
     }
 
-    fn warp<T: cv_core::Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn warp<
+        T: cv_core::Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         matrix: &[[T; 3]; 3],
@@ -623,9 +691,21 @@ impl ComputeContext for GpuContext {
                 };
 
                 let matrix_f32: [[f32; 3]; 3] = [
-                    [matrix[0][0].to_f32(), matrix[0][1].to_f32(), matrix[0][2].to_f32()],
-                    [matrix[1][0].to_f32(), matrix[1][1].to_f32(), matrix[1][2].to_f32()],
-                    [matrix[2][0].to_f32(), matrix[2][1].to_f32(), matrix[2][2].to_f32()],
+                    [
+                        matrix[0][0].to_f32(),
+                        matrix[0][1].to_f32(),
+                        matrix[0][2].to_f32(),
+                    ],
+                    [
+                        matrix[1][0].to_f32(),
+                        matrix[1][1].to_f32(),
+                        matrix[1][2].to_f32(),
+                    ],
+                    [
+                        matrix[2][0].to_f32(),
+                        matrix[2][1].to_f32(),
+                        matrix[2][2].to_f32(),
+                    ],
                 ];
 
                 let result_gpu =
@@ -639,7 +719,9 @@ impl ComputeContext for GpuContext {
                         _phantom: PhantomData,
                     })
                 } else {
-                    Err(crate::Error::InvalidInput("Failed to downcast warp GPU result".into()))
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast warp GPU result".into(),
+                    ))
                 }
             } else {
                 Err(crate::Error::InvalidInput(
@@ -647,7 +729,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU warp only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU warp only supports f32".into(),
+            ))
         }
     }
 
@@ -678,9 +762,16 @@ impl ComputeContext for GpuContext {
                 )?;
                 let storage_any = result_gpu.storage.as_any();
                 if let Some(storage_s) = storage_any.downcast_ref::<S>() {
-                    Ok(Tensor { storage: storage_s.clone(), shape: result_gpu.shape, dtype: result_gpu.dtype, _phantom: PhantomData })
+                    Ok(Tensor {
+                        storage: storage_s.clone(),
+                        shape: result_gpu.shape,
+                        dtype: result_gpu.dtype,
+                        _phantom: PhantomData,
+                    })
                 } else {
-                    Err(crate::Error::InvalidInput("Failed to downcast nms GPU result".into()))
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast nms GPU result".into(),
+                    ))
                 }
             } else {
                 Err(crate::Error::InvalidInput(
@@ -688,11 +779,16 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU nms only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU nms only supports f32".into(),
+            ))
         }
     }
 
-    fn nms_boxes<T: cv_core::Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn nms_boxes<
+        T: cv_core::Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         iou_threshold: T,
@@ -717,7 +813,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU nms_boxes only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU nms_boxes only supports f32".into(),
+            ))
         }
     }
 
@@ -882,7 +980,7 @@ impl ComputeContext for GpuContext {
 
                 let result_gpu =
                     crate::gpu_kernels::pointcloud::compute_normals(self, &input_gpu, k_neighbors)?;
-                
+
                 let storage_any = result_gpu.storage.as_any();
                 if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                     Ok(Tensor {
@@ -892,7 +990,9 @@ impl ComputeContext for GpuContext {
                         _phantom: PhantomData,
                     })
                 } else {
-                    Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast GPU result".into(),
+                    ))
                 }
             } else {
                 Err(crate::Error::InvalidInput(
@@ -900,7 +1000,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU pointcloud_normals only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU pointcloud_normals only supports f32".into(),
+            ))
         }
     }
 
@@ -992,13 +1094,11 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU tsdf_integrate only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU tsdf_integrate only supports f32".into(),
+            ))
         }
     }
-
-
-
-
 
     fn tsdf_raycast<
         T: cv_core::Float + 'static,
@@ -1074,7 +1174,7 @@ impl ComputeContext for GpuContext {
                     voxel_size.to_f32(),
                     truncation.to_f32(),
                 )?;
-                
+
                 let storage_any = result_gpu.storage.as_any();
                 if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                     Ok(Tensor {
@@ -1084,7 +1184,9 @@ impl ComputeContext for GpuContext {
                         _phantom: PhantomData,
                     })
                 } else {
-                    Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast GPU result".into(),
+                    ))
                 }
             } else {
                 Err(crate::Error::InvalidInput(
@@ -1092,7 +1194,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU tsdf_raycast only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU tsdf_raycast only supports f32".into(),
+            ))
         }
     }
 
@@ -1136,7 +1240,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU tsdf_extract_mesh only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU tsdf_extract_mesh only supports f32".into(),
+            ))
         }
     }
 
@@ -1201,16 +1307,21 @@ impl ComputeContext for GpuContext {
                 window_size,
                 max_iters,
             )?;
-            
+
             // Safety: we verified T == f32, so Vec<[f32;2]> and Vec<[T;2]> have identical layout.
             let results_t: Vec<[T; 2]> = unsafe { std::mem::transmute(results) };
             Ok(results_t)
         } else {
-            Err(crate::Error::NotSupported("GPU optical_flow_lk only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU optical_flow_lk only supports f32".into(),
+            ))
         }
     }
 
-    fn pyramid_down<T: cv_core::Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pyramid_down<
+        T: cv_core::Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> crate::Result<Tensor<T, S>> {
@@ -1230,9 +1341,16 @@ impl ComputeContext for GpuContext {
                 let result_gpu = crate::gpu_kernels::pyramid::pyramid_down(self, &input_gpu)?;
                 let storage_any = result_gpu.storage.as_any();
                 if let Some(storage_s) = storage_any.downcast_ref::<S>() {
-                    Ok(Tensor { storage: storage_s.clone(), shape: result_gpu.shape, dtype: result_gpu.dtype, _phantom: PhantomData })
+                    Ok(Tensor {
+                        storage: storage_s.clone(),
+                        shape: result_gpu.shape,
+                        dtype: result_gpu.dtype,
+                        _phantom: PhantomData,
+                    })
                 } else {
-                    Err(crate::Error::InvalidInput("Failed to downcast pyramid_down result".into()))
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast pyramid_down result".into(),
+                    ))
                 }
             } else {
                 Err(crate::Error::InvalidInput(
@@ -1240,7 +1358,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU pyramid_down only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU pyramid_down only supports f32".into(),
+            ))
         }
     }
 
@@ -1264,7 +1384,7 @@ impl ComputeContext for GpuContext {
             };
 
             let result_gpu = crate::gpu_kernels::color::color_convert(self, &input_gpu, code)?;
-            
+
             let storage_any = result_gpu.storage.as_any();
             if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                 Ok(Tensor {
@@ -1274,7 +1394,9 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 })
             } else {
-                Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                Err(crate::Error::InvalidInput(
+                    "Failed to downcast GPU result".into(),
+                ))
             }
         } else {
             Err(crate::Error::InvalidInput(
@@ -1308,7 +1430,7 @@ impl ComputeContext for GpuContext {
                 new_shape.0 as u32,
                 new_shape.1 as u32,
             )?;
-            
+
             let storage_any = result_gpu.storage.as_any();
             if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                 Ok(Tensor {
@@ -1318,7 +1440,9 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 })
             } else {
-                Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                Err(crate::Error::InvalidInput(
+                    "Failed to downcast GPU result".into(),
+                ))
             }
         } else {
             Err(crate::Error::InvalidInput(
@@ -1355,7 +1479,7 @@ impl ComputeContext for GpuContext {
                 sigma_color,
                 sigma_space,
             )?;
-            
+
             let storage_any = result_gpu.storage.as_any();
             if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                 Ok(Tensor {
@@ -1365,7 +1489,9 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 })
             } else {
-                Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                Err(crate::Error::InvalidInput(
+                    "Failed to downcast GPU result".into(),
+                ))
             }
         } else {
             Err(crate::Error::InvalidInput(
@@ -1400,7 +1526,7 @@ impl ComputeContext for GpuContext {
                 threshold,
                 non_max_suppression,
             )?;
-            
+
             let storage_any = result_gpu.storage.as_any();
             if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                 Ok(Tensor {
@@ -1410,7 +1536,9 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 })
             } else {
-                Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                Err(crate::Error::InvalidInput(
+                    "Failed to downcast GPU result".into(),
+                ))
             }
         } else {
             Err(crate::Error::InvalidInput(
@@ -1441,9 +1569,13 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 };
 
-                let blurred_f32 =
-                    crate::gpu_kernels::convolve::gaussian_blur(self, &input_gpu, sigma.to_f32(), k_size)?;
-                
+                let blurred_f32 = crate::gpu_kernels::convolve::gaussian_blur(
+                    self,
+                    &input_gpu,
+                    sigma.to_f32(),
+                    k_size,
+                )?;
+
                 let storage_any = blurred_f32.storage.as_any();
                 if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                     Ok(Tensor {
@@ -1453,7 +1585,9 @@ impl ComputeContext for GpuContext {
                         _phantom: PhantomData,
                     })
                 } else {
-                    Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast GPU result".into(),
+                    ))
                 }
             } else {
                 Err(crate::Error::InvalidInput(
@@ -1461,7 +1595,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU gaussian_blur only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU gaussian_blur only supports f32".into(),
+            ))
         }
     }
 
@@ -1612,7 +1748,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU sift_extrema only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU sift_extrema only supports f32".into(),
+            ))
         }
     }
 
@@ -1667,13 +1805,13 @@ impl ComputeContext for GpuContext {
                     kp_data.len() as u32,
                     0u32,
                 ];
-                let params_buffer = self
-                    .device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("SIFT Desc Params"),
-                        contents: bytemuck::cast_slice(&params),
-                        usage: wgpu::BufferUsages::UNIFORM,
-                    });
+                let params_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("SIFT Desc Params"),
+                            contents: bytemuck::cast_slice(&params),
+                            usage: wgpu::BufferUsages::UNIFORM,
+                        });
 
                 let shader_source = include_str!("../shaders/sift_descriptor.wgsl");
                 let pipeline = self.create_compute_pipeline(shader_source, "main");
@@ -1733,7 +1871,10 @@ impl ComputeContext for GpuContext {
                         .iter()
                         .map(|&v| (v * 512.0).min(255.0) as u8)
                         .collect();
-                    descs.push(cv_core::Descriptor::new(data, keypoints.keypoints[i].clone()));
+                    descs.push(cv_core::Descriptor::new(
+                        data,
+                        keypoints.keypoints[i],
+                    ));
                 }
 
                 Ok(cv_core::Descriptors { descriptors: descs })
@@ -1743,7 +1884,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU compute_sift_descriptors only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU compute_sift_descriptors only supports f32".into(),
+            ))
         }
     }
 
@@ -1778,17 +1921,27 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 };
 
-                let res = crate::gpu_kernels::icp::icp_correspondences(self, &src_gpu, &tgt_gpu, max_dist.to_f32())?;
+                let res = crate::gpu_kernels::icp::icp_correspondences(
+                    self,
+                    &src_gpu,
+                    &tgt_gpu,
+                    max_dist.to_f32(),
+                )?;
 
                 // Convert Vec<(usize, usize, f32)> to Vec<(usize, usize, T)>
-                Ok(res.into_iter().map(|(a, b, d)| (a, b, T::from_f32(d))).collect())
+                Ok(res
+                    .into_iter()
+                    .map(|(a, b, d)| (a, b, T::from_f32(d)))
+                    .collect())
             } else {
                 Err(crate::Error::InvalidInput(
                     "GpuContext requires GpuStorage tensors".into(),
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU icp_correspondences only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU icp_correspondences only supports f32".into(),
+            ))
         }
     }
 
@@ -1853,7 +2006,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU icp_accumulate only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU icp_accumulate only supports f32".into(),
+            ))
         }
     }
 
@@ -1922,7 +2077,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU dense_icp_step only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU dense_icp_step only supports f32".into(),
+            ))
         }
     }
 
@@ -1948,7 +2105,12 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 };
 
-                let result_gpu = crate::gpu_kernels::akaze::akaze_diffusion(self, &input_gpu, k.to_f32(), tau.to_f32())?;
+                let result_gpu = crate::gpu_kernels::akaze::akaze_diffusion(
+                    self,
+                    &input_gpu,
+                    k.to_f32(),
+                    tau.to_f32(),
+                )?;
 
                 let storage_any = result_gpu.storage.as_any();
                 if let Some(storage_s) = storage_any.downcast_ref::<S>() {
@@ -1969,7 +2131,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU akaze_diffusion only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU akaze_diffusion only supports f32".into(),
+            ))
         }
     }
 
@@ -2036,7 +2200,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU akaze_derivatives only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU akaze_derivatives only supports f32".into(),
+            ))
         }
     }
 
@@ -2068,7 +2234,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU akaze_contrast_k only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU akaze_contrast_k only supports f32".into(),
+            ))
         }
     }
 
@@ -2097,8 +2265,13 @@ impl ComputeContext for GpuContext {
 
                 let values_f32: &[f32] = bytemuck::cast_slice(values);
 
-                let result_gpu =
-                    crate::gpu_kernels::sparse::spmv(self, row_ptr, col_indices, values_f32, &x_gpu)?;
+                let result_gpu = crate::gpu_kernels::sparse::spmv(
+                    self,
+                    row_ptr,
+                    col_indices,
+                    values_f32,
+                    &x_gpu,
+                )?;
 
                 let storage_any = result_gpu.storage.as_any();
                 if let Some(storage_s) = storage_any.downcast_ref::<S>() {
@@ -2119,7 +2292,9 @@ impl ComputeContext for GpuContext {
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU spmv only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU spmv only supports f32".into(),
+            ))
         }
     }
     fn mog2_update<
@@ -2176,18 +2351,29 @@ impl ComputeContext for GpuContext {
                     _padding: params._padding,
                 };
 
-                crate::gpu_kernels::mog2_update(self, &frame_gpu, &mut model_gpu, &mut mask_gpu, &params_f32)
+                crate::gpu_kernels::mog2_update(
+                    self,
+                    &frame_gpu,
+                    &mut model_gpu,
+                    &mut mask_gpu,
+                    &params_f32,
+                )
             } else {
                 Err(crate::Error::InvalidInput(
                     "GpuContext requires GpuStorage tensors".into(),
                 ))
             }
         } else {
-            Err(crate::Error::NotSupported("GPU mog2_update only supports f32".into()))
+            Err(crate::Error::NotSupported(
+                "GPU mog2_update only supports f32".into(),
+            ))
         }
     }
 
-    fn pointcloud_transform<T: cv_core::Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pointcloud_transform<
+        T: cv_core::Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         points: &Tensor<T, S>,
         transform: &[[T; 4]; 4],
@@ -2206,9 +2392,8 @@ impl ComputeContext for GpuContext {
                 };
 
                 // Safe: we verified T is f32 via TypeId check above
-                let transform_f32: &[[f32; 4]; 4] = unsafe {
-                    &*(transform as *const [[T; 4]; 4] as *const [[f32; 4]; 4])
-                };
+                let transform_f32: &[[f32; 4]; 4] =
+                    unsafe { &*(transform as *const [[T; 4]; 4] as *const [[f32; 4]; 4]) };
 
                 let result_gpu = crate::gpu_kernels::pointcloud_transform::pointcloud_transform(
                     self,

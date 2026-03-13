@@ -303,7 +303,7 @@ mod tests {
         let img = make_binary_image(10, 10, &pixels);
         let (labels, num_labels) = connected_components(&img, 8).unwrap();
         assert_eq!(num_labels, 2); // background + 1 component
-        // Check a foreground pixel
+                                   // Check a foreground pixel
         assert_eq!(labels.index(0, 3, 2).unwrap(), 1);
         // Check a background pixel
         assert_eq!(labels.index(0, 0, 0).unwrap(), 0);

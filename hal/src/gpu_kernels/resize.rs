@@ -63,7 +63,11 @@ pub fn resize<T: cv_core::float::Float + bytemuck::Pod>(
 
     let shader_source = match cv_core::DataType::from_type::<T>() {
         Ok(cv_core::DataType::F32) => include_str!("../../shaders/resize_f32.wgsl"),
-        Ok(_) => return Err(crate::Error::NotSupported("Unsupported resize precision type".into())),
+        Ok(_) => {
+            return Err(crate::Error::NotSupported(
+                "Unsupported resize precision type".into(),
+            ))
+        }
         _ => {
             include_str!("../../shaders/resize_f32.wgsl")
         }
@@ -76,7 +80,13 @@ pub fn resize<T: cv_core::float::Float + bytemuck::Pod>(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: input.storage.as_any().downcast_ref::<GpuStorage<f32>>().unwrap().buffer().as_entire_binding(),
+                resource: input
+                    .storage
+                    .as_any()
+                    .downcast_ref::<GpuStorage<f32>>()
+                    .unwrap()
+                    .buffer()
+                    .as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,

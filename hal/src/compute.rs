@@ -48,7 +48,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn threshold<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn threshold<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         thresh: T,
@@ -62,7 +65,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn sobel<T: Float + bytemuck::Pod + std::fmt::Debug + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn sobel<
+        T: Float + bytemuck::Pod + std::fmt::Debug + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         dx: i32,
@@ -90,7 +96,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn warp<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn warp<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         matrix: &[[T; 3]; 3],
@@ -129,7 +138,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn nms_rotated_boxes<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn nms_rotated_boxes<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         iou_threshold: T,
@@ -154,7 +166,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn pointcloud_transform<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn pointcloud_transform<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         points: &Tensor<T, S>,
         transform: &[[T; 4]; 4],
@@ -166,7 +181,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn pointcloud_normals<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn pointcloud_normals<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         points: &Tensor<T, S>,
         k_neighbors: u32,
@@ -178,7 +196,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn tsdf_integrate<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn tsdf_integrate<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         depth_image: &Tensor<T, S>,
         camera_pose: &[[T; 4]; 4],
@@ -215,7 +236,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn tsdf_raycast<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn tsdf_raycast<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         tsdf_volume: &Tensor<T, S>,
         camera_pose: &[[T; 4]; 4],
@@ -256,7 +280,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn tsdf_extract_mesh<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn tsdf_extract_mesh<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         tsdf_volume: &Tensor<T, S>,
         voxel_size: T,
@@ -276,7 +303,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn optical_flow_lk<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn optical_flow_lk<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         prev_pyramid: &[Tensor<T, S>],
         next_pyramid: &[Tensor<T, S>],
@@ -297,7 +327,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn cvt_color<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn cvt_color<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         code: ColorConversion,
@@ -309,7 +342,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn resize<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn resize<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         new_shape: (usize, usize),
@@ -321,7 +357,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn pyramid_down<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn pyramid_down<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> Result<Tensor<T, S>> {
@@ -349,7 +388,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn fast_detect<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn fast_detect<
+        T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         threshold: T,
@@ -378,7 +420,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn subtract<T: Float + 'static + bytemuck::Pod, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn subtract<
+        T: Float + 'static + bytemuck::Pod,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         a: &Tensor<T, S>,
         b: &Tensor<T, S>,
@@ -403,7 +448,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn sift_extrema<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn sift_extrema<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         dog_prev: &Tensor<T, S>,
         dog_curr: &Tensor<T, S>,
@@ -424,7 +472,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn compute_sift_descriptors<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn compute_sift_descriptors<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         image: &Tensor<T, S>,
         keypoints: &cv_core::KeyPoints,
@@ -436,7 +487,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn icp_correspondences<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn icp_correspondences<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         src: &Tensor<T, S>,
         tgt: &Tensor<T, S>,
@@ -449,7 +503,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn icp_accumulate<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn icp_accumulate<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         source: &Tensor<T, S>,
         target: &Tensor<T, S>,
@@ -470,7 +527,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn dense_icp_step<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn dense_icp_step<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         source_depth: &Tensor<T, S>,
         target_data: &Tensor<T, S>,
@@ -507,7 +567,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn akaze_diffusion<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn akaze_diffusion<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         k: T,
@@ -520,7 +583,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn akaze_derivatives<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn akaze_derivatives<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> Result<(Tensor<T, S>, Tensor<T, S>, Tensor<T, S>)> {
@@ -531,7 +597,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn akaze_contrast_k<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn akaze_contrast_k<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> Result<T> {
@@ -542,7 +611,10 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn spmv<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    pub fn spmv<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         row_ptr: &[u32],
         col_indices: &[u32],
@@ -556,7 +628,11 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
-    pub fn mog2_update<T: Float + bytemuck::Pod + 'static, S1: Storage<T> + 'static, S2: Storage<u32> + 'static>(
+    pub fn mog2_update<
+        T: Float + bytemuck::Pod + 'static,
+        S1: Storage<T> + 'static,
+        S2: Storage<u32> + 'static,
+    >(
         &self,
         frame: &Tensor<T, S1>,
         model: &mut Tensor<T, S1>,

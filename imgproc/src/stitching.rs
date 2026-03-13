@@ -60,7 +60,7 @@ pub fn find_homography(
 
         // Row 2i+1:  sx sy 1  0 0 0  -dx*sx -dx*sy -dx
         let r1 = 2 * i + 1;
-        a_data[r1 * 9 + 0] = sx;
+        a_data[(r1 * 9)] = sx;
         a_data[r1 * 9 + 1] = sy;
         a_data[r1 * 9 + 2] = 1.0;
         a_data[r1 * 9 + 6] = -dx * sx;
@@ -371,11 +371,7 @@ pub fn stitch_pair<T: Float + Default + 'static>(
     let out_h = (max_y + offset_y).ceil() as usize + 1;
 
     // Translation matrix to shift everything by offset.
-    let t_offset = [
-        [1.0, 0.0, offset_x],
-        [0.0, 1.0, offset_y],
-        [0.0, 0.0, 1.0],
-    ];
+    let t_offset = [[1.0, 0.0, offset_x], [0.0, 1.0, offset_y], [0.0, 0.0, 1.0]];
 
     // Warp img2 with combined H.
     let h_combined = mat3_mul(&t_offset, &h);
@@ -564,8 +560,8 @@ mod tests {
             (25.0, 75.0),
             (75.0, 25.0),
             (60.0, 40.0),
-            (10.0, 10.0),  // outlier
-            (90.0, 90.0),  // outlier
+            (10.0, 10.0), // outlier
+            (90.0, 90.0), // outlier
         ];
         let mut dst: Vec<(f64, f64)> = src.iter().map(|&(x, y)| (x + 5.0, y + 5.0)).collect();
         // Corrupt the last two.
@@ -580,7 +576,11 @@ mod tests {
 
         // The majority of inliers (first 8) should be accepted.
         let inlier_count: usize = mask[..8].iter().filter(|&&b| b).count();
-        assert!(inlier_count >= 6, "Expected >=6 inliers among first 8, got {}", inlier_count);
+        assert!(
+            inlier_count >= 6,
+            "Expected >=6 inliers among first 8, got {}",
+            inlier_count
+        );
 
         // The H should approximate a translation by (5, 5).
         // RANSAC is stochastic — allow wider tolerance.
@@ -641,8 +641,7 @@ mod tests {
 
     #[test]
     fn test_warp_zero_output_size() {
-        let img =
-            CpuTensor::<f32>::from_vec(vec![1.0; 4], TensorShape::new(1, 2, 2)).unwrap();
+        let img = CpuTensor::<f32>::from_vec(vec![1.0; 4], TensorShape::new(1, 2, 2)).unwrap();
         let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let result = warp_perspective(&img, &identity, (0, 0));
         assert!(result.is_err());
@@ -669,13 +668,15 @@ mod tests {
 
         let result = stitch_pair(&img1, &img2, &matches).unwrap();
         // Output should be wider than either input.
-        assert!(result.shape.width >= w, "Stitched width should be >= input width");
+        assert!(
+            result.shape.width >= w,
+            "Stitched width should be >= input width"
+        );
     }
 
     #[test]
     fn test_stitch_pair_too_few_matches() {
-        let img =
-            CpuTensor::<f32>::from_vec(vec![1.0; 9], TensorShape::new(1, 3, 3)).unwrap();
+        let img = CpuTensor::<f32>::from_vec(vec![1.0; 9], TensorShape::new(1, 3, 3)).unwrap();
         let matches = vec![(0.0, 0.0, 0.0, 0.0), (1.0, 0.0, 1.0, 0.0)];
         let result = stitch_pair(&img, &img, &matches);
         assert!(result.is_err());

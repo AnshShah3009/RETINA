@@ -5,6 +5,12 @@ pub struct Stitcher {
     // panorama state
 }
 
+impl Default for Stitcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Stitcher {
     pub fn new() -> Self {
         Self {}

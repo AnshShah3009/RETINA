@@ -30,7 +30,7 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
     }
 
     let out_len = w * h;
-    let byte_size = (out_len as usize * std::mem::size_of::<T>()) as u64;
+    let byte_size = (out_len * std::mem::size_of::<T>()) as u64;
 
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("FAST Output Buffer"),
@@ -71,7 +71,13 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: input.storage.as_any().downcast_ref::<GpuStorage<f32>>().unwrap().buffer().as_entire_binding(),
+                resource: input
+                    .storage
+                    .as_any()
+                    .downcast_ref::<GpuStorage<f32>>()
+                    .unwrap()
+                    .buffer()
+                    .as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -116,13 +122,17 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
         });
 
         let shader_source_nms = match cv_core::DataType::from_type::<T>() {
-        Ok(cv_core::DataType::F32) => include_str!("../../shaders/fast_nms_f32.wgsl"),
-        Ok(_) => return Err(crate::Error::NotSupported("Unsupported fast precision type".into())),
-        _ => {
-            include_str!("../../shaders/fast_nms_f32.wgsl")
-        }
-    };
-    let pipeline_nms = ctx.create_compute_pipeline(shader_source_nms, "main");
+            Ok(cv_core::DataType::F32) => include_str!("../../shaders/fast_nms_f32.wgsl"),
+            Ok(_) => {
+                return Err(crate::Error::NotSupported(
+                    "Unsupported fast precision type".into(),
+                ))
+            }
+            _ => {
+                include_str!("../../shaders/fast_nms_f32.wgsl")
+            }
+        };
+        let pipeline_nms = ctx.create_compute_pipeline(shader_source_nms, "main");
 
         let nms_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("FAST NMS Bind Group"),
@@ -130,7 +140,13 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: score_map.storage.as_any().downcast_ref::<crate::storage::GpuStorage<T>>().unwrap().buffer().as_entire_binding(),
+                    resource: score_map
+                        .storage
+                        .as_any()
+                        .downcast_ref::<crate::storage::GpuStorage<T>>()
+                        .unwrap()
+                        .buffer()
+                        .as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -201,14 +217,13 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
     let num_u32 = num_pixels.div_ceil(4);
 
     // 1. Count pass
-    let usages =
-        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;    // Create a host accessible buffer. This depends on WGSL structs being packed to bytes, not float sizes of the GPU logic!
+    let usages = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC; // Create a host accessible buffer. This depends on WGSL structs being packed to bytes, not float sizes of the GPU logic!
     let counts_buffer = ctx.get_buffer((num_u32 as u64) * 4, usages);
 
     let params = CollectParams {
         width: w as u32,
         height: h as u32,
-        num_elements: num_u32 as u32,
+        num_elements: num_u32,
         padding: 0,
     };
 
@@ -251,7 +266,13 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: score_map.storage.as_any().downcast_ref::<GpuStorage<f32>>().unwrap().buffer().as_entire_binding(),
+                    resource: score_map
+                        .storage
+                        .as_any()
+                        .downcast_ref::<GpuStorage<f32>>()
+                        .unwrap()
+                        .buffer()
+                        .as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -266,7 +287,7 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&count_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((num_u32 as u32).div_ceil(256), 1, 1);
+        pass.dispatch_workgroups(num_u32.div_ceil(256), 1, 1);
     }
     ctx.submit(encoder);
 
@@ -337,7 +358,13 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: score_map.storage.as_any().downcast_ref::<GpuStorage<f32>>().unwrap().buffer().as_entire_binding(),
+                    resource: score_map
+                        .storage
+                        .as_any()
+                        .downcast_ref::<GpuStorage<f32>>()
+                        .unwrap()
+                        .buffer()
+                        .as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -356,7 +383,7 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&collect_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((num_u32 as u32).div_ceil(256), 1, 1);
+        pass.dispatch_workgroups(num_u32.div_ceil(256), 1, 1);
     }
     ctx.submit(encoder);
 

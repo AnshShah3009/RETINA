@@ -20,7 +20,7 @@ impl std::fmt::Debug for GifCapture {
 
 impl GifCapture {
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = File::open(path).map_err(|e| VideoError::Io(e))?;
+        let file = File::open(path).map_err(VideoError::Io)?;
         let reader = BufReader::new(file);
         let decoder = image::codecs::gif::GifDecoder::new(reader)
             .map_err(|e| VideoError::Backend(format!("Failed to decode GIF: {}", e)))?;

@@ -301,7 +301,13 @@ fn gaussian_blur_gpu(
     let output_gpu = gpu.convolve_2d(&input_gpu, &kernel_gpu, hal_border)?;
     let output_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = output_gpu.to_cpu()?;
 
-    let data: Vec<u8> = output_cpu.storage.as_slice().unwrap().iter().map(|&v| v.clamp(0.0, 255.0) as u8).collect();
+    let data: Vec<u8> = output_cpu
+        .storage
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .collect();
     GrayImage::from_raw(image.width(), image.height(), data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
 }
@@ -341,7 +347,13 @@ fn convolve_gpu(
     let output_gpu = gpu.convolve_2d(&input_gpu, &kernel_gpu, hal_border)?;
     let output_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = output_gpu.to_cpu()?;
 
-    let data: Vec<u8> = output_cpu.storage.as_slice().unwrap().iter().map(|&v| v.clamp(0.0, 255.0) as u8).collect();
+    let data: Vec<u8> = output_cpu
+        .storage
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .collect();
     GrayImage::from_raw(image.width(), image.height(), data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
 }

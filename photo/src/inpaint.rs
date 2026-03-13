@@ -9,8 +9,8 @@
 use cv_core::float::Float;
 use cv_core::tensor::{CpuTensor, TensorShape};
 use cv_core::Result;
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 
 /// Status flags for Fast Marching Method pixels.
 const KNOWN: u8 = 0;
@@ -162,9 +162,9 @@ pub fn inpaint_telea<T: Float + Default + 'static>(
             let mut sum_w = 0.0f64;
             let mut sum_v = 0.0f64;
 
-            let y0 = if entry.y >= r { entry.y - r } else { 0 };
+            let y0 = entry.y.saturating_sub(r);
             let y1 = (entry.y + r + 1).min(height);
-            let x0 = if entry.x >= r { entry.x - r } else { 0 };
+            let x0 = entry.x.saturating_sub(r);
             let x1 = (entry.x + r + 1).min(width);
 
             // Gradient estimation at this pixel (from distance map).
@@ -349,9 +349,9 @@ pub fn inpaint_ns<T: Float + Default + 'static>(
                     }
 
                     // Laplacian of the image (isotropic diffusion).
-                    let laplacian = prev[idx - width] + prev[idx + width] + prev[idx - 1]
-                        + prev[idx + 1]
-                        - 4.0 * prev[idx];
+                    let laplacian =
+                        prev[idx - width] + prev[idx + width] + prev[idx - 1] + prev[idx + 1]
+                            - 4.0 * prev[idx];
 
                     // Gradient (isophote direction).
                     let gy = (prev[idx + width] - prev[idx - width]) * 0.5;
@@ -360,13 +360,16 @@ pub fn inpaint_ns<T: Float + Default + 'static>(
 
                     // Smoothness Laplacian (second derivative of the smoothness field).
                     // Approximate Laplacian of the Laplacian for NS-like behavior.
-                    let lap_up = prev[(y - 1) * width + x - 1] + prev[(y - 1) * width + x + 1]
+                    let lap_up = prev[(y - 1) * width + x - 1]
+                        + prev[(y - 1) * width + x + 1]
                         + prev[idx - width]
                         - 3.0 * prev[(y - 1) * width + x];
-                    let lap_down = prev[(y + 1) * width + x - 1] + prev[(y + 1) * width + x + 1]
+                    let lap_down = prev[(y + 1) * width + x - 1]
+                        + prev[(y + 1) * width + x + 1]
                         + prev[idx + width]
                         - 3.0 * prev[(y + 1) * width + x];
-                    let lap_left = prev[(y - 1) * width + x - 1] + prev[(y + 1) * width + x - 1]
+                    let lap_left = prev[(y - 1) * width + x - 1]
+                        + prev[(y + 1) * width + x - 1]
                         + prev[idx - 1]
                         - 3.0 * prev[y * width + x - 1];
                     let lap_right = prev[(y - 1) * width + x + 1]

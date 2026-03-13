@@ -106,7 +106,7 @@ pub fn dot(
 ) -> Result<f32> {
     let len = a.storage.len;
     let num_groups = (len as u32).div_ceil(256);
-    
+
     let partial_sums_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Dot Partial Sums"),
         size: (num_groups * 4) as u64,
@@ -121,13 +121,24 @@ pub fn dot(
         label: Some("Dot Bind Group"),
         layout: &pipeline.get_bind_group_layout(2), // Use layout 2 from shader
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: a.storage.buffer().as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: b.storage.buffer().as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: partial_sums_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: a.storage.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: b.storage.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: partial_sums_buf.as_entire_binding(),
+            },
         ],
     });
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
@@ -136,13 +147,14 @@ pub fn dot(
     }
     ctx.submit(encoder);
 
-    let partial_sums: Vec<f32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
-        ctx.device.clone(),
-        &ctx.queue,
-        &partial_sums_buf,
-        0,
-        (num_groups * 4) as usize,
-    ))?;
+    let partial_sums: Vec<f32> =
+        pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
+            ctx.device.clone(),
+            &ctx.queue,
+            &partial_sums_buf,
+            0,
+            (num_groups * 4) as usize,
+        ))?;
 
     Ok(partial_sums.iter().sum())
 }
@@ -154,12 +166,14 @@ pub fn axpy(
     y: &mut Tensor<f32, GpuStorage<f32>>,
 ) -> Result<()> {
     let len = x.storage.len;
-    
-    let alpha_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("AXPY Alpha"),
-        contents: bytemuck::bytes_of(&alpha),
-        usage: wgpu::BufferUsages::UNIFORM,
-    });
+
+    let alpha_buf = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("AXPY Alpha"),
+            contents: bytemuck::bytes_of(&alpha),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
     let shader_source = include_str!("../../shaders/vector_ops.wgsl");
     let pipeline = ctx.create_compute_pipeline(shader_source, "axpy");
@@ -168,13 +182,24 @@ pub fn axpy(
         label: Some("AXPY Bind Group"),
         layout: &pipeline.get_bind_group_layout(0),
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: x.storage.buffer().as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: y.storage.buffer().as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: alpha_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: x.storage.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: y.storage.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: alpha_buf.as_entire_binding(),
+            },
         ],
     });
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
@@ -185,18 +210,16 @@ pub fn axpy(
     Ok(())
 }
 
-pub fn vec_scale(
-    ctx: &GpuContext,
-    alpha: f32,
-    v: &mut Tensor<f32, GpuStorage<f32>>,
-) -> Result<()> {
+pub fn vec_scale(ctx: &GpuContext, alpha: f32, v: &mut Tensor<f32, GpuStorage<f32>>) -> Result<()> {
     let len = v.storage.len;
-    
-    let alpha_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Scale Alpha"),
-        contents: bytemuck::bytes_of(&alpha),
-        usage: wgpu::BufferUsages::UNIFORM,
-    });
+
+    let alpha_buf = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Scale Alpha"),
+            contents: bytemuck::bytes_of(&alpha),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
     let shader_source = include_str!("../../shaders/vector_ops.wgsl");
     let pipeline = ctx.create_compute_pipeline(shader_source, "vec_scale");
@@ -205,12 +228,20 @@ pub fn vec_scale(
         label: Some("Scale Bind Group"),
         layout: &pipeline.get_bind_group_layout(3),
         entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: v.storage.buffer().as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: alpha_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: v.storage.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: alpha_buf.as_entire_binding(),
+            },
         ],
     });
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);

@@ -3,7 +3,7 @@ use crate::context::{
     TemplateMatchMethod, ThresholdType, WarpType,
 };
 use crate::{BackendType, DeviceId, Error, Result};
-use cv_core::{storage::Storage, Tensor, Float};
+use cv_core::{storage::Storage, Float, Tensor};
 
 /// Experimental MLX Context for Apple Silicon
 /// WARNING: Currently untested on actual hardware.
@@ -178,7 +178,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn find_chessboard_corners<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn find_chessboard_corners<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _image: &Tensor<T, S>,
         _pattern_size: (usize, usize),
@@ -198,7 +201,10 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX morphology not implemented".into()))
     }
 
-    fn warp<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn warp<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _input: &Tensor<T, S>,
         _matrix: &[[T; 3]; 3],
@@ -225,7 +231,10 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX nms_boxes not implemented".into()))
     }
 
-    fn nms_rotated_boxes<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn nms_rotated_boxes<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _input: &Tensor<T, S>,
         _iou_threshold: T,
@@ -250,10 +259,15 @@ impl ComputeContext for MlxContext {
         &self,
         _input: &Tensor<T, S>,
     ) -> Result<Tensor<T, S>> {
-        Err(Error::NotSupported("MLX pyramid_down not implemented".into()))
+        Err(Error::NotSupported(
+            "MLX pyramid_down not implemented".into(),
+        ))
     }
 
-    fn pointcloud_transform<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pointcloud_transform<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _points: &Tensor<T, S>,
         _transform: &[[T; 4]; 4],
@@ -264,7 +278,10 @@ impl ComputeContext for MlxContext {
     }
 
     /// Compute point-cloud normals on Apple Silicon.
-    fn pointcloud_normals<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pointcloud_normals<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         points: &Tensor<T, S>,
         k_neighbors: u32,
@@ -309,7 +326,9 @@ impl ComputeContext for MlxContext {
                 _phantom: std::marker::PhantomData,
             })
         } else {
-            Err(Error::NotSupported("MLX pointcloud_normals only supports f32".into()))
+            Err(Error::NotSupported(
+                "MLX pointcloud_normals only supports f32".into(),
+            ))
         }
     }
 
@@ -342,7 +361,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn tsdf_extract_mesh<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn tsdf_extract_mesh<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _tsdf_volume: &Tensor<T, S>,
         _voxel_size: T,
@@ -367,7 +389,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn cvt_color<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn cvt_color<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _input: &Tensor<T, S>,
         _code: ColorConversion,
@@ -375,7 +400,10 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX cvt_color not implemented".into()))
     }
 
-    fn resize<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn resize<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _input: &Tensor<T, S>,
         _new_shape: (usize, usize),
@@ -383,7 +411,10 @@ impl ComputeContext for MlxContext {
         Err(Error::NotSupported("MLX resize not implemented".into()))
     }
 
-    fn bilateral_filter<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn bilateral_filter<
+        T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _input: &Tensor<T, S>,
         _d: i32,
@@ -395,7 +426,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn fast_detect<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn fast_detect<
+        T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _input: &Tensor<T, S>,
         _threshold: T,
@@ -452,7 +486,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn compute_sift_descriptors<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn compute_sift_descriptors<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _image: &Tensor<T, S>,
         _keypoints: &cv_core::KeyPoints,
@@ -462,7 +499,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn icp_correspondences<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn icp_correspondences<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _src: &Tensor<T, S>,
         _tgt: &Tensor<T, S>,
@@ -511,7 +551,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn akaze_derivatives<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn akaze_derivatives<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _input: &Tensor<T, S>,
     ) -> Result<(Tensor<T, S>, Tensor<T, S>, Tensor<T, S>)> {
@@ -520,7 +563,10 @@ impl ComputeContext for MlxContext {
         ))
     }
 
-    fn akaze_contrast_k<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn akaze_contrast_k<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _input: &Tensor<T, S>,
     ) -> Result<T> {

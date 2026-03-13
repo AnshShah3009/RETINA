@@ -1,5 +1,5 @@
-use crate::storage::{CpuStorage, Storage};
 use crate::float::Float;
+use crate::storage::{CpuStorage, Storage};
 use std::default::Default;
 use std::fmt;
 use std::marker::PhantomData;
@@ -150,7 +150,9 @@ impl<T: Float + 'static, S: crate::storage::StorageFactory<T>> Tensor<T, S> {
     /// Convert this tensor to a different floating-point precision.
     ///
     /// This allows converting between any supported float types (e.g., `f32` -> `f64`, `f32` -> `f16`).
-    pub fn convert_precision<U: Float + 'static, S2: crate::storage::StorageFactory<U>>(&self) -> crate::Result<Tensor<U, S2>> {
+    pub fn convert_precision<U: Float + 'static, S2: crate::storage::StorageFactory<U>>(
+        &self,
+    ) -> crate::Result<Tensor<U, S2>> {
         let src_data = self.as_slice()?;
         let dst_data: Vec<U> = src_data.iter().map(|&x| U::from_f64(x.to_f64())).collect();
         Tensor::<U, S2>::from_vec(dst_data, self.shape)
@@ -405,13 +407,14 @@ impl<T: Clone + Copy + fmt::Debug + 'static, S: crate::storage::StorageFactory<T
     }
 }
 
-impl<T: Clone + Copy + Default + fmt::Debug + 'static, S: crate::storage::StorageFactory<T>> Tensor<T, S> {
+impl<T: Clone + Copy + Default + fmt::Debug + 'static, S: crate::storage::StorageFactory<T>>
+    Tensor<T, S>
+{
     pub fn new(shape: TensorShape) -> crate::Result<Self> {
         let dtype = DataType::from_type::<T>()?;
 
         Ok(Self {
-            storage: S::create(shape, T::default())
-                .map_err(crate::Error::RuntimeError)?,
+            storage: S::create(shape, T::default()).map_err(crate::Error::RuntimeError)?,
             shape,
             dtype,
             _phantom: PhantomData,
@@ -422,8 +425,7 @@ impl<T: Clone + Copy + Default + fmt::Debug + 'static, S: crate::storage::Storag
         let dtype = DataType::from_type::<T>()?;
 
         Ok(Self {
-            storage: S::create_zeros(shape)
-                .map_err(crate::Error::RuntimeError)?,
+            storage: S::create_zeros(shape).map_err(crate::Error::RuntimeError)?,
             shape,
             dtype,
             _phantom: PhantomData,

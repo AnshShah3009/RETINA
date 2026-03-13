@@ -339,7 +339,7 @@ pub mod buffer_utils {
         pub fn get(&self, device: &Device, size: u64, usage: BufferUsages) -> Buffer {
             let bucket_size = Self::get_size_bucket(size);
             let dev_key = (device as *const Device) as usize;
-            
+
             let mut buckets = match self.buckets.lock() {
                 Ok(b) => b,
                 Err(poisoned) => poisoned.into_inner(),
@@ -363,7 +363,7 @@ pub mod buffer_utils {
         pub fn return_buffer(&self, device: &Device, buffer: Buffer, usage: BufferUsages) {
             let size = buffer.size();
             let dev_key = (device as *const Device) as usize;
-            
+
             let mut buckets = match self.buckets.lock() {
                 Ok(b) => b,
                 Err(poisoned) => poisoned.into_inner(),
@@ -459,7 +459,9 @@ pub mod buffer_utils {
                     std::thread::yield_now();
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    break Err(crate::Error::DeviceError("Readback channel closed".to_string()));
+                    break Err(crate::Error::DeviceError(
+                        "Readback channel closed".to_string(),
+                    ));
                 }
             }
         };

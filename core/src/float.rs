@@ -358,28 +358,36 @@ mod tests {
                 let x = <$t>::from_f64(2.0);
                 let y = <$t>::from_f64(3.0);
                 assert!(abs_diff_eq(x + y, <$t>::from_f64(5.0), <$t>::EPSILON));
-                assert!(abs_diff_eq(x.sqrt(), <$t>::from_f64(2.0f64.sqrt()), <$t>::EPSILON));
+                assert!(abs_diff_eq(
+                    x.sqrt(),
+                    <$t>::from_f64(2.0f64.sqrt()),
+                    <$t>::EPSILON
+                ));
                 assert!(abs_diff_eq(x.recip(), <$t>::from_f64(0.5), <$t>::EPSILON));
-                assert!(abs_diff_eq(x.rsqrt(), <$t>::from_f64(1.0 / 2.0f64.sqrt()), <$t>::EPSILON));
-                
+                assert!(abs_diff_eq(
+                    x.rsqrt(),
+                    <$t>::from_f64(1.0 / 2.0f64.sqrt()),
+                    <$t>::EPSILON
+                ));
+
                 // Constants
                 assert!(abs_diff_eq(<$t>::ZERO, <$t>::from_f64(0.0), <$t>::EPSILON));
                 assert!(abs_diff_eq(<$t>::ONE, <$t>::from_f64(1.0), <$t>::EPSILON));
-                
+
                 // Edge cases
                 let nan = <$t>::from_f64(f64::NAN);
                 let inf = <$t>::from_f64(f64::INFINITY);
                 let neg_inf = <$t>::from_f64(f64::NEG_INFINITY);
-                
+
                 assert!(nan.is_nan());
                 assert!(!nan.is_finite());
-                
+
                 assert!(inf.is_infinite());
                 assert!(!inf.is_finite());
-                
+
                 assert!(neg_inf.is_infinite());
                 assert!(!neg_inf.is_finite());
-                
+
                 assert!(<$t>::ONE.is_finite());
                 assert!(!<$t>::ONE.is_nan());
                 assert!(!<$t>::ONE.is_infinite());

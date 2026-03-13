@@ -3,7 +3,7 @@ use crate::context::{
     TemplateMatchMethod, ThresholdType, WarpType,
 };
 use crate::{BackendType, Capability, ComputeBackend, DeviceId, QueueId, QueueType, Result};
-use cv_core::{storage::Storage, Tensor, TensorShape, Float};
+use cv_core::{storage::Storage, Float, Tensor, TensorShape};
 use rayon::prelude::*;
 use wide::*;
 
@@ -211,7 +211,10 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn sobel<T: Float + bytemuck::Pod + std::fmt::Debug + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn sobel<
+        T: Float + bytemuck::Pod + std::fmt::Debug + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         dx: i32,
@@ -224,8 +227,10 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
 
-        let mut gx_storage = S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
-        let mut gy_storage = S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
+        let mut gx_storage =
+            S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
+        let mut gy_storage =
+            S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
         let gx_slice = gx_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Gx output not on CPU".into()))?;
@@ -288,7 +293,10 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn canny<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn canny<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         low_threshold: T,
@@ -328,7 +336,7 @@ impl ComputeContext for CpuBackend {
             // Quantize angle to 4 directions
             let angle = my.atan2(mx).to_degrees();
             let angle = if angle < 0.0 { angle + 180.0 } else { angle };
-            direction[i] = if angle < 22.5 || angle >= 157.5 {
+            direction[i] = if !(22.5..157.5).contains(&angle) {
                 0 // horizontal edge -> suppress vertically
             } else if angle < 67.5 {
                 1 // 45-degree
@@ -352,10 +360,16 @@ impl ComputeContext for CpuBackend {
                     let idx = y * w + x;
                     let mag = magnitude[idx];
                     let (n1, n2) = match direction[idx] {
-                        0 => (magnitude[idx - 1], magnitude[idx + 1]),           // horizontal
-                        1 => (magnitude[(y - 1) * w + x + 1], magnitude[(y + 1) * w + x - 1]), // 45
-                        2 => (magnitude[(y - 1) * w + x], magnitude[(y + 1) * w + x]),         // vertical
-                        _ => (magnitude[(y - 1) * w + x - 1], magnitude[(y + 1) * w + x + 1]), // 135
+                        0 => (magnitude[idx - 1], magnitude[idx + 1]), // horizontal
+                        1 => (
+                            magnitude[(y - 1) * w + x + 1],
+                            magnitude[(y + 1) * w + x - 1],
+                        ), // 45
+                        2 => (magnitude[(y - 1) * w + x], magnitude[(y + 1) * w + x]), // vertical
+                        _ => (
+                            magnitude[(y - 1) * w + x - 1],
+                            magnitude[(y + 1) * w + x + 1],
+                        ), // 135
                     };
                     if mag >= n1 && mag >= n2 {
                         row_out[x] = mag;
@@ -402,8 +416,7 @@ impl ComputeContext for CpuBackend {
         }
 
         // Build output: strong edges = ONE, rest = ZERO
-        let mut output_storage =
-            S::new(len, T::ZERO).map_err(crate::Error::MemoryError)?;
+        let mut output_storage = S::new(len, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -421,7 +434,10 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn hough_lines<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn hough_lines<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         rho: T,
@@ -443,12 +459,8 @@ impl ComputeContext for CpuBackend {
         let num_theta = (std::f32::consts::PI / theta_f).ceil() as usize;
 
         // Precompute sin/cos tables
-        let cos_table: Vec<f32> = (0..num_theta)
-            .map(|t| (t as f32 * theta_f).cos())
-            .collect();
-        let sin_table: Vec<f32> = (0..num_theta)
-            .map(|t| (t as f32 * theta_f).sin())
-            .collect();
+        let cos_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).cos()).collect();
+        let sin_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).sin()).collect();
 
         let rho_offset = diag; // rho can be negative, shift by diagonal
 
@@ -502,7 +514,10 @@ impl ComputeContext for CpuBackend {
         Ok(lines)
     }
 
-    fn hough_circles<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn hough_circles<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         min_radius: T,
@@ -763,8 +778,7 @@ impl ComputeContext for CpuBackend {
                         }
                         TemplateMatchMethod::Ccoeff => sum_ccoeff,
                         TemplateMatchMethod::CcoeffNormed => {
-                            let patch_var =
-                                patch_sq_sum - patch_sum * patch_sum / tmpl_len_f;
+                            let patch_var = patch_sq_sum - patch_sum * patch_sum / tmpl_len_f;
                             let denom = patch_var.sqrt() * tmpl_norm;
                             if denom > T::EPSILON {
                                 sum_ccoeff / denom
@@ -826,56 +840,53 @@ impl ComputeContext for CpuBackend {
         let min_disp = params.min_disparity;
         let num_disp = params.num_disparities;
 
-        let mut output_storage =
-            OS::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
+        let mut output_storage = OS::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
         // Block matching with SAD (Sum of Absolute Differences)
-        dst.par_chunks_mut(w)
-            .enumerate()
-            .for_each(|(y, row_out)| {
-                if y < half_block || y + half_block >= h {
-                    return;
+        dst.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+            if y < half_block || y + half_block >= h {
+                return;
+            }
+            for x in 0..w {
+                if x < half_block || x + half_block >= w {
+                    continue;
                 }
-                for x in 0..w {
-                    if x < half_block || x + half_block >= w {
+
+                let mut best_sad = T::from_f32(f32::MAX);
+                let mut best_disp = T::ZERO;
+
+                for d in 0..num_disp {
+                    let disp = min_disp + d;
+                    let rx = x as i32 - disp;
+                    if rx < half_block as i32 || rx + half_block as i32 >= w as i32 {
                         continue;
                     }
+                    let rx = rx as usize;
 
-                    let mut best_sad = T::from_f32(f32::MAX);
-                    let mut best_disp = T::ZERO;
-
-                    for d in 0..num_disp {
-                        let disp = min_disp + d;
-                        let rx = x as i32 - disp;
-                        if rx < half_block as i32 || rx + half_block as i32 >= w as i32 {
-                            continue;
-                        }
-                        let rx = rx as usize;
-
-                        let mut sad = T::ZERO;
-                        for by in 0..block_size {
-                            let sy = y - half_block + by;
-                            for bx in 0..block_size {
-                                let lx = x - half_block + bx;
-                                let rrx = rx - half_block + bx;
-                                let lv = left_data[sy * w + lx];
-                                let rv = right_data[sy * w + rrx];
-                                sad += (lv - rv).abs();
-                            }
-                        }
-
-                        if sad < best_sad {
-                            best_sad = sad;
-                            best_disp = T::from_f32(disp as f32);
+                    let mut sad = T::ZERO;
+                    for by in 0..block_size {
+                        let sy = y - half_block + by;
+                        for bx in 0..block_size {
+                            let lx = x - half_block + bx;
+                            let rrx = rx - half_block + bx;
+                            let lv = left_data[sy * w + lx];
+                            let rv = right_data[sy * w + rrx];
+                            sad += (lv - rv).abs();
                         }
                     }
 
-                    row_out[x] = best_disp;
+                    if sad < best_sad {
+                        best_sad = sad;
+                        best_disp = T::from_f32(disp as f32);
+                    }
                 }
-            });
+
+                row_out[x] = best_disp;
+            }
+        });
 
         Ok(Tensor {
             storage: output_storage,
@@ -901,7 +912,10 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn find_chessboard_corners<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn find_chessboard_corners<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _image: &Tensor<T, S>,
         _pattern_size: (usize, usize),
@@ -923,7 +937,10 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn threshold<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn threshold<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         thresh: T,
@@ -965,7 +982,9 @@ impl ComputeContext for CpuBackend {
                             let s_v = f32x8::new(src_chunk[i..i + 8].try_into().unwrap());
                             let res = match typ {
                                 ThresholdType::Binary => s_v.cmp_gt(thresh_v).blend(max_v, zero_v),
-                                ThresholdType::BinaryInv => s_v.cmp_gt(thresh_v).blend(zero_v, max_v),
+                                ThresholdType::BinaryInv => {
+                                    s_v.cmp_gt(thresh_v).blend(zero_v, max_v)
+                                }
                                 ThresholdType::Trunc => s_v.min(thresh_v),
                                 ThresholdType::ToZero => s_v.cmp_gt(thresh_v).blend(s_v, zero_v),
                                 ThresholdType::ToZeroInv => s_v.cmp_gt(thresh_v).blend(zero_v, s_v),
@@ -1199,7 +1218,11 @@ impl ComputeContext for CpuBackend {
                 let sx = (matrix[0][0] * fx + matrix[0][1] * fy + matrix[0][2]) / sw;
                 let sy = (matrix[1][0] * fx + matrix[1][1] * fy + matrix[1][2]) / sw;
 
-                if sx >= T::ZERO && sx < T::from_f32((w - 1) as f32) && sy >= T::ZERO && sy < T::from_f32((h - 1) as f32) {
+                if sx >= T::ZERO
+                    && sx < T::from_f32((w - 1) as f32)
+                    && sy >= T::ZERO
+                    && sy < T::from_f32((h - 1) as f32)
+                {
                     // Bilinear interpolation
                     let x0 = sx.to_f32() as usize;
                     let y0 = sy.to_f32() as usize;
@@ -1358,7 +1381,10 @@ impl ComputeContext for CpuBackend {
         Ok(kept)
     }
 
-    fn nms_rotated_boxes<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn nms_rotated_boxes<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         iou_threshold: T,
@@ -1471,7 +1497,10 @@ impl ComputeContext for CpuBackend {
         Ok(kept)
     }
 
-    fn pointcloud_transform<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pointcloud_transform<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         points: &Tensor<T, S>,
         transform: &[[T; 4]; 4],
@@ -1481,7 +1510,8 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Points not on CPU".into()))?;
         let num_points = points.shape.height;
-        let mut output_storage = S::new(num_points * 4, T::ZERO).map_err(crate::Error::MemoryError)?;
+        let mut output_storage =
+            S::new(num_points * 4, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1520,7 +1550,10 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn pointcloud_normals<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pointcloud_normals<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         points: &Tensor<T, S>,
         k_neighbors: u32,
@@ -1537,7 +1570,8 @@ impl ComputeContext for CpuBackend {
         if TypeId::of::<T>() == TypeId::of::<f32>() {
             let src_f32: &[f32] = bytemuck::cast_slice(src);
             let num_points = points.shape.height;
-            let mut normals_storage = S::new(num_points * 4, T::ZERO).map_err(crate::Error::MemoryError)?;
+            let mut normals_storage =
+                S::new(num_points * 4, T::ZERO).map_err(crate::Error::MemoryError)?;
             let dst = normals_storage
                 .as_mut_slice()
                 .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -1551,11 +1585,19 @@ impl ComputeContext for CpuBackend {
             // Use a KD-tree for efficient search
             let tree = rstar::RTree::bulk_load(
                 (0..num_points)
-                    .map(|i| [src_f32[i * 4], src_f32[i * 4 + 1], src_f32[i * 4 + 2], i as f32])
+                    .map(|i| {
+                        [
+                            src_f32[i * 4],
+                            src_f32[i * 4 + 1],
+                            src_f32[i * 4 + 2],
+                            i as f32,
+                        ]
+                    })
                     .collect::<Vec<[f32; 4]>>(),
             );
 
-            dst_f32.par_chunks_mut(4)
+            dst_f32
+                .par_chunks_mut(4)
                 .enumerate()
                 .for_each(|(i, normal_out)| {
                     let p = pts[i];
@@ -1613,7 +1655,8 @@ impl ComputeContext for CpuBackend {
                         let b00 = a00 - q;
                         let b11 = a11 - q;
                         let b22 = a22 - q;
-                        let p_val = ((b00 * b00 + b11 * b11 + b22 * b22 + 2.0 * norm_sq) / 6.0).sqrt();
+                        let p_val =
+                            ((b00 * b00 + b11 * b11 + b22 * b22 + 2.0 * norm_sq) / 6.0).sqrt();
                         if p_val < 1e-10 {
                             Vector3::z()
                         } else {
@@ -1696,12 +1739,37 @@ impl ComputeContext for CpuBackend {
             let depth_f32: &[f32] = bytemuck::cast_slice(depth);
             let voxels_f32: &mut [f32] = bytemuck::cast_slice_mut(voxels);
             let camera_pose_f32: [[f32; 4]; 4] = [
-                [camera_pose[0][0].to_f32(), camera_pose[0][1].to_f32(), camera_pose[0][2].to_f32(), camera_pose[0][3].to_f32()],
-                [camera_pose[1][0].to_f32(), camera_pose[1][1].to_f32(), camera_pose[1][2].to_f32(), camera_pose[1][3].to_f32()],
-                [camera_pose[2][0].to_f32(), camera_pose[2][1].to_f32(), camera_pose[2][2].to_f32(), camera_pose[2][3].to_f32()],
-                [camera_pose[3][0].to_f32(), camera_pose[3][1].to_f32(), camera_pose[3][2].to_f32(), camera_pose[3][3].to_f32()],
+                [
+                    camera_pose[0][0].to_f32(),
+                    camera_pose[0][1].to_f32(),
+                    camera_pose[0][2].to_f32(),
+                    camera_pose[0][3].to_f32(),
+                ],
+                [
+                    camera_pose[1][0].to_f32(),
+                    camera_pose[1][1].to_f32(),
+                    camera_pose[1][2].to_f32(),
+                    camera_pose[1][3].to_f32(),
+                ],
+                [
+                    camera_pose[2][0].to_f32(),
+                    camera_pose[2][1].to_f32(),
+                    camera_pose[2][2].to_f32(),
+                    camera_pose[2][3].to_f32(),
+                ],
+                [
+                    camera_pose[3][0].to_f32(),
+                    camera_pose[3][1].to_f32(),
+                    camera_pose[3][2].to_f32(),
+                    camera_pose[3][3].to_f32(),
+                ],
             ];
-            let intrinsics_f32: [f32; 4] = [intrinsics[0].to_f32(), intrinsics[1].to_f32(), intrinsics[2].to_f32(), intrinsics[3].to_f32()];
+            let intrinsics_f32: [f32; 4] = [
+                intrinsics[0].to_f32(),
+                intrinsics[1].to_f32(),
+                intrinsics[2].to_f32(),
+                intrinsics[3].to_f32(),
+            ];
             let voxel_size_f32 = voxel_size.to_f32();
             let truncation_f32 = truncation.to_f32();
 
@@ -1799,7 +1867,10 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn tsdf_extract_mesh<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn tsdf_extract_mesh<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         _tsdf_volume: &Tensor<T, S>,
         _voxel_size: T,
@@ -1811,7 +1882,10 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn optical_flow_lk<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn optical_flow_lk<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         prev_pyramid: &[Tensor<T, S>],
         next_pyramid: &[Tensor<T, S>],
@@ -2120,7 +2194,8 @@ impl ComputeContext for CpuBackend {
                         "RgbToGray requires 3 channels".into(),
                     ));
                 }
-                let mut output_storage = S::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
+                let mut output_storage =
+                    S::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
                 let dst = output_storage
                     .as_mut_slice()
                     .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -2155,7 +2230,8 @@ impl ComputeContext for CpuBackend {
                         "GrayToRgb requires 1 channel".into(),
                     ));
                 }
-                let mut output_storage = S::new(h * w * 3, T::ZERO).map_err(crate::Error::MemoryError)?;
+                let mut output_storage =
+                    S::new(h * w * 3, T::ZERO).map_err(crate::Error::MemoryError)?;
                 let dst = output_storage
                     .as_mut_slice()
                     .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -2242,7 +2318,10 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn bilateral_filter<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn bilateral_filter<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         d: i32,
@@ -2333,10 +2412,22 @@ impl ComputeContext for CpuBackend {
 
                 // Full 16-pixel circle
                 let offsets = [
-                    (0, -3), (1, -3), (2, -2), (3, -1),
-                    (3, 0), (3, 1), (2, 2), (1, 3),
-                    (0, 3), (-1, 3), (-2, 2), (-3, 1),
-                    (-3, 0), (-3, -1), (-2, -2), (-1, -3),
+                    (0, -3),
+                    (1, -3),
+                    (2, -2),
+                    (3, -1),
+                    (3, 0),
+                    (3, 1),
+                    (2, 2),
+                    (1, 3),
+                    (0, 3),
+                    (-1, 3),
+                    (-2, 2),
+                    (-3, 1),
+                    (-3, 0),
+                    (-3, -1),
+                    (-2, -2),
+                    (-1, -3),
                 ];
 
                 let mut vals = [T::ZERO; 16];
@@ -2369,18 +2460,25 @@ impl ComputeContext for CpuBackend {
                     if s == T::ZERO {
                         continue;
                     }
-                    
+
                     let mut is_max = true;
                     for dy in -1..=1 {
                         for dx in -1..=1 {
-                            if dx == 0 && dy == 0 { continue; }
-                            let neighbor_s = scores[((y as i32 + dy) as usize) * w + (x as i32 + dx) as usize];
-                            if neighbor_s > s || (neighbor_s == s && (dy > 0 || (dy == 0 && dx > 0))) {
+                            if dx == 0 && dy == 0 {
+                                continue;
+                            }
+                            let neighbor_s =
+                                scores[((y as i32 + dy) as usize) * w + (x as i32 + dx) as usize];
+                            if neighbor_s > s
+                                || (neighbor_s == s && (dy > 0 || (dy == 0 && dx > 0)))
+                            {
                                 is_max = false;
                                 break;
                             }
                         }
-                        if !is_max { break; }
+                        if !is_max {
+                            break;
+                        }
                     }
 
                     if !is_max {
@@ -2398,7 +2496,10 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn gaussian_blur<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn gaussian_blur<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         sigma: T,
@@ -2410,7 +2511,7 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
         let c = input.shape.channels;
-        
+
         let mut output_storage = S::new(h * w * c, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
@@ -2434,7 +2535,8 @@ impl ComputeContext for CpuBackend {
                     for ch in 0..c {
                         let mut sum = T::ZERO;
                         for i in 0..kx.len() {
-                            let sx = (x as isize + i as isize - rx as isize).clamp(0, w as isize - 1)
+                            let sx = (x as isize + i as isize - rx as isize)
+                                .clamp(0, w as isize - 1)
                                 as usize;
                             sum += row_src[sx * c + ch] * kx[i];
                         }
@@ -2444,19 +2546,22 @@ impl ComputeContext for CpuBackend {
             });
 
         // Vertical pass
-        dst.par_chunks_mut(w * c).enumerate().for_each(|(y, row_dst)| {
-            for x in 0..w {
-                for ch in 0..c {
-                    let mut sum = T::ZERO;
-                    for j in 0..ky.len() {
-                        let sy =
-                            (y as isize + j as isize - ry as isize).clamp(0, h as isize - 1) as usize;
-                        sum += intermediate[(sy * w + x) * c + ch] * ky[j];
+        dst.par_chunks_mut(w * c)
+            .enumerate()
+            .for_each(|(y, row_dst)| {
+                for x in 0..w {
+                    for ch in 0..c {
+                        let mut sum = T::ZERO;
+                        for j in 0..ky.len() {
+                            let sy = (y as isize + j as isize - ry as isize)
+                                .clamp(0, h as isize - 1)
+                                as usize;
+                            sum += intermediate[(sy * w + x) * c + ch] * ky[j];
+                        }
+                        row_dst[x * c + ch] = sum;
                     }
-                    row_dst[x * c + ch] = sum;
                 }
-            }
-        });
+            });
 
         Ok(Tensor {
             storage: output_storage,
@@ -2466,7 +2571,10 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn pyramid_down<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pyramid_down<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> Result<Tensor<T, S>> {
@@ -2477,7 +2585,7 @@ impl ComputeContext for CpuBackend {
 
         // Gaussian blur first
         let blurred = self.gaussian_blur(input, T::from_f32(1.0), 5)?;
-        
+
         // Then downsample
         let mut output_storage = S::new(nh * nw * c, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
@@ -2485,13 +2593,15 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
         let src_blurred = blurred.storage.as_slice().unwrap();
 
-        dst.par_chunks_mut(nw * c).enumerate().for_each(|(y, row_out)| {
-            for x in 0..nw {
-                for ch in 0..c {
-                    row_out[x * c + ch] = src_blurred[((y * 2) * w + (x * 2)) * c + ch];
+        dst.par_chunks_mut(nw * c)
+            .enumerate()
+            .for_each(|(y, row_out)| {
+                for x in 0..nw {
+                    for ch in 0..c {
+                        row_out[x * c + ch] = src_blurred[((y * 2) * w + (x * 2)) * c + ch];
+                    }
                 }
-            }
-        });
+            });
 
         Ok(Tensor {
             storage: output_storage,
@@ -2617,7 +2727,10 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn sift_extrema<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn sift_extrema<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         dog_prev: &Tensor<T, S>,
         dog_curr: &Tensor<T, S>,
@@ -2669,9 +2782,18 @@ impl ComputeContext for CpuBackend {
                                     continue;
                                 }
                                 let neighbor_val = match ds {
-                                    -1 => prev_f32[(y as i32 + dy) as usize * w + (x as i32 + dx) as usize],
-                                    0 => curr_f32[(y as i32 + dy) as usize * w + (x as i32 + dx) as usize],
-                                    1 => next_f32[(y as i32 + dy) as usize * w + (x as i32 + dx) as usize],
+                                    -1 => {
+                                        prev_f32[(y as i32 + dy) as usize * w
+                                            + (x as i32 + dx) as usize]
+                                    }
+                                    0 => {
+                                        curr_f32[(y as i32 + dy) as usize * w
+                                            + (x as i32 + dx) as usize]
+                                    }
+                                    1 => {
+                                        next_f32[(y as i32 + dy) as usize * w
+                                            + (x as i32 + dx) as usize]
+                                    }
                                     _ => 0.0,
                                 };
                                 if neighbor_val >= val {
@@ -2703,7 +2825,8 @@ impl ComputeContext for CpuBackend {
                 }
             });
 
-            Tensor::from_vec(dst, dog_curr.shape).map_err(|e| crate::Error::RuntimeError(e.to_string()))
+            Tensor::from_vec(dst, dog_curr.shape)
+                .map_err(|e| crate::Error::RuntimeError(e.to_string()))
         } else {
             Err(crate::Error::NotSupported(
                 "sift_extrema currently only supports f32 on CPU".into(),
@@ -2711,7 +2834,10 @@ impl ComputeContext for CpuBackend {
         }
     }
 
-    fn compute_sift_descriptors<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn compute_sift_descriptors<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         image: &Tensor<T, S>,
         keypoints: &cv_core::KeyPoints,
@@ -2791,7 +2917,7 @@ impl ComputeContext for CpuBackend {
                         })
                         .collect();
 
-                    cv_core::Descriptor::new(data, kp.clone())
+                    cv_core::Descriptor::new(data, *kp)
                 })
                 .collect();
 
@@ -2803,7 +2929,10 @@ impl ComputeContext for CpuBackend {
         }
     }
 
-    fn icp_correspondences<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn icp_correspondences<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         src: &Tensor<T, S>,
         tgt: &Tensor<T, S>,
@@ -2831,11 +2960,7 @@ impl ComputeContext for CpuBackend {
             let correspondences: Vec<(usize, usize, T)> = (0..num_src)
                 .into_par_iter()
                 .filter_map(|si| {
-                    let p_s = [
-                        src_f32[si * 4],
-                        src_f32[si * 4 + 1],
-                        src_f32[si * 4 + 2],
-                    ];
+                    let p_s = [src_f32[si * 4], src_f32[si * 4 + 1], src_f32[si * 4 + 2]];
                     let mut min_dist_sq = f32::MAX;
                     let mut best_ti = 0;
                     let mut found = false;
@@ -2893,13 +3018,19 @@ impl ComputeContext for CpuBackend {
         use std::any::TypeId;
         if TypeId::of::<T>() == TypeId::of::<f32>() {
             // Safety: we verified T == f32 via TypeId above.
-            let src_f32: &[f32] = unsafe { std::slice::from_raw_parts(src_slice.as_ptr() as *const f32, src_slice.len()) };
-            let tgt_f32: &[f32] = unsafe { std::slice::from_raw_parts(tgt_slice.as_ptr() as *const f32, tgt_slice.len()) };
-            let norm_f32: &[f32] = unsafe { std::slice::from_raw_parts(norm_slice.as_ptr() as *const f32, norm_slice.len()) };
+            let src_f32: &[f32] = unsafe {
+                std::slice::from_raw_parts(src_slice.as_ptr() as *const f32, src_slice.len())
+            };
+            let tgt_f32: &[f32] = unsafe {
+                std::slice::from_raw_parts(tgt_slice.as_ptr() as *const f32, tgt_slice.len())
+            };
+            let norm_f32: &[f32] = unsafe {
+                std::slice::from_raw_parts(norm_slice.as_ptr() as *const f32, norm_slice.len())
+            };
             let mut transform_f32 = nalgebra::Matrix4::<f32>::zeros();
-        for i in 0..16 {
-            transform_f32[i] = transform[i].to_f32();
-        }
+            for i in 0..16 {
+                transform_f32[i] = transform[i].to_f32();
+            }
 
             let mut ata = nalgebra::Matrix6::<f32>::zeros();
             let mut atb = nalgebra::Vector6::<f32>::zeros();
@@ -2937,14 +3068,14 @@ impl ComputeContext for CpuBackend {
             }
 
             let mut ata_t = nalgebra::Matrix6::<T>::zeros();
-        for i in 0..36 {
-            ata_t[i] = T::from_f32(ata[i]);
-        }
-        let mut atb_t = nalgebra::Vector6::<T>::zeros();
-        for i in 0..6 {
-            atb_t[i] = T::from_f32(atb[i]);
-        }
-        Ok((ata_t, atb_t))
+            for i in 0..36 {
+                ata_t[i] = T::from_f32(ata[i]);
+            }
+            let mut atb_t = nalgebra::Vector6::<T>::zeros();
+            for i in 0..6 {
+                atb_t[i] = T::from_f32(atb[i]);
+            }
+            Ok((ata_t, atb_t))
         } else {
             Err(crate::Error::NotSupported(
                 "icp_accumulate currently only supports f32 on CPU".into(),
@@ -3011,7 +3142,10 @@ impl ComputeContext for CpuBackend {
         })
     }
 
-    fn akaze_derivatives<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn akaze_derivatives<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> crate::Result<(Tensor<T, S>, Tensor<T, S>, Tensor<T, S>)> {
@@ -3021,9 +3155,12 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
 
-        let mut lx_storage = S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
-        let mut ly_storage = S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
-        let mut ldet_storage = S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
+        let mut lx_storage =
+            S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
+        let mut ly_storage =
+            S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
+        let mut ldet_storage =
+            S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
 
         let lx_slice = lx_storage
             .as_mut_slice()
@@ -3053,18 +3190,24 @@ impl ComputeContext for CpuBackend {
                     let lx = (get_val(x + 1, y - 1)
                         + T::from_f32(3.0) * get_val(x + 1, y)
                         + get_val(x + 1, y + 1))
-                        - (get_val(x - 1, y - 1) + T::from_f32(3.0) * get_val(x - 1, y) + get_val(x - 1, y + 1));
+                        - (get_val(x - 1, y - 1)
+                            + T::from_f32(3.0) * get_val(x - 1, y)
+                            + get_val(x - 1, y + 1));
 
                     let ly = (get_val(x - 1, y + 1)
                         + T::from_f32(3.0) * get_val(x, y + 1)
                         + get_val(x + 1, y + 1))
-                        - (get_val(x - 1, y - 1) + T::from_f32(3.0) * get_val(x, y - 1) + get_val(x + 1, y - 1));
+                        - (get_val(x - 1, y - 1)
+                            + T::from_f32(3.0) * get_val(x, y - 1)
+                            + get_val(x + 1, y - 1));
 
                     row_lx[x as usize] = lx / T::from_f32(32.0);
                     row_ly[x as usize] = ly / T::from_f32(32.0);
 
-                    let lxx = get_val(x + 1, y) + get_val(x - 1, y) - T::from_f32(2.0) * get_val(x, y);
-                    let lyy = get_val(x, y + 1) + get_val(x, y - 1) - T::from_f32(2.0) * get_val(x, y);
+                    let lxx =
+                        get_val(x + 1, y) + get_val(x - 1, y) - T::from_f32(2.0) * get_val(x, y);
+                    let lyy =
+                        get_val(x, y + 1) + get_val(x, y - 1) - T::from_f32(2.0) * get_val(x, y);
                     let lxy = (get_val(x + 1, y + 1) + get_val(x - 1, y - 1)
                         - get_val(x - 1, y + 1)
                         - get_val(x + 1, y - 1))
@@ -3096,7 +3239,10 @@ impl ComputeContext for CpuBackend {
         ))
     }
 
-    fn akaze_contrast_k<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn akaze_contrast_k<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> crate::Result<T> {
@@ -3305,7 +3451,6 @@ fn hamming_dist(a: &[u8], b: &[u8]) -> u32 {
     }
     dist
 }
-
 
 impl CpuBackend {
     pub fn is_available() -> bool {

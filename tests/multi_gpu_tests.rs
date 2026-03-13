@@ -167,7 +167,11 @@ fn test_matching_parity(cpu: &CpuBackend, gpu: &GpuContext, gpu_name: &str) {
     println!("  ✓ Matching parity passed for {}", gpu_name);
 }
 
-fn test_fast_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuBackend, gpu: &GpuContext, gpu_name: &str) {
+fn test_fast_parity<T: cv_core::float::Float + bytemuck::Pod>(
+    cpu: &CpuBackend,
+    gpu: &GpuContext,
+    gpu_name: &str,
+) {
     let shape = TensorShape::new(1, 128, 128);
     let mut data = vec![T::ZERO; shape.len()];
     // Create some corners
@@ -181,7 +185,9 @@ fn test_fast_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuBackend, 
     let input_gpu = input_cpu.to_gpu_ctx(gpu).expect("Upload failed");
 
     // CPU
-    let res_cpu = cpu.fast_detect(&input_cpu, T::from_f32(20.0), false).unwrap();
+    let res_cpu = cpu
+        .fast_detect(&input_cpu, T::from_f32(20.0), false)
+        .unwrap();
     let cpu_slice = res_cpu.storage.as_slice().unwrap();
 
     // GPU (Should return NotSupported for now, we handle it gracefully in the test runner)
@@ -208,7 +214,11 @@ fn test_fast_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuBackend, 
     }
 }
 
-fn test_bilateral_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuBackend, gpu: &GpuContext, gpu_name: &str) {
+fn test_bilateral_parity<T: cv_core::float::Float + bytemuck::Pod>(
+    cpu: &CpuBackend,
+    gpu: &GpuContext,
+    gpu_name: &str,
+) {
     let shape = TensorShape::new(1, 64, 64);
     let mut data = vec![T::ZERO; shape.len()];
     for i in 0..data.len() {
@@ -219,11 +229,15 @@ fn test_bilateral_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuBack
     let input_gpu = input_cpu.to_gpu_ctx(gpu).expect("Upload failed");
 
     // CPU
-    let res_cpu = cpu.bilateral_filter(&input_cpu, 5, T::from_f32(10.0), T::from_f32(10.0)).unwrap();
+    let res_cpu = cpu
+        .bilateral_filter(&input_cpu, 5, T::from_f32(10.0), T::from_f32(10.0))
+        .unwrap();
     let cpu_slice = res_cpu.storage.as_slice().unwrap();
 
     // GPU
-    let res_gpu_encoded = gpu.bilateral_filter(&input_gpu, 5, T::from_f32(10.0), T::from_f32(10.0)).unwrap();
+    let res_gpu_encoded = gpu
+        .bilateral_filter(&input_gpu, 5, T::from_f32(10.0), T::from_f32(10.0))
+        .unwrap();
     let res_gpu = res_gpu_encoded.to_cpu_ctx(gpu).unwrap();
     let gpu_slice = res_gpu.storage.as_slice().unwrap();
 
@@ -270,7 +284,11 @@ fn test_resize_parity(cpu: &CpuBackend, gpu: &GpuContext, gpu_name: &str) {
     println!("  ✓ Resize parity passed for {}", gpu_name);
 }
 
-fn test_color_cvt_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuBackend, gpu: &GpuContext, gpu_name: &str) {
+fn test_color_cvt_parity<T: cv_core::float::Float + bytemuck::Pod>(
+    cpu: &CpuBackend,
+    gpu: &GpuContext,
+    gpu_name: &str,
+) {
     let shape = TensorShape::new(3, 64, 64);
     let mut data = vec![T::ZERO; shape.len()];
     for i in 0..data.len() {
@@ -305,7 +323,11 @@ fn test_color_cvt_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuBack
     println!("  ✓ Color Cvt parity passed for {}", gpu_name);
 }
 
-fn test_pc_transform_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuBackend, gpu: &GpuContext, gpu_name: &str) {
+fn test_pc_transform_parity<T: cv_core::float::Float + bytemuck::Pod>(
+    cpu: &CpuBackend,
+    gpu: &GpuContext,
+    gpu_name: &str,
+) {
     let num_points = 1000;
     let mut data = vec![T::ZERO; num_points * 4];
     for i in 0..num_points {
@@ -320,9 +342,12 @@ fn test_pc_transform_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuB
     let input_gpu = input_cpu.to_gpu_ctx(gpu).expect("Upload failed");
 
     let mut transform = [[T::ZERO; 4]; 4];
-    transform[0][0] = T::ONE; transform[0][3] = T::from_f32(10.0);
-    transform[1][1] = T::ONE; transform[1][3] = T::from_f32(-5.0);
-    transform[2][2] = T::ONE; transform[2][3] = T::from_f32(2.0);
+    transform[0][0] = T::ONE;
+    transform[0][3] = T::from_f32(10.0);
+    transform[1][1] = T::ONE;
+    transform[1][3] = T::from_f32(-5.0);
+    transform[2][2] = T::ONE;
+    transform[2][3] = T::from_f32(2.0);
     transform[3][3] = T::ONE;
 
     // Execute on CPU
@@ -332,7 +357,10 @@ fn test_pc_transform_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuB
     // Execute on GPU (skip if not implemented)
     match gpu.pointcloud_transform(&input_gpu, &transform) {
         Err(cv_hal::Error::NotSupported(_)) => {
-            println!("  ⊘ PC Transform skipped for {} (GPU kernel not implemented)", gpu_name);
+            println!(
+                "  ⊘ PC Transform skipped for {} (GPU kernel not implemented)",
+                gpu_name
+            );
             return;
         }
         Err(e) => panic!("PC Transform failed on {}: {:?}", gpu_name, e),
@@ -354,7 +382,11 @@ fn test_pc_transform_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuB
     }
 }
 
-fn test_threshold_parity<T: cv_core::float::Float + bytemuck::Pod>(cpu: &CpuBackend, gpu: &GpuContext, gpu_name: &str) {
+fn test_threshold_parity<T: cv_core::float::Float + bytemuck::Pod>(
+    cpu: &CpuBackend,
+    gpu: &GpuContext,
+    gpu_name: &str,
+) {
     let shape = TensorShape::new(1, 128, 128);
     let mut data = vec![T::ZERO; shape.len()];
     for i in 0..data.len() {

@@ -1,7 +1,7 @@
+use crate::context::ThresholdType;
 use crate::gpu::GpuContext;
 use crate::GpuTensor;
 use crate::Result;
-use crate::context::ThresholdType;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -29,7 +29,7 @@ pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
 ) -> Result<GpuTensor<T>> {
     let len = input.shape.len();
 
-    let byte_size = (len as usize * std::mem::size_of::<T>()) as u64;
+    let byte_size = (len * std::mem::size_of::<T>()) as u64;
 
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Threshold Output Buffer"),
@@ -42,8 +42,8 @@ pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     let params = ThresholdParams {
         width: input.shape.width as u32,
         height: input.shape.height as u32,
-        thresh: thresh,
-        max_value: max_value,
+        thresh,
+        max_value,
         thresh_type: thresh_type as u32,
         len: len as u32,
     };
@@ -59,7 +59,11 @@ pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     // Pipeline setup
     let shader_source = match cv_core::DataType::from_type::<T>() {
         Ok(cv_core::DataType::F32) => include_str!("../../shaders/threshold_f32.wgsl"),
-        Ok(_) => return Err(crate::Error::NotSupported("Unsupported threshold precision type".into())),
+        Ok(_) => {
+            return Err(crate::Error::NotSupported(
+                "Unsupported threshold precision type".into(),
+            ))
+        }
         _ => {
             include_str!("../../shaders/threshold_f32.wgsl")
         }

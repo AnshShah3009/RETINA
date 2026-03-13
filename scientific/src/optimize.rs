@@ -109,7 +109,11 @@ pub fn minimize_nelder_mead(
 
         // Sort simplex by function value
         let mut order: Vec<usize> = (0..=n).collect();
-        order.sort_by(|&a, &b| fvals[a].partial_cmp(&fvals[b]).unwrap_or(std::cmp::Ordering::Equal));
+        order.sort_by(|&a, &b| {
+            fvals[a]
+                .partial_cmp(&fvals[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let sorted_simplex: Vec<Vec<f64>> = order.iter().map(|&i| simplex[i].clone()).collect();
         let sorted_fvals: Vec<f64> = order.iter().map(|&i| fvals[i]).collect();
         simplex = sorted_simplex;
@@ -143,12 +147,16 @@ pub fn minimize_nelder_mead(
         }
 
         // Reflect
-        let xr: Vec<f64> = (0..n).map(|j| centroid[j] + alpha * (centroid[j] - simplex[n][j])).collect();
+        let xr: Vec<f64> = (0..n)
+            .map(|j| centroid[j] + alpha * (centroid[j] - simplex[n][j]))
+            .collect();
         let fr = f(&xr);
 
         if fr < fvals[0] {
             // Expand
-            let xe: Vec<f64> = (0..n).map(|j| centroid[j] + gamma * (xr[j] - centroid[j])).collect();
+            let xe: Vec<f64> = (0..n)
+                .map(|j| centroid[j] + gamma * (xr[j] - centroid[j]))
+                .collect();
             let fe = f(&xe);
             if fe < fr {
                 simplex[n] = xe;
@@ -165,7 +173,9 @@ pub fn minimize_nelder_mead(
             // Contract
             if fr < fvals[n] {
                 // Outside contraction
-                let xc: Vec<f64> = (0..n).map(|j| centroid[j] + rho * (xr[j] - centroid[j])).collect();
+                let xc: Vec<f64> = (0..n)
+                    .map(|j| centroid[j] + rho * (xr[j] - centroid[j]))
+                    .collect();
                 let fc = f(&xc);
                 if fc <= fr {
                     simplex[n] = xc;
@@ -181,7 +191,9 @@ pub fn minimize_nelder_mead(
                 }
             } else {
                 // Inside contraction
-                let xc: Vec<f64> = (0..n).map(|j| centroid[j] - rho * (centroid[j] - simplex[n][j])).collect();
+                let xc: Vec<f64> = (0..n)
+                    .map(|j| centroid[j] - rho * (centroid[j] - simplex[n][j]))
+                    .collect();
                 let fc = f(&xc);
                 if fc < fvals[n] {
                     simplex[n] = xc;
@@ -346,9 +358,8 @@ pub fn minimize_bfgs(
 
             for i in 0..n {
                 for j in 0..n {
-                    h_inv[i][j] += rho_val * ((1.0 + rho_val * yhy) * s[i] * s[j]
-                        - hy[i] * s[j]
-                        - s[i] * hy[j]);
+                    h_inv[i][j] += rho_val
+                        * ((1.0 + rho_val * yhy) * s[i] * s[j] - hy[i] * s[j] - s[i] * hy[j]);
                 }
             }
         }
@@ -488,7 +499,11 @@ pub fn minimize_lbfgsb(
         let gamma = if let (Some(s_last), Some(y_last)) = (s_hist.last(), y_hist.last()) {
             let sy: f64 = s_last.iter().zip(y_last.iter()).map(|(a, b)| a * b).sum();
             let yy: f64 = y_last.iter().map(|v| v * v).sum::<f64>();
-            if yy > 1e-30 { sy / yy } else { 1.0 }
+            if yy > 1e-30 {
+                sy / yy
+            } else {
+                1.0
+            }
         } else {
             1.0
         };
@@ -601,9 +616,8 @@ pub fn curve_fit(
     let mut lambda = 1e-3;
     let eps = 1e-8; // finite-difference step
 
-    let residuals = |p: &[f64]| -> Vec<f64> {
-        (0..m).map(|i| y_data[i] - model(x_data[i], p)).collect()
-    };
+    let residuals =
+        |p: &[f64]| -> Vec<f64> { (0..m).map(|i| y_data[i] - model(x_data[i], p)).collect() };
 
     let jacobian = |p: &[f64]| -> Vec<Vec<f64>> {
         // J[i][j] = d(model(x_i, p)) / d(p_j)  (note: d(residual)/dp = -J)
@@ -699,7 +713,10 @@ pub fn curve_fit(
     let s2 = cost / dof as f64;
 
     let covariance = match invert_matrix(&jtj) {
-        Some(inv) => inv.iter().map(|row| row.iter().map(|v| v * s2).collect()).collect(),
+        Some(inv) => inv
+            .iter()
+            .map(|row| row.iter().map(|v| v * s2).collect())
+            .collect(),
         None => vec![vec![0.0; np]; np],
     };
 
@@ -1002,9 +1019,7 @@ pub fn minimize(
     grad: Option<&dyn Fn(&[f64]) -> Vec<f64>>,
 ) -> OptimizeResult {
     match method {
-        Method::NelderMead => {
-            minimize_nelder_mead(&f, x0, &NelderMeadConfig::default())
-        }
+        Method::NelderMead => minimize_nelder_mead(&f, x0, &NelderMeadConfig::default()),
         Method::Bfgs => {
             let config = BfgsConfig::default();
             match grad {
@@ -1105,8 +1120,14 @@ mod tests {
         let f = |x: &[f64]| (x[0] - 3.0).powi(2) + (x[1] + 2.0).powi(2);
         let g = |x: &[f64]| vec![2.0 * (x[0] - 3.0), 2.0 * (x[1] + 2.0)];
         let bounds = vec![
-            Bounds { lower: Some(0.0), upper: Some(2.0) },
-            Bounds { lower: Some(-1.0), upper: Some(1.0) },
+            Bounds {
+                lower: Some(0.0),
+                upper: Some(2.0),
+            },
+            Bounds {
+                lower: Some(-1.0),
+                upper: Some(1.0),
+            },
         ];
         let config = BfgsConfig::default();
         let res = minimize_lbfgsb(f, g, &[0.0, 0.0], &bounds, 10, &config);
@@ -1136,8 +1157,16 @@ mod tests {
         let model = |x: f64, p: &[f64]| p[0] * x + p[1];
         let res = curve_fit(model, &x_data, &y_data, &[0.0, 0.0], 100).unwrap();
 
-        assert!((res.params[0] - 2.0).abs() < 1e-6, "a ≈ 2, got {}", res.params[0]);
-        assert!((res.params[1] - 1.0).abs() < 1e-6, "b ≈ 1, got {}", res.params[1]);
+        assert!(
+            (res.params[0] - 2.0).abs() < 1e-6,
+            "a ≈ 2, got {}",
+            res.params[0]
+        );
+        assert!(
+            (res.params[1] - 1.0).abs() < 1e-6,
+            "b ≈ 1, got {}",
+            res.params[1]
+        );
         assert!(res.r_squared > 0.9999);
     }
 
@@ -1150,8 +1179,16 @@ mod tests {
         let model = |x: f64, p: &[f64]| p[0] * (-p[1] * x).exp();
         let res = curve_fit(model, &x_data, &y_data, &[1.0, 0.1], 200).unwrap();
 
-        assert!((res.params[0] - 5.0).abs() < 0.1, "A ≈ 5, got {}", res.params[0]);
-        assert!((res.params[1] - 0.3).abs() < 0.01, "k ≈ 0.3, got {}", res.params[1]);
+        assert!(
+            (res.params[0] - 5.0).abs() < 0.1,
+            "A ≈ 5, got {}",
+            res.params[0]
+        );
+        assert!(
+            (res.params[1] - 0.3).abs() < 0.01,
+            "k ≈ 0.3, got {}",
+            res.params[1]
+        );
         assert!(res.r_squared > 0.999);
     }
 
@@ -1180,14 +1217,7 @@ mod tests {
     #[test]
     fn newton_cos_x_minus_x() {
         // Root of cos(x) - x = 0 (Dottie number ≈ 0.7390851332)
-        let root = newton(
-            |x| x.cos() - x,
-            |x| -x.sin() - 1.0,
-            0.5,
-            1e-12,
-            100,
-        )
-        .unwrap();
+        let root = newton(|x| x.cos() - x, |x| -x.sin() - 1.0, 0.5, 1e-12, 100).unwrap();
         assert!(
             (root.cos() - root).abs() < 1e-10,
             "cos(root) should equal root, got {}",

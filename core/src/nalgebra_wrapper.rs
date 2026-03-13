@@ -1,7 +1,7 @@
 use crate::float::Float;
-use crate::vector::{Vector, Point3D, Matrix3x3, Matrix4x4};
-use nalgebra::{Vector3, Point3, Matrix3, Matrix4};
-use std::ops::{Add, Sub, Mul, Div, AddAssign, SubAssign, MulAssign, DivAssign};
+use crate::vector::{Matrix3x3, Matrix4x4, Point3D, Vector};
+use nalgebra::{Matrix3, Matrix4, Point3, Vector3};
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
 /// Wrapper for a 3D vector, compatible with nalgebra.
 ///
@@ -18,22 +18,36 @@ impl<T: Float> Vector3Wrapper<T> {
     pub fn new(x: T, y: T, z: T) -> Self {
         Self { data: [x, y, z] }
     }
-    
+
     /// Returns the X component of the vector.
-    pub fn x(&self) -> T { self.data[0] }
+    pub fn x(&self) -> T {
+        self.data[0]
+    }
     /// Returns the Y component of the vector.
-    pub fn y(&self) -> T { self.data[1] }
+    pub fn y(&self) -> T {
+        self.data[1]
+    }
     /// Returns the Z component of the vector.
-    pub fn z(&self) -> T { self.data[2] }
+    pub fn z(&self) -> T {
+        self.data[2]
+    }
 
     /// Converts the vector to a nalgebra `Vector3<f32>`.
     pub fn to_na_f32(&self) -> Vector3<f32> {
-        Vector3::new(self.data[0].to_f32(), self.data[1].to_f32(), self.data[2].to_f32())
+        Vector3::new(
+            self.data[0].to_f32(),
+            self.data[1].to_f32(),
+            self.data[2].to_f32(),
+        )
     }
 
     /// Converts the vector to a nalgebra `Vector3<f64>`.
     pub fn to_na_f64(&self) -> Vector3<f64> {
-        Vector3::new(self.data[0].to_f64(), self.data[1].to_f64(), self.data[2].to_f64())
+        Vector3::new(
+            self.data[0].to_f64(),
+            self.data[1].to_f64(),
+            self.data[2].to_f64(),
+        )
     }
 
     /// Creates a `Vector3Wrapper` from a nalgebra `Vector3<f32>`.
@@ -48,12 +62,14 @@ impl<T: Float> Vector3Wrapper<T> {
 }
 
 impl<T: Float> Vector<T> for Vector3Wrapper<T> {
-    fn len(&self) -> usize { 3 }
-    
+    fn len(&self) -> usize {
+        3
+    }
+
     fn dot(&self, other: &Self) -> T {
         self.data[0] * other.data[0] + self.data[1] * other.data[1] + self.data[2] * other.data[2]
     }
-    
+
     fn normalize(&self) -> Self {
         let n = self.norm();
         if n > T::EPSILON {
@@ -63,7 +79,7 @@ impl<T: Float> Vector<T> for Vector3Wrapper<T> {
             Self::new(T::ZERO, T::ZERO, T::ZERO)
         }
     }
-    
+
     fn cross_3d(&self, other: &Self) -> Self {
         Self::new(
             self.data[1] * other.data[2] - self.data[2] * other.data[1],
@@ -78,21 +94,33 @@ impl<T: Float> Vector<T> for Vector3Wrapper<T> {
 impl<T: Float> Add for Vector3Wrapper<T> {
     type Output = Self;
     fn add(self, other: Self) -> Self {
-        Self::new(self.data[0] + other.data[0], self.data[1] + other.data[1], self.data[2] + other.data[2])
+        Self::new(
+            self.data[0] + other.data[0],
+            self.data[1] + other.data[1],
+            self.data[2] + other.data[2],
+        )
     }
 }
 
 impl<T: Float> Sub for Vector3Wrapper<T> {
     type Output = Self;
     fn sub(self, other: Self) -> Self {
-        Self::new(self.data[0] - other.data[0], self.data[1] - other.data[1], self.data[2] - other.data[2])
+        Self::new(
+            self.data[0] - other.data[0],
+            self.data[1] - other.data[1],
+            self.data[2] - other.data[2],
+        )
     }
 }
 
 impl<T: Float> Mul<T> for Vector3Wrapper<T> {
     type Output = Self;
     fn mul(self, scalar: T) -> Self {
-        Self::new(self.data[0] * scalar, self.data[1] * scalar, self.data[2] * scalar)
+        Self::new(
+            self.data[0] * scalar,
+            self.data[1] * scalar,
+            self.data[2] * scalar,
+        )
     }
 }
 
@@ -102,7 +130,11 @@ impl<T: Float> Div<T> for Vector3Wrapper<T> {
         if scalar.abs() < T::EPSILON {
             return Self::new(T::ZERO, T::ZERO, T::ZERO);
         }
-        Self::new(self.data[0] / scalar, self.data[1] / scalar, self.data[2] / scalar)
+        Self::new(
+            self.data[0] / scalar,
+            self.data[1] / scalar,
+            self.data[2] / scalar,
+        )
     }
 }
 
@@ -156,20 +188,34 @@ impl<T: Float> Point3Wrapper<T> {
     }
 
     /// Returns the X coordinate of the point.
-    pub fn x(&self) -> T { self.data[0] }
+    pub fn x(&self) -> T {
+        self.data[0]
+    }
     /// Returns the Y coordinate of the point.
-    pub fn y(&self) -> T { self.data[1] }
+    pub fn y(&self) -> T {
+        self.data[1]
+    }
     /// Returns the Z coordinate of the point.
-    pub fn z(&self) -> T { self.data[2] }
+    pub fn z(&self) -> T {
+        self.data[2]
+    }
 
     /// Converts the point to a nalgebra `Point3<f32>`.
     pub fn to_na_f32(&self) -> Point3<f32> {
-        Point3::new(self.data[0].to_f32(), self.data[1].to_f32(), self.data[2].to_f32())
+        Point3::new(
+            self.data[0].to_f32(),
+            self.data[1].to_f32(),
+            self.data[2].to_f32(),
+        )
     }
 
     /// Converts the point to a nalgebra `Point3<f64>`.
     pub fn to_na_f64(&self) -> Point3<f64> {
-        Point3::new(self.data[0].to_f64(), self.data[1].to_f64(), self.data[2].to_f64())
+        Point3::new(
+            self.data[0].to_f64(),
+            self.data[1].to_f64(),
+            self.data[2].to_f64(),
+        )
     }
 
     /// Creates a `Point3Wrapper` from a nalgebra `Point3<f32>`.
@@ -184,17 +230,23 @@ impl<T: Float> Point3Wrapper<T> {
 }
 
 impl<T: Float> Point3D<T> for Point3Wrapper<T> {
-    fn x(&self) -> T { self.data[0] }
-    fn y(&self) -> T { self.data[1] }
-    fn z(&self) -> T { self.data[2] }
-    
+    fn x(&self) -> T {
+        self.data[0]
+    }
+    fn y(&self) -> T {
+        self.data[1]
+    }
+    fn z(&self) -> T {
+        self.data[2]
+    }
+
     fn distance_to(&self, other: &Self) -> T {
         let dx = self.data[0] - other.data[0];
         let dy = self.data[1] - other.data[1];
         let dz = self.data[2] - other.data[2];
-        (dx*dx + dy*dy + dz*dz).sqrt()
+        (dx * dx + dy * dy + dz * dz).sqrt()
     }
-    
+
     fn transform<M: Matrix4x4<T>>(&self, matrix: &M) -> Self {
         let v = [self.data[0], self.data[1], self.data[2], T::ONE];
         let res = matrix.mul_vector(&v);
@@ -203,7 +255,7 @@ impl<T: Float> Point3D<T> for Point3Wrapper<T> {
             if res[3] == T::ONE {
                 Self::new(res[0], res[1], res[2])
             } else {
-                Self::new(res[0]/res[3], res[1]/res[3], res[2]/res[3])
+                Self::new(res[0] / res[3], res[1] / res[3], res[2] / res[3])
             }
         } else {
             // If w is zero, it's a point at infinity, which we can't represent as Point3
@@ -218,21 +270,33 @@ impl<T: Float> Point3D<T> for Point3Wrapper<T> {
 impl<T: Float> Add<Vector3Wrapper<T>> for Point3Wrapper<T> {
     type Output = Self;
     fn add(self, v: Vector3Wrapper<T>) -> Self {
-        Self::new(self.data[0] + v.data[0], self.data[1] + v.data[1], self.data[2] + v.data[2])
+        Self::new(
+            self.data[0] + v.data[0],
+            self.data[1] + v.data[1],
+            self.data[2] + v.data[2],
+        )
     }
 }
 
 impl<T: Float> Sub<Vector3Wrapper<T>> for Point3Wrapper<T> {
     type Output = Self;
     fn sub(self, v: Vector3Wrapper<T>) -> Self {
-        Self::new(self.data[0] - v.data[0], self.data[1] - v.data[1], self.data[2] - v.data[2])
+        Self::new(
+            self.data[0] - v.data[0],
+            self.data[1] - v.data[1],
+            self.data[2] - v.data[2],
+        )
     }
 }
 
 impl<T: Float> Sub for Point3Wrapper<T> {
     type Output = Vector3Wrapper<T>;
     fn sub(self, other: Self) -> Vector3Wrapper<T> {
-        Vector3Wrapper::new(self.data[0] - other.data[0], self.data[1] - other.data[1], self.data[2] - other.data[2])
+        Vector3Wrapper::new(
+            self.data[0] - other.data[0],
+            self.data[1] - other.data[1],
+            self.data[2] - other.data[2],
+        )
     }
 }
 
@@ -304,7 +368,7 @@ impl<T: Float> Matrix3x3<T> for Matrix3Wrapper<T> {
         data[2][2] = T::ONE;
         Self { data }
     }
-    
+
     fn mul_vector(&self, v: &[T; 3]) -> [T; 3] {
         let mut res = [T::ZERO; 3];
         for i in 0..3 {
@@ -312,7 +376,7 @@ impl<T: Float> Matrix3x3<T> for Matrix3Wrapper<T> {
         }
         res
     }
-    
+
     fn mul_matrix(&self, other: &Self) -> Self {
         let mut res = [[T::ZERO; 3]; 3];
         for i in 0..3 {
@@ -326,21 +390,19 @@ impl<T: Float> Matrix3x3<T> for Matrix3Wrapper<T> {
         }
         Self { data: res }
     }
-    
+
     fn determinant(&self) -> T {
         let m = self.data;
-        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
-        m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-        m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
     }
-    
+
     fn inverse(&self) -> Option<Self> {
         // Delegate to nalgebra via f64 for stability
         let m = self.to_na_f64();
-        
-        m.try_inverse().map(|inv| {
-            Self::from_na_f64(&inv)
-        })
+
+        m.try_inverse().map(|inv| Self::from_na_f64(&inv))
     }
 }
 
@@ -420,15 +482,18 @@ impl<T: Float> Matrix4x4<T> for Matrix4Wrapper<T> {
         data[3][3] = T::ONE;
         Self { data }
     }
-    
+
     fn mul_vector(&self, v: &[T; 4]) -> [T; 4] {
         let mut res = [T::ZERO; 4];
         for i in 0..4 {
-            res[i] = self.data[i][0] * v[0] + self.data[i][1] * v[1] + self.data[i][2] * v[2] + self.data[i][3] * v[3];
+            res[i] = self.data[i][0] * v[0]
+                + self.data[i][1] * v[1]
+                + self.data[i][2] * v[2]
+                + self.data[i][3] * v[3];
         }
         res
     }
-    
+
     fn mul_matrix(&self, other: &Self) -> Self {
         let mut res = [[T::ZERO; 4]; 4];
         for i in 0..4 {
@@ -442,14 +507,12 @@ impl<T: Float> Matrix4x4<T> for Matrix4Wrapper<T> {
         }
         Self { data: res }
     }
-    
+
     fn inverse(&self) -> Option<Self> {
         // Delegate to nalgebra via f64 for stability
         let m = self.to_na_f64();
-        
-        m.try_inverse().map(|inv| {
-            Self::from_na_f64(&inv)
-        })
+
+        m.try_inverse().map(|inv| Self::from_na_f64(&inv))
     }
 }
 
@@ -490,13 +553,13 @@ mod tests {
     fn test_vector3_ops() {
         let v1 = Vector3Wrapper::new(1.0f32, 2.0, 3.0);
         let v2 = Vector3Wrapper::new(4.0f32, 5.0, 6.0);
-        
+
         let v3 = v1 + v2;
         assert_eq!(v3, Vector3Wrapper::new(5.0, 7.0, 9.0));
-        
+
         let mut v4 = v1 * 2.0;
         assert_eq!(v4, Vector3Wrapper::new(2.0, 4.0, 6.0));
-        
+
         v4 /= 2.0;
         assert_eq!(v4, v1);
     }

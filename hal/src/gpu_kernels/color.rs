@@ -72,7 +72,13 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: input.storage.as_any().downcast_ref::<GpuStorage<f32>>().unwrap().buffer().as_entire_binding(),
+                resource: input
+                    .storage
+                    .as_any()
+                    .downcast_ref::<GpuStorage<f32>>()
+                    .unwrap()
+                    .buffer()
+                    .as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,

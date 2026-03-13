@@ -21,7 +21,7 @@ pub fn median(data: &[f64]) -> f64 {
     let mut sorted = data.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
@@ -201,7 +201,7 @@ fn t_cdf(t: f64, df: f64) -> f64 {
 
 /// Regularized incomplete beta function I_x(a,b) using continued fraction (Lentz's method).
 fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
-    if x < 0.0 || x > 1.0 {
+    if !(0.0..=1.0).contains(&x) {
         return f64::NAN;
     }
     if x == 0.0 {
@@ -235,8 +235,7 @@ fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
         h *= d * c;
 
         // Odd step
-        let num_odd =
-            -(a + m_f) * (a + b + m_f) * x / ((a + 2.0 * m_f) * (a + 2.0 * m_f + 1.0));
+        let num_odd = -(a + m_f) * (a + b + m_f) * x / ((a + 2.0 * m_f) * (a + 2.0 * m_f + 1.0));
         d = 1.0 / (1.0 + num_odd * d).max(tiny);
         c = (1.0 + num_odd / c).max(tiny);
         let delta = d * c;
@@ -322,7 +321,7 @@ fn inv_normal_cdf(p: f64) -> f64 {
         -3.969683028665376e+01,
         2.209460984245205e+02,
         -2.759285104469687e+02,
-        1.383577518672690e+02,
+        1.383_577_518_672_69e2,
         -3.066479806614716e+01,
         2.506628277459239e+00,
     ];

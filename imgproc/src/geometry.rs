@@ -215,7 +215,13 @@ fn warp_gpu(
     )?;
 
     let res_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = res_gpu.to_cpu()?;
-    let res_data: Vec<u8> = res_cpu.storage.as_slice().unwrap().iter().map(|&v| v.clamp(0.0, 255.0) as u8).collect();
+    let res_data: Vec<u8> = res_cpu
+        .storage
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .collect();
 
     GrayImage::from_raw(width, height, res_data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))

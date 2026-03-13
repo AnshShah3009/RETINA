@@ -164,9 +164,7 @@ impl NoiseModel {
                 }
                 m
             }
-            NoiseModel::Isotropic(sigma, dim) => {
-                DMatrix::identity(*dim, *dim) * (1.0 / sigma)
-            }
+            NoiseModel::Isotropic(sigma, dim) => DMatrix::identity(*dim, *dim) * (1.0 / sigma),
             NoiseModel::Unit(dim) => DMatrix::identity(*dim, *dim),
             NoiseModel::Full(cov) => {
                 // Sigma^{-1/2} via Cholesky of Sigma^{-1}
@@ -222,7 +220,7 @@ pub trait Factor: Send + Sync {
 }
 
 /// Numerical Jacobians via central differences.
-fn numerical_jacobians(factor: &dyn Factor, values: &Values) -> Vec<DMatrix<f64>> {
+pub fn numerical_jacobians(factor: &dyn Factor, values: &Values) -> Vec<DMatrix<f64>> {
     let eps = 1e-5;
     let keys = factor.keys().to_vec();
     let r0 = factor.error(values);
@@ -407,11 +405,7 @@ impl FactorGraph {
     }
 
     /// Linearise all factors and assemble the normal equations H*dx = -b.
-    fn linearize(
-        &self,
-        values: &Values,
-        ordering: &[Key],
-    ) -> (DMatrix<f64>, DVector<f64>) {
+    fn linearize(&self, values: &Values, ordering: &[Key]) -> (DMatrix<f64>, DVector<f64>) {
         // Build offset map
         let mut offsets: HashMap<Key, usize> = HashMap::new();
         let mut total_dim = 0;
@@ -431,10 +425,7 @@ impl FactorGraph {
             let r = factor.error(values);
 
             // Whiten Jacobians and residual
-            let jacs: Vec<DMatrix<f64>> = raw_jacs
-                .iter()
-                .map(|j| &sqrt_info * j)
-                .collect();
+            let jacs: Vec<DMatrix<f64>> = raw_jacs.iter().map(|j| &sqrt_info * j).collect();
             let wr = &sqrt_info * &r;
 
             let keys = factor.keys();
@@ -461,11 +452,7 @@ impl FactorGraph {
     }
 
     /// Gauss-Newton optimization.
-    pub fn optimize_gn(
-        &self,
-        initial: &Values,
-        config: &GNConfig,
-    ) -> Result<Values, String> {
+    pub fn optimize_gn(&self, initial: &Values, config: &GNConfig) -> Result<Values, String> {
         let ordering = self.build_ordering(initial);
         let mut values = initial.clone();
 
@@ -501,11 +488,7 @@ impl FactorGraph {
     }
 
     /// Levenberg-Marquardt optimization.
-    pub fn optimize_lm(
-        &self,
-        initial: &Values,
-        config: &LMParams,
-    ) -> Result<Values, String> {
+    pub fn optimize_lm(&self, initial: &Values, config: &LMParams) -> Result<Values, String> {
         let ordering = self.build_ordering(initial);
         let mut values = initial.clone();
         let mut lambda = config.initial_lambda;

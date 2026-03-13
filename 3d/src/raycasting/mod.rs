@@ -82,25 +82,33 @@ pub fn cast_rays_mesh_ctx(
 ) -> Vec<Option<RayHit>> {
     // GPU Path
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        let rays_tuples: Vec<(Point3<f32>, Vector3<f32>)> = rays.iter().map(|r| (r.origin, r.direction)).collect();
-        let gpu_faces: Vec<[u32; 3]> = mesh.faces.iter().map(|f| [f[0] as u32, f[1] as u32, f[2] as u32]).collect();
+        let rays_tuples: Vec<(Point3<f32>, Vector3<f32>)> =
+            rays.iter().map(|r| (r.origin, r.direction)).collect();
+        let gpu_faces: Vec<[u32; 3]> = mesh
+            .faces
+            .iter()
+            .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+            .collect();
         if let Ok(gpu_hits) = cv_hal::gpu_kernels::raycasting_gpu::cast_rays(
             gpu,
             &rays_tuples,
             &mesh.vertices,
             &gpu_faces,
         ) {
-            return gpu_hits.into_iter().map(|hit| {
-                hit.map(|(dist, point, normal)| {
-                    RayHit {
-                        distance: dist,
-                        point,
-                        normal,
-                        triangle_index: 0, // GPU doesn't return index yet
-                        barycentric: (0.0, 0.0, 0.0), // GPU doesn't return barycentric yet
-                    }
+            return gpu_hits
+                .into_iter()
+                .map(|hit| {
+                    hit.map(|(dist, point, normal)| {
+                        RayHit {
+                            distance: dist,
+                            point,
+                            normal,
+                            triangle_index: 0, // GPU doesn't return index yet
+                            barycentric: (0.0, 0.0, 0.0), // GPU doesn't return barycentric yet
+                        }
+                    })
                 })
-            }).collect();
+                .collect();
         }
     }
 

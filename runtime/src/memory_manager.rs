@@ -64,14 +64,16 @@ impl MemoryManager {
                 // Return to global pool for now.
                 let usages =
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
-                cv_hal::gpu_kernels::buffer_utils::global_pool()
-                    .return_buffer(device, retired.buffer, usages);
+                cv_hal::gpu_kernels::buffer_utils::global_pool().return_buffer(
+                    device,
+                    retired.buffer,
+                    usages,
+                );
             } else {
                 i += 1;
             }
         }
     }
-
 
     /// Get a buffer from the pool.
     pub fn get_buffer(&self, device: &wgpu::Device, size: u64, usage: BufferUsages) -> Buffer {

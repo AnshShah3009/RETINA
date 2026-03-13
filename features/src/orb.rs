@@ -137,17 +137,27 @@ impl Orb {
             } else {
                 let new_w = (image.shape.width as f32 / scale) as usize;
                 let new_h = (image.shape.height as f32 / scale) as usize;
-                let img_f32 = convert_to_f32_cpu(ctx, image).expect("Failed to convert image to f32");
+                let img_f32 =
+                    convert_to_f32_cpu(ctx, image).expect("Failed to convert image to f32");
                 let resized = ctx.resize(&img_f32, (new_w, new_h)).unwrap();
-                
+
                 let cpu_u8 = resized.to_cpu().unwrap();
-                let img_h_w = cpu_u8.shape.clone();
-                let data: Vec<f32> = cpu_u8.storage.as_slice().unwrap().iter().map(|&v| v as f32).collect();
-                let tensor_f32: Tensor<f32, cv_core::storage::CpuStorage<f32>> = Tensor::from_vec(data, img_h_w).unwrap();
+                let img_h_w = cpu_u8.shape;
+                let data: Vec<f32> = cpu_u8
+                    .storage
+                    .as_slice()
+                    .unwrap()
+                    .iter()
+                    .map(|&v| v)
+                    .collect();
+                let tensor_f32: Tensor<f32, cv_core::storage::CpuStorage<f32>> =
+                    Tensor::from_vec(data, img_h_w).unwrap();
                 tensor_f32
             };
 
-            let score_map = ctx.fast_detect(&scaled_f32, self.fast_threshold as f32, true).unwrap();
+            let score_map = ctx
+                .fast_detect(&scaled_f32, self.fast_threshold as f32, true)
+                .unwrap();
             let kps = extract_keypoints_from_score_map(ctx, &score_map, self.n_features * 2)
                 .expect("Failed to extract keypoints from score map");
 
@@ -295,61 +305,74 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
     image: &Tensor<u8, S>,
 ) -> (KeyPoints, Descriptors) {
     if let ComputeDevice::Gpu(gpu) = ctx {
-            use cv_hal::gpu_kernels::{brief, pyramid};
+        use cv_hal::gpu_kernels::{brief, pyramid};
         use cv_hal::storage::GpuStorage;
 
         // Ensure input is on GPU
-        let input_gpu_u8 = if let Some(gpu_storage) =
-            image.storage.as_any().downcast_ref::<GpuStorage<u8>>()
-        {
-            Tensor {
-                storage: gpu_storage.clone(),
-                shape: image.shape,
-                dtype: image.dtype,
-                _phantom: std::marker::PhantomData,
-            }
-        } else {
-            use cv_core::storage::CpuStorage;
-            use cv_hal::tensor_ext::TensorToGpu;
-
-            let cpu_tensor = Tensor {
-                storage: image.storage.as_any().downcast_ref::<CpuStorage<u8>>().cloned().unwrap_or_else(|| {
-                    // If not CpuStorage, convert to CpuStorage first
-                    convert_to_cpu_image(ctx, image).storage
-                }),
-                shape: image.shape,
-                dtype: image.dtype,
-                _phantom: std::marker::PhantomData,
-            };
-
-            match cpu_tensor.to_gpu_ctx(gpu) {
-                Ok(gpu_tensor) => gpu_tensor,
-                Err(e) => {
-                    eprintln!(
-                        "Warning: Failed to upload tensor to GPU: {}, falling back to CPU",
-                        e
-                    );
-                    return {
-                        let mut keypoints = orb.detect_ctx(ctx, image);
-                        let cpu_img_tensor = convert_to_cpu_image(ctx, image);
-                        let (h, w) = cpu_img_tensor.shape.hw();
-                        let gray = image::GrayImage::from_raw(
-                            w as u32,
-                            h as u32,
-                            cpu_img_tensor.storage.as_slice().unwrap_or(&[]).to_vec(),
-                        )
-                        .unwrap_or_else(|| image::GrayImage::new(w as u32, h as u32));
-                        orb.compute_orientations(&gray, &mut keypoints);
-                        let descriptors = orb.extract(&gray, &keypoints);
-                        (keypoints, descriptors)
-                    };
+        let input_gpu_u8 =
+            if let Some(gpu_storage) = image.storage.as_any().downcast_ref::<GpuStorage<u8>>() {
+                Tensor {
+                    storage: gpu_storage.clone(),
+                    shape: image.shape,
+                    dtype: image.dtype,
+                    _phantom: std::marker::PhantomData,
                 }
-            }
-        };
+            } else {
+                use cv_core::storage::CpuStorage;
+                use cv_hal::tensor_ext::TensorToGpu;
+
+                let cpu_tensor = Tensor {
+                    storage: image
+                        .storage
+                        .as_any()
+                        .downcast_ref::<CpuStorage<u8>>()
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            // If not CpuStorage, convert to CpuStorage first
+                            convert_to_cpu_image(ctx, image).storage
+                        }),
+                    shape: image.shape,
+                    dtype: image.dtype,
+                    _phantom: std::marker::PhantomData,
+                };
+
+                match cpu_tensor.to_gpu_ctx(gpu) {
+                    Ok(gpu_tensor) => gpu_tensor,
+                    Err(e) => {
+                        eprintln!(
+                            "Warning: Failed to upload tensor to GPU: {}, falling back to CPU",
+                            e
+                        );
+                        return {
+                            let mut keypoints = orb.detect_ctx(ctx, image);
+                            let cpu_img_tensor = convert_to_cpu_image(ctx, image);
+                            let (h, w) = cpu_img_tensor.shape.hw();
+                            let gray = image::GrayImage::from_raw(
+                                w as u32,
+                                h as u32,
+                                cpu_img_tensor.storage.as_slice().unwrap_or(&[]).to_vec(),
+                            )
+                            .unwrap_or_else(|| image::GrayImage::new(w as u32, h as u32));
+                            orb.compute_orientations(&gray, &mut keypoints);
+                            let descriptors = orb.extract(&gray, &keypoints);
+                            (keypoints, descriptors)
+                        };
+                    }
+                }
+            };
 
         let f32_tensor = match input_gpu_u8.to_f32_ctx(gpu) {
             Ok(gpu_f32) => gpu_f32,
-            Err(_) => return (KeyPoints { keypoints: Vec::new() }, Descriptors { descriptors: Vec::new() }),
+            Err(_) => {
+                return (
+                    KeyPoints {
+                        keypoints: Vec::new(),
+                    },
+                    Descriptors {
+                        descriptors: Vec::new(),
+                    },
+                )
+            }
         };
 
         // 1. Build Pyramid
@@ -365,10 +388,17 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
             let scale = pyramid.scales[level];
 
             // 2. FAST Detect
-            let score_map = cv_hal::gpu_kernels::fast::fast_detect::<f32>(gpu, scaled_img, orb.fast_threshold as f32, true).unwrap();
+            let score_map = cv_hal::gpu_kernels::fast::fast_detect::<f32>(
+                gpu,
+                scaled_img,
+                orb.fast_threshold as f32,
+                true,
+            )
+            .unwrap();
 
             // 3. Extract Keypoints
-            let mut kps_f32 = cv_hal::gpu_kernels::fast::extract_keypoints(gpu, &score_map).unwrap();
+            let mut kps_f32 =
+                cv_hal::gpu_kernels::fast::extract_keypoints(gpu, &score_map).unwrap();
             if kps_f32.is_empty() {
                 continue;
             }
@@ -377,9 +407,13 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
             let scaled_img_u8 = scaled_img.to_u8_ctx(gpu).unwrap();
 
             // 4. Compute Orientations
-            let angles =
-                cv_hal::gpu_kernels::orientation::compute_orientation(gpu, &scaled_img_u8, &kps_f32, orb.patch_size / 2)
-                    .unwrap();
+            let angles = cv_hal::gpu_kernels::orientation::compute_orientation(
+                gpu,
+                &scaled_img_u8,
+                &kps_f32,
+                orb.patch_size / 2,
+            )
+            .unwrap();
             for (i, &angle) in angles.iter().enumerate() {
                 kps_f32[i].angle = angle;
                 kps_f32[i].octave = level as i32;

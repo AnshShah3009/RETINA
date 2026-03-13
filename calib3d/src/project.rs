@@ -306,7 +306,6 @@ pub fn compute_projection_jacobians(
     let eps = 1e-7;
     let row = 2 * point_idx;
 
-
     // Jacobian w.r.t. rotation (3 parameters)
     for k in 0..3 {
         let mut rvec_pert = *rvec;
@@ -370,7 +369,11 @@ pub fn compute_projection_jacobians(
             2 => dist_pert.p1 += eps,
             3 => dist_pert.p2 += eps,
             4 => dist_pert.k3 += eps,
-            _ => return Err(cv_core::Error::AlgorithmError("Invalid distortion index".to_string())),
+            _ => {
+                return Err(cv_core::Error::AlgorithmError(
+                    "Invalid distortion index".to_string(),
+                ))
+            }
         }
 
         let (xd_pert, yd_pert) = dist_pert.apply(x, y);

@@ -167,7 +167,7 @@ impl Sift {
                 let b_f32 = &octave_layers[i];
 
                 let diff = ctx
-                    .subtract(&a_f32, &b_f32)
+                    .subtract(a_f32, b_f32)
                     .map_err(|e| Error::FeatureError(format!("Subtraction failed: {}", e)))?;
                 dog_layers.push(diff);
             }
@@ -214,7 +214,10 @@ impl Sift {
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
-    ) -> crate::Result<(KeyPoints, Vec<Vec<Tensor<f32, cv_core::storage::CpuStorage<f32>>>>)> {
+    ) -> crate::Result<(
+        KeyPoints,
+        Vec<Vec<Tensor<f32, cv_core::storage::CpuStorage<f32>>>>,
+    )> {
         let gaussian_pyramid = self.build_scale_space(ctx, image)?;
         let dog_pyramid = self.compute_dog(ctx, &gaussian_pyramid)?;
 
@@ -342,7 +345,7 @@ impl Sift {
                     let octave_img = &gaussian_pyramid[octave][0];
                     let descs = cpu
                         .compute_sift_descriptors(
-                            &octave_img,
+                            octave_img,
                             &KeyPoints {
                                 keypoints: octave_kps,
                             },

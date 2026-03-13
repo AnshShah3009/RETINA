@@ -1,8 +1,8 @@
 use crate::gpu::GpuContext;
-use crate::GpuTensor;
 use crate::storage::WgpuGpuStorage;
-use cv_core::storage::Storage;
+use crate::GpuTensor;
 use crate::Result;
+use cv_core::storage::Storage;
 use cv_core::Tensor;
 
 #[derive(Debug, Clone)]
@@ -11,9 +11,7 @@ pub struct ImagePyramid<T: cv_core::Float + bytemuck::Pod + 'static, S: Storage<
     pub scales: Vec<f32>,
 }
 
-pub fn build_pyramid<
-    T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'static,
->(
+pub fn build_pyramid<T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     ctx: &GpuContext,
     input: &GpuTensor<T>,
     n_levels: usize,
@@ -50,9 +48,7 @@ pub fn build_pyramid<
     Ok(ImagePyramid { levels, scales })
 }
 
-pub fn pyramid_down<
-    T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'static,
->(
+pub fn pyramid_down<T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     ctx: &GpuContext,
     input: &GpuTensor<T>,
 ) -> Result<GpuTensor<T>> {
@@ -61,12 +57,18 @@ pub fn pyramid_down<
     let new_h = h / 2;
 
     if new_w == 0 || new_h == 0 {
-        return Err(crate::Error::InvalidInput("Image too small to downsample".into()));
+        return Err(crate::Error::InvalidInput(
+            "Image too small to downsample".into(),
+        ));
     }
 
     // Gaussian blur then resize (gaussian_blur is f32-only, so we use resize directly for non-f32)
     use cv_core::storage::Storage;
-    if let Some(input_f32) = input.storage.as_any().downcast_ref::<crate::storage::WgpuGpuStorage<f32>>() {
+    if let Some(input_f32) = input
+        .storage
+        .as_any()
+        .downcast_ref::<crate::storage::WgpuGpuStorage<f32>>()
+    {
         use std::marker::PhantomData;
         let input_f32_tensor: crate::GpuTensor<f32> = cv_core::Tensor {
             storage: input_f32.clone(),
@@ -77,7 +79,8 @@ pub fn pyramid_down<
         let blurred = crate::gpu_kernels::convolve::gaussian_blur(ctx, &input_f32_tensor, 1.0, 5)?;
         let scaled = crate::gpu_kernels::resize::resize(ctx, &blurred, new_w as u32, new_h as u32)?;
         // Safety: f32 is a special case of T (we only reach here when T == f32)
-        let scaled_t = unsafe { std::mem::transmute::<crate::GpuTensor<f32>, crate::GpuTensor<T>>(scaled) };
+        let scaled_t =
+            unsafe { std::mem::transmute::<crate::GpuTensor<f32>, crate::GpuTensor<T>>(scaled) };
         Ok(scaled_t)
     } else {
         // For non-f32: skip gaussian blur, just resize

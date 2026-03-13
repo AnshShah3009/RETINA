@@ -554,14 +554,10 @@ pub fn moments(contour: &Contour) -> Moments {
         m11 += a * (2.0 * xi * yi + xi * yj + xj * yi + 2.0 * xj * yj);
         m02 += a * (yi * yi + yi * yj + yj * yj);
         m30 += a * (xi + xj) * (xi * xi + xj * xj);
-        m21 += a
-            * (xi * xi * (3.0 * yi + yj)
-                + 2.0 * xi * xj * (yi + yj)
-                + xj * xj * (yi + 3.0 * yj));
-        m12 += a
-            * (yi * yi * (3.0 * xi + xj)
-                + 2.0 * yi * yj * (xi + xj)
-                + yj * yj * (xi + 3.0 * xj));
+        m21 +=
+            a * (xi * xi * (3.0 * yi + yj) + 2.0 * xi * xj * (yi + yj) + xj * xj * (yi + 3.0 * yj));
+        m12 +=
+            a * (yi * yi * (3.0 * xi + xj) + 2.0 * yi * yj * (xi + xj) + yj * yj * (xi + 3.0 * xj));
         m03 += a * (yi + yj) * (yi * yi + yj * yj);
     }
 
@@ -591,16 +587,8 @@ pub fn moments(contour: &Contour) -> Moments {
     }
 
     // Central moments
-    let x_bar = if m00.abs() > 1e-12 {
-        m10 / m00
-    } else {
-        0.0
-    };
-    let y_bar = if m00.abs() > 1e-12 {
-        m01 / m00
-    } else {
-        0.0
-    };
+    let x_bar = if m00.abs() > 1e-12 { m10 / m00 } else { 0.0 };
+    let y_bar = if m00.abs() > 1e-12 { m01 / m00 } else { 0.0 };
 
     let mu20 = m20 - x_bar * m10;
     let mu11 = m11 - x_bar * m01;

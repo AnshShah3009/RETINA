@@ -63,7 +63,7 @@ pub fn fftfreq(n: usize, d: f64) -> Vec<f64> {
     }
     let nd = n as f64 * d;
     let mut freqs = Vec::with_capacity(n);
-    let half = (n + 1) / 2; // ceil(n/2)
+    let half = n.div_ceil(2); // ceil(n/2)
     for i in 0..half {
         freqs.push(i as f64 / nd);
     }
@@ -176,7 +176,7 @@ pub fn psd(input: &[f64], sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
         .collect();
 
     // Double non-DC, non-Nyquist bins to account for negative frequencies
-    let nyquist = if n % 2 == 0 { n_freqs - 1 } else { n_freqs };
+    let nyquist = if n.is_multiple_of(2) { n_freqs - 1 } else { n_freqs };
     for p in power.iter_mut().take(nyquist).skip(1) {
         *p *= 2.0;
     }

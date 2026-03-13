@@ -1,5 +1,5 @@
 use crate::{BackendType, DeviceId, Result};
-use cv_core::{storage::Storage, Tensor, Float};
+use cv_core::{storage::Storage, Float, Tensor};
 
 /// A unified context for executing compute operations.
 ///
@@ -43,7 +43,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<()>;
 
     /// Execute a threshold operation
-    fn threshold<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn threshold<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         thresh: T,
@@ -52,7 +55,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<T, S>>;
 
     /// Execute a Sobel operator
-    fn sobel<T: Float + bytemuck::Pod + std::fmt::Debug + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn sobel<
+        T: Float + bytemuck::Pod + std::fmt::Debug + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         dx: i32,
@@ -61,7 +67,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<(Tensor<T, S>, Tensor<T, S>)>;
 
     /// Execute Canny edge detection
-    fn canny<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn canny<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         low_threshold: T,
@@ -69,7 +78,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<T, S>>;
 
     /// Execute Hough line transform
-    fn hough_lines<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn hough_lines<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         rho: T,
@@ -78,7 +90,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Vec<cv_core::HoughLine>>;
 
     /// Execute Hough circle transform
-    fn hough_circles<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn hough_circles<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         min_radius: T,
@@ -108,7 +123,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<u8, S>>;
 
     /// Execute a warp operation (affine or perspective)
-    fn warp<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn warp<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         matrix: &[[T; 3]; 3],
@@ -150,21 +168,30 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Vec<usize>>;
 
     /// Transform a point cloud
-    fn pointcloud_transform<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pointcloud_transform<
+        T: Float + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         points: &Tensor<T, S>,
         transform: &[[T; 4]; 4],
     ) -> Result<Tensor<T, S>>;
 
     /// Compute normals for a point cloud
-    fn pointcloud_normals<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pointcloud_normals<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         points: &Tensor<T, S>,
         k_neighbors: u32,
     ) -> Result<Tensor<T, S>>;
 
     /// TSDF Volume Integration
-    fn tsdf_integrate<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn tsdf_integrate<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         depth_image: &Tensor<T, S>,
         camera_pose: &[[T; 4]; 4],
@@ -200,7 +227,10 @@ pub trait ComputeContext: Send + Sync {
         max_triangles: u32,
     ) -> Result<Vec<crate::gpu_kernels::marching_cubes::Vertex>>;
 
-    fn optical_flow_lk<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn optical_flow_lk<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         prev_pyramid: &[Tensor<T, S>],
         next_pyramid: &[Tensor<T, S>],
@@ -210,27 +240,39 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Vec<[T; 2]>>;
 
     /// Color space conversion
-    fn cvt_color<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn cvt_color<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         code: ColorConversion,
     ) -> Result<Tensor<T, S>>;
 
     /// Resize an image
-    fn resize<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn resize<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         new_shape: (usize, usize),
     ) -> Result<Tensor<T, S>>;
 
     /// Create an image pyramid level (downsample)
-    fn pyramid_down<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn pyramid_down<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> Result<Tensor<T, S>>;
 
     /// Bilateral Filter
-    fn bilateral_filter<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn bilateral_filter<
+        T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         d: i32,
@@ -240,7 +282,10 @@ pub trait ComputeContext: Send + Sync {
 
     /// FAST Keypoint Detection
     /// Returns a score map (1 channel, same size as input)
-    fn fast_detect<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn fast_detect<
+        T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         threshold: T,
@@ -248,7 +293,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<T, S>>;
 
     /// Gaussian Blur
-    fn gaussian_blur<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn gaussian_blur<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         sigma: T,
@@ -278,7 +326,10 @@ pub trait ComputeContext: Send + Sync {
     /// SIFT Local Extrema Detection
     /// Finds local maxima/minima in 3x3x3 scale-space neighborhood.
     /// Returns a U8 score map on CPU for refinement.
-    fn sift_extrema<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn sift_extrema<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         dog_prev: &Tensor<T, S>,
         dog_curr: &Tensor<T, S>,
@@ -300,7 +351,10 @@ pub trait ComputeContext: Send + Sync {
 
     /// ICP Point Correspondence
     /// Finds nearest neighbors from src points to tgt points
-    fn icp_correspondences<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn icp_correspondences<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         src: &Tensor<T, S>,
         tgt: &Tensor<T, S>,
@@ -309,7 +363,10 @@ pub trait ComputeContext: Send + Sync {
 
     /// ICP Jacobian Accumulation
     /// Accumulates J^T * J and J^T * r for point-to-plane ICP
-    fn icp_accumulate<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn icp_accumulate<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         source: &Tensor<T, S>,
         target: &Tensor<T, S>,
@@ -318,7 +375,10 @@ pub trait ComputeContext: Send + Sync {
         transform: &nalgebra::Matrix4<T>,
     ) -> Result<(nalgebra::Matrix6<T>, nalgebra::Vector6<T>)>;
 
-    fn dense_icp_step<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn dense_icp_step<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         source_depth: &Tensor<T, S>,
         target_data: &Tensor<T, S>,
@@ -329,7 +389,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<(nalgebra::Matrix6<T>, nalgebra::Vector6<T>)>;
 
     /// AKAZE Non-linear Diffusion step
-    fn akaze_diffusion<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn akaze_diffusion<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
         k: T,
@@ -337,19 +400,28 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<T, S>>;
 
     /// AKAZE Derivatives and Hessian Determinant
-    fn akaze_derivatives<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn akaze_derivatives<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> Result<(Tensor<T, S>, Tensor<T, S>, Tensor<T, S>)>;
 
     /// Compute AKAZE Contrast K factor (70th percentile)
-    fn akaze_contrast_k<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn akaze_contrast_k<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         input: &Tensor<T, S>,
     ) -> Result<T>;
 
     /// Sparse Matrix-Vector Multiply (y = A * x)
-    fn spmv<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn spmv<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         row_ptr: &[u32],
         col_indices: &[u32],
@@ -357,7 +429,11 @@ pub trait ComputeContext: Send + Sync {
         x: &Tensor<T, S>,
     ) -> Result<Tensor<T, S>>;
 
-    fn mog2_update<T: Float + bytemuck::Pod + 'static, S1: Storage<T> + 'static, S2: Storage<u32> + 'static>(
+    fn mog2_update<
+        T: Float + bytemuck::Pod + 'static,
+        S1: Storage<T> + 'static,
+        S2: Storage<u32> + 'static,
+    >(
         &self,
         frame: &Tensor<T, S1>,
         model: &mut Tensor<T, S1>,
@@ -391,7 +467,10 @@ pub trait ComputeContext: Send + Sync {
     ) -> Result<Tensor<T, OS>>;
 
     /// Accelerated chessboard corner detection
-    fn find_chessboard_corners<T: Float + bytemuck::Pod + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
+    fn find_chessboard_corners<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
         &self,
         image: &Tensor<T, S>,
         pattern_size: (usize, usize),
@@ -430,7 +509,6 @@ pub struct Mog2Params<T: Float> {
 // Safety: All fields are Pod when T: Pod. Repr(C) guarantees no padding surprises.
 unsafe impl<T: Float + bytemuck::Pod> bytemuck::Pod for Mog2Params<T> {}
 unsafe impl<T: Float + bytemuck::Zeroable> bytemuck::Zeroable for Mog2Params<T> {}
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorConversion {

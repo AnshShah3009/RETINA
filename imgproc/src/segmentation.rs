@@ -55,10 +55,7 @@ impl Ord for WatershedPixel {
 /// # Errors
 /// Returns an error if the image is not 3-channel, the markers are not 1-channel,
 /// or if the spatial dimensions do not match.
-pub fn watershed<T: Float>(
-    image: &CpuTensor<T>,
-    markers: &mut CpuTensor<i32>,
-) -> Result<()> {
+pub fn watershed<T: Float>(image: &CpuTensor<T>, markers: &mut CpuTensor<i32>) -> Result<()> {
     let (c, h, w) = image.shape.chw();
     if c != 3 {
         return Err(cv_core::Error::InvalidInput(
@@ -179,12 +176,7 @@ pub fn watershed<T: Float>(
 }
 
 /// Compute per-pixel gradient magnitude from a 3-channel CHW image.
-fn compute_gradient_magnitude<T: Float>(
-    img_data: &[T],
-    h: usize,
-    w: usize,
-    hw: usize,
-) -> Vec<f64> {
+fn compute_gradient_magnitude<T: Float>(img_data: &[T], h: usize, w: usize, hw: usize) -> Vec<f64> {
     let mut gradient = vec![0.0f64; hw];
     for r in 0..h {
         for col in 0..w {
@@ -572,7 +564,13 @@ mod tests {
     use cv_core::{CpuTensor, TensorShape};
 
     /// Helper: create a 3-channel CHW image from per-channel flat arrays.
-    fn make_color_image(h: usize, w: usize, ch0: &[f32], ch1: &[f32], ch2: &[f32]) -> CpuTensor<f32> {
+    fn make_color_image(
+        h: usize,
+        w: usize,
+        ch0: &[f32],
+        ch1: &[f32],
+        ch2: &[f32],
+    ) -> CpuTensor<f32> {
         let mut data = Vec::with_capacity(3 * h * w);
         data.extend_from_slice(ch0);
         data.extend_from_slice(ch1);
@@ -665,8 +663,7 @@ mod tests {
         }
         let image = make_color_image(h, w, &ch_r, &ch_g, &ch_b);
 
-        let mut mask =
-            CpuTensor::<u8>::from_vec(vec![0u8; hw], TensorShape::new(1, h, w)).unwrap();
+        let mut mask = CpuTensor::<u8>::from_vec(vec![0u8; hw], TensorShape::new(1, h, w)).unwrap();
 
         // Rectangle covers only the left half -> foreground should be left half
         grab_cut(
@@ -705,8 +702,7 @@ mod tests {
     #[test]
     fn grabcut_requires_rect_for_init_with_rect() {
         let image = make_color_image(4, 4, &[0.0; 16], &[0.0; 16], &[0.0; 16]);
-        let mut mask =
-            CpuTensor::<u8>::from_vec(vec![0u8; 16], TensorShape::new(1, 4, 4)).unwrap();
+        let mut mask = CpuTensor::<u8>::from_vec(vec![0u8; 16], TensorShape::new(1, 4, 4)).unwrap();
         let res = grab_cut(&image, &mut mask, None, 1, GrabCutMode::InitWithRect);
         assert!(res.is_err());
     }
@@ -727,8 +723,7 @@ mod tests {
                 data[r * w + c] = 0.0;
             }
         }
-        let mut image =
-            CpuTensor::<f32>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+        let mut image = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
 
         let count = flood_fill(&mut image, (2, 2), 0.5, 0.0, 0.0, 4).unwrap();
 
@@ -753,15 +748,18 @@ mod tests {
                 (r + c) as f32 * 0.1 // values from 0.0 to 0.6
             })
             .collect();
-        let mut image =
-            CpuTensor::<f32>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+        let mut image = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
 
         // Seed at (0,0) value=0.0, tolerance [0.0 - 0.15, 0.0 + 0.15] = [-0.15, 0.15]
         let count = flood_fill(&mut image, (0, 0), 9.0, 0.15, 0.15, 4).unwrap();
 
         // (0,0)=0.0, (0,1)=0.1, (1,0)=0.1 are within tolerance; (1,1)=0.2 is not reachable via 4-conn from seed through in-range pixels
         // Actually (1,1) = 0.2 > 0.15 so it's blocked. (0,1) and (1,0) are reachable.
-        assert!(count >= 3, "at least seed + 2 neighbours should be filled, got {}", count);
+        assert!(
+            count >= 3,
+            "at least seed + 2 neighbours should be filled, got {}",
+            count
+        );
     }
 
     #[test]
@@ -774,8 +772,7 @@ mod tests {
         // 1 0 1
         // 0 1 0
         let data = vec![0.0f32, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
-        let mut image =
-            CpuTensor::<f32>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+        let mut image = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
 
         // 4-conn from centre: only (1,1) itself
         let mut img4 = image.clone();

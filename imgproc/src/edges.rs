@@ -131,8 +131,20 @@ fn sobel_gpu(
     let gx_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = gx_gpu.to_cpu()?;
     let gy_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = gy_gpu.to_cpu()?;
 
-    let gx_data: Vec<u8> = gx_cpu.storage.as_slice().unwrap().iter().map(|&v| v.clamp(0.0, 255.0) as u8).collect();
-    let gy_data: Vec<u8> = gy_cpu.storage.as_slice().unwrap().iter().map(|&v| v.clamp(0.0, 255.0) as u8).collect();
+    let gx_data: Vec<u8> = gx_cpu
+        .storage
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .collect();
+    let gy_data: Vec<u8> = gy_cpu
+        .storage
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .collect();
 
     let gx = GrayImage::from_raw(src.width(), src.height(), gx_data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))?;
@@ -545,7 +557,13 @@ fn canny_gpu(
     let res_gpu = gpu.canny(&input_gpu, low, high)?;
 
     let res_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = res_gpu.to_cpu()?;
-    let res_data: Vec<u8> = res_cpu.storage.as_slice().unwrap().iter().map(|&v| v.clamp(0.0, 255.0) as u8).collect();
+    let res_data: Vec<u8> = res_cpu
+        .storage
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .collect();
 
     GrayImage::from_raw(src.width(), src.height(), res_data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))

@@ -39,6 +39,7 @@
 
 pub mod fft;
 pub mod geometry;
+pub mod geometry2d;
 pub mod integrate;
 pub mod interpolate;
 pub mod jit;

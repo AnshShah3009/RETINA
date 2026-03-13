@@ -67,23 +67,18 @@ pub fn compute_rgbd_odometry_ctx(
 
     // GPU Path
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        let intrinsics_array = [
-            intrinsics.fx,
-            intrinsics.fy,
-            intrinsics.cx,
-            intrinsics.cy,
-        ];
-        
+        let intrinsics_array = [intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy];
+
         // Convert color to u32 for HAL if provided
         let src_color_u32 = source_color.map(|c| {
-            c.iter().map(|v| {
-                (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16)
-            }).collect::<Vec<_>>()
+            c.iter()
+                .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
+                .collect::<Vec<_>>()
         });
         let dst_color_u32 = target_color.map(|c| {
-            c.iter().map(|v| {
-                (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16)
-            }).collect::<Vec<_>>()
+            c.iter()
+                .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
+                .collect::<Vec<_>>()
         });
 
         if let Ok((transform, fitness, rmse)) = cv_hal::gpu_kernels::odometry_gpu::compute_odometry(
