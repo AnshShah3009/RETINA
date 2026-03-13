@@ -12,7 +12,12 @@ rayon = { workspace = true }
 wide = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
-bytemuck = { version = "1.21.0", features = ["derive"] }
+num-traits = { version = "0.2", default-features = false }
+bytemuck = { workspace = true, features = ["derive"] }
+half = { version = "2.4", features = ["num-traits", "serde"], optional = true }
 
 [features]
-default = []
+default = ["full-precision"]
+full-precision = []
+half-precision = ["half"]
+all-precision = ["full-precision", "half-precision"]

@@ -80,7 +80,7 @@ impl<D, M: RobustModel<D>> Ransac<D, M> {
         let mut best_num_inliers = 0;
         let mut best_residual = f64::INFINITY;
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut indices: Vec<usize> = (0..n).collect();
 
         for _ in 0..self.config.max_iterations {
@@ -165,7 +165,7 @@ impl<D, M: RobustModel<D>> LMedS<D, M> {
         let mut best_model = None;
         let mut best_median_error = f64::INFINITY;
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut indices: Vec<usize> = (0..n).collect();
 
         for _ in 0..self.config.max_iterations {
@@ -263,7 +263,7 @@ impl<D, M: RobustModel<D>> Prosac<D, M> {
         let mut best_num_inliers = 0;
         let mut best_residual = f64::INFINITY;
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // PROSAC parameters
         let t_max = self.config.max_iterations;
@@ -412,7 +412,7 @@ mod tests {
         noise: f64,
     ) -> Vec<Point2<f64>> {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut points = Vec::new();
 
         for i in 0..n_inliers {
@@ -422,13 +422,13 @@ mod tests {
             } else {
                 -c / a
             };
-            let y = y + rng.gen_range(-noise..noise);
+            let y = y + rng.random_range(-noise..noise);
             points.push(Point2::new(x, y));
         }
 
         for _ in 0..n_outliers {
-            let x = rng.gen_range(0.0..10.0);
-            let y = rng.gen_range(-10.0..10.0);
+            let x = rng.random_range(0.0..10.0);
+            let y = rng.random_range(-10.0..10.0);
             points.push(Point2::new(x, y));
         }
 

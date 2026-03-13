@@ -6,11 +6,14 @@
 
 pub mod buffer_handle;
 pub mod descriptor;
+pub mod float;
 pub mod frames;
 pub mod geometry;
 pub mod image;
 pub mod kalman;
 pub mod keypoint;
+pub mod nalgebra_adapters;
+pub mod nalgebra_wrapper;
 pub mod point_cloud;
 pub mod robust;
 pub mod robust_loss;
@@ -18,14 +21,18 @@ pub mod runtime;
 pub mod slam;
 pub mod storage;
 pub mod tensor;
+pub mod vector;
 
 pub use buffer_handle::*;
 pub use descriptor::*;
+pub use float::*;
 pub use frames::*;
 pub use geometry::*;
 pub use image::*;
 pub use kalman::*;
 pub use keypoint::*;
+pub use nalgebra_adapters::*;
+pub use nalgebra_wrapper::*;
 pub use point_cloud::*;
 pub use robust::*;
 pub use robust_loss::*;
@@ -33,6 +40,7 @@ pub use runtime::*;
 pub use slam::*;
 pub use storage::*;
 pub use tensor::*;
+pub use vector::*;
 
 /// Error types for core operations
 #[derive(Debug, thiserror::Error)]

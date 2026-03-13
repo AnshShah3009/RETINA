@@ -1069,7 +1069,8 @@ fn intersect(a: [f32; 2], b: [f32; 2], c: [f32; 2], d: [f32; 2]) -> [f32; 2] {
 }
 
 /// A line in Hesse normal form (rho, theta).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub struct HoughLine {
     /// Distance from the origin.
     pub rho: f32,
@@ -1086,7 +1087,8 @@ impl HoughLine {
 }
 
 /// A circle in (x, y, radius) form.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub struct HoughCircle {
     pub cx: f32,
     pub cy: f32,

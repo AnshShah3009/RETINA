@@ -128,6 +128,14 @@ pub trait StorageFactory<T: 'static>: Storage<T> + Sized {
 
     /// Create storage with a given size and default value.
     fn new(size: usize, default_value: T) -> std::result::Result<Self, String>;
+
+    /// Create storage with a given shape and default value.
+    fn create(shape: crate::tensor::TensorShape, default: T) -> std::result::Result<Self, String>;
+
+    /// Create storage with a given shape and zero-initialized data.
+    fn create_zeros(shape: crate::tensor::TensorShape) -> std::result::Result<Self, String>
+    where
+        T: Default;
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -318,6 +326,28 @@ impl<T: Clone + Debug + 'static> StorageFactory<T> for CpuStorage<T> {
             handle: BufferHandle(generate_handle_id()),
             shape: vec![],
             data: vec![default_value; size],
+        })
+    }
+
+    fn create(shape: crate::tensor::TensorShape, default: T) -> std::result::Result<Self, String> {
+        let size = shape.len();
+        Ok(CpuStorage {
+            handle: BufferHandle(generate_handle_id()),
+            shape: vec![shape.channels, shape.height, shape.width],
+            data: vec![default; size],
+        })
+    }
+
+    fn create_zeros(shape: crate::tensor::TensorShape) -> std::result::Result<Self, String>
+    where
+        T: Default,
+    {
+        let size = shape.len();
+        let data = (0..size).map(|_| T::default()).collect();
+        Ok(CpuStorage {
+            handle: BufferHandle(generate_handle_id()),
+            shape: vec![shape.channels, shape.height, shape.width],
+            data,
         })
     }
 }
