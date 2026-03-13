@@ -1374,7 +1374,9 @@ version = "0.1.0"
 dependencies = [
  "cv-3d",
  "cv-scientific",
+ "hashbrown 0.16.1",
  "nalgebra",
+ "rayon",
 ]
 
 [[package]]
@@ -1385,6 +1387,7 @@ dependencies = [
  "cv-core",
  "cv-dnn",
  "cv-features",
+ "cv-imgproc",
  "cv-optimize",
  "cv-photo",
  "cv-point-cloud",

@@ -21,6 +21,7 @@ cv-videoio = { workspace = true }
 cv-dnn = { workspace = true }
 cv-optimize = { workspace = true }
 cv-photo = { workspace = true }
+cv-imgproc = { workspace = true }
 nalgebra = { workspace = true }
 rustfft = { workspace = true }
 image = { workspace = true }

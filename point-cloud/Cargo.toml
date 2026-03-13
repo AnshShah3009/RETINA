@@ -9,6 +9,8 @@ description = "Unified point cloud operations crate"
 cv-scientific = { workspace = true }
 cv-3d = { workspace = true }
 nalgebra = { workspace = true }
+rayon = { workspace = true }
+hashbrown = { workspace = true }
 
 [features]
 default = []

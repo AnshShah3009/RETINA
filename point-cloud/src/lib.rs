@@ -42,6 +42,7 @@
 //! Vulkan (Linux/Android), DX12 (Windows), and WebGPU.
 
 pub mod cpu;
+pub mod filters;
 pub mod gpu;
 pub mod hidden_point_removal;
 

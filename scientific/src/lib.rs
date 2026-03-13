@@ -50,6 +50,8 @@ pub mod multiview;
 pub mod optimize;
 pub mod point_cloud;
 pub mod signal;
+pub mod sparse;
+pub mod spatial;
 pub mod special;
 pub mod stats;
 

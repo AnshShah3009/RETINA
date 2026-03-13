@@ -1283,6 +1283,292 @@ fn point_in_polygon(x: f64, y: f64, polygon: Vec<(f64, f64)>) -> bool {
     pip(&point, &poly)
 }
 
+// ============== Point Cloud Filtering Bindings ==============
+
+/// Statistical outlier removal. Returns (inlier_points, inlier_indices).
+///
+/// Removes points whose mean distance to `nb_neighbors` nearest neighbours
+/// exceeds `mean + std_ratio * stddev`.
+#[pyfunction]
+fn statistical_outlier_removal(
+    points: Vec<(f64, f64, f64)>,
+    nb_neighbors: usize,
+    std_ratio: f64,
+) -> (Vec<(f64, f64, f64)>, Vec<usize>) {
+    let pts: Vec<nalgebra::Point3<f64>> = points
+        .iter()
+        .map(|&(x, y, z)| nalgebra::Point3::new(x, y, z))
+        .collect();
+    let (inliers, indices) =
+        cv_point_cloud::filters::statistical_outlier_removal(&pts, nb_neighbors, std_ratio);
+    let out_pts = inliers.iter().map(|p| (p.x, p.y, p.z)).collect();
+    (out_pts, indices)
+}
+
+/// Radius outlier removal. Returns (inlier_points, inlier_indices).
+///
+/// Removes points that have fewer than `min_neighbors` within the given `radius`.
+#[pyfunction]
+fn radius_outlier_removal(
+    points: Vec<(f64, f64, f64)>,
+    radius: f64,
+    min_neighbors: usize,
+) -> (Vec<(f64, f64, f64)>, Vec<usize>) {
+    let pts: Vec<nalgebra::Point3<f64>> = points
+        .iter()
+        .map(|&(x, y, z)| nalgebra::Point3::new(x, y, z))
+        .collect();
+    let (inliers, indices) =
+        cv_point_cloud::filters::radius_outlier_removal(&pts, radius, min_neighbors);
+    let out_pts = inliers.iter().map(|p| (p.x, p.y, p.z)).collect();
+    (out_pts, indices)
+}
+
+/// Voxel downsampling. Groups points into cubic voxels and returns centroids.
+#[pyfunction]
+fn voxel_downsample(points: Vec<(f64, f64, f64)>, voxel_size: f64) -> Vec<(f64, f64, f64)> {
+    let pts: Vec<nalgebra::Point3<f64>> = points
+        .iter()
+        .map(|&(x, y, z)| nalgebra::Point3::new(x, y, z))
+        .collect();
+    let result = cv_point_cloud::filters::voxel_downsample(&pts, None, None, voxel_size);
+    result.points.iter().map(|p| (p.x, p.y, p.z)).collect()
+}
+
+// ============== HDR & Tone Mapping Bindings ==============
+
+/// Reinhard tone mapping: maps HDR radiance to LDR [0,1].
+///
+/// Args:
+///     hdr_data: Flat list of f64 pixel values (CHW layout).
+///     channels: Number of channels.
+///     height, width: Image dimensions.
+///     gamma: Gamma correction exponent (e.g. 2.2).
+///
+/// Returns:
+///     Flat list of f32 pixel values in [0, 1].
+#[pyfunction]
+fn tonemap_reinhard(
+    hdr_data: Vec<f64>,
+    channels: usize,
+    height: usize,
+    width: usize,
+    gamma: f64,
+) -> PyResult<Vec<f32>> {
+    let tensor = CpuTensor::<f64>::from_vec(hdr_data, TensorShape::new(channels, height, width))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let result = cv_photo::tonemap_reinhard(&tensor, gamma)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    result
+        .as_slice()
+        .map(|s| s.to_vec())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
+
+/// Mertens exposure fusion: fuse multiple LDR images into one.
+///
+/// Args:
+///     images: List of flat f32 image data (each CHW layout, values in [0,1]).
+///     channels: Number of channels.
+///     height, width: Image dimensions.
+///
+/// Returns:
+///     Flat list of f32 pixel values — the fused image.
+#[pyfunction]
+fn merge_mertens(
+    images: Vec<Vec<f32>>,
+    channels: usize,
+    height: usize,
+    width: usize,
+) -> PyResult<Vec<f32>> {
+    let tensors: Result<Vec<CpuTensor<f32>>, _> = images
+        .into_iter()
+        .map(|data| CpuTensor::<f32>::from_vec(data, TensorShape::new(channels, height, width)))
+        .collect();
+    let tensors =
+        tensors.map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let result = cv_photo::merge_mertens(&tensors)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    result
+        .as_slice()
+        .map(|s| s.to_vec())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
+
+// ============== Denoising Bindings ==============
+
+/// Non-local means denoising for single-channel images.
+///
+/// Args:
+///     image: Flat list of f32 pixel values (1, H, W layout).
+///     height, width: Image dimensions.
+///     h: Filter strength.
+///     template_window: Size of comparison patch (odd number, e.g. 7).
+///     search_window: Size of search area (odd number, e.g. 21).
+///
+/// Returns:
+///     Flat list of f32 pixel values — the denoised image.
+#[pyfunction]
+fn fast_nl_means_denoising(
+    image: Vec<f32>,
+    height: usize,
+    width: usize,
+    h: f32,
+    template_window: usize,
+    search_window: usize,
+) -> PyResult<Vec<f32>> {
+    let tensor = CpuTensor::<f32>::from_vec(image, TensorShape::new(1, height, width))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let result = cv_photo::fast_nl_means_denoising(&tensor, h, template_window, search_window)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    result
+        .as_slice()
+        .map(|s| s.to_vec())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
+
+// ============== Signal Processing Bindings ==============
+
+/// Welch's method for power spectral density estimation.
+///
+/// Args:
+///     data: Input signal samples.
+///     nperseg: Segment length for FFT.
+///     sample_rate: Sampling frequency in Hz.
+///
+/// Returns:
+///     Tuple of (frequencies, psd) vectors.
+#[pyfunction]
+fn welch_psd(data: Vec<f64>, nperseg: usize, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
+    cv_scientific::signal::welch(&data, nperseg, None, sample_rate)
+}
+
+/// Design a Butterworth lowpass filter.
+///
+/// Args:
+///     order: Filter order (>= 1).
+///     cutoff: Cutoff frequency in Hz.
+///     sample_rate: Sampling frequency in Hz.
+///
+/// Returns:
+///     Tuple of (b, a) coefficient vectors (transfer function form).
+#[pyfunction]
+fn butter_lowpass(order: usize, cutoff: f64, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
+    cv_scientific::signal::butter(order, cutoff, sample_rate)
+}
+
+/// Zero-phase forward-backward digital filtering.
+///
+/// Args:
+///     b: Numerator coefficients.
+///     a: Denominator coefficients.
+///     x: Input signal.
+///
+/// Returns:
+///     Filtered signal (same length as x).
+#[pyfunction]
+fn filtfilt(b: Vec<f64>, a: Vec<f64>, x: Vec<f64>) -> Vec<f64> {
+    cv_scientific::signal::filtfilt(&b, &a, &x)
+}
+
+/// Find peaks (local maxima) in a 1D signal.
+///
+/// Args:
+///     data: Input signal.
+///     min_height: Optional minimum peak height.
+///     min_distance: Optional minimum distance between peaks.
+///
+/// Returns:
+///     List of peak indices.
+#[pyfunction]
+#[pyo3(signature = (data, min_height=None, min_distance=None))]
+fn find_peaks(data: Vec<f64>, min_height: Option<f64>, min_distance: Option<usize>) -> Vec<usize> {
+    cv_scientific::signal::find_peaks(&data, min_height, min_distance)
+}
+
+// ============== Distance Transform Bindings ==============
+
+/// Compute the distance transform of a binary image.
+///
+/// Each output pixel holds the distance to the nearest zero-valued pixel.
+///
+/// Args:
+///     binary: Flat list of f32 pixel values (H * W). Zero = background.
+///     height, width: Image dimensions.
+///     dist_type: Distance metric — "l1", "l2", or "chessboard".
+///
+/// Returns:
+///     Flat list of f32 distance values.
+#[pyfunction]
+fn distance_transform(
+    binary: Vec<f32>,
+    height: usize,
+    width: usize,
+    dist_type: &str,
+) -> PyResult<Vec<f32>> {
+    let dt = match dist_type {
+        "l1" => cv_imgproc::distance_transform::DistanceType::L1,
+        "l2" => cv_imgproc::distance_transform::DistanceType::L2,
+        "chessboard" => cv_imgproc::distance_transform::DistanceType::Chessboard,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Unknown distance type '{}'. Use 'l1', 'l2', or 'chessboard'.",
+                other
+            )));
+        }
+    };
+    let tensor = CpuTensor::<f32>::from_vec(binary, TensorShape::new(1, height, width))
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    let result = cv_imgproc::distance_transform::distance_transform(&tensor, dt)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+    result
+        .as_slice()
+        .map(|s| s.to_vec())
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+}
+
+// ============== Sparse & Spatial Bindings ==============
+
+/// Query a KD-tree for the k nearest neighbours of a point.
+///
+/// Args:
+///     points: List of points (each a list of floats, all same dimensionality).
+///     query: Query point (list of floats).
+///     k: Number of neighbours to return.
+///
+/// Returns:
+///     List of (index, distance) pairs sorted by ascending distance.
+#[pyfunction]
+fn kdtree_query(points: Vec<Vec<f64>>, query: Vec<f64>, k: usize) -> PyResult<Vec<(usize, f64)>> {
+    let tree = cv_scientific::spatial::KDTree::new(&points)
+        .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
+    Ok(tree.query(&query, k))
+}
+
+/// Solve a sparse linear system Ax = b using conjugate gradient.
+///
+/// Args:
+///     triplets: List of (row, col, value) entries defining A.
+///     nrows: Number of rows of A.
+///     ncols: Number of columns of A.
+///     b: Right-hand side vector.
+///
+/// Returns:
+///     Solution vector x.
+#[pyfunction]
+fn sparse_solve_cg(
+    triplets: Vec<(usize, usize, f64)>,
+    nrows: usize,
+    ncols: usize,
+    b: Vec<f64>,
+) -> PyResult<Vec<f64>> {
+    let mat = cv_scientific::sparse::CsrMatrix::from_triplets(nrows, ncols, &triplets);
+    let b_vec = DVector::from_vec(b);
+    let result = cv_scientific::sparse::cg_solve(&mat, &b_vec, 1000, 1e-10)
+        .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+    Ok(result.as_slice().to_vec())
+}
+
 #[pymodule]
 fn cv_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorkloadHint>()?;
@@ -1329,5 +1615,24 @@ fn cv_native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(delaunay, m)?)?;
     m.add_function(wrap_pyfunction!(polygon_area, m)?)?;
     m.add_function(wrap_pyfunction!(point_in_polygon, m)?)?;
+    // Point cloud filtering
+    m.add_function(wrap_pyfunction!(statistical_outlier_removal, m)?)?;
+    m.add_function(wrap_pyfunction!(radius_outlier_removal, m)?)?;
+    m.add_function(wrap_pyfunction!(voxel_downsample, m)?)?;
+    // HDR & tone mapping
+    m.add_function(wrap_pyfunction!(tonemap_reinhard, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_mertens, m)?)?;
+    // Denoising
+    m.add_function(wrap_pyfunction!(fast_nl_means_denoising, m)?)?;
+    // Signal processing
+    m.add_function(wrap_pyfunction!(welch_psd, m)?)?;
+    m.add_function(wrap_pyfunction!(butter_lowpass, m)?)?;
+    m.add_function(wrap_pyfunction!(filtfilt, m)?)?;
+    m.add_function(wrap_pyfunction!(find_peaks, m)?)?;
+    // Distance transform
+    m.add_function(wrap_pyfunction!(distance_transform, m)?)?;
+    // Sparse & spatial
+    m.add_function(wrap_pyfunction!(kdtree_query, m)?)?;
+    m.add_function(wrap_pyfunction!(sparse_solve_cg, m)?)?;
     Ok(())
 }
