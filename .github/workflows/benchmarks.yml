@@ -31,29 +31,12 @@ jobs:
         fetch-depth: 0
 
     - name: Install Rust toolchain
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
-        override: true
         components: rustfmt, clippy
 
-    - name: Cache cargo registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache cargo index
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache cargo build
-      uses: actions/cache@v3
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+    - name: Cache Rust build artifacts
+      uses: Swatinem/rust-cache@v2
 
     - name: Run benchmarks
       working-directory: stereo
@@ -61,49 +44,23 @@ jobs:
         cargo bench --bench calibration_benchmark -- --sample-size 20 --verbose
       timeout-minutes: 45
 
-    - name: Save benchmark results
-      if: always()
-      working-directory: rust-cv-native
-      run: |
-        mkdir -p ci_artifacts
-        ./scripts/save_benchmark_results.sh
-
     - name: Upload benchmark artifacts
       if: always()
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: benchmark-results-${{ github.run_id }}
-        path: ci_artifacts/benchmarks/
+        path: target/criterion/
         retention-days: 30
+        if-no-files-found: ignore
 
-    - name: Comment PR with benchmark results
-      if: github.event_name == 'pull_request'
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const fs = require('fs');
-          const summaryPath = 'ci_artifacts/benchmarks/summary_*.txt';
-          const files = require('glob').sync(summaryPath);
-
-          if (files.length > 0) {
-            const summary = fs.readFileSync(files[0], 'utf8');
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: '## 📊 Benchmark Results\n\n```\n' + summary + '\n```'
-            });
-          }
-
-    - name: Publish benchmark report
+    - name: Publish criterion report
       if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: criterion-html-report
         path: target/criterion/report/
         if-no-files-found: ignore
 
-  # Optional: Compare benchmarks across commits
   compare-benchmarks:
     name: Compare Benchmark Results
     runs-on: ubuntu-latest
@@ -112,7 +69,7 @@ jobs:
 
     steps:
     - name: Download PR benchmark results
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         name: benchmark-results-${{ github.run_id }}
         path: pr_results
@@ -121,8 +78,4 @@ jobs:
       run: |
         echo "## Benchmark Comparison"
         echo "Results from this PR:"
-        if [ -f "pr_results/summary_*.txt" ]; then
-          head -20 pr_results/summary_*.txt
-        else
-          echo "No benchmark results found"
-        fi
+        find pr_results -name "*.json" -exec head -5 {} \; 2>/dev/null || echo "No benchmark results found"
