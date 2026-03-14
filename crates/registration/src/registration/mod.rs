@@ -207,7 +207,7 @@ pub fn registration_icp_point_to_plane(
                 let residual = diff.dot(normal);
 
                 // Compute Jacobian
-                let p = src_point.coords;
+                let p = transformed.coords;
                 let n = normal;
                 let cross = p.cross(n);
 
@@ -221,7 +221,7 @@ pub fn registration_icp_point_to_plane(
 
         // Solve for update
         if let Some(ata_inv) = ata.try_inverse() {
-            let delta = ata_inv * atb;
+            let delta = -(ata_inv * atb);
 
             // Update transformation using exponential map
             let update = exponential_map_se3(&delta);
@@ -357,7 +357,7 @@ pub fn registration_icp_point_to_plane_ctx(
 
         // Solve for update on CPU (Matrix6 is small)
         if let Some(ata_inv) = ata.try_inverse() {
-            let delta = ata_inv * atb;
+            let delta = -(ata_inv * atb);
             let update = exponential_map_se3(&delta);
             transformation = update * transformation;
         }
@@ -438,7 +438,7 @@ fn exponential_map_se3(delta: &nalgebra::Vector6<f32>) -> Matrix4<f32> {
         let k_cross_sq = k_cross * k_cross;
         let left_jacobian = nalgebra::Matrix3::identity()
             + k_cross * ((1.0 - theta.cos()) / theta)
-            + k_cross_sq * ((theta - theta.sin()) / (theta * theta));
+            + k_cross_sq * ((theta - theta.sin()) / theta);
         left_jacobian * v
     };
 

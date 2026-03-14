@@ -96,9 +96,12 @@ pub fn corner_subpix(
         let mut x = p.x;
         let mut y = p.y;
         for _ in 0..max_iters {
-            let mut sw = 0.0f64;
-            let mut sx = 0.0f64;
-            let mut sy = 0.0f64;
+            // Autocorrelation matrix method (OpenCV cornerSubPix):
+            // Solve G * q = b where
+            //   G = sum(grad * grad^T)
+            //   b = sum(grad * grad^T * p)
+            let mut g = Matrix2::<f64>::zeros();
+            let mut b = Vector2::<f64>::zeros();
             let cx = x.round() as i32;
             let cy = y.round() as i32;
             for dy in -(win_radius as i32)..=(win_radius as i32) {
@@ -114,20 +117,22 @@ pub fn corner_subpix(
                     let gy = (image.get_pixel(xx as u32, (yy + 1) as u32)[0] as f64
                         - image.get_pixel(xx as u32, (yy - 1) as u32)[0] as f64)
                         * 0.5;
-                    let wgt = (gx * gx + gy * gy).sqrt();
-                    if wgt <= 1e-9 {
-                        continue;
-                    }
-                    sw += wgt;
-                    sx += wgt * xx as f64;
-                    sy += wgt * yy as f64;
+                    let grad = Vector2::new(gx, gy);
+                    let ggt = grad * grad.transpose();
+                    let pt = Vector2::new(xx as f64, yy as f64);
+                    g += ggt;
+                    b += ggt * pt;
                 }
             }
-            if sw <= 1e-9 {
+            if g.determinant().abs() <= 1e-9 {
                 break;
             }
-            let nx = sx / sw;
-            let ny = sy / sw;
+            let q = match g.try_inverse() {
+                Some(g_inv) => g_inv * b,
+                None => break,
+            };
+            let nx = q[0];
+            let ny = q[1];
             let shift = ((nx - x) * (nx - x) + (ny - y) * (ny - y)).sqrt();
             x = nx;
             y = ny;

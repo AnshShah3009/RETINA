@@ -101,10 +101,13 @@ impl<'a> SparseLMSolver<'a> {
         r: &DVector<f64>,
         lambda: f64,
     ) -> Result<DVector<f64>, String> {
-        // Solve (J^T J + lambda I) delta = -J^T r using CG
+        // Solve (J^T J + lambda * diag(J^T J)) delta = -J^T r using CG
         let n = j.cols;
         let mut x = DVector::zeros(n);
         let rhs = -j.transpose_spmv_ctx(self.ctx, r)?;
+
+        // Cache diagonal of J^T J for Marquardt damping
+        let diag_jtj = self.compute_jtj_diagonal(j);
 
         let mut residual = rhs.clone();
         let mut p = residual.clone();
@@ -113,7 +116,7 @@ impl<'a> SparseLMSolver<'a> {
         for _ in 0..100 {
             let jp = j.spmv_ctx(self.ctx, &p)?;
             let j_tj_p = j.transpose_spmv_ctx(self.ctx, &jp)?;
-            let v = j_tj_p + lambda * &p;
+            let v = j_tj_p + lambda * diag_jtj.component_mul(&p);
 
             let pap = p.dot(&v);
             if pap.abs() < 1e-10 {
@@ -132,6 +135,21 @@ impl<'a> SparseLMSolver<'a> {
         }
 
         Ok(x)
+    }
+
+    /// Compute diagonal of J^T J for Marquardt damping
+    fn compute_jtj_diagonal(&self, j: &SparseMatrix) -> DVector<f64> {
+        let mut diag = DVector::zeros(j.cols);
+        for r in 0..j.rows {
+            let start = j.row_ptr[r] as usize;
+            let end = j.row_ptr[r + 1] as usize;
+            for i in start..end {
+                let c = j.col_indices[i] as usize;
+                let v = j.values[i];
+                diag[c] += v * v;
+            }
+        }
+        diag
     }
 
     /// Solves the normal equations SparseMatrix * x = b

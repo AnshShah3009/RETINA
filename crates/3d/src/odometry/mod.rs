@@ -104,7 +104,7 @@ pub fn compute_rgbd_odometry_ctx(
 
     // CPU Fallback (Rayon)
     // Multi-scale pyramid
-    let scales = vec![1.0, 0.5, 0.25, 0.125];
+    let scales = vec![0.125, 0.25, 0.5, 1.0];
     let mut transformation = Matrix4::identity();
 
     for scale in scales {

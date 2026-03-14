@@ -184,7 +184,10 @@ impl TSDFVolume {
         }
 
         // CPU Fallback (Rayon)
-        // Transform camera origin to world space
+        // Compute inverse extrinsics for projective distance
+        let extrinsics_inv = extrinsics
+            .try_inverse()
+            .unwrap_or_else(Matrix4::identity);
         let camera_origin = extrinsics.transform_point(&Point3::origin());
 
         let updates: Vec<_> = group.run(|| {
@@ -195,7 +198,7 @@ impl TSDFVolume {
 
                     for u in 0..width {
                         let idx = v * width + u;
-                        let depth = depth_image[idx];
+                        let depth = depth_image[idx] / self.depth_scale;
 
                         if depth <= 0.0 || depth > 10.0 {
                             continue;
@@ -227,19 +230,12 @@ impl TSDFVolume {
                             let t = i as f32 / steps.max(1) as f32;
                             let voxel_pos = start + (end - start) * t;
 
-                            // Calculate TSDF value
-                            let dist = (voxel_pos - point_world).norm();
-                            let sdf = if voxel_pos.coords.dot(&ray_dir)
-                                > point_world.coords.dot(&ray_dir)
-                            {
-                                dist // Behind surface
-                            } else {
-                                -dist // In front of surface
-                            };
+                            // Calculate TSDF value using projective distance:
+                            // Transform voxel back to camera frame and compare depths
+                            let voxel_camera = extrinsics_inv.transform_point(&voxel_pos);
+                            let sdf = voxel_camera.z - depth;
 
-                            let tsdf = sdf
-                                .clamp(-self.truncation_distance, self.truncation_distance)
-                                / self.truncation_distance;
+                            let tsdf = (sdf / self.truncation_distance).clamp(-1.0, 1.0);
 
                             local_updates.push((voxel_pos, tsdf, color));
                         }
@@ -287,12 +283,20 @@ impl TSDFVolume {
         let old_tsdf = block.tsdf[idx];
         let old_weight = block.weights[idx];
 
+        let new_tsdf = (old_tsdf * old_weight + tsdf) / (old_weight + 1.0);
         let new_weight = (old_weight + 1.0).min(self.max_weight);
-        let new_tsdf = (old_tsdf * old_weight + tsdf) / new_weight;
+
+        // Weighted average for colors instead of overwriting
+        let old_color = block.colors[idx];
+        let new_color = Vector3::new(
+            ((old_color.x as f32 * old_weight + color.x as f32) / (old_weight + 1.0)) as u8,
+            ((old_color.y as f32 * old_weight + color.y as f32) / (old_weight + 1.0)) as u8,
+            ((old_color.z as f32 * old_weight + color.z as f32) / (old_weight + 1.0)) as u8,
+        );
 
         block.tsdf[idx] = new_tsdf;
         block.weights[idx] = new_weight;
-        block.colors[idx] = color;
+        block.colors[idx] = new_color;
     }
 
     /// Extract surface mesh using Marching Cubes

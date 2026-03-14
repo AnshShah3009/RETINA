@@ -75,7 +75,7 @@ impl GNCOptimizer {
         // GNC outer loop - gradually reduce parameter
         for gnc_iter in 0..self.gnc_iterations {
             // Compute current parameter schedule
-            let alpha = (gnc_iter as f32 + 1.0) / self.gnc_iterations as f32;
+            let alpha = gnc_iter as f32 / (self.gnc_iterations as f32 - 1.0).max(1.0);
             let param = self.compute_parameter_schedule(alpha);
             self.loss.update_param(param);
 

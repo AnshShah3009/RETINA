@@ -146,16 +146,11 @@ pub fn calibrate_camera_planar_with_options(
         cy = fixed_cy;
     }
 
-    // Apply fix_focal_length constraint if requested
-    // Note: This is applied post-estimation since the closed-form solution
-    // requires full focal length estimation. For iterative refinement,
-    // this would be enforced during optimization.
-    if options.fix_focal_length {
-        // When fixing focal length, use equal focal lengths (common for many cameras)
-        let f_avg = (fx + fy) / 2.0;
-        fx = f_avg;
-        fy = f_avg;
-    }
+    // fix_focal_length: freeze fx and fy at their current values during
+    // optimization. At this point we simply skip any mutation -- the values
+    // produced by the closed-form solver (or constrained by fix_aspect_ratio)
+    // are kept as-is. The flag is primarily consumed in the iterative
+    // refinement loop below to prevent focal-length updates.
 
     let intrinsics = CameraIntrinsics::new(fx, fy, cx, cy, image_size.0, image_size.1);
     let k_inv = intrinsics.inverse_matrix();
@@ -773,6 +768,11 @@ fn refine_distortion(
                 row_idx += 2;
             }
         }
+
+        // Truncate to actual number of rows (skipped behind-camera points
+        // leave trailing zero rows that corrupt the solve).
+        let j = j.rows(0, row_idx).clone_owned();
+        let r = r.rows(0, row_idx).clone_owned();
 
         let jt = j.transpose();
         let h = &jt * &j;

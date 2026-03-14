@@ -105,8 +105,12 @@ pub fn registration_colored_icp(
 
                 // Compute jacobian (simplified)
                 // Full implementation would compute SE(3) jacobian
-                let diff = transformed - target_point;
-                let normal = diff.normalize();
+                let normal = target.normals.as_ref()
+                    .map(|n| n[target_idx])
+                    .unwrap_or_else(|| {
+                        let diff = transformed - target_point;
+                        diff.normalize()
+                    });
 
                 // Geometric jacobian
                 let jacobian_geo = compute_point_to_plane_jacobian(&source_point, &normal);
@@ -133,7 +137,7 @@ pub fn registration_colored_icp(
 
         // Solve for update
         if let Some(ata_inv) = ata.try_inverse() {
-            let delta = ata_inv * atb;
+            let delta = -(ata_inv * atb);
 
             // Convert delta to transformation update
             let update = exponential_map(&delta);
@@ -201,8 +205,18 @@ fn exponential_map(delta: &nalgebra::Vector6<f32>) -> Matrix4<f32> {
         Matrix3::identity() + k_cross * theta.sin() + k_cross * k_cross * (1.0 - theta.cos())
     };
 
-    // Translation
-    let translation = v;
+    // Proper SE(3) exponential map using left Jacobian
+    let translation = if theta < 1e-6 {
+        v
+    } else {
+        let k = omega / theta;
+        let k_cross_v = Matrix3::new(0.0, -k.z, k.y, k.z, 0.0, -k.x, -k.y, k.x, 0.0);
+        let k_cross_sq_v = k_cross_v * k_cross_v;
+        let left_jacobian = Matrix3::identity()
+            + k_cross_v * ((1.0 - theta.cos()) / theta)
+            + k_cross_sq_v * ((theta - theta.sin()) / theta);
+        left_jacobian * v
+    };
 
     // Build transformation
     let mut transform = Matrix4::identity();

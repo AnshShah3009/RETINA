@@ -58,10 +58,12 @@ pub fn laplacian_smooth(mesh: &mut TriangleMesh, iterations: usize, lambda: f32)
 
 /// Taubin smoothing: Two-step Laplacian with shrinkage compensation
 pub fn taubin_smooth(mesh: &mut TriangleMesh, iterations: usize, lambda: f32, mu: f32) {
-    // Forward Laplacian
-    laplacian_smooth(mesh, iterations, lambda);
-    // Backward Laplacian (negative step)
-    laplacian_smooth(mesh, iterations, -mu);
+    for _ in 0..iterations {
+        // Forward Laplacian (shrink)
+        laplacian_smooth(mesh, 1, lambda);
+        // Backward Laplacian (inflate)
+        laplacian_smooth(mesh, 1, -mu);
+    }
 }
 
 /// Edge collapse simplification: Reduce triangle count
@@ -89,13 +91,24 @@ pub fn simplify_edge_collapse(mesh: &mut TriangleMesh, target_ratio: f32) {
     let mut vertex_remap: HashMap<usize, usize> =
         (0..mesh.vertices.len()).map(|i| (i, i)).collect();
 
+    // Path-compressing resolve: follow remap chains to the final vertex
+    let resolve = |remap: &HashMap<usize, usize>, mut v: usize| -> usize {
+        while let Some(&next) = remap.get(&v) {
+            if next == v {
+                break;
+            }
+            v = next;
+        }
+        v
+    };
+
     for (v0, v1) in edges {
         if collapsed >= num_faces_to_remove {
             break;
         }
 
-        let rv0 = *vertex_remap.get(&v0).unwrap_or(&v0);
-        let rv1 = *vertex_remap.get(&v1).unwrap_or(&v1);
+        let rv0 = resolve(&vertex_remap, v0);
+        let rv1 = resolve(&vertex_remap, v1);
 
         if rv0 == rv1 {
             continue;
@@ -113,9 +126,9 @@ pub fn simplify_edge_collapse(mesh: &mut TriangleMesh, target_ratio: f32) {
     let mut new_faces = Vec::new();
     for face in &mesh.faces {
         let new_face = [
-            *vertex_remap.get(&face[0]).unwrap_or(&face[0]),
-            *vertex_remap.get(&face[1]).unwrap_or(&face[1]),
-            *vertex_remap.get(&face[2]).unwrap_or(&face[2]),
+            resolve(&vertex_remap, face[0]),
+            resolve(&vertex_remap, face[1]),
+            resolve(&vertex_remap, face[2]),
         ];
 
         // Keep only non-degenerate faces
@@ -238,7 +251,10 @@ pub fn loop_subdivision(mesh: &mut TriangleMesh) {
                     let p1 = mesh.vertices[v1];
                     let o0 = mesh.vertices[opposite_vertices[0]];
                     let o1 = mesh.vertices[opposite_vertices[1]];
-                    (p0 + p1.coords + o0.coords + o1.coords) * 0.25
+                    Point3::from(
+                        (p0.coords + p1.coords) * (3.0 / 8.0)
+                            + (o0.coords + o1.coords) * (1.0 / 8.0),
+                    )
                 } else {
                     // Boundary edge
                     let p0 = mesh.vertices[v0];
@@ -261,7 +277,7 @@ pub fn loop_subdivision(mesh: &mut TriangleMesh) {
         for face in &mesh.faces {
             if face.contains(&i) {
                 for &v in face.iter() {
-                    if v != i {
+                    if v != i && !neighbors.contains(&v) {
                         neighbors.push(v);
                     }
                 }

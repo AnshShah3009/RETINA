@@ -115,8 +115,20 @@ pub fn fisheye_init_undistort_rectify_map(
     let mut map_x = vec![0.0f32; (width * height) as usize];
     let mut map_y = vec![0.0f32; (width * height) as usize];
 
-    let k_new_inv = new_intrinsics.matrix().try_inverse().unwrap();
-    let r_inv = rectification.try_inverse().unwrap();
+    let k_new_inv = new_intrinsics
+        .matrix()
+        .try_inverse()
+        .ok_or_else(|| {
+            cv_core::Error::CalibrationError(
+                "fisheye_init_undistort_rectify_map: new_intrinsics matrix is not invertible"
+                    .to_string(),
+            )
+        })?;
+    let r_inv = rectification.try_inverse().ok_or_else(|| {
+        cv_core::Error::CalibrationError(
+            "fisheye_init_undistort_rectify_map: rectification matrix is not invertible".to_string(),
+        )
+    })?;
 
     map_x
         .par_chunks_mut(width as usize)
@@ -128,6 +140,9 @@ pub fn fisheye_init_undistort_rectify_map(
                 let rectified_norm = k_new_inv * dst;
                 let original_norm = r_inv * rectified_norm;
 
+                if original_norm[2].abs() <= 1e-12 {
+                    continue;
+                }
                 let xn = original_norm[0] / original_norm[2];
                 let yn = original_norm[1] / original_norm[2];
                 let (xd, yd) = distortion.apply(xn, yn);
