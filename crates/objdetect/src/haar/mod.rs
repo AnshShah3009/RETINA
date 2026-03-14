@@ -169,6 +169,7 @@ impl HaarCascade {
         Ok(detections)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_window(
         &self,
         integral: &Tensor<u32>,
