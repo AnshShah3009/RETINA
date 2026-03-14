@@ -3,7 +3,7 @@
 //! Estimates camera motion from consecutive RGBD frames.
 //! Implements multi-scale odometry with different loss functions.
 
-use nalgebra::{Matrix3, Matrix4, Point3, Vector3};
+use nalgebra::{Matrix4, Matrix6, Point3, Vector3, Vector6};
 use rayon::prelude::*;
 
 use cv_hal::compute::ComputeDevice;
@@ -179,7 +179,7 @@ pub fn compute_rgbd_odometry_ctx(
     })
 }
 
-/// Point-to-plane odometry
+/// Point-to-plane odometry (6-DOF: translation + rotation)
 fn compute_point_to_plane_ctx(
     source_depth: &[f32],
     target_depth: &[f32],
@@ -196,16 +196,18 @@ fn compute_point_to_plane_ctx(
     let (target_vertices, target_normals) =
         compute_vertex_normal_map_ctx(target_depth, intrinsics, width, height, group);
 
+    let mut prev_rmse = f32::MAX;
+
     for _ in 0..max_iterations {
-        // Build linear system in parallel
-        let (ata, atb, current_total_residual, valid_points) = group.run(|| {
+        // Build 6x6 linear system in parallel
+        let (ata, atb, total_residual, valid_points) = group.run(|| {
             (0..height)
                 .into_par_iter()
                 .map(|v| {
-                    let mut local_ata = Matrix3::<f32>::zeros();
-                    let mut local_atb = Vector3::<f32>::zeros();
-                    let mut local_residual = 0.0;
-                    let mut local_valid = 0;
+                    let mut local_ata = Matrix6::<f32>::zeros();
+                    let mut local_atb = Vector6::<f32>::zeros();
+                    let mut local_residual = 0.0f32;
+                    let mut local_valid = 0u32;
 
                     for u in 0..width {
                         let idx = v * width + u;
@@ -238,15 +240,21 @@ fn compute_point_to_plane_ctx(
                         let target_vertex = target_vertices[tidx];
                         let target_normal = target_normals[tidx];
 
-                        if target_vertex.z <= 0.0 {
+                        if target_vertex.z <= 0.0 || target_normal.norm_squared() < 1e-6 {
                             continue;
                         }
 
                         // Point-to-plane error
-                        let residual = (target_point - target_vertex).dot(&target_normal);
+                        let diff = target_point - target_vertex;
+                        let residual = diff.dot(&target_normal);
 
-                        // Jacobian (simplified for translation only)
-                        let jacobian = target_normal;
+                        // 6-DOF Jacobian: [n.x, n.y, n.z, (p x n).x, (p x n).y, (p x n).z]
+                        // where p is the transformed source point and n is the target normal
+                        let p = target_point.coords;
+                        let n = target_normal;
+                        let cross = p.cross(&n);
+
+                        let jacobian = Vector6::new(n.x, n.y, n.z, cross.x, cross.y, cross.z);
 
                         local_ata += jacobian * jacobian.transpose();
                         local_atb += jacobian * residual;
@@ -256,32 +264,156 @@ fn compute_point_to_plane_ctx(
                     (local_ata, local_atb, local_residual, local_valid)
                 })
                 .reduce(
-                    || (Matrix3::zeros(), Vector3::zeros(), 0.0, 0),
+                    || (Matrix6::zeros(), Vector6::zeros(), 0.0f32, 0u32),
                     |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
                 )
         });
-
-        let _ = current_total_residual; // Use it if needed for convergence check
 
         if valid_points < 100 {
             return None;
         }
 
-        // Solve for update
-        if let Some(ata_inv) = ata.try_inverse() {
-            let delta = ata_inv * atb;
+        // Convergence check
+        let rmse = (total_residual / valid_points as f32).sqrt();
+        if (prev_rmse - rmse).abs() < 1e-6 {
+            break;
+        }
+        prev_rmse = rmse;
 
-            // Update transformation (translation only for simplicity)
-            let update = Matrix4::new_translation(&delta);
+        // Solve 6x6 system for [tx, ty, tz, rx, ry, rz]
+        if let Some(ata_inv) = ata.try_inverse() {
+            let delta = -(ata_inv * atb);
+
+            // Apply update using SE(3) exponential map
+            let update = exponential_map_se3(&delta);
             transformation = update * transformation;
         }
     }
 
+    // Compute fitness and RMSE for the final transformation
+    let (fitness, rmse) = compute_fitness_rmse(
+        source_depth,
+        &target_vertices,
+        &target_normals,
+        intrinsics,
+        width,
+        height,
+        &transformation,
+        group,
+    );
+
     Some(OdometryResult {
         transformation,
-        fitness: 0.0,
-        inlier_rmse: 0.0,
+        fitness,
+        inlier_rmse: rmse,
     })
+}
+
+/// Compute fitness (fraction of valid correspondences) and point-to-plane RMSE
+#[allow(clippy::too_many_arguments)]
+fn compute_fitness_rmse(
+    source_depth: &[f32],
+    target_vertices: &[Point3<f32>],
+    target_normals: &[Vector3<f32>],
+    intrinsics: &crate::tsdf::CameraIntrinsics,
+    width: usize,
+    height: usize,
+    transformation: &Matrix4<f32>,
+    group: &RuntimeRunner,
+) -> (f32, f32) {
+    let (total_error, valid, total_source) = group.run(|| {
+        (0..height)
+            .into_par_iter()
+            .map(|v| {
+                let mut err = 0.0f32;
+                let mut valid_count = 0u32;
+                let mut source_count = 0u32;
+
+                for u in 0..width {
+                    let idx = v * width + u;
+                    let depth = source_depth[idx];
+                    if depth <= 0.0 {
+                        continue;
+                    }
+                    source_count += 1;
+
+                    let x = (u as f32 - intrinsics.cx) * depth / intrinsics.fx;
+                    let y = (v as f32 - intrinsics.cy) * depth / intrinsics.fy;
+                    let tp = transformation.transform_point(&Point3::new(x, y, depth));
+
+                    let tu = (tp.x * intrinsics.fx / tp.z + intrinsics.cx) as i32;
+                    let tv = (tp.y * intrinsics.fy / tp.z + intrinsics.cy) as i32;
+
+                    if tu < 0 || tu >= width as i32 || tv < 0 || tv >= height as i32 {
+                        continue;
+                    }
+                    let tidx = tv as usize * width + tu as usize;
+                    if target_vertices[tidx].z <= 0.0 || target_normals[tidx].norm_squared() < 1e-6
+                    {
+                        continue;
+                    }
+
+                    let diff = tp - target_vertices[tidx];
+                    let r = diff.dot(&target_normals[tidx]);
+                    err += r * r;
+                    valid_count += 1;
+                }
+                (err, valid_count, source_count)
+            })
+            .reduce(
+                || (0.0f32, 0u32, 0u32),
+                |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2),
+            )
+    });
+
+    if valid == 0 || total_source == 0 {
+        return (0.0, 0.0);
+    }
+    let fitness = valid as f32 / total_source as f32;
+    let rmse = (total_error / valid as f32).sqrt();
+    (fitness, rmse)
+}
+
+/// Exponential map from se(3) to SE(3)
+///
+/// Maps a 6-vector [tx, ty, tz, rx, ry, rz] to a 4x4 homogeneous transformation
+/// matrix using Rodrigues' formula for rotation and the left Jacobian for translation.
+fn exponential_map_se3(delta: &Vector6<f32>) -> Matrix4<f32> {
+    let omega = Vector3::new(delta[3], delta[4], delta[5]);
+    let v = Vector3::new(delta[0], delta[1], delta[2]);
+
+    let theta = omega.norm();
+
+    let rotation = if theta < 1e-6 {
+        nalgebra::Matrix3::identity()
+    } else {
+        let k = omega / theta;
+        let k_cross = nalgebra::Matrix3::new(0.0, -k.z, k.y, k.z, 0.0, -k.x, -k.y, k.x, 0.0);
+        nalgebra::Matrix3::identity()
+            + k_cross * theta.sin()
+            + k_cross * k_cross * (1.0 - theta.cos())
+    };
+
+    // Proper SE(3) exponential map using left Jacobian
+    let translation = if theta < 1e-6 {
+        v
+    } else {
+        let k = omega / theta;
+        let k_cross = nalgebra::Matrix3::new(0.0, -k.z, k.y, k.z, 0.0, -k.x, -k.y, k.x, 0.0);
+        let k_cross_sq = k_cross * k_cross;
+        let left_jacobian = nalgebra::Matrix3::identity()
+            + k_cross * ((1.0 - theta.cos()) / theta)
+            + k_cross_sq * ((theta - theta.sin()) / theta);
+        left_jacobian * v
+    };
+
+    let mut transform = Matrix4::identity();
+    transform.fixed_view_mut::<3, 3>(0, 0).copy_from(&rotation);
+    transform
+        .fixed_view_mut::<3, 1>(0, 3)
+        .copy_from(&translation);
+
+    transform
 }
 
 /// Intensity-based odometry (uses color)

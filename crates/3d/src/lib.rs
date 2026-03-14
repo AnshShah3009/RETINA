@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 //! 3D Computer Vision Algorithms
 //!
 //! This crate provides core 3D computer vision algorithms including:
