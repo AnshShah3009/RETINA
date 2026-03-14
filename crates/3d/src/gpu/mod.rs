@@ -449,6 +449,26 @@ pub mod point_cloud {
                 if neighbours.len() < 2 {
                     return Vector3::z();
                 }
+                // Sort neighbours by angle around the query point so that
+                // consecutive cross-products give a consistent normal.
+                // Project onto a local 2D frame and use atan2.
+                let ref_dir = neighbours[0].normalize();
+                // Build a second basis vector orthogonal to ref_dir.
+                let up = if ref_dir.x.abs() < 0.9 {
+                    Vector3::x()
+                } else {
+                    Vector3::y()
+                };
+                let u = ref_dir;
+                let w = u.cross(&up).normalize();
+                let v = w.cross(&u);
+                neighbours.sort_by(|a, b| {
+                    let angle_a = a.dot(&v).atan2(a.dot(&w));
+                    let angle_b = b.dot(&v).atan2(b.dot(&w));
+                    angle_a
+                        .partial_cmp(&angle_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 // Accumulate cross products of consecutive pairs.
                 let mut acc = Vector3::zeros();
                 let n = neighbours.len();

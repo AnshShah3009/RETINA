@@ -377,9 +377,11 @@ pub fn twist_to_se3(twist: &Vector6<f64>) -> (Matrix3<f64>, Vector3<f64>) {
     } else {
         let axis = omega / theta;
         let skew = skew_symmetric(&axis);
-        let r = Matrix3::identity() + theta * skew + (1.0 - theta.cos()) * skew * skew;
-        let t =
-            (Matrix3::identity() + theta * skew + (1.0 - theta.cos()) * skew * skew) * v / theta;
+        let r = Matrix3::identity() + theta.sin() * skew + (1.0 - theta.cos()) * skew * skew;
+        let v_mat = Matrix3::identity()
+            + ((1.0 - theta.cos()) / theta) * skew
+            + ((theta - theta.sin()) / theta) * skew * skew;
+        let t = v_mat * v;
         (r, t)
     }
 }

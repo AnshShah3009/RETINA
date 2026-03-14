@@ -12,7 +12,7 @@ pub struct BilateralFilterParams {
     pub kernel_size: i32,
     /// Spatial sigma (larger = more smoothing)
     pub sigma_space: f32,
-    /// Range sigma (larger = more edge preservation)
+    /// Range sigma (larger = less edge preservation, more smoothing)
     pub sigma_range: f32,
 }
 
@@ -228,11 +228,10 @@ fn bilateral_filter_rgb_internal(
                         let spatial_dist = (kx * kx + ky * ky) as f32;
                         let spatial_weight = (-spatial_dist / sigma_space_sq).exp();
 
-                        let range_dist = ((center_r - nr).powi(2)
+                        let range_dist_sq = (center_r - nr).powi(2)
                             + (center_g - ng).powi(2)
-                            + (center_b - nb).powi(2))
-                        .sqrt();
-                        let range_weight = (-range_dist * range_dist / sigma_range_sq).exp();
+                            + (center_b - nb).powi(2);
+                        let range_weight = (-range_dist_sq / sigma_range_sq).exp();
 
                         let weight = spatial_weight * range_weight;
                         sum_r += nr * weight;
@@ -243,9 +242,9 @@ fn bilateral_filter_rgb_internal(
                 }
 
                 if weight_sum > 0.0 {
-                    row[pixel_offset] = (sum_r / weight_sum).round() as u8;
-                    row[pixel_offset + 1] = (sum_g / weight_sum).round() as u8;
-                    row[pixel_offset + 2] = (sum_b / weight_sum).round() as u8;
+                    row[pixel_offset] = (sum_r / weight_sum).round().clamp(0.0, 255.0) as u8;
+                    row[pixel_offset + 1] = (sum_g / weight_sum).round().clamp(0.0, 255.0) as u8;
+                    row[pixel_offset + 2] = (sum_b / weight_sum).round().clamp(0.0, 255.0) as u8;
                 } else {
                     row[pixel_offset] = image[idx];
                     row[pixel_offset + 1] = image[idx + 1];
@@ -362,11 +361,10 @@ fn joint_bilateral_filter_internal(
                         let spatial_dist = (kx * kx + ky * ky) as f32;
                         let spatial_weight = (-spatial_dist / sigma_space_sq).exp();
 
-                        let range_dist = ((center_gi[0] - neighbor_gi[0]).powi(2)
+                        let range_dist_sq = (center_gi[0] - neighbor_gi[0]).powi(2)
                             + (center_gi[1] - neighbor_gi[1]).powi(2)
-                            + (center_gi[2] - neighbor_gi[2]).powi(2))
-                        .sqrt();
-                        let range_weight = (-range_dist * range_dist / sigma_range_sq).exp();
+                            + (center_gi[2] - neighbor_gi[2]).powi(2);
+                        let range_weight = (-range_dist_sq / sigma_range_sq).exp();
 
                         let weight = spatial_weight * range_weight;
                         sum += neighbor_depth * weight;

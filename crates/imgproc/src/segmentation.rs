@@ -82,8 +82,8 @@ pub fn watershed<T: Float>(image: &CpuTensor<T>, markers: &mut CpuTensor<i32>) -
 
     let gradient = compute_gradient_magnitude::<T>(img_data, h, w, hw);
 
-    // 4-connected neighbours
-    let offsets: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    // 8-connected neighbours (Meyer's algorithm)
+    let offsets: [(i32, i32); 8] = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)];
 
     let marker_data = markers.as_mut_slice()?;
 

@@ -221,7 +221,6 @@ pub fn registration_ransac_based_on_feature_matching(
         threshold: max_correspondence_distance as f64,
         max_iterations,
         confidence: 0.99,
-        min_sample_size: ransac_n,
     };
 
     let estimator = GlobalRegistrationEstimator { source, target };

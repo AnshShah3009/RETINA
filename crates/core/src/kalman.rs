@@ -63,7 +63,9 @@ impl DynamicKalmanFilter {
         let innovation = measurement - &self.meas_matrix * &self.state_pre;
         self.state_post = &self.state_pre + &self.gain * innovation;
         let i = DMatrix::identity(self.state_post.len(), self.state_post.len());
-        self.error_cov_post = (&i - &self.gain * &self.meas_matrix) * &self.error_cov_pre;
+        let i_kh = &i - &self.gain * &self.meas_matrix;
+        self.error_cov_post = &i_kh * &self.error_cov_pre * i_kh.transpose()
+            + &self.gain * &self.meas_noise_cov * self.gain.transpose();
         &self.state_post
     }
 }
@@ -121,7 +123,7 @@ impl<const N: usize, const M: usize> KalmanFilter<N, M> {
     pub fn update(&self, state: &mut KalmanFilterState<N>, z: &SVector<f64, M>) {
         let y = z - self.h * state.x;
         let s = self.h * state.p * self.h.transpose() + self.r;
-        let k = state.p * self.h.transpose() * s.try_inverse().unwrap_or(SMatrix::identity());
+        let k = state.p * self.h.transpose() * s.try_inverse().unwrap_or(SMatrix::zeros());
         state.x += k * y;
         let i = SMatrix::<f64, N, N>::identity();
         let i_kh = i - k * self.h;
@@ -163,7 +165,7 @@ impl<const N: usize, const M: usize> ExtendedKalmanFilter<N, M> {
     ) {
         let y = z - h(&state.x);
         let s = jacobian_h * state.p * jacobian_h.transpose() + self.r;
-        let k = state.p * jacobian_h.transpose() * s.try_inverse().unwrap_or(SMatrix::identity());
+        let k = state.p * jacobian_h.transpose() * s.try_inverse().unwrap_or(SMatrix::zeros());
         state.x += k * y;
         let i = SMatrix::<f64, N, N>::identity();
         let i_kh = i - k * jacobian_h;

@@ -148,7 +148,7 @@ fn main(
         if nb_idx[i] != 0xFFFFFFFFu { valid += 1u; }
     }
     if valid < 3u {
-        normals[idx] = vec4<f32>(0.0, 1.0, 0.0, 0.0);
+        normals[idx] = vec4<f32>(0.0, 0.0, 1.0, 0.0);
         return;
     }
 

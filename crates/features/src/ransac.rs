@@ -512,7 +512,6 @@ mod tests {
             threshold: 15.0, // Higher threshold for translation
             max_iterations: 1000,
             confidence: 0.99,
-            min_sample_size: 4,
         };
 
         let result = estimate_homography(&matches, &src_points, &dst_points, &config);

@@ -10,7 +10,7 @@ Cargo.lock
 # IDE and editor
 .idea/
 .vscode/
-.claude/
+
 *.iml
 
 # Archives and large binaries

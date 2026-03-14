@@ -149,11 +149,37 @@ impl Matches {
         self.matches.retain(|m| m.distance <= max_distance);
     }
 
-    pub fn apply_ratio_test(&self, ratio_threshold: f32) -> Vec<FeatureMatch> {
+    /// Filter matches by absolute distance threshold.
+    ///
+    /// Keeps only matches whose distance is at most `max_distance`.
+    /// This is NOT Lowe's ratio test; see [`apply_ratio_test`] for that.
+    pub fn filter_by_max_distance(&self, max_distance: f32) -> Vec<FeatureMatch> {
         self.matches
             .iter()
-            .filter(|m| m.distance <= ratio_threshold)
+            .filter(|m| m.distance <= max_distance)
             .copied()
+            .collect()
+    }
+
+    /// Apply Lowe's ratio test (SIFT, 2004).
+    ///
+    /// Given kNN results with k=2 (pairs of nearest and second-nearest neighbor),
+    /// keeps only matches where `d_nearest / d_second_nearest < ratio_threshold`.
+    /// A typical threshold is 0.75 or 0.8.
+    ///
+    /// Each element in `nn_pairs` is a `(best_match, second_best_match)` pair
+    /// for the same query descriptor.
+    pub fn apply_ratio_test(
+        nn_pairs: &[(FeatureMatch, FeatureMatch)],
+        ratio_threshold: f32,
+    ) -> Vec<FeatureMatch> {
+        nn_pairs
+            .iter()
+            .filter(|(best, second_best)| {
+                second_best.distance > 0.0
+                    && (best.distance / second_best.distance) < ratio_threshold
+            })
+            .map(|(best, _)| *best)
             .collect()
     }
 }
@@ -331,13 +357,39 @@ mod tests {
     }
 
     #[test]
-    fn matches_apply_ratio_test() {
+    fn matches_filter_by_max_distance() {
         let mut m = Matches::new();
         m.push(FeatureMatch::new(0, 0, 0.3));
         m.push(FeatureMatch::new(1, 1, 0.8));
-        let filtered = m.apply_ratio_test(0.5);
+        let filtered = m.filter_by_max_distance(0.5);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].distance, 0.3);
+    }
+
+    #[test]
+    fn matches_apply_ratio_test_lowes() {
+        // Pair 0: best=0.3, second=1.0 => ratio=0.3 < 0.75 => accepted
+        // Pair 1: best=0.7, second=0.8 => ratio=0.875 >= 0.75 => rejected
+        // Pair 2: best=0.1, second=0.5 => ratio=0.2 < 0.75 => accepted
+        let nn_pairs = vec![
+            (FeatureMatch::new(0, 10, 0.3), FeatureMatch::new(0, 11, 1.0)),
+            (FeatureMatch::new(1, 20, 0.7), FeatureMatch::new(1, 21, 0.8)),
+            (FeatureMatch::new(2, 30, 0.1), FeatureMatch::new(2, 31, 0.5)),
+        ];
+        let filtered = Matches::apply_ratio_test(&nn_pairs, 0.75);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].query_idx, 0);
+        assert_eq!(filtered[1].query_idx, 2);
+    }
+
+    #[test]
+    fn matches_apply_ratio_test_zero_second_distance() {
+        // If second_best.distance is 0.0, the pair should be rejected to avoid division issues
+        let nn_pairs = vec![
+            (FeatureMatch::new(0, 10, 0.0), FeatureMatch::new(0, 11, 0.0)),
+        ];
+        let filtered = Matches::apply_ratio_test(&nn_pairs, 0.75);
+        assert_eq!(filtered.len(), 0);
     }
 
     #[test]

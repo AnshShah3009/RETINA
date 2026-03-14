@@ -32,7 +32,7 @@ fn frame_conventions() {
     println!("  OpenCV: {:?}", opencv.camera_convention);
     println!("    Handedness: {:?}", opencv.handedness);
 
-    // OpenGL (LH, +Z backward, +Y up)
+    // OpenGL (RH, +Z backward, +Y up)
     let opengl = FrameConvention::opengl();
     println!("  OpenGL: {:?}", opengl.camera_convention);
     println!("    Handedness: {:?}", opengl.handedness);

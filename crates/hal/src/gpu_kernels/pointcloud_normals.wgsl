@@ -1,5 +1,15 @@
-// Point Cloud Normal Computation
-// Computes surface normals from point cloud using neighbor search
+// DEPRECATED: Legacy point cloud normal computation shader.
+//
+// This shader uses a simple cross-product of two neighbour vectors instead of
+// PCA on the full covariance matrix.  It is NOT used by any active code path —
+// all GPU normal estimation now goes through either:
+//   - pointcloud_normals_morton.wgsl   (Morton-sorted kNN + analytic PCA)
+//   - pointcloud_normals_fast_gpu.wgsl (tiled brute-force kNN + analytic PCA)
+//   - pointcloud_normals_batch_pca.wgsl (hybrid CPU kNN + GPU PCA)
+//
+// Kept only for backward compatibility with any external code that may reference
+// the `compute_normals` function in gpu_kernels/mod.rs.  Prefer removing this
+// file once all callers have migrated to the PCA-based shaders.
 
 @group(0) @binding(0) var<storage, read> points: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> normals: array<vec4<f32>>;

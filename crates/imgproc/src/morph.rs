@@ -46,6 +46,10 @@ pub fn create_morph_kernel(shape: MorphShape, width: u32, height: u32) -> Vec<(i
                 kernel.push((i, 0));
             }
             for i in -(height as i32 / 2)..=(height as i32 / 2) {
+                if i == 0 {
+                    // skip center (0,0) since horizontal arm already added it
+                    continue;
+                }
                 kernel.push((0, i));
             }
         }

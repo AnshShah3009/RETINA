@@ -27,6 +27,7 @@ fn scharr_kernels_1d() -> (Vec<f32>, Vec<f32>) {
     (vec![-1.0, 0.0, 1.0], vec![3.0, 10.0, 3.0])
 }
 
+#[allow(dead_code)]
 fn kernel_from_1d(kx: &[f32], ky: &[f32]) -> Kernel {
     let mut data = vec![0.0f32; kx.len() * ky.len()];
     for (y, &vy) in ky.iter().enumerate() {
@@ -84,10 +85,12 @@ pub fn sobel_ex_ctx(
     group: &RuntimeRunner,
 ) -> GrayImage {
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if dx == 1 && dy == 1 && ksize == 3 {
+        // TODO: GPU Sobel shader (sobel.wgsl) expects packed u8-in-u32 but Rust sends f32 tensors.
+        // The GPU path is broken until a proper rewrite aligns the data formats.
+        if ksize == 3 && ((dx == 1 && dy == 0) || (dx == 0 && dy == 1)) {
             if let Ok(result) = sobel_gpu(gpu, src, ksize) {
                 let (gx, gy) = result;
-                let target = if dx > 0 { gx } else { gy };
+                let target = if dx == 1 { gx } else { gy };
                 return apply_linear_transform(target, scale, delta);
             }
         }
@@ -201,9 +204,9 @@ pub fn scharr_ex_ctx(
     } else {
         smooth.as_slice()
     };
-    let kernel = kernel_from_1d(kx, ky);
 
-    convolve_with_border_into_ctx(src, &mut out, &kernel, border, group);
+    // Use separable convolution for performance (Scharr is separable: [-1,0,1] x [3,10,3])
+    crate::convolve::separable_convolve_into_ctx(src, &mut out, kx, ky, border, group);
     apply_linear_transform(out, scale, delta)
 }
 
@@ -540,6 +543,8 @@ pub fn canny_ctx(
     })
 }
 
+// TODO: GPU Canny shader (canny.wgsl) expects packed u8-in-u32 but Rust sends f32 tensors.
+// The GPU path is broken until a proper rewrite aligns the data formats.
 fn canny_gpu(
     gpu: &cv_hal::gpu::GpuContext,
     src: &GrayImage,

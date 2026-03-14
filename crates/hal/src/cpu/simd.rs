@@ -85,6 +85,23 @@ pub fn convolve_row_1d(src: &[f32], dst: &mut [f32], kernel: &[f32], radius: usi
         let res: [f32; 8] = sum_v.into();
         dst[x..x + 8].copy_from_slice(&res);
     }
+
+    // Scalar fallback for remaining pixels (or entire row when width < 8)
+    let scalar_start = if width_simd > 0 {
+        width_simd - 1 + chunk_size
+    } else {
+        0
+    };
+    for x in scalar_start..width {
+        let mut sum = 0.0f32;
+        for k in 0..k_len {
+            let offset = x + k;
+            if offset < src.len() {
+                sum += src[offset] * kernel[k];
+            }
+        }
+        dst[x] = sum;
+    }
 }
 
 #[cfg(test)]

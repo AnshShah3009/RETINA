@@ -6,12 +6,86 @@
 #![allow(deprecated)]
 
 use crate::descriptor::{Descriptor, DescriptorExtractor, Descriptors};
-use crate::fast::fast_detect;
+use crate::fast::{self, fast_detect};
 use cv_core::{storage::Storage, Error, KeyPoint, KeyPoints, Tensor};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::tensor_ext::{TensorCast, TensorToCpu};
+use cv_imgproc::convolve::gaussian_blur;
 use image::GrayImage;
 use rayon::prelude::*;
+
+/// Learned rBRIEF pattern from OpenCV's ORB implementation (`bit_pattern_31_`).
+/// 256 test pairs, each with 4 values: (x1, y1, x2, y2) relative to patch center.
+/// Selected via a greedy algorithm to maximize descriptor variance and minimize
+/// correlation between bits (see Rublee et al., "ORB: an efficient alternative
+/// to SIFT or SURF", ICCV 2011).
+#[rustfmt::skip]
+const ORB_PATTERN: [[i32; 4]; 256] = [
+    [8,-3,9,5], [4,2,7,-12], [-11,9,-8,2], [7,-12,12,-13],
+    [2,-13,2,12], [1,-7,1,6], [-2,-10,-2,-4], [-13,-13,-11,-8],
+    [-13,-3,-12,-9], [10,4,11,9], [-13,-8,-8,-9], [-11,7,-9,12],
+    [7,7,12,6], [-4,-5,-3,0], [-13,2,-12,-3], [-9,0,-7,5],
+    [12,-6,12,-1], [-3,6,-2,12], [-6,-13,-4,-8], [11,-13,12,-8],
+    [4,7,5,1], [5,-3,10,-3], [3,-7,6,12], [-8,-7,-6,-2],
+    [-2,11,-1,-10], [-13,12,-8,10], [-7,3,-5,-3], [-4,2,-3,7],
+    [-10,-12,-6,11], [5,-12,6,-7], [5,-6,7,-1], [1,0,4,-5],
+    [9,11,11,-13], [4,7,4,12], [2,-1,4,4], [-4,-12,-2,7],
+    [-8,-5,-7,-10], [4,11,9,12], [0,-8,1,-13], [-13,-2,-8,2],
+    [-3,-2,-2,3], [-6,9,-4,-9], [8,12,10,7], [0,9,1,3],
+    [7,-5,11,-10], [-13,-6,-11,0], [10,7,12,1], [-6,-3,-6,12],
+    [10,-9,12,-4], [-13,8,-8,-12], [-13,0,-8,-4], [3,3,7,8],
+    [5,7,10,-7], [-1,7,1,-12], [3,-10,5,6], [2,-4,3,-10],
+    [-13,0,-13,5], [-13,-7,-12,12], [-13,3,-11,8], [-7,12,-4,7],
+    [6,-10,12,8], [-9,-1,-7,-6], [-2,-5,0,12], [-12,5,-7,5],
+    [3,-10,8,-13], [-7,-7,-4,5], [-3,-2,-1,-7], [2,9,5,-11],
+    [-11,-13,-5,-13], [-1,6,0,-1], [5,-3,5,2], [-4,-13,-4,12],
+    [-9,-6,-9,6], [-12,-10,-8,-4], [10,2,12,-3], [7,12,12,12],
+    [-7,-13,-6,5], [-4,9,-3,4], [7,-1,12,2], [-7,6,-5,1],
+    [-13,11,-12,5], [-3,7,-2,-6], [7,-8,12,-7], [-13,-7,-11,-12],
+    [1,-3,12,12], [2,-6,3,0], [-4,3,-2,-13], [-1,-13,1,9],
+    [7,1,8,-6], [1,-1,3,12], [9,1,12,6], [-1,-9,-1,3],
+    [-13,-13,-10,5], [7,7,10,12], [12,-5,12,9], [6,3,7,11],
+    [5,-13,6,10], [2,-12,2,3], [3,8,4,-6], [2,6,12,-13],
+    [9,-12,10,3], [-8,4,-7,9], [-11,12,-4,-6], [1,12,2,-8],
+    [6,-9,7,-4], [2,3,3,-2], [6,3,11,0], [3,-3,8,-8],
+    [7,8,9,3], [-11,-5,-6,-4], [-10,11,-5,10], [-5,-8,-3,12],
+    [-10,5,-9,0], [8,-1,12,-6], [4,-6,6,-11], [-10,12,-8,7],
+    [4,-2,6,7], [-2,0,-2,12], [-5,-8,-5,2], [7,-6,10,12],
+    [-9,-13,-8,-8], [-5,-13,-5,-2], [8,-8,9,-13], [-9,-11,-9,0],
+    [1,-8,1,-2], [7,-4,9,1], [-2,1,-1,-4], [11,-6,12,-11],
+    [-12,-9,-6,4], [3,7,7,12], [5,5,10,8], [0,-4,2,8],
+    [-9,12,-5,-13], [0,7,2,12], [-1,2,1,7], [5,11,7,-9],
+    [3,5,6,-8], [-13,-4,-8,9], [-5,9,-3,-3], [-4,-7,-3,-12],
+    [6,5,8,0], [-7,6,-6,12], [-13,6,-5,-2], [1,-10,3,10],
+    [4,1,8,-4], [-2,-2,2,-13], [2,-12,12,12], [-2,-13,0,-6],
+    [4,1,9,3], [-6,-10,-3,-5], [-3,-13,-1,1], [7,5,12,-11],
+    [4,-2,5,-7], [-13,9,-9,-5], [7,1,8,6], [7,-8,7,6],
+    [-7,-4,-7,1], [-8,11,-7,-8], [-13,6,-12,-8], [2,4,3,9],
+    [10,-5,12,3], [-6,-5,-6,7], [8,-3,9,-8], [2,-12,2,8],
+    [-11,-2,-10,3], [-12,-13,-7,-9], [-11,0,-10,-5], [5,-3,11,8],
+    [-2,-13,-1,12], [-1,-8,0,9], [-13,-11,-12,-5], [-10,-2,-10,11],
+    [-3,9,-2,-13], [2,-3,3,2], [-9,-13,-4,0], [-4,6,-3,-10],
+    [-4,12,-2,-7], [-6,-11,-4,9], [6,-3,6,11], [-13,11,-5,5],
+    [11,11,12,6], [7,-5,12,-2], [-1,12,0,7], [-4,-8,-3,-2],
+    [-7,1,-6,7], [-13,-12,-8,-13], [-7,-2,-6,-8], [-8,5,-6,-9],
+    [-5,-1,-4,5], [-13,7,-8,10], [1,5,5,-13], [1,0,10,-13],
+    [9,12,10,-1], [5,-8,10,-9], [-1,11,1,-13], [-9,-3,-6,2],
+    [-1,-10,1,12], [-13,1,-8,-10], [8,-11,10,-6], [2,-13,3,-6],
+    [7,-13,12,-9], [-10,-10,-5,-7], [-10,-8,-8,-13], [4,-6,8,5],
+    [3,12,8,-13], [-4,2,-3,-3], [5,-13,10,-12], [4,-13,5,-1],
+    [-9,9,-4,3], [0,3,3,-9], [-12,1,-6,1], [3,2,4,-8],
+    [-10,-10,-10,9], [8,-13,12,12], [-8,-12,-6,-5], [2,2,3,7],
+    [10,6,11,-8], [6,8,8,-12], [-7,10,-6,5], [-3,-9,-3,9],
+    [-1,-13,-1,5], [-3,-7,-3,4], [-8,-2,-8,3], [4,2,12,12],
+    [2,-5,3,11], [6,-9,11,-13], [3,-1,7,12], [11,-1,12,4],
+    [-3,0,-3,6], [4,-11,4,12], [2,-4,2,1], [-10,-6,-8,1],
+    [-13,7,-11,1], [-13,12,-11,-13], [6,0,11,-13], [0,-1,1,4],
+    [-13,3,-9,-2], [-9,8,-6,-3], [-13,-6,-8,-2], [5,-9,8,10],
+    [2,7,3,-9], [-1,-6,-1,-1], [9,5,11,-2], [11,-3,12,-8],
+    [3,0,3,5], [-1,4,0,10], [3,-6,4,5], [-13,0,-10,5],
+    [5,8,12,11], [8,9,9,-6], [7,-4,8,-12], [-10,4,-10,9],
+    [7,3,12,4], [9,-7,10,-2], [7,0,12,-2], [-1,-6,0,-11],
+];
 
 /// ORB feature detector and descriptor
 pub struct Orb {
@@ -99,13 +173,33 @@ impl Orb {
 
             let kps = fast_detect(&scaled, self.fast_threshold, self.n_features * 2);
 
-            for kp in kps.keypoints {
-                let scaled_kp = KeyPoint::new(kp.x * scale as f64, kp.y * scale as f64)
-                    .with_size(self.patch_size as f64 * scale as f64)
-                    .with_octave(level as i32);
+            // Bug 5 fix: apply non-maximum suppression to FAST keypoints
+            let kps = fast::non_max_suppression(kps, &scaled, self.fast_threshold);
 
-                all_keypoints.push(scaled_kp);
-            }
+            // Bug 7 fix: compute FAST corner score so keypoints have a real response
+            // Bug 4 fix: if Harris scoring is selected, re-score with Harris response
+            let scored_kps: Vec<KeyPoint> = kps
+                .keypoints
+                .into_iter()
+                .map(|kp| {
+                    let response = match self.score_type {
+                        ScoreType::Harris => {
+                            compute_harris_response(&scaled, kp.x as i32, kp.y as i32)
+                        }
+                        ScoreType::Fast => {
+                            fast::corner_score(&scaled, kp.x as i32, kp.y as i32, self.fast_threshold)
+                                as f64
+                        }
+                    };
+
+                    KeyPoint::new(kp.x * scale as f64, kp.y * scale as f64)
+                        .with_size(self.patch_size as f64 * scale as f64)
+                        .with_octave(level as i32)
+                        .with_response(response)
+                })
+                .collect();
+
+            all_keypoints.extend(scored_kps);
 
             scale *= self.scale_factor;
         }
@@ -180,9 +274,11 @@ impl Orb {
     }
 
     /// Compute orientations for keypoints using intensity centroid (Parallelized)
+    ///
+    /// Uses a circular mask (`dx*dx + dy*dy <= r*r`) to match the GPU shader.
     pub fn compute_orientations(&self, image: &GrayImage, keypoints: &mut KeyPoints) {
-        let patch_size = self.patch_size;
-        let half_patch = patch_size / 2;
+        let half_patch = self.patch_size / 2;
+        let r_sq = (half_patch * half_patch) as i64;
 
         keypoints.keypoints.par_iter_mut().for_each(|kp| {
             let x = kp.x as i32;
@@ -191,16 +287,21 @@ impl Orb {
             let mut m01 = 0.0f64;
             let mut m10 = 0.0f64;
 
-            for dy in -half_patch..half_patch {
-                for dx in -half_patch..half_patch {
+            for dy in -half_patch..=half_patch {
+                for dx in -half_patch..=half_patch {
+                    // Circular mask -- matches the GPU orientation kernel
+                    if (dx as i64 * dx as i64 + dy as i64 * dy as i64) > r_sq {
+                        continue;
+                    }
+
                     let px = x + dx;
                     let py = y + dy;
 
                     if px >= 0 && px < image.width() as i32 && py >= 0 && py < image.height() as i32
                     {
                         let intensity = image.get_pixel(px as u32, py as u32)[0] as f64;
-                        m01 += intensity * dy as f64;
                         m10 += intensity * dx as f64;
+                        m01 += intensity * dy as f64;
                     }
                 }
             }
@@ -436,27 +537,28 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
             }
         }
 
-        // Sort and truncate
-        all_keypoints.sort_by(|a, b| {
+        // Sort keypoints and descriptors together to keep them in sync
+        let mut paired: Vec<(KeyPoint, Descriptor)> = all_keypoints
+            .into_iter()
+            .zip(all_descriptors.into_iter())
+            .collect();
+
+        paired.sort_by(|(a, _), (b, _)| {
             b.response
                 .partial_cmp(&a.response)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        // We need to keep descriptors synced with sorted keypoints
-        // For simplicity, we filter them together
-        if all_keypoints.len() > orb.n_features {
-            // Actually we should sort them earlier or use a better way to keep them synced.
-            // Let's truncate for now.
-            all_keypoints.truncate(orb.n_features);
-            all_descriptors.truncate(orb.n_features);
-        }
+        paired.truncate(orb.n_features);
+
+        let (sorted_kps, sorted_descs): (Vec<KeyPoint>, Vec<Descriptor>) =
+            paired.into_iter().unzip();
 
         (
             KeyPoints {
-                keypoints: all_keypoints,
+                keypoints: sorted_kps,
             },
             Descriptors {
-                descriptors: all_descriptors,
+                descriptors: sorted_descs,
             },
         )
     } else {
@@ -543,11 +645,15 @@ fn convert_to_cpu_image<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
 
 impl DescriptorExtractor for Orb {
     fn extract(&self, image: &GrayImage, keypoints: &KeyPoints) -> Descriptors {
+        // Apply Gaussian blur (7x7, sigma=2) before computing BRIEF descriptors,
+        // matching OpenCV's GaussianBlur pre-processing step for ORB.
+        let smoothed = gaussian_blur(image, 2.0);
+
         let mut descriptors = Descriptors::with_capacity(keypoints.len());
         let pattern = generate_steered_brief_pattern(self.patch_size);
 
         for kp in keypoints.iter() {
-            if let Some(desc) = compute_orb_descriptor(image, kp, &pattern, self.patch_size) {
+            if let Some(desc) = compute_orb_descriptor(&smoothed, kp, &pattern, self.patch_size) {
                 descriptors.push(desc);
             }
         }
@@ -556,26 +662,23 @@ impl DescriptorExtractor for Orb {
     }
 }
 
-/// Generate BRIEF sampling pattern with rotation support
+/// Return the learned rBRIEF sampling pattern (256 test pairs).
+///
+/// When `patch_size` is the default 31 the canonical `ORB_PATTERN` coordinates
+/// are used directly; for other sizes the coordinates are scaled proportionally.
 fn generate_steered_brief_pattern(patch_size: i32) -> Vec<(f32, f32, f32, f32)> {
-    use rand::rng;
-    use rand::Rng;
-
-    let mut rng = rng();
-    let num_pairs = 256; // 256 bits = 32 bytes
-    let half_size = patch_size as f32 / 2.0;
-
-    let mut pairs = Vec::with_capacity(num_pairs);
-
-    for _ in 0..num_pairs {
-        let x1 = rng.random_range(-half_size..half_size);
-        let y1 = rng.random_range(-half_size..half_size);
-        let x2 = rng.random_range(-half_size..half_size);
-        let y2 = rng.random_range(-half_size..half_size);
-        pairs.push((x1, y1, x2, y2));
-    }
-
-    pairs
+    let scale = patch_size as f32 / 31.0;
+    ORB_PATTERN
+        .iter()
+        .map(|&[x1, y1, x2, y2]| {
+            (
+                x1 as f32 * scale,
+                y1 as f32 * scale,
+                x2 as f32 * scale,
+                y2 as f32 * scale,
+            )
+        })
+        .collect()
 }
 
 /// Compute ORB descriptor with rotation
@@ -614,25 +717,24 @@ fn compute_orb_descriptor(
         let px2 = (cx as f32 + rx2) as i32;
         let py2 = (cy as f32 + ry2) as i32;
 
-        if px1 < 0
-            || px1 >= width
-            || py1 < 0
-            || py1 >= height
-            || px2 < 0
-            || px2 >= width
-            || py2 < 0
-            || py2 >= height
-        {
-            continue;
+        let in_bounds = px1 >= 0
+            && px1 < width
+            && py1 >= 0
+            && py1 < height
+            && px2 >= 0
+            && px2 < width
+            && py2 >= 0
+            && py2 < height;
+
+        if in_bounds {
+            let val1 = image.get_pixel(px1 as u32, py1 as u32)[0];
+            let val2 = image.get_pixel(px2 as u32, py2 as u32)[0];
+
+            if val1 < val2 {
+                descriptor_data[byte_idx] |= 1 << (7 - bit_idx);
+            }
         }
-
-        let val1 = image.get_pixel(px1 as u32, py1 as u32)[0];
-        let val2 = image.get_pixel(px2 as u32, py2 as u32)[0];
-
-        if val1 < val2 {
-            descriptor_data[byte_idx] |= 1 << (7 - bit_idx);
-        }
-
+        // Always advance bit position to keep alignment consistent across keypoints
         bit_idx += 1;
         if bit_idx == 8 {
             bit_idx = 0;
@@ -653,6 +755,46 @@ fn scale_image(image: &GrayImage, scale: f32) -> GrayImage {
         new_height,
         image::imageops::FilterType::Triangle,
     )
+}
+
+/// Compute Harris corner response at a single pixel using the same
+/// formulation as [`harris::harris_detect`]: `det(M) - k * trace(M)^2`
+/// with a 3x3 Sobel gradient window and `k = 0.04`.
+fn compute_harris_response(image: &GrayImage, x: i32, y: i32) -> f64 {
+    let width = image.width() as i32;
+    let height = image.height() as i32;
+    let half_window = 1i32;
+    let k = 0.04;
+
+    // Ensure we have enough border for the Sobel + window
+    if x < half_window + 1
+        || x >= width - half_window - 1
+        || y < half_window + 1
+        || y >= height - half_window - 1
+    {
+        return 0.0;
+    }
+
+    let mut i_xx = 0.0f64;
+    let mut i_yy = 0.0f64;
+    let mut i_xy = 0.0f64;
+
+    for by in -half_window..=half_window {
+        for bx in -half_window..=half_window {
+            let gx = image.get_pixel((x + bx + 1) as u32, (y + by) as u32)[0] as f64
+                - image.get_pixel((x + bx - 1) as u32, (y + by) as u32)[0] as f64;
+            let gy = image.get_pixel((x + bx) as u32, (y + by + 1) as u32)[0] as f64
+                - image.get_pixel((x + bx) as u32, (y + by - 1) as u32)[0] as f64;
+
+            i_xx += gx * gx;
+            i_yy += gy * gy;
+            i_xy += gx * gy;
+        }
+    }
+
+    let det = i_xx * i_yy - i_xy * i_xy;
+    let trace = i_xx + i_yy;
+    det - k * trace * trace
 }
 
 /// Detect ORB keypoints and compute descriptors on the CPU.

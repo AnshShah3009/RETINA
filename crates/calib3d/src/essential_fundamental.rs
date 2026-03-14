@@ -110,7 +110,6 @@ pub fn find_essential_mat_ransac(
         threshold: thresh_norm * thresh_norm,
         max_iterations: max_iters,
         confidence: 0.99,
-        min_sample_size: 8,
     };
 
     let ransac = Ransac::new(config);
@@ -136,7 +135,6 @@ pub fn find_fundamental_mat_ransac(
         threshold: threshold_px * threshold_px,
         max_iterations: max_iters,
         confidence: 0.99,
-        min_sample_size: 8,
     };
 
     let ransac = Ransac::new(config);

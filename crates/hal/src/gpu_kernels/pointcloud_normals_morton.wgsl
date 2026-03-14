@@ -95,7 +95,8 @@ fn find_neighbors_sorted(
         
         let other_idx = sorted_indices[j];
         let other = points[other_idx].xyz;
-        let d = distance(point, other);
+        let diff = point - other;
+        let d = dot(diff, diff);
         
         // Insert into sorted list
         if d < dists[k - 1u] {
@@ -195,7 +196,7 @@ fn compute_normal_pca(point: vec3<f32>, neighbors: array<u32, 32>, k: u32) -> ve
         if neighbors[i] != 0xFFFFFFFFu { count = count + 1u; }
     }
     
-    if count < 3u { return vec3<f32>(0.0, 1.0, 0.0); }
+    if count < 3u { return vec3<f32>(0.0, 0.0, 1.0); }
     
     // Centroid
     var centroid = vec3<f32>(0.0);

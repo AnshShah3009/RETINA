@@ -233,8 +233,11 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
         .par_iter()
         .map(|p| {
             let query_point = [p.x, p.y, p.z];
-            let neighbors: Vec<&PointWrapper> =
-                tree.nearest_neighbor_iter(&query_point).take(k).collect();
+            let neighbors: Vec<&PointWrapper> = tree
+                .nearest_neighbor_iter(&query_point)
+                .skip(1)
+                .take(k)
+                .collect();
 
             if neighbors.len() < 3 {
                 return Vector3::new(0.0, 0.0, 1.0); // Default up
@@ -293,7 +296,7 @@ pub fn orient_normals(pc: &mut PointCloud, k: usize) {
 
     while let Some(i) = queue.pop() {
         let q = [pc.points[i].x, pc.points[i].y, pc.points[i].z];
-        let neighbors: Vec<_> = tree.nearest_neighbor_iter(&q).take(k).collect();
+        let neighbors: Vec<_> = tree.nearest_neighbor_iter(&q).skip(1).take(k).collect();
 
         for nb in neighbors {
             let j = nb.0;
@@ -310,19 +313,27 @@ pub fn orient_normals(pc: &mut PointCloud, k: usize) {
         }
     }
 
-    // Handle unvisited (disconnected components)
+    // Handle unvisited (disconnected components) — run a new BFS from each
+    // unvisited seed so the entire component gets consistently oriented.
     for i in 0..n {
         if !visited[i] {
-            let q = [pc.points[i].x, pc.points[i].y, pc.points[i].z];
-            let neighbors: Vec<_> = tree.nearest_neighbor_iter(&q).take(k).collect();
-            let mut flip = 0;
-            for nb in &neighbors {
-                if normals[i].dot(&normals[nb.0]) < 0.0 {
-                    flip += 1;
+            visited[i] = true;
+            let mut comp_queue = vec![i];
+            while let Some(ci) = comp_queue.pop() {
+                let q = [pc.points[ci].x, pc.points[ci].y, pc.points[ci].z];
+                let neighbors: Vec<_> =
+                    tree.nearest_neighbor_iter(&q).skip(1).take(k).collect();
+                for nb in neighbors {
+                    let j = nb.0;
+                    if visited[j] {
+                        continue;
+                    }
+                    if normals[j].dot(&normals[ci]) < 0.0 {
+                        normals[j] = -normals[j];
+                    }
+                    visited[j] = true;
+                    comp_queue.push(j);
                 }
-            }
-            if flip > neighbors.len() / 2 {
-                normals[i] = -normals[i];
             }
         }
     }
@@ -807,7 +818,6 @@ pub fn segment_plane(
         threshold: distance_threshold as f64,
         max_iterations: num_iterations,
         confidence: 0.99,
-        min_sample_size: ransac_n,
     };
 
     let ransac = Ransac::new(config);

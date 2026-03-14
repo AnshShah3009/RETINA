@@ -108,14 +108,18 @@ pub fn distance_transform_with_labels<T: Float>(
             if src[idx].to_f32() == 0.0 {
                 return idx as i32;
             }
-            let mut best_dist_sq = f64::MAX;
+            let mut best_dist = f64::MAX;
             let mut best_label = -1i32;
             for (i, &(bx, by)) in bg_coords.iter().enumerate() {
                 let dx = px as f64 - bx as f64;
                 let dy = py as f64 - by as f64;
-                let d = dx * dx + dy * dy;
-                if d < best_dist_sq {
-                    best_dist_sq = d;
+                let d = match dist_type {
+                    DistanceType::L1 => dx.abs() + dy.abs(),
+                    DistanceType::Chessboard => dx.abs().max(dy.abs()),
+                    DistanceType::L2 => dx * dx + dy * dy,
+                };
+                if d < best_dist {
+                    best_dist = d;
                     best_label = bg_indices[i];
                 }
             }

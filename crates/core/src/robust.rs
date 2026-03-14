@@ -11,7 +11,6 @@ pub struct RobustConfig {
     pub threshold: f64,
     pub max_iterations: usize,
     pub confidence: f64,
-    pub min_sample_size: usize,
 }
 
 impl Default for RobustConfig {
@@ -20,7 +19,6 @@ impl Default for RobustConfig {
             threshold: 1.0,
             max_iterations: 1000,
             confidence: 0.99,
-            min_sample_size: 4,
         }
     }
 }
@@ -80,10 +78,18 @@ impl<D, M: RobustModel<D>> Ransac<D, M> {
         let mut best_num_inliers = 0;
         let mut best_residual = f64::INFINITY;
 
+        // Adaptive iteration bound (Fischler & Bolles 1981)
+        let mut adaptive_k = self.config.max_iterations as f64;
+
         let mut rng = rand::rng();
         let mut indices: Vec<usize> = (0..n).collect();
 
-        for _ in 0..self.config.max_iterations {
+        for iteration in 0..self.config.max_iterations {
+            // Terminate when the loop counter exceeds the adaptive bound
+            if iteration as f64 >= adaptive_k {
+                break;
+            }
+
             // 1. Sample
             indices.shuffle(&mut rng);
             let sample: Vec<&D> = (0..k).map(|i| &data[indices[i]]).collect();
@@ -118,9 +124,14 @@ impl<D, M: RobustModel<D>> Ransac<D, M> {
                     best_model = Some(model);
                     best_residual = residual;
 
-                    // Early exit check
-                    if num_inliers as f64 > n as f64 * self.config.confidence {
-                        break;
+                    // Update adaptive iteration bound:
+                    // w = inlier ratio, k = log(1 - confidence) / log(1 - w^sample_size)
+                    let w = best_num_inliers as f64 / n as f64;
+                    let w_k = w.powi(k as i32);
+                    if w_k > 0.0 && w_k < 1.0 {
+                        let new_k = (1.0 - self.config.confidence).ln()
+                            / (1.0 - w_k).ln();
+                        adaptive_k = new_k.min(self.config.max_iterations as f64);
                     }
                 }
             }
@@ -182,6 +193,11 @@ impl<D, M: RobustModel<D>> LMedS<D, M> {
                 if errors.is_empty() {
                     continue;
                 }
+
+                // Square the errors so the sqrt in the sigma formula is correct:
+                // compute_error() returns Euclidean distances (unsquared), but the
+                // sigma formula assumes squared errors under the median.
+                errors.iter_mut().for_each(|e| *e = *e * *e);
 
                 errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -268,18 +284,32 @@ impl<D, M: RobustModel<D>> Prosac<D, M> {
         // PROSAC parameters
         let t_max = self.config.max_iterations;
         let mut n_sub = m;
-        let mut t_n = 1.0;
+
+        // Precompute C(N, m) for the growth function denominator
+        let mut c_total = 1.0_f64;
+        for i in 0..m {
+            c_total *= (n - i) as f64 / (m - i) as f64;
+        }
+
+        // Initialize t_n = C(m, m) / C(N, m) * t_max = 1 / C(N, m) * t_max
+        let mut t_n = t_max as f64 / c_total;
+
+        // Adaptive iteration bound (same as RANSAC)
+        let mut adaptive_k = t_max as f64;
 
         for t in 1..=t_max {
+            // Terminate when the loop counter exceeds the adaptive bound
+            if t as f64 > adaptive_k {
+                break;
+            }
+
             // 1. Determine size of subset to sample from (Growth Function)
             // Progressive sampling: starts with small subset of high-quality data
-            if t > t_n as usize && n_sub < n {
+            // Use recurrence: T_{n+1} = (n+1)/(n+1-m) * T_n
+            while t > t_n as usize && n_sub < n {
+                let prev_n_sub = n_sub as f64;
                 n_sub += 1;
-                let mut num = 1.0;
-                for i in 0..m {
-                    num *= (n_sub - i) as f64 / (m - i) as f64;
-                }
-                t_n = num * t_max as f64 / n as f64;
+                t_n = t_n * (prev_n_sub + 1.0) / (prev_n_sub + 1.0 - m as f64);
             }
 
             // 2. Sample
@@ -328,9 +358,13 @@ impl<D, M: RobustModel<D>> Prosac<D, M> {
                     best_model = Some(model);
                     best_residual = residual;
 
-                    // Standard PROSAC early exit check
-                    if num_inliers as f64 > n as f64 * self.config.confidence {
-                        break;
+                    // Update adaptive iteration bound
+                    let w = best_num_inliers as f64 / n as f64;
+                    let w_m = w.powi(m as i32);
+                    if w_m > 0.0 && w_m < 1.0 {
+                        let new_k = (1.0 - self.config.confidence).ln()
+                            / (1.0 - w_m).ln();
+                        adaptive_k = new_k.min(t_max as f64);
                     }
                 }
             }
@@ -448,7 +482,6 @@ mod tests {
                 threshold: 0.1,
                 confidence: 0.99,
                 max_iterations: 100,
-                min_sample_size: 2,
             });
 
             let estimator = LineEstimator;
@@ -466,7 +499,6 @@ mod tests {
                 threshold: 0.2,
                 confidence: 0.99,
                 max_iterations: 1000,
-                min_sample_size: 2,
             });
 
             let estimator = LineEstimator;
@@ -484,7 +516,6 @@ mod tests {
                 threshold: 0.1,
                 confidence: 0.99,
                 max_iterations: 100,
-                min_sample_size: 2,
             });
 
             let estimator = LineEstimator;
@@ -502,7 +533,6 @@ mod tests {
                 threshold: 0.1,
                 confidence: 0.99,
                 max_iterations: 100,
-                min_sample_size: 2,
             });
 
             let estimator = LineEstimator;
@@ -534,7 +564,6 @@ mod tests {
                 threshold: 0.1,
                 max_iterations: 100,
                 confidence: 0.99,
-                min_sample_size: 2,
             });
 
             let estimator = LineEstimator;
@@ -551,7 +580,6 @@ mod tests {
                 threshold: 0.3,
                 max_iterations: 500,
                 confidence: 0.99,
-                min_sample_size: 2,
             });
 
             let estimator = LineEstimator;
@@ -570,7 +598,6 @@ mod tests {
                 threshold: 0.1,
                 max_iterations: 100,
                 confidence: 0.99,
-                min_sample_size: 2,
             });
 
             let estimator = LineEstimator;
@@ -593,7 +620,6 @@ mod tests {
                 threshold: 0.1,
                 confidence: 0.99,
                 max_iterations: 100,
-                min_sample_size: 2,
             });
 
             let estimator = LineEstimator;
@@ -610,7 +636,6 @@ mod tests {
                 threshold: 0.2,
                 confidence: 0.99,
                 max_iterations: 500,
-                min_sample_size: 2,
             });
 
             let estimator = LineEstimator;
