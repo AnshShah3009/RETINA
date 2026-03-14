@@ -547,6 +547,9 @@ pub enum BorderMode<T: Float> {
     Constant(T),
     Replicate,
     Reflect,
+    /// Reflect without duplicating the border pixel (period = 2n-2).
+    /// This is the default border mode in OpenCV (`BORDER_REFLECT_101`).
+    Reflect101,
     Wrap,
 }
 

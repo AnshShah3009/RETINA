@@ -374,9 +374,12 @@ impl Akaze {
                                     if dx == 0 && dy == 0 {
                                         continue;
                                     }
+                                    // Use strict > to match OpenCV convention:
+                                    // a pixel is a local maximum if no neighbor
+                                    // is strictly greater than it.
                                     if det_slice
                                         [(y as i32 + dy) as usize * w + (x as i32 + dx) as usize]
-                                        >= val
+                                        > val
                                     {
                                         is_max = false;
                                         break;

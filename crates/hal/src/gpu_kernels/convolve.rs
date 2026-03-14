@@ -48,6 +48,7 @@ pub fn convolve_2d<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         BorderMode::Replicate => (1, 0.0),
         BorderMode::Reflect => (2, 0.0),
         BorderMode::Wrap => (3, 0.0),
+        BorderMode::Reflect101 => (4, 0.0),
     };
 
     let params = ConvolveParams {
@@ -128,11 +129,32 @@ struct SeparableParams {
     padding: u32,
 }
 
+/// Convert a `BorderMode` to its integer representation for GPU shaders.
+fn border_mode_to_int<T: Float>(mode: &BorderMode<T>) -> u32 {
+    match mode {
+        BorderMode::Constant(_) => 0,
+        BorderMode::Replicate => 1,
+        BorderMode::Reflect => 2,
+        BorderMode::Wrap => 3,
+        BorderMode::Reflect101 => 4,
+    }
+}
+
 pub fn gaussian_blur<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     ctx: &GpuContext,
     input: &crate::GpuTensor<T>,
     sigma: T,
     k_size: usize,
+) -> Result<crate::GpuTensor<T>> {
+    gaussian_blur_with_border(ctx, input, sigma, k_size, BorderMode::Replicate)
+}
+
+pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
+    ctx: &GpuContext,
+    input: &crate::GpuTensor<T>,
+    sigma: T,
+    k_size: usize,
+    border_mode: BorderMode<T>,
 ) -> Result<crate::GpuTensor<T>> {
     // Only f32 WGSL shader available
     if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
@@ -146,6 +168,8 @@ pub fn gaussian_blur<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
 
     let output_size = input.shape.len();
     let output_byte_size = (output_size * std::mem::size_of::<f32>()) as u64;
+
+    let border_int = border_mode_to_int(&border_mode);
 
     let temp_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Blur Temp Buffer"),
@@ -177,7 +201,7 @@ pub fn gaussian_blur<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         height: h as u32,
         kernel_size: k_size as u32,
         is_vertical: 0,
-        border_mode: 1,
+        border_mode: border_int,
         padding: 0,
     };
     let h_params_buf = ctx
@@ -215,7 +239,7 @@ pub fn gaussian_blur<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         height: h as u32,
         kernel_size: k_size as u32,
         is_vertical: 1,
-        border_mode: 1,
+        border_mode: border_int,
         padding: 0,
     };
     let v_params_buf = ctx

@@ -39,10 +39,12 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
         mapped_at_creation: false,
     });
 
+    // Bug 3 fix: pass threshold as f32 bits (bitcast in shader) instead of
+    // truncating to u32, which destroys fractional values like 0.1.
     let params_data: [u32; 4] = [
         w as u32,
         h as u32,
-        threshold.to_f32() as u32,
+        threshold.to_f32().to_bits(),
         if nonmax_suppression { 1u32 } else { 0u32 },
     ];
 
@@ -213,17 +215,19 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
         return Ok(Vec::new());
     }
 
-    // Buffer to get number of results
-    let num_u32 = num_pixels.div_ceil(4);
+    // Bug 5 fix: Use the f32 collection shader that reads f32 scores directly,
+    // instead of the packed-u8 collection shader. For f32 score maps, each
+    // element is one pixel, so num_elements = num_pixels.
+    let num_elements = num_pixels;
 
     // 1. Count pass
-    let usages = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC; // Create a host accessible buffer. This depends on WGSL structs being packed to bytes, not float sizes of the GPU logic!
-    let counts_buffer = ctx.get_buffer((num_u32 as u64) * 4, usages);
+    let usages = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
+    let counts_buffer = ctx.get_buffer((num_elements as u64) * 4, usages);
 
     let params = CollectParams {
         width: w as u32,
         height: h as u32,
-        num_elements: num_u32,
+        num_elements,
         padding: 0,
     };
 
@@ -235,11 +239,11 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let shader_source = include_str!("feature_collection.wgsl");
+    let shader_source = include_str!("feature_collection_f32.wgsl");
     let shader = ctx
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Feature Collection Shader"),
+            label: Some("Feature Collection F32 Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
 
@@ -287,7 +291,7 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&count_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(num_u32.div_ceil(256), 1, 1);
+        pass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
     }
     ctx.submit(encoder);
 
@@ -297,14 +301,15 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
         &ctx.queue,
         &counts_buffer,
         0,
-        (num_u32 as usize) * 4,
+        (num_elements as usize) * 4,
     ))?;
 
     let mut total = 0u32;
-    let mut indices = Vec::with_capacity(num_u32 as usize);
+    let mut indices = Vec::with_capacity(num_elements as usize);
     for &c in &counts_data {
         indices.push(total);
-        if c <= 4 {
+        // f32 collection: each element is 0 or 1
+        if c <= 1 {
             total += c;
         }
     }
@@ -383,7 +388,7 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&collect_pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(num_u32.div_ceil(256), 1, 1);
+        pass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
     }
     ctx.submit(encoder);
 

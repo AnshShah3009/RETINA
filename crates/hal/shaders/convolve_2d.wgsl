@@ -3,7 +3,7 @@ struct Params {
     height: u32,
     kernel_width: u32,
     kernel_height: u32,
-    border_mode: u32, // 0: Constant, 1: Replicate, 2: Reflect, 3: Wrap
+    border_mode: u32, // 0: Constant, 1: Replicate, 2: Reflect, 3: Wrap, 4: Reflect101
     border_const: f32,
 }
 
@@ -15,7 +15,7 @@ struct Params {
 fn get_input_index(x: i32, y: i32) -> i32 {
     let w = i32(params.width);
     let h = i32(params.height);
-    
+
     var ix = x;
     var iy = y;
 
@@ -27,13 +27,8 @@ fn get_input_index(x: i32, y: i32) -> i32 {
     } else if (params.border_mode == 1u) { // Replicate
         ix = clamp(ix, 0, w - 1);
         iy = clamp(iy, 0, h - 1);
-    } else if (params.border_mode == 2u) { // Reflect
-        // Reflect 101: gfedcb|abcdefgh|gfedcba
-        // Not perfectly implemented here, using simple reflection for now
-        // Simple abs reflect:
-        // if ix < 0 { ix = -ix - 1; } etc?
-        // Let's implement standard Reflect101 logic used in OpenCV default
-        // For standard Reflect:
+    } else if (params.border_mode == 2u) { // Reflect (period = 2n)
+        // dcba|abcd|dcba  (border pixel is duplicated)
         if (w == 1) { ix = 0; }
         else {
             let period = 2 * w;
@@ -41,7 +36,7 @@ fn get_input_index(x: i32, y: i32) -> i32 {
             if (ix < 0) { ix += period; }
             if (ix >= w) { ix = period - ix - 1; }
         }
-        
+
         if (h == 1) { iy = 0; }
         else {
             let period = 2 * h;
@@ -54,6 +49,23 @@ fn get_input_index(x: i32, y: i32) -> i32 {
         if (ix < 0) { ix += w; }
         iy = iy % h;
         if (iy < 0) { iy += h; }
+    } else if (params.border_mode == 4u) { // Reflect101 (period = 2n-2)
+        // dcb|abcd|cba  (border pixel is NOT duplicated, OpenCV default)
+        if (w == 1) { ix = 0; }
+        else {
+            let period = 2 * w - 2;
+            ix = ix % period;
+            if (ix < 0) { ix += period; }
+            if (ix >= w) { ix = period - ix; }
+        }
+
+        if (h == 1) { iy = 0; }
+        else {
+            let period = 2 * h - 2;
+            iy = iy % period;
+            if (iy < 0) { iy += period; }
+            if (iy >= h) { iy = period - iy; }
+        }
     }
 
     return iy * w + ix;

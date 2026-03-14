@@ -24,8 +24,11 @@ pub fn sift_extrema(
     edge_threshold: f32,
 ) -> Result<Tensor<u8, GpuStorage<u8>>> {
     let (h, w) = dog_curr.shape.hw();
-    let out_len = w * h;
-    let byte_size = (out_len.div_ceil(4) * 4) as u64;
+    // The shader packs 4 pixels per u32, writing with row stride ceil(w/4).
+    // Total u32 elements = h * ceil(w/4), total bytes = h * ceil(w/4) * 4.
+    let row_stride_u32 = w.div_ceil(4);
+    let total_u32 = h * row_stride_u32;
+    let byte_size = (total_u32 * 4) as u64;
 
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("SIFT Extrema Output"),
@@ -95,9 +98,12 @@ pub fn sift_extrema(
     }
     ctx.submit(encoder);
 
+    // Store the total bytes (total_u32 * 4) as the storage length so readback
+    // retrieves the full packed buffer. Use a 1-D shape for the packed data.
+    let total_bytes = total_u32 * 4;
     Ok(Tensor {
-        storage: GpuStorage::from_buffer(Arc::new(output_buffer), out_len),
-        shape: dog_curr.shape,
+        storage: GpuStorage::from_buffer(Arc::new(output_buffer), total_bytes),
+        shape: cv_core::TensorShape::new(1, h, row_stride_u32 * 4),
         dtype: cv_core::DataType::U8,
         _phantom: PhantomData,
     })

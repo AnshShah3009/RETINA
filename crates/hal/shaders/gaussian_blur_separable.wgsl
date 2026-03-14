@@ -3,7 +3,7 @@ struct Params {
     height: u32,
     kernel_size: u32,
     is_vertical: u32, // 0: Horizontal, 1: Vertical
-    border_mode: u32, // 0: Constant, 1: Replicate, 2: Reflect, 3: Wrap
+    border_mode: u32, // 0: Constant, 1: Replicate, 2: Reflect, 3: Wrap, 4: Reflect101
 }
 
 @group(0) @binding(0) var<storage, read> input_data: array<f32>;
@@ -14,7 +14,7 @@ struct Params {
 fn get_input_index(x: i32, y: i32) -> i32 {
     let w = i32(params.width);
     let h = i32(params.height);
-    
+
     var ix = x;
     var iy = y;
 
@@ -25,14 +25,14 @@ fn get_input_index(x: i32, y: i32) -> i32 {
     } else if (params.border_mode == 1u) { // Replicate
         ix = clamp(ix, 0, w - 1);
         iy = clamp(iy, 0, h - 1);
-    } else if (params.border_mode == 2u) { // Reflect
+    } else if (params.border_mode == 2u) { // Reflect (period = 2n)
         if (w > 1) {
             let period = 2 * w;
             ix = ix % period;
             if (ix < 0) { ix += period; }
             if (ix >= w) { ix = period - ix - 1; }
         } else { ix = 0; }
-        
+
         if (h > 1) {
             let period = 2 * h;
             iy = iy % period;
@@ -44,6 +44,20 @@ fn get_input_index(x: i32, y: i32) -> i32 {
         if (ix < 0) { ix += w; }
         iy = iy % h;
         if (iy < 0) { iy += h; }
+    } else if (params.border_mode == 4u) { // Reflect101 (period = 2n-2)
+        if (w > 1) {
+            let period = 2 * w - 2;
+            ix = ix % period;
+            if (ix < 0) { ix += period; }
+            if (ix >= w) { ix = period - ix; }
+        } else { ix = 0; }
+
+        if (h > 1) {
+            let period = 2 * h - 2;
+            iy = iy % period;
+            if (iy < 0) { iy += period; }
+            if (iy >= h) { iy = period - iy; }
+        } else { iy = 0; }
     }
 
     return iy * w + ix;

@@ -113,6 +113,7 @@ impl ComputeContext for GpuContext {
                     crate::context::BorderMode::Replicate => crate::context::BorderMode::Replicate,
                     crate::context::BorderMode::Reflect => crate::context::BorderMode::Reflect,
                     crate::context::BorderMode::Wrap => crate::context::BorderMode::Wrap,
+                    crate::context::BorderMode::Reflect101 => crate::context::BorderMode::Reflect101,
                 };
                 let result_gpu = crate::gpu_kernels::convolve::convolve_2d(
                     self,
@@ -2427,6 +2428,110 @@ impl ComputeContext for GpuContext {
 }
 
 impl GpuContext {
+    /// Compute dominant orientations for SIFT keypoints on GPU.
+    ///
+    /// Returns a Vec<f32> of orientation angles in degrees [0, 360) for each keypoint.
+    pub fn compute_sift_orientations(
+        &self,
+        image: &Tensor<f32, crate::storage::GpuStorage<f32>>,
+        keypoints: &[cv_core::KeyPoint],
+    ) -> crate::Result<Vec<f32>> {
+        if keypoints.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let num_kps = keypoints.len();
+
+        // Upload keypoints as vec4<f32> [x, y, size, octave]
+        let kp_data: Vec<[f32; 4]> = keypoints
+            .iter()
+            .map(|kp| [kp.x as f32, kp.y as f32, kp.size as f32, kp.octave as f32])
+            .collect();
+
+        let kp_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("SIFT Orientation Keypoints"),
+                contents: bytemuck::cast_slice(&kp_data),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
+        // Output buffer: one f32 per keypoint
+        let out_byte_size = (num_kps * 4) as u64;
+        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SIFT Orientation Output"),
+            size: out_byte_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let params = [
+            image.shape.width as u32,
+            image.shape.height as u32,
+            num_kps as u32,
+            0u32,
+        ];
+        let params_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("SIFT Orientation Params"),
+                    contents: bytemuck::cast_slice(&params),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+
+        let shader_source = include_str!("../shaders/sift_orientation.wgsl");
+        let pipeline = self.create_compute_pipeline(shader_source, "main");
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SIFT Orientation Bind Group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: image.storage.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: kp_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let x = (num_kps as u32).div_ceil(64);
+            pass.dispatch_workgroups(x, 1, 1);
+        }
+        self.submit(encoder);
+
+        let orientations: Vec<f32> =
+            pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
+                self.device.clone(),
+                &self.queue,
+                &output_buffer,
+                0,
+                out_byte_size as usize,
+            ))?;
+
+        Ok(orientations)
+    }
+
     /// Get the global GPU context. Returns an error if not yet initialized.
     pub fn global() -> crate::Result<&'static GpuContext> {
         GLOBAL_CONTEXT

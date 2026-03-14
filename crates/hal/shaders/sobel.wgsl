@@ -45,11 +45,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let p21 = get_pixel(x,     y + 1);
         let p22 = get_pixel(x + 1, y + 1);
 
-        let gx = abs((p02 + 2.0 * p12 + p22) - (p00 + 2.0 * p10 + p20));
-        let gy = abs((p20 + 2.0 * p21 + p22) - (p00 + 2.0 * p01 + p02));
+        // Compute signed gradients (no abs), then bias by 128 to store in u8.
+        // This preserves sign information: values < 128 are negative gradients,
+        // values > 128 are positive gradients, 128 is zero.
+        // For absolute-value gradient magnitude, use the f32 Sobel output path.
+        let gx = (p02 + 2.0 * p12 + p22) - (p00 + 2.0 * p10 + p20);
+        let gy = (p20 + 2.0 * p21 + p22) - (p00 + 2.0 * p01 + p02);
 
-        res_gx = res_gx | ((u32(clamp(gx, 0.0, 255.0)) & 0xFFu) << (i * 8u));
-        res_gy = res_gy | ((u32(clamp(gy, 0.0, 255.0)) & 0xFFu) << (i * 8u));
+        let gx_out = clamp(gx + 128.0, 0.0, 255.0);
+        let gy_out = clamp(gy + 128.0, 0.0, 255.0);
+
+        res_gx = res_gx | ((u32(gx_out) & 0xFFu) << (i * 8u));
+        res_gy = res_gy | ((u32(gy_out) & 0xFFu) << (i * 8u));
     }
 
     gx_data[u32_x + u32(y) * ((params.width + 3u) / 4u)] = res_gx;

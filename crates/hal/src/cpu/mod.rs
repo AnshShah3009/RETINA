@@ -83,6 +83,74 @@ impl ComputeBackend for CpuBackend {
     }
 }
 
+/// Map a single coordinate using the given border mode.
+/// Returns `None` when the pixel should use the constant fill value.
+fn map_border_coord_1d<T: Float>(coord: isize, len: usize, mode: &BorderMode<T>) -> Option<usize> {
+    let n = len as isize;
+    if n <= 0 {
+        return None;
+    }
+    match mode {
+        BorderMode::Constant(_) => {
+            if coord < 0 || coord >= n {
+                None
+            } else {
+                Some(coord as usize)
+            }
+        }
+        BorderMode::Replicate => Some(coord.clamp(0, n - 1) as usize),
+        BorderMode::Wrap => {
+            let mut c = coord % n;
+            if c < 0 {
+                c += n;
+            }
+            Some(c as usize)
+        }
+        BorderMode::Reflect => {
+            if n == 1 {
+                return Some(0);
+            }
+            let period = 2 * n;
+            let mut c = coord % period;
+            if c < 0 {
+                c += period;
+            }
+            if c >= n {
+                c = period - c - 1;
+            }
+            Some(c as usize)
+        }
+        BorderMode::Reflect101 => {
+            if n == 1 {
+                return Some(0);
+            }
+            let period = 2 * n - 2;
+            let mut c = coord % period;
+            if c < 0 {
+                c += period;
+            }
+            if c >= n {
+                c = period - c;
+            }
+            Some(c as usize)
+        }
+    }
+}
+
+/// Map (x, y) using border mode. Returns `Some((ix, iy))` or `None` for constant fill.
+fn map_border_coord<T: Float>(
+    x: isize,
+    y: isize,
+    w: usize,
+    h: usize,
+    mode: &BorderMode<T>,
+) -> Option<(usize, usize)> {
+    match (map_border_coord_1d(x, w, mode), map_border_coord_1d(y, h, mode)) {
+        (Some(ix), Some(iy)) => Some((ix, iy)),
+        _ => None,
+    }
+}
+
 impl CpuBackend {
     #[allow(clippy::needless_range_loop)]
     fn convolve_separable<T: Float + bytemuck::Pod + std::fmt::Debug>(
@@ -169,7 +237,7 @@ impl ComputeContext for CpuBackend {
         &self,
         input: &Tensor<T, S>,
         kernel: &Tensor<T, S>,
-        _border_mode: BorderMode<T>,
+        border_mode: BorderMode<T>,
     ) -> Result<Tensor<T, S>> {
         let src = input
             .storage
@@ -189,17 +257,21 @@ impl ComputeContext for CpuBackend {
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-        // Naive implementation for now, but parallelized
         dst.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             for x in 0..w {
                 let mut sum = T::ZERO;
                 for ky in 0..kh {
                     for kx in 0..kw {
-                        let sy = (y as isize + ky as isize - (kh / 2) as isize)
-                            .clamp(0, h as isize - 1) as usize;
-                        let sx = (x as isize + kx as isize - (kw / 2) as isize)
-                            .clamp(0, w as isize - 1) as usize;
-                        sum += src[sy * w + sx] * k_data[ky * kw + kx];
+                        let src_y = y as isize + ky as isize - (kh / 2) as isize;
+                        let src_x = x as isize + kx as isize - (kw / 2) as isize;
+                        let val = match map_border_coord(src_x, src_y, w, h, &border_mode) {
+                            Some((ix, iy)) => src[iy * w + ix],
+                            None => match border_mode {
+                                BorderMode::Constant(v) => v,
+                                _ => T::ZERO,
+                            },
+                        };
+                        sum += val * k_data[ky * kw + kx];
                     }
                 }
                 row[x] = sum;
@@ -1084,6 +1156,11 @@ impl ComputeContext for CpuBackend {
         })
     }
 
+    /// Morphological operation (erode/dilate/open/close).
+    ///
+    /// Border handling: out-of-bounds pixels use the morphological identity element
+    /// (255 for erode, 0 for dilate). This matches the GPU shader behavior and is
+    /// mathematically correct because the identity element does not affect min/max.
     #[allow(clippy::needless_range_loop)]
     fn morphology<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
@@ -1104,6 +1181,13 @@ impl ComputeContext for CpuBackend {
         let (kh, kw) = kernel.shape.hw();
         let (cx, cy) = (kw / 2, kh / 2);
 
+        // Identity element: does not affect min (erode) or max (dilate)
+        let identity = if typ == MorphologyType::Erode {
+            255u8
+        } else {
+            0u8
+        };
+
         if iterations == 0 {
             return Ok(input.clone());
         }
@@ -1119,27 +1203,32 @@ impl ComputeContext for CpuBackend {
 
                 // SIMD path (32 pixels at a time)
                 while x + 32 <= w {
-                    let mut res_v = if typ == MorphologyType::Erode {
-                        u8x32::splat(255)
-                    } else {
-                        u8x32::ZERO
-                    };
+                    let mut res_v = u8x32::splat(identity);
 
                     for ky in 0..kh {
-                        let sy = (y + ky as isize - cy as isize).clamp(0, h as isize - 1) as usize;
-                        let row_src = &src[sy * w..(sy + 1) * w];
+                        let sy_raw = y + ky as isize - cy as isize;
 
                         for kx in 0..kw {
                             if k_data[ky * kw + kx] == 0 {
                                 continue;
                             }
+
+                            // If the source row is out of bounds, use identity element
+                            if sy_raw < 0 || sy_raw >= h as isize {
+                                // identity element: no effect on min/max
+                                continue;
+                            }
+                            let sy = sy_raw as usize;
+                            let row_src = &src[sy * w..(sy + 1) * w];
                             let sx_base = x as isize + kx as isize - cx as isize;
 
-                            // Load 32 bytes with clamping
-                            let mut bytes = [0u8; 32];
+                            // Load 32 bytes, using identity for out-of-bounds columns
+                            let mut bytes = [identity; 32];
                             for i in 0..32 {
-                                let sx = (sx_base + i as isize).clamp(0, w as isize - 1) as usize;
-                                bytes[i] = row_src[sx];
+                                let sx = sx_base + i as isize;
+                                if sx >= 0 && sx < w as isize {
+                                    bytes[i] = row_src[sx as usize];
+                                }
                             }
 
                             let v = u8x32::from(bytes);
@@ -1158,21 +1247,24 @@ impl ComputeContext for CpuBackend {
 
                 // Scalar tail
                 for cx_idx in x..w {
-                    let mut val = if typ == MorphologyType::Erode {
-                        255u8
-                    } else {
-                        0u8
-                    };
+                    let mut val = identity;
                     for ky in 0..kh {
-                        let sy = (y + ky as isize - cy as isize).clamp(0, h as isize - 1) as usize;
+                        let sy_raw = y + ky as isize - cy as isize;
                         for kx in 0..kw {
                             if k_data[ky * kw + kx] == 0 {
                                 continue;
                             }
-                            let sx = (cx_idx as isize + kx as isize - cx as isize)
-                                .clamp(0, w as isize - 1)
-                                as usize;
-                            let v = src[sy * w + sx];
+                            let sx_raw = cx_idx as isize + kx as isize - cx as isize;
+                            // Use identity element for out-of-bounds pixels
+                            let v = if sy_raw < 0
+                                || sy_raw >= h as isize
+                                || sx_raw < 0
+                                || sx_raw >= w as isize
+                            {
+                                identity
+                            } else {
+                                src[sy_raw as usize * w + sx_raw as usize]
+                            };
                             if typ == MorphologyType::Erode {
                                 val = val.min(v);
                             } else {
@@ -1279,14 +1371,16 @@ impl ComputeContext for CpuBackend {
         let r = (window_size / 2) as isize;
 
         dst.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
+            let center_idx_base = y * w;
             for x in 0..w {
-                let val = src[y * w + x];
+                let val = src[center_idx_base + x];
                 if val < threshold {
                     continue;
                 }
 
                 let mut is_max = true;
-                for j in -r..=r {
+                let center_idx = center_idx_base + x;
+                'outer: for j in -r..=r {
                     for i in -r..=r {
                         if i == 0 && j == 0 {
                             continue;
@@ -1297,14 +1391,20 @@ impl ComputeContext for CpuBackend {
                             && sy < h as isize
                             && sx >= 0
                             && sx < w as isize
-                            && src[sy as usize * w + sx as usize] > val
                         {
-                            is_max = false;
-                            break;
+                            let neighbor_idx = sy as usize * w + sx as usize;
+                            let neighbor_val = src[neighbor_idx];
+                            // Suppress if neighbor is strictly greater
+                            if neighbor_val > val {
+                                is_max = false;
+                                break 'outer;
+                            }
+                            // Tie-breaking: smaller index wins (matches GPU NMS shader)
+                            if neighbor_val == val && neighbor_idx < center_idx {
+                                is_max = false;
+                                break 'outer;
+                            }
                         }
-                    }
-                    if !is_max {
-                        break;
                     }
                 }
                 if is_max {

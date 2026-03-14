@@ -254,10 +254,14 @@ impl Sift {
                         continue;
                     }
                 };
+                // The GPU extrema kernel packs 4 pixels per u32, so the
+                // row stride in bytes is ceil(w/4)*4, which may differ from w.
+                // Use the candidate tensor's width as the stride.
+                let cand_stride = candidates.shape.width;
 
                 for y in 1..h - 1 {
                     for x in 1..w - 1 {
-                        if cand_slice[y * w + x] > 0 {
+                        if cand_slice[y * cand_stride + x] > 0 {
                             if let Some(refined) = refine_point(
                                 dog_layers,
                                 s,
@@ -345,9 +349,47 @@ impl Sift {
                 continue;
             }
 
+            // Compute orientations for this octave's keypoints
+            let octave_img = &gaussian_pyramid[octave][0];
+            let octave_kps = match ctx {
+                ComputeDevice::Cpu(_) => {
+                    let src = octave_img
+                        .storage
+                        .as_slice()
+                        .ok_or_else(|| Error::FeatureError("Image not on CPU".into()))?;
+                    let (h, w) = octave_img.shape.hw();
+                    octave_kps
+                        .into_iter()
+                        .map(|kp| {
+                            let angle = compute_orientation_cpu(src, w, h, &kp);
+                            kp.with_angle(angle)
+                        })
+                        .collect::<Vec<_>>()
+                }
+                ComputeDevice::Gpu(gpu) => {
+                    use cv_hal::tensor_ext::TensorToGpu;
+                    let octave_img_gpu = octave_img.to_gpu_ctx(gpu).map_err(|e| {
+                        Error::FeatureError(format!("Failed to upload image to GPU: {}", e))
+                    })?;
+                    let orientations = gpu
+                        .compute_sift_orientations(&octave_img_gpu, &octave_kps)
+                        .map_err(|e| {
+                            Error::FeatureError(format!(
+                                "SIFT orientation computation failed: {}",
+                                e
+                            ))
+                        })?;
+                    octave_kps
+                        .into_iter()
+                        .zip(orientations.into_iter())
+                        .map(|(kp, angle)| kp.with_angle(angle as f64))
+                        .collect::<Vec<_>>()
+                }
+                ComputeDevice::Mlx(_) => octave_kps,
+            };
+
             match ctx {
                 ComputeDevice::Cpu(cpu) => {
-                    let octave_img = &gaussian_pyramid[octave][0];
                     let descs = cpu
                         .compute_sift_descriptors(
                             octave_img,
@@ -580,11 +622,32 @@ fn refine_point(
         }
     }
 
-    let d_final = match dog_layers[curr_s].storage.as_slice() {
-        Some(slice) => slice[curr_y * dog_layers[0].shape.width + curr_x],
+    let d_final_slice = match dog_layers[curr_s].storage.as_slice() {
+        Some(slice) => slice,
         None => return None,
     };
-    let contrast = d_final + 0.5 * offset.dot(&Vector3::new(0.0, 0.0, 0.0));
+    let d_final = d_final_slice[curr_y * dog_layers[0].shape.width + curr_x];
+
+    // Recompute gradient at the refined position for the contrast check
+    let d_prev_final = match dog_layers[curr_s - 1].storage.as_slice() {
+        Some(slice) => slice,
+        None => return None,
+    };
+    let d_next_final = match dog_layers[curr_s + 1].storage.as_slice() {
+        Some(slice) => slice,
+        None => return None,
+    };
+    let w = dog_layers[0].shape.width;
+    let dx_final =
+        (d_final_slice[curr_y * w + curr_x + 1] - d_final_slice[curr_y * w + curr_x - 1]) / 2.0;
+    let dy_final =
+        (d_final_slice[(curr_y + 1) * w + curr_x] - d_final_slice[(curr_y - 1) * w + curr_x])
+            / 2.0;
+    let ds_final =
+        (d_next_final[curr_y * w + curr_x] - d_prev_final[curr_y * w + curr_x]) / 2.0;
+    let gradient = Vector3::new(dx_final, dy_final, ds_final);
+
+    let contrast = d_final + 0.5 * gradient.dot(&offset);
     if contrast.abs() < contrast_threshold / n_layers as f32 {
         return None;
     }
@@ -597,6 +660,73 @@ fn refine_point(
         .with_response(contrast.abs() as f64)
         .with_size(1.6 * 2.0f64.powf((curr_s as f64 + offset.z as f64) / n_layers as f64)),
     )
+}
+
+/// Compute dominant orientation for a single keypoint using a 36-bin histogram
+/// of gradient orientations weighted by gradient magnitude and Gaussian window.
+/// Returns the dominant orientation in degrees [0, 360).
+fn compute_orientation_cpu(
+    src: &[f32],
+    w: usize,
+    h: usize,
+    kp: &KeyPoint,
+) -> f64 {
+    let cx = kp.x as f32;
+    let cy = kp.y as f32;
+    let sigma = kp.size as f32 * 1.5;
+    let radius = (3.0 * sigma) as i32;
+    let sigma_sq_inv = -0.5 / (sigma * sigma);
+
+    let mut hist = [0.0f32; 36];
+
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let x = cx as i32 + dx;
+            let y = cy as i32 + dy;
+
+            let g_x = get_val_f32(src, w, h, x + 1, y) - get_val_f32(src, w, h, x - 1, y);
+            let g_y = get_val_f32(src, w, h, x, y + 1) - get_val_f32(src, w, h, x, y - 1);
+
+            let mag = (g_x * g_x + g_y * g_y).sqrt();
+            let mut ori = g_y.atan2(g_x) * 180.0 / std::f32::consts::PI;
+            if ori < 0.0 {
+                ori += 360.0;
+            }
+
+            let weight = ((dx * dx + dy * dy) as f32 * sigma_sq_inv).exp();
+            let bin = (ori / 10.0) as usize % 36;
+            hist[bin] += mag * weight;
+        }
+    }
+
+    // Find peak bin
+    let mut max_mag = 0.0f32;
+    let mut best_bin = 0usize;
+    for i in 0..36 {
+        if hist[i] > max_mag {
+            max_mag = hist[i];
+            best_bin = i;
+        }
+    }
+
+    // Parabolic interpolation for sub-bin precision
+    let left = hist[(best_bin + 35) % 36];
+    let center = hist[best_bin];
+    let right = hist[(best_bin + 1) % 36];
+    let interp = 0.5 * (left - right) / (left - 2.0 * center + right + 1e-7);
+    let angle = ((best_bin as f32 + interp) * 10.0) % 360.0;
+
+    if angle < 0.0 {
+        (angle + 360.0) as f64
+    } else {
+        angle as f64
+    }
+}
+
+fn get_val_f32(src: &[f32], w: usize, h: usize, x: i32, y: i32) -> f32 {
+    let cx = x.clamp(0, w as i32 - 1) as usize;
+    let cy = y.clamp(0, h as i32 - 1) as usize;
+    src[cy * w + cx]
 }
 
 fn convert_to_f32_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(

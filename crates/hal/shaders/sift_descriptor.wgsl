@@ -27,7 +27,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let cy = kp.y;
     let size = kp.z;
     let angle_rad = kp.w * PI / 180.0;
-    
+
     let cos_a = cos(angle_rad);
     let sin_a = sin(angle_rad);
 
@@ -35,15 +35,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var hist = array<f32, 128>();
     for (var i = 0u; i < 128u; i++) { hist[i] = 0.0; }
 
+    let d = 4.0; // descriptor width (4x4 subregions)
     let bin_width = size * 3.0; // Typical SIFT param
-    let radius = i32(bin_width * 2.0); 
+    let radius = i32(bin_width * 2.0);
+    let gauss_denom = d * 0.5; // d/2
 
     for (var dy = -radius; dy <= radius; dy++) {
         for (var dx = -radius; dx <= radius; dx++) {
             // Rotate coordinate system
             let rx = (f32(dx) * cos_a + f32(dy) * sin_a) / bin_width;
             let ry = (-f32(dx) * sin_a + f32(dy) * cos_a) / bin_width;
-            
+
             // Region index (-2.0 to 2.0 -> 0 to 4)
             let r_bin_x = rx + 1.5;
             let r_bin_y = ry + 1.5;
@@ -51,33 +53,71 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             if (r_bin_x > -1.0 && r_bin_x < 4.0 && r_bin_y > -1.0 && r_bin_y < 4.0) {
                 let x = i32(cx) + dx;
                 let y = i32(cy) + dy;
-                
+
                 let g_x = get_val(x + 1, y) - get_val(x - 1, y);
                 let g_y = get_val(x, y + 1) - get_val(x, y - 1);
                 let mag = sqrt(g_x * g_x + g_y * g_y);
                 var ori = atan2(g_y, g_x) - angle_rad;
                 while (ori < 0.0) { ori += 2.0 * PI; }
-                let o_bin = (ori * 8.0 / (2.0 * PI));
+                while (ori >= 2.0 * PI) { ori -= 2.0 * PI; }
+                let o_bin = ori * 8.0 / (2.0 * PI);
 
-                // Trilinear interpolation into histograms (simplified for now)
-                let ix = i32(floor(r_bin_x));
-                let iy = i32(floor(r_bin_y));
-                let io = i32(floor(o_bin));
+                // Gaussian spatial weight (Bug 4 fix)
+                let gauss_w = exp(-0.5 * (rx * rx + ry * ry) / (gauss_denom * gauss_denom));
+                let weighted_mag = mag * gauss_w;
 
-                if (ix >= 0 && ix < 4 && iy >= 0 && iy < 4) {
-                    let bin_idx = u32((iy * 4 + ix) * 8 + (io % 8));
-                    hist[bin_idx] += mag;
+                // Trilinear interpolation (Bug 5 fix)
+                let x_bin_f = r_bin_x - 0.5;
+                let y_bin_f = r_bin_y - 0.5;
+                let o_bin_f = o_bin - 0.5;
+
+                let ix0 = i32(floor(x_bin_f));
+                let iy0 = i32(floor(y_bin_f));
+                let io0 = i32(floor(o_bin_f));
+
+                let fx = x_bin_f - f32(ix0);
+                let fy = y_bin_f - f32(iy0);
+                let fo = o_bin_f - f32(io0);
+
+                for (var xi = 0; xi < 2; xi++) {
+                    let bx = ix0 + xi;
+                    if (bx < 0 || bx >= 4) { continue; }
+                    var wx: f32;
+                    if (xi == 0) { wx = 1.0 - fx; } else { wx = fx; }
+                    for (var yi = 0; yi < 2; yi++) {
+                        let by = iy0 + yi;
+                        if (by < 0 || by >= 4) { continue; }
+                        var wy: f32;
+                        if (yi == 0) { wy = 1.0 - fy; } else { wy = fy; }
+                        for (var oi = 0; oi < 2; oi++) {
+                            let bo = ((io0 + oi) % 8 + 8) % 8;
+                            var wo: f32;
+                            if (oi == 0) { wo = 1.0 - fo; } else { wo = fo; }
+                            let bin_idx = u32((by * 4 + bx) * 8 + bo);
+                            hist[bin_idx] += weighted_mag * wx * wy * wo;
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Normalize and output
+    // First L2 normalization
     var norm_sq = 0.0;
     for (var i = 0u; i < 128u; i++) { norm_sq += hist[i] * hist[i]; }
     let norm_inv = 1.0 / (sqrt(norm_sq) + 1e-7);
 
+    // Clamp to 0.2
     for (var i = 0u; i < 128u; i++) {
-        descriptors[kp_idx * 128u + i] = min(0.2, hist[i] * norm_inv);
+        hist[i] = min(0.2, hist[i] * norm_inv);
+    }
+
+    // Second L2 normalization after clamping
+    var norm_sq2 = 0.0;
+    for (var i = 0u; i < 128u; i++) { norm_sq2 += hist[i] * hist[i]; }
+    let norm_inv2 = 1.0 / (sqrt(norm_sq2) + 1e-7);
+
+    for (var i = 0u; i < 128u; i++) {
+        descriptors[kp_idx * 128u + i] = hist[i] * norm_inv2;
     }
 }

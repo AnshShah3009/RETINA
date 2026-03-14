@@ -61,6 +61,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
-    // Assign dominant orientation (simple version without parabolic interpolation for now)
-    orientations[kp_idx] = f32(best_bin) * 10.0;
+    // Parabolic interpolation for sub-bin precision
+    let left = hist[(best_bin + 35u) % 36u];
+    let center = hist[best_bin];
+    let right = hist[(best_bin + 1u) % 36u];
+    let interp = 0.5 * (left - right) / (left - 2.0 * center + right + 1e-7);
+    var angle = (f32(best_bin) + interp) * 10.0;
+    angle = angle % 360.0;
+    if (angle < 0.0) { angle += 360.0; }
+    orientations[kp_idx] = angle;
 }

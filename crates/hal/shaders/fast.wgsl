@@ -21,7 +21,7 @@ fn get_u8(x: i32, y: i32) -> u32 {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x_u32 = global_id.x;
     let y = i32(global_id.y);
-    
+
     if (x_u32 * 4u >= params.width || y >= i32(params.height)) {
         return;
     }
@@ -30,7 +30,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     for (var k = 0u; k < 4u; k++) {
         let x = i32(x_u32 * 4u + k);
         if (x >= i32(params.width)) { break; }
-        
+
+        // Bug 4 fix: skip 3px border to match CPU
+        if (x < 3 || x >= i32(params.width) - 3 || y < 3 || y >= i32(params.height) - 3) {
+            continue;
+        }
+
         let p = get_u8(x, y);
         let high = p + params.threshold;
         let low = select(0u, p - params.threshold, p >= params.threshold);
@@ -54,7 +59,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         var b_mask = 0u;
         var d_mask = 0u;
-        
+
         if (v0 > high) { b_mask |= 1u; } else if (v0 < low) { d_mask |= 1u; }
         if (v1 > high) { b_mask |= 2u; } else if (v1 < low) { d_mask |= 2u; }
         if (v2 > high) { b_mask |= 4u; } else if (v2 < low) { d_mask |= 4u; }
@@ -74,33 +79,34 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         let b_ext = b_mask | (b_mask << 16u);
         let d_ext = d_mask | (d_mask << 16u);
-        
+
         var is_corner = false;
         for (var i = 0u; i < 16u; i++) {
             if (((b_ext >> i) & 0x1FFu) == 0x1FFu) { is_corner = true; break; }
             if (((d_ext >> i) & 0x1FFu) == 0x1FFu) { is_corner = true; break; }
         }
 
+        // Bug 2 fix: compute min-diff score to match CPU
         var score = 0u;
         if (is_corner) {
-            var sad = 0u;
-            sad += u32(abs(i32(v0) - i32(p)));
-            sad += u32(abs(i32(v1) - i32(p)));
-            sad += u32(abs(i32(v2) - i32(p)));
-            sad += u32(abs(i32(v3) - i32(p)));
-            sad += u32(abs(i32(v4) - i32(p)));
-            sad += u32(abs(i32(v5) - i32(p)));
-            sad += u32(abs(i32(v6) - i32(p)));
-            sad += u32(abs(i32(v7) - i32(p)));
-            sad += u32(abs(i32(v8) - i32(p)));
-            sad += u32(abs(i32(v9) - i32(p)));
-            sad += u32(abs(i32(v10) - i32(p)));
-            sad += u32(abs(i32(v11) - i32(p)));
-            sad += u32(abs(i32(v12) - i32(p)));
-            sad += u32(abs(i32(v13) - i32(p)));
-            sad += u32(abs(i32(v14) - i32(p)));
-            sad += u32(abs(i32(v15) - i32(p)));
-            score = (sad / 16u);
+            var min_d = 255u;
+            min_d = min(min_d, u32(abs(i32(v0) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v1) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v2) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v3) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v4) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v5) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v6) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v7) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v8) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v9) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v10) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v11) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v12) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v13) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v14) - i32(p))));
+            min_d = min(min_d, u32(abs(i32(v15) - i32(p))));
+            score = min_d;
         }
         res_combined = res_combined | ((score & 0xFFu) << (k * 8u));
     }

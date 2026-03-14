@@ -1,5 +1,10 @@
 // GPU Morphology (Erode/Dilate) Kernel
 // Performs morphological operations on packed u8 grayscale images.
+//
+// Border handling: out-of-bounds pixels use the morphological identity element
+// (255 for erode, 0 for dilate). This is mathematically correct because the
+// identity element does not affect the min/max result. The CPU path uses the
+// same identity-element convention for parity.
 
 struct Params {
     width: u32,

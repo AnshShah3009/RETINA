@@ -41,25 +41,36 @@ impl BriefDescriptor {
         }
     }
 
-    fn compute_brief(&self, image: &GrayImage, x: i32, y: i32) -> Descriptor {
+    fn compute_brief(&self, image: &GrayImage, x: i32, y: i32, angle: f64) -> Descriptor {
         let width = image.width() as i32;
         let height = image.height() as i32;
+
+        // Bug 7 fix: rotate pattern coordinates by keypoint angle to match GPU path.
+        // When angle is -1.0 (unset), use identity rotation (no rotation).
+        let (cos_a, sin_a) = if angle >= 0.0 {
+            (angle.cos(), angle.sin())
+        } else {
+            (1.0, 0.0)
+        };
 
         let mut descriptor_data = vec![0u8; self.descriptor_size];
         let mut bit_idx = 0;
         let mut byte_idx = 0;
 
-        for (x1, y1, x2, y2) in &self.pairs {
-            let px1 = (x + x1).clamp(0, width - 1) as u32;
-            let py1 = (y + y1).clamp(0, height - 1) as u32;
-            let px2 = (x + x2).clamp(0, width - 1) as u32;
-            let py2 = (y + y2).clamp(0, height - 1) as u32;
+        for &(x1, y1, x2, y2) in &self.pairs {
+            // Rotate pair points around the keypoint center
+            let rx1 = x1 as f64 * cos_a - y1 as f64 * sin_a + x as f64;
+            let ry1 = x1 as f64 * sin_a + y1 as f64 * cos_a + y as f64;
+            let rx2 = x2 as f64 * cos_a - y2 as f64 * sin_a + x as f64;
+            let ry2 = x2 as f64 * sin_a + y2 as f64 * cos_a + y as f64;
 
-            let val1 = image.get_pixel(px1, py1)[0];
-            let val2 = image.get_pixel(px2, py2)[0];
+            // Bilinear interpolation for sub-pixel coordinates
+            let val1 = bilinear_sample(image, rx1, ry1, width, height);
+            let val2 = bilinear_sample(image, rx2, ry2, width, height);
 
+            // Bug 6 fix: use LSB-first bit packing to match GPU (brief.wgsl uses 1u << j)
             if val1 < val2 {
-                descriptor_data[byte_idx] |= 1 << (7 - bit_idx);
+                descriptor_data[byte_idx] |= 1 << bit_idx;
             }
 
             bit_idx += 1;
@@ -87,13 +98,39 @@ impl DescriptorExtractor for BriefDescriptor {
                 && y >= half_size
                 && y < (image.height() as i32 - half_size)
             {
-                let desc = self.compute_brief(image, x, y);
+                // Bug 7 fix: pass keypoint angle for rotation support
+                let desc = self.compute_brief(image, x, y, kp.angle);
                 descriptors.push(desc);
             }
         }
 
         descriptors
     }
+}
+
+/// Bilinear interpolation for sub-pixel sampling, matching the GPU's
+/// `get_pixel_bilinear` in brief.wgsl.
+fn bilinear_sample(image: &GrayImage, x: f64, y: f64, width: i32, height: i32) -> f64 {
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let x0c = x0.clamp(0, width - 1);
+    let y0c = y0.clamp(0, height - 1);
+    let x1c = x1.clamp(0, width - 1);
+    let y1c = y1.clamp(0, height - 1);
+
+    let dx = x - x0 as f64;
+    let dy = y - y0 as f64;
+
+    let p00 = image.get_pixel(x0c as u32, y0c as u32)[0] as f64;
+    let p10 = image.get_pixel(x1c as u32, y0c as u32)[0] as f64;
+    let p01 = image.get_pixel(x0c as u32, y1c as u32)[0] as f64;
+    let p11 = image.get_pixel(x1c as u32, y1c as u32)[0] as f64;
+
+    let top = p00 * (1.0 - dx) + p10 * dx;
+    let bottom = p01 * (1.0 - dx) + p11 * dx;
+    top * (1.0 - dy) + bottom * dy
 }
 
 /// Extract BRIEF descriptors for a set of keypoints in a single call.
