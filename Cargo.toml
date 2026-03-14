@@ -53,6 +53,11 @@ name = "normals"
 harness = false
 path = "benches/normals.rs"
 
+[[bench]]
+name = "cubecl_vs_wgpu"
+harness = false
+path = "benches/cubecl_vs_wgpu.rs"
+
 [workspace]
 resolver = "2"
 members = [
