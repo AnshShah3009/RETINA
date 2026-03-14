@@ -38,11 +38,7 @@ struct SimpleNN {
 
 impl SimpleNN {
     fn new(points: Vec<Point3<f32>>) -> Self {
-        let mut items: Vec<_> = points
-            .iter()
-            .enumerate()
-            .map(|(i, &p)| (p, i))
-            .collect();
+        let mut items: Vec<_> = points.iter().enumerate().map(|(i, &p)| (p, i)).collect();
         let tree = cv_3d::spatial::KDTree::build(&mut items);
         Self { tree }
     }

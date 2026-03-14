@@ -81,8 +81,7 @@ fn bench_marching_cubes(c: &mut Criterion) {
         let vs = 2.2 * 0.4 / gs as f32;
 
         if let Some(ref ctx) = gpu {
-            let storage =
-                WgpuGpuStorage::from_slice_ctx(ctx, &sdf).expect("GPU upload");
+            let storage = WgpuGpuStorage::from_slice_ctx(ctx, &sdf).expect("GPU upload");
             let shape = cv_core::TensorShape::new(gs * 2, gs, gs);
             let vol = cv_core::Tensor {
                 storage,
@@ -92,9 +91,7 @@ fn bench_marching_cubes(c: &mut Criterion) {
             };
 
             // Warmup
-            let _ = cv_hal::gpu_kernels::marching_cubes::extract_mesh(
-                ctx, &vol, vs, 0.0, 500_000,
-            );
+            let _ = cv_hal::gpu_kernels::marching_cubes::extract_mesh(ctx, &vol, vs, 0.0, 500_000);
             ctx.wait_idle().ok();
 
             group.bench_with_input(BenchmarkId::new("wgpu", &label), &(), |b, _| {
@@ -128,7 +125,12 @@ fn bench_kdtree(c: &mut Criterion) {
     for &n in &[10_000usize, 100_000] {
         let label = format!("n={}", n);
         let cloud = sphere_cloud(n, 1.0);
-        let mut items: Vec<_> = cloud.points.iter().enumerate().map(|(i, &p)| (p, i)).collect();
+        let mut items: Vec<_> = cloud
+            .points
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, i))
+            .collect();
         let tree = KDTree::build(&mut items);
         let q = Point3::new(0.5, 0.5, 0.5);
 
@@ -164,21 +166,17 @@ fn bench_icp(c: &mut Criterion) {
             .unwrap();
         let init = Matrix4::identity();
 
-        group.bench_with_input(
-            BenchmarkId::new("point_to_plane", &label),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    black_box(registration_icp_point_to_plane(
-                        black_box(&source),
-                        black_box(&target),
-                        0.5,
-                        black_box(&init),
-                        30,
-                    ))
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("point_to_plane", &label), &(), |b, _| {
+            b.iter(|| {
+                black_box(registration_icp_point_to_plane(
+                    black_box(&source),
+                    black_box(&target),
+                    0.5,
+                    black_box(&init),
+                    30,
+                ))
+            });
+        });
     }
     group.finish();
 }
@@ -226,7 +224,12 @@ fn bench_tsdf(c: &mut Criterion) {
             })
             .collect();
         let intrinsics = CameraIntrinsics::new(
-            w as f32, h as f32, w as f32 / 2.0, h as f32 / 2.0, w as u32, h as u32,
+            w as f32,
+            h as f32,
+            w as f32 / 2.0,
+            h as f32 / 2.0,
+            w as u32,
+            h as u32,
         );
         let extrinsics = Matrix4::identity();
 

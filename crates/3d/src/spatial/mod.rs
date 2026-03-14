@@ -145,11 +145,7 @@ impl<T: Clone> KDTree<T> {
         })
     }
 
-    fn nearest_recursive(
-        node: &KDNode<T>,
-        query: &Point3<f32>,
-        best: &mut (Point3<f32>, T, f32),
-    ) {
+    fn nearest_recursive(node: &KDNode<T>, query: &Point3<f32>, best: &mut (Point3<f32>, T, f32)) {
         let dist = squared_distance(&node.point, query);
         if dist < best.2 {
             *best = (node.point, node.data.clone(), dist);
@@ -172,11 +168,7 @@ impl<T: Clone> KDTree<T> {
         }
     }
 
-    pub fn search_radius(
-        &self,
-        query: &Point3<f32>,
-        radius: f32,
-    ) -> Vec<(Point3<f32>, T, f32)> {
+    pub fn search_radius(&self, query: &Point3<f32>, radius: f32) -> Vec<(Point3<f32>, T, f32)> {
         let mut results = Vec::new();
         let radius_sq = radius * radius;
         if let Some(ref root) = self.root {
@@ -215,11 +207,7 @@ impl<T: Clone> KDTree<T> {
 
     /// K nearest neighbors using a max-heap for efficient pruning.
     /// Only explores branches that could contain closer points than the current k-th best.
-    pub fn k_nearest_neighbors(
-        &self,
-        query: &Point3<f32>,
-        k: usize,
-    ) -> Vec<(Point3<f32>, T, f32)> {
+    pub fn k_nearest_neighbors(&self, query: &Point3<f32>, k: usize) -> Vec<(Point3<f32>, T, f32)> {
         let mut heap: BinaryHeap<KnnEntry<T>> = BinaryHeap::with_capacity(k + 1);
         if let Some(ref root) = self.root {
             Self::knn_recursive(root, query, k, &mut heap);
