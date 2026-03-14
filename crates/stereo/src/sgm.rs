@@ -415,4 +415,73 @@ mod tests {
 
         assert!(valid_count > 0, "Should have valid disparities");
     }
+
+    #[test]
+    fn test_sgm_disparity_accuracy() {
+        // Create a synthetic stereo pair by shifting an image horizontally by
+        // exactly 5 pixels. SGM should recover disparity ~5 for most pixels.
+        let width = 80u32;
+        let height = 80u32;
+        let true_disparity = 5i32;
+
+        let mut left = GrayImage::new(width, height);
+        let mut right = GrayImage::new(width, height);
+
+        // Use a random-ish texture to give the matcher plenty of signal.
+        // Simple pseudo-random via a linear congruential generator.
+        let mut rng: u32 = 42;
+        for y in 0..height {
+            for x in 0..width {
+                rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+                let val = ((rng >> 16) % 256) as u8;
+                left.put_pixel(x, y, Luma([val]));
+            }
+        }
+
+        // Right image is the left image shifted right by `true_disparity` pixels.
+        // disparity = left_x - right_x, so if a feature at left_x appears at
+        // right_x = left_x - true_disparity in the right image, then:
+        // right(x, y) = left(x + true_disparity, y)
+        for y in 0..height {
+            for x in 0..width {
+                let sx = x as i32 + true_disparity;
+                let val = if sx >= 0 && sx < width as i32 {
+                    left.get_pixel(sx as u32, y)[0]
+                } else {
+                    0
+                };
+                right.put_pixel(x, y, Luma([val]));
+            }
+        }
+
+        let matcher = SgmMatcher::new()
+            .with_disparity_range(0, 16)
+            .with_penalties(10, 120);
+
+        let disparity_map = matcher.compute(&left, &right).unwrap();
+
+        // Check interior pixels (excluding borders where the matching window
+        // and the shift itself create boundary artifacts).
+        let margin = 10usize;
+        let mut correct = 0usize;
+        let mut total = 0usize;
+
+        for y in margin..(height as usize - margin) {
+            for x in margin..(width as usize - margin) {
+                let d = disparity_map.data[y * width as usize + x];
+                total += 1;
+                if (d - true_disparity as f32).abs() <= 1.0 {
+                    correct += 1;
+                }
+            }
+        }
+
+        let accuracy = correct as f64 / total as f64;
+        assert!(
+            accuracy > 0.7,
+            "SGM disparity accuracy too low: {:.1}% of interior pixels within 1 of true disparity {}",
+            accuracy * 100.0,
+            true_disparity
+        );
+    }
 }

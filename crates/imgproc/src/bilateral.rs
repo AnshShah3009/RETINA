@@ -395,3 +395,82 @@ pub fn joint_bilateral_filter_ctx(
         output
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bilateral_preserves_uniform() {
+        // A uniform depth image (all 1.0) should be unchanged after filtering.
+        let width = 20u32;
+        let height = 20u32;
+        let depth: Vec<f32> = vec![1.0; (width * height) as usize];
+        let mut output = vec![0.0f32; depth.len()];
+        bilateral_filter_depth_internal(
+            &depth,
+            &mut output,
+            width,
+            height,
+            BilateralFilterParams::default(),
+        );
+        for (i, &v) in output.iter().enumerate() {
+            assert!(
+                (v - 1.0).abs() < 1e-5,
+                "pixel {} expected 1.0, got {}",
+                i,
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn test_bilateral_preserves_edge() {
+        // Step edge image: left half = 0.5, right half = 1.5.
+        // With a small sigma_range the filter should not blend across the edge.
+        let width = 40u32;
+        let height = 20u32;
+        let mut depth = vec![0.0f32; (width * height) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                depth[idx] = if x < width / 2 { 0.5 } else { 1.5 };
+            }
+        }
+
+        let params = BilateralFilterParams {
+            kernel_size: 5,
+            sigma_space: 3.0,
+            sigma_range: 0.01, // very small range sigma => strong edge preservation
+        };
+
+        let mut output = vec![0.0f32; depth.len()];
+        bilateral_filter_depth_internal(&depth, &mut output, width, height, params);
+
+        // Check pixels well inside each half (away from the edge boundary).
+        // Left interior (columns 0..15) should stay close to 0.5.
+        // Right interior (columns 25..40) should stay close to 1.5.
+        for y in 2..height - 2 {
+            for x in 0..15 {
+                let v = output[(y * width + x) as usize];
+                assert!(
+                    (v - 0.5).abs() < 0.05,
+                    "left interior pixel ({},{}) expected ~0.5, got {}",
+                    x,
+                    y,
+                    v
+                );
+            }
+            for x in 25..width {
+                let v = output[(y * width + x) as usize];
+                assert!(
+                    (v - 1.5).abs() < 0.05,
+                    "right interior pixel ({},{}) expected ~1.5, got {}",
+                    x,
+                    y,
+                    v
+                );
+            }
+        }
+    }
+}

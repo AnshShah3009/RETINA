@@ -358,4 +358,100 @@ mod tests {
         // If no good matches found, quality is inf - this is ok for gradient pattern
         // Just verify the function runs without panicking
     }
+
+    #[test]
+    fn test_stereo_rectify_scanline_alignment() {
+        // Create two synthetic cameras separated by a pure horizontal translation.
+        // After rectification, corresponding 3D points projected into both views
+        // should have the same y-coordinate.
+        use nalgebra::{Matrix3, Point3, Vector3};
+
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 160.0, 120.0, 320, 240);
+
+        // Left camera at origin, right camera translated 0.1m along x.
+        let left_extrinsics = Pose::identity();
+        let right_extrinsics = Pose::new(Matrix3::identity(), Vector3::new(0.1, 0.0, 0.0));
+
+        let width = 320u32;
+        let height = 240u32;
+        let left_img = GrayImage::from_pixel(width, height, Luma([128]));
+        let right_img = GrayImage::from_pixel(width, height, Luma([128]));
+
+        let result = rectify_stereo_pair(
+            &left_img,
+            &right_img,
+            &intrinsics,
+            &intrinsics,
+            &left_extrinsics,
+            &right_extrinsics,
+        )
+        .expect("rectification should succeed");
+
+        // Generate 3D world points in front of both cameras.
+        let world_points = vec![
+            Point3::new(0.0, 0.0, 3.0),
+            Point3::new(0.5, 0.3, 4.0),
+            Point3::new(-0.3, -0.2, 2.5),
+            Point3::new(0.1, -0.4, 5.0),
+        ];
+
+        // For each world point, compute where it lands in the rectified left
+        // and right images, and verify the y-coordinates match.
+        for pt in &world_points {
+            // Project into left camera (at identity)
+            let left_px = intrinsics.project(pt);
+            let lx = left_px.x.round() as i32;
+            let ly = left_px.y.round() as i32;
+            if lx < 0 || lx >= width as i32 || ly < 0 || ly >= height as i32 {
+                continue;
+            }
+
+            // Project into right camera (translated along x)
+            let pt_right = Point3::new(pt.x - 0.1, pt.y, pt.z);
+            let right_px = intrinsics.project(&pt_right);
+            let rx = right_px.x.round() as i32;
+            let ry = right_px.y.round() as i32;
+            if rx < 0 || rx >= width as i32 || ry < 0 || ry >= height as i32 {
+                continue;
+            }
+
+            // The rectification maps go from rectified -> original, so we
+            // search for the rectified coordinates that map closest to our
+            // original pixel coordinates.
+            let mut best_ly_rect = -1.0f32;
+            let mut best_ry_rect = -1.0f32;
+            let mut best_l_dist = f32::MAX;
+            let mut best_r_dist = f32::MAX;
+
+            for ry_rect in 0..height {
+                for rx_rect in 0..width {
+                    let idx = (ry_rect * width + rx_rect) as usize;
+                    let dl = (result.left_map_x[idx] - lx as f32).powi(2)
+                        + (result.left_map_y[idx] - ly as f32).powi(2);
+                    if dl < best_l_dist {
+                        best_l_dist = dl;
+                        best_ly_rect = ry_rect as f32;
+                    }
+                    let dr = (result.right_map_x[idx] - rx as f32).powi(2)
+                        + (result.right_map_y[idx] - ry as f32).powi(2);
+                    if dr < best_r_dist {
+                        best_r_dist = dr;
+                        best_ry_rect = ry_rect as f32;
+                    }
+                }
+            }
+
+            // After rectification, the y-coordinates of corresponding points
+            // should be equal (scanline alignment).
+            let y_diff = (best_ly_rect - best_ry_rect).abs();
+            assert!(
+                y_diff <= 2.0,
+                "Scanline alignment violated for {:?}: left_y_rect={}, right_y_rect={}, diff={}",
+                pt,
+                best_ly_rect,
+                best_ry_rect,
+                y_diff
+            );
+        }
+    }
 }

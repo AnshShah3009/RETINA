@@ -426,4 +426,67 @@ mod tests {
         );
         assert_eq!((result.width(), result.height()), (20, 20));
     }
+
+    #[test]
+    fn test_adaptive_mean_segments_gradient() {
+        // 20x20 image: left half = 50, right half = 200.
+        // With MeanC, block_size=11, c=0:
+        //  - bright half (200) should be above the local mean => 255
+        //  - dark half (50) should be below the local mean => 0
+        //
+        // The block_size=11 means a radius of 5 pixels. Pixels within 5
+        // columns of the edge (x=10) have mixed neighborhoods, so we only
+        // check pixels well inside each half.
+        let width = 20u32;
+        let height = 20u32;
+        let mut img = GrayImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let val = if x < width / 2 { 50u8 } else { 200u8 };
+                img.put_pixel(x, y, Luma([val]));
+            }
+        }
+
+        let result = adaptive_threshold(
+            &img,
+            255,
+            AdaptiveMethod::MeanC,
+            ThresholdType::Binary,
+            11,
+            0.0,
+        );
+
+        // Dark interior: columns 0..4. The 11x11 window centered at x=3
+        // spans x=-2..8, all within the dark half (value 50). Local mean=50,
+        // pixel=50, and 50 > 50 is false => output 0.
+        // Bright interior: columns 16..20. Similarly, fully within bright half.
+        // Local mean=200, pixel=200, and 200 > 200 is false => output 0 (!).
+        //
+        // The Binary threshold outputs max_value when src > local_mean - c.
+        // With c=0: src > local_mean. For uniform regions the pixel equals
+        // the mean so the strict > comparison yields 0 everywhere in a
+        // uniform region. The test should therefore verify the TRANSITION:
+        // near the edge, the bright side has mean < 200, so 200 > mean => 255,
+        // while the dark side has mean > 50, so 50 > mean is false => 0.
+        //
+        // Check pixels near (but not on) the transition zone.
+        // Columns 6..9 on the dark side have a window that includes some 200s,
+        // raising the local mean above 50, so 50 > mean is still false => 0.
+        // Columns 11..14 on the bright side have a window that includes some 50s,
+        // lowering the local mean below 200, so 200 > mean => 255.
+        for y in 0..height {
+            for x in 6..10 {
+                let v = result.get_pixel(x, y)[0];
+                assert_eq!(v, 0, "dark-side pixel ({},{}) should be 0, got {}", x, y, v);
+            }
+            for x in 11..15 {
+                let v = result.get_pixel(x, y)[0];
+                assert_eq!(
+                    v, 255,
+                    "bright-side pixel ({},{}) should be 255, got {}",
+                    x, y, v
+                );
+            }
+        }
+    }
 }

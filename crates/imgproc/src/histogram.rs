@@ -66,3 +66,36 @@ pub fn histogram_equalization(image: &GrayImage) -> GrayImage {
 
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Luma;
+
+    #[test]
+    fn test_histogram_equalization_identity() {
+        // A 256x1 image with one pixel per intensity (0..=255) already has a
+        // perfectly uniform histogram. After equalization the output should
+        // approximately equal the input (the CDF is already linear).
+        let mut img = GrayImage::new(256, 1);
+        for i in 0u32..256 {
+            img.put_pixel(i, 0, Luma([i as u8]));
+        }
+
+        let output = histogram_equalization(&img);
+
+        for i in 0u32..256 {
+            let src = i as u8;
+            let dst = output.get_pixel(i, 0)[0];
+            let diff = (src as i16 - dst as i16).unsigned_abs();
+            assert!(
+                diff <= 1,
+                "pixel {} expected ~{}, got {} (diff={})",
+                i,
+                src,
+                dst,
+                diff
+            );
+        }
+    }
+}

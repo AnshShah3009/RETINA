@@ -385,3 +385,93 @@ fn sample_unique_indices(n: usize, k: usize, seed: u64) -> Vec<usize> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cv_core::{CameraIntrinsics, Pose};
+    use nalgebra::{Matrix3, Point2, Point3, Vector3};
+
+    #[test]
+    fn test_fundamental_epipolar_constraint() {
+        // Generate synthetic point pairs from a known camera motion,
+        // compute the fundamental matrix, and verify x2^T * F * x1 ~ 0.
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+
+        // Camera 2 is rotated slightly around Y and translated along X.
+        let angle = 0.1_f64; // ~5.7 degrees
+        let r = Matrix3::new(
+            angle.cos(),
+            0.0,
+            angle.sin(),
+            0.0,
+            1.0,
+            0.0,
+            -angle.sin(),
+            0.0,
+            angle.cos(),
+        );
+        let t = Vector3::new(0.5, 0.0, 0.0);
+        let extrinsics = Pose::new(r, t);
+
+        // Derive the ground-truth fundamental matrix.
+        let e = essential_from_extrinsics(&extrinsics);
+        let f_gt = fundamental_from_essential(&e, &intrinsics, &intrinsics);
+
+        // Generate 3D world points in front of the cameras.
+        let world_points = vec![
+            Point3::new(0.0, 0.0, 5.0),
+            Point3::new(1.0, 0.5, 4.0),
+            Point3::new(-0.5, -0.3, 6.0),
+            Point3::new(0.3, -0.8, 3.5),
+            Point3::new(-1.0, 0.7, 7.0),
+            Point3::new(0.8, 0.2, 4.5),
+            Point3::new(-0.2, -0.5, 5.5),
+            Point3::new(0.5, 1.0, 3.0),
+            Point3::new(-0.7, 0.3, 6.5),
+            Point3::new(1.2, -0.4, 4.2),
+        ];
+
+        // Project into camera 1 (at identity) and camera 2 (at extrinsics).
+        let rot = extrinsics.rotation_matrix();
+        let pts1: Vec<Point2<f64>> = world_points.iter().map(|p| intrinsics.project(p)).collect();
+        let pts2: Vec<Point2<f64>> = world_points
+            .iter()
+            .map(|p| {
+                let p_cam2 = Point3::from(rot * p.coords + t);
+                intrinsics.project(&p_cam2)
+            })
+            .collect();
+
+        // Verify epipolar constraint: x2^T * F * x1 should be ~ 0.
+        for (p1, p2) in pts1.iter().zip(pts2.iter()) {
+            let x1 = Vector3::new(p1.x, p1.y, 1.0);
+            let x2 = Vector3::new(p2.x, p2.y, 1.0);
+            let val = x2.dot(&(f_gt * x1));
+            assert!(
+                val.abs() < 1e-6,
+                "Epipolar constraint violated: x2^T*F*x1 = {} for p1={:?}, p2={:?}",
+                val,
+                p1,
+                p2
+            );
+        }
+
+        // Now also estimate F from the point correspondences and verify
+        // the estimated F also satisfies the constraint (looser tolerance
+        // due to numerical estimation).
+        let f_est = find_fundamental_mat(&pts1, &pts2).expect("should estimate F");
+        for (p1, p2) in pts1.iter().zip(pts2.iter()) {
+            let x1 = Vector3::new(p1.x, p1.y, 1.0);
+            let x2 = Vector3::new(p2.x, p2.y, 1.0);
+            let val = x2.dot(&(f_est * x1));
+            assert!(
+                val.abs() < 0.01,
+                "Estimated F epipolar constraint violated: x2^T*F*x1 = {} for p1={:?}, p2={:?}",
+                val,
+                p1,
+                p2
+            );
+        }
+    }
+}
