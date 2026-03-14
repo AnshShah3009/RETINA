@@ -200,6 +200,9 @@ impl MeanShiftTracker {
             self.window_size.1 as f64 / 2.0,
         );
 
+        // Compute the candidate histogram at the current position
+        let candidate = self.compute_color_histogram(frame, cx, cy);
+
         let mut numerator_x = 0.0;
         let mut numerator_y = 0.0;
         let mut denominator = 0.0;
@@ -217,7 +220,7 @@ impl MeanShiftTracker {
 
                 if dist_sq < 1.0 {
                     let intensity = frame.get_pixel(x, y)[0] as usize;
-                    let weight = (target[intensity] / (target[intensity] + 1e-6)).sqrt();
+                    let weight = (target[intensity] / (candidate[intensity] + 1e-6)).sqrt();
 
                     numerator_x += x as f64 * weight as f64;
                     numerator_y += y as f64 * weight as f64;

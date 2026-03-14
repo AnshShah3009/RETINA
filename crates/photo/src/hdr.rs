@@ -442,6 +442,13 @@ pub fn tonemap_reinhard(hdr: &CpuTensor<f64>, gamma: f64) -> Result<CpuTensor<f3
 
     let lum = compute_luminance(data, channels, n_pixels);
 
+    // Compute log-average luminance for key scaling.
+    let epsilon = 1e-10;
+    let l_avg = {
+        let sum_log: f64 = lum.iter().map(|&l| (l + epsilon).ln()).sum();
+        (sum_log / n_pixels as f64).exp()
+    };
+
     let inv_gamma = 1.0 / gamma.max(0.01);
     let mut out = vec![0.0f32; channels * n_pixels];
 
@@ -449,7 +456,9 @@ pub fn tonemap_reinhard(hdr: &CpuTensor<f64>, gamma: f64) -> Result<CpuTensor<f3
         let ch_offset = c * n_pixels;
         for pixel in 0..n_pixels {
             let l_in = lum[pixel];
-            let l_out = l_in / (1.0 + l_in);
+            // Scale luminance by key value.
+            let l_scaled = 0.18 / l_avg * l_in;
+            let l_out = l_scaled / (1.0 + l_scaled);
 
             // Scale the color channel proportionally.
             let ratio = if l_in > 1e-10 { l_out / l_in } else { 0.0 };
@@ -487,7 +496,7 @@ pub fn tonemap_drago(hdr: &CpuTensor<f64>, gamma: f64, saturation: f64) -> Resul
     };
 
     let bias = 0.85; // Drago bias parameter
-    let bias_log = (bias / (1.0 - bias)).ln() / (0.5f64).ln();
+    let bias_log = bias.ln() / (0.5f64).ln();
     let inv_gamma = 1.0 / gamma.max(0.01);
 
     // Drago mapping: L_out = log(1 + L_scaled) / log(1 + L_max_scaled)

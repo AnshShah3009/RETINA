@@ -362,29 +362,33 @@ pub fn inpaint_ns<T: Float + Default + 'static>(
 
                     // Smoothness Laplacian (second derivative of the smoothness field).
                     // Approximate Laplacian of the Laplacian for NS-like behavior.
-                    let lap_up = prev[(y - 1) * width + x - 1]
-                        + prev[(y - 1) * width + x + 1]
-                        + prev[idx - width]
-                        - 3.0 * prev[(y - 1) * width + x];
-                    let lap_down = prev[(y + 1) * width + x - 1]
-                        + prev[(y + 1) * width + x + 1]
-                        + prev[idx + width]
-                        - 3.0 * prev[(y + 1) * width + x];
-                    let lap_left = prev[(y - 1) * width + x - 1]
-                        + prev[(y + 1) * width + x - 1]
-                        + prev[idx - 1]
-                        - 3.0 * prev[y * width + x - 1];
-                    let lap_right = prev[(y - 1) * width + x + 1]
-                        + prev[(y + 1) * width + x + 1]
-                        + prev[idx + 1]
-                        - 3.0 * prev[y * width + x + 1];
+                    let lap_up = prev[(y - 2).max(0) * width + x]
+                        + prev[y * width + x]
+                        + prev[(y - 1) * width + x.saturating_sub(1)]
+                        + prev[(y - 1) * width + (x + 1).min(width - 1)]
+                        - 4.0 * prev[(y - 1) * width + x];
+                    let lap_down = prev[y * width + x]
+                        + prev[((y + 2).min(height - 1)) * width + x]
+                        + prev[(y + 1) * width + x.saturating_sub(1)]
+                        + prev[(y + 1) * width + (x + 1).min(width - 1)]
+                        - 4.0 * prev[(y + 1) * width + x];
+                    let lap_left = prev[(y - 1) * width + x.saturating_sub(1)]
+                        + prev[(y + 1) * width + x.saturating_sub(1)]
+                        + prev[y * width + x.saturating_sub(2).max(0)]
+                        + prev[y * width + x]
+                        - 4.0 * prev[y * width + x.saturating_sub(1)];
+                    let lap_right = prev[(y - 1) * width + (x + 1).min(width - 1)]
+                        + prev[(y + 1) * width + (x + 1).min(width - 1)]
+                        + prev[y * width + x]
+                        + prev[y * width + (x + 2).min(width - 1)]
+                        - 4.0 * prev[y * width + (x + 1).min(width - 1)];
 
                     let smooth_grad_y = (lap_down - lap_up) * 0.5;
                     let smooth_grad_x = (lap_right - lap_left) * 0.5;
 
                     // Project smoothness gradient onto isophote direction (perpendicular to gradient).
                     // Isophote direction: (-gy, gx) / |g|.
-                    let projection = (-gy * smooth_grad_x + gx * smooth_grad_y) / g_mag;
+                    let projection = (-gy * smooth_grad_y + gx * smooth_grad_x) / g_mag;
 
                     // Update: combine Laplacian diffusion + NS correction.
                     result[c][idx] = prev[idx] + dt * (laplacian + projection);

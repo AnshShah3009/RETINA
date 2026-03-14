@@ -3516,6 +3516,47 @@ impl ComputeContext for CpuBackend {
                         pix_model[m_base + 1] = pixel;
                         pix_model[m_base + 2] = var_init;
                     }
+
+                    // Bug 6 fix: Renormalize weights so they sum to 1.0
+                    let mut total_w = T::ZERO;
+                    for m in 0..n_mixtures {
+                        total_w += pix_model[m * 3];
+                    }
+                    if total_w > T::from_f32(1e-5) {
+                        for m in 0..n_mixtures {
+                            pix_model[m * 3] /= total_w;
+                        }
+                    }
+
+                    // Bug 5 fix: Sort components by weight/variance ratio (descending)
+                    // Use simple insertion sort since n_mixtures is small (5)
+                    for i in 1..n_mixtures {
+                        let i_base = i * 3;
+                        let i_w = pix_model[i_base];
+                        let i_mean = pix_model[i_base + 1];
+                        let i_var = pix_model[i_base + 2];
+                        let i_ratio = i_w / i_var.max(T::from_f32(1e-10));
+
+                        let mut j = i;
+                        while j > 0 {
+                            let j_base = (j - 1) * 3;
+                            let j_ratio =
+                                pix_model[j_base] / pix_model[j_base + 2].max(T::from_f32(1e-10));
+                            if j_ratio >= i_ratio {
+                                break;
+                            }
+                            // Shift component j-1 to position j
+                            let jd = j * 3;
+                            pix_model[jd] = pix_model[j_base];
+                            pix_model[jd + 1] = pix_model[j_base + 1];
+                            pix_model[jd + 2] = pix_model[j_base + 2];
+                            j -= 1;
+                        }
+                        let j_base = j * 3;
+                        pix_model[j_base] = i_w;
+                        pix_model[j_base + 1] = i_mean;
+                        pix_model[j_base + 2] = i_var;
+                    }
                 }
             });
         Ok(())

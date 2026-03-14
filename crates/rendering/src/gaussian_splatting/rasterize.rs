@@ -46,7 +46,7 @@ impl Camera {
         );
 
         let aspect = width as f32 / height as f32;
-        let fov = 2.0 * (focal_length / width as f32).atan();
+        let fov = 2.0 * (0.5 * width as f32 / focal_length).atan();
         let proj = Self::perspective_matrix(fov, aspect, 0.01, 100.0);
 
         Self {
@@ -141,11 +141,18 @@ impl GaussianRasterizer {
     }
 
     pub fn project_gaussians(&self, cloud: &GaussianCloud) -> Vec<ProjectedGaussian> {
-        let vp = self.camera.view_projection();
+        let view = &self.camera.view_matrix;
         cloud
             .gaussians
             .iter()
-            .map(|g| g.project(&vp, self.camera.focal_length))
+            .map(|g| {
+                g.project(
+                    view,
+                    self.camera.focal_length,
+                    self.camera.width,
+                    self.camera.height,
+                )
+            })
             .collect()
     }
 
@@ -166,9 +173,15 @@ impl GaussianRasterizer {
             1.0,
         );
 
-        let det = cov_2d[(0, 0)] * cov_2d[(1, 1)] - cov_2d[(0, 1)] * cov_2d[(1, 0)];
-        let det_abs = det.abs();
-        let radius = (3.0 * det_abs.sqrt()).ceil() as u32;
+        // Compute eigenvalue-based radius from 2D covariance
+        let a = cov_2d[(0, 0)];
+        let b = cov_2d[(0, 1)];
+        let d = cov_2d[(1, 1)];
+        let trace = a + d;
+        let det = a * d - b * b;
+        let discriminant = ((trace * trace / 4.0) - det).max(0.0);
+        let max_eigenvalue = trace / 2.0 + discriminant.sqrt();
+        let radius = (3.0 * max_eigenvalue.sqrt()).ceil() as u32;
         let radius = radius.max(1);
 
         let (tiles_x, tiles_y) = self.num_tiles();
@@ -214,18 +227,27 @@ impl GaussianRasterizer {
             .collect();
         sorted_tiles.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-        let mut output_image =
-            vec![Vector3::zeros(); (self.camera.width * self.camera.height) as usize];
-        let mut output_alpha = vec![0.0f32; (self.camera.width * self.camera.height) as usize];
-        let mut output_depth = vec![f32::MAX; (self.camera.width * self.camera.height) as usize];
+        let n_pixels = (self.camera.width * self.camera.height) as usize;
+        let mut output_image = vec![Vector3::zeros(); n_pixels];
+        let mut output_alpha = vec![0.0f32; n_pixels];
+        let mut output_depth = vec![f32::MAX; n_pixels];
+        // Transmittance for front-to-back compositing, initialized to 1.0
+        let mut transmittance = vec![1.0f32; n_pixels];
 
         for (tile_idx, _) in sorted_tiles {
             let tile_x = (tile_idx as u32 % tiles_x) * self.tile_width;
             let tile_y = (tile_idx as u32 / tiles_x) * self.tile_height;
 
-            let _tile_pixels: Vec<(usize, Vector3<f32>, f32)> = Vec::new();
+            // Sort gaussians in this tile by depth (front to back)
+            let mut tile_gauss: Vec<usize> = tile_gaussians[tile_idx].clone();
+            tile_gauss.sort_by(|&a, &b| {
+                projected[a]
+                    .depth
+                    .partial_cmp(&projected[b].depth)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
-            for &gauss_idx in &tile_gaussians[tile_idx] {
+            for &gauss_idx in &tile_gauss {
                 let pg = &projected[gauss_idx];
 
                 for py in tile_y..(tile_y + self.tile_height).min(self.camera.height) {
@@ -235,33 +257,36 @@ impl GaussianRasterizer {
 
                         let dx = pixel_x - pg.center.x;
                         let dy = pixel_y - pg.center.y;
-                        let dist_sq = dx * dx + dy * dy;
 
+                        // Full Mahalanobis distance using inverse covariance
                         let inv_cov_2d = pg.inv_cov_2d();
-                        let mahalanobis = inv_cov_2d[(0, 0)] * dist_sq;
+                        let a = inv_cov_2d[(0, 0)];
+                        let b = inv_cov_2d[(0, 1)];
+                        let c = inv_cov_2d[(1, 1)];
+                        let mahalanobis = a * dx * dx + 2.0 * b * dx * dy + c * dy * dy;
 
-                        let weight: f32 = (-0.5 * mahalanobis).exp() * pg.opacity;
+                        let alpha_i: f32 = ((-0.5 * mahalanobis).exp() * pg.opacity).min(0.99);
 
-                        if weight < 0.0001 {
+                        if alpha_i < 0.0001 {
                             continue;
                         }
 
                         let pixel_idx = (py * self.camera.width + px) as usize;
-                        let color = pg.color;
 
-                        output_image[pixel_idx] += color * weight;
-                        output_alpha[pixel_idx] += weight;
+                        // Front-to-back compositing with transmittance
+                        let t_i = transmittance[pixel_idx];
+                        if t_i < 0.001 {
+                            continue;
+                        }
+
+                        let color = pg.color;
+                        output_image[pixel_idx] += color * alpha_i * t_i;
+                        output_alpha[pixel_idx] += alpha_i * t_i;
+                        transmittance[pixel_idx] *= 1.0 - alpha_i;
                         output_depth[pixel_idx] = output_depth[pixel_idx].min(pg.depth);
                     }
                 }
             }
-        }
-
-        for i in 0..output_image.len() {
-            if output_alpha[i] > 0.0 {
-                output_image[i] /= output_alpha[i].min(1.0);
-            }
-            output_alpha[i] = 1.0 - (-output_alpha[i] as f32).exp();
         }
 
         RasterizationResult {
@@ -446,7 +471,7 @@ mod tests {
     #[test]
     fn test_project_gaussians() {
         let camera = Camera::new(
-            Point3::new(0.0, 0.0, 5.0),
+            Point3::new(0.0, 0.0, 0.0),
             Vector4::new(0.0, 0.0, 0.0, 1.0),
             1000.0,
             800,
@@ -455,7 +480,7 @@ mod tests {
 
         let mut cloud = GaussianCloud::new();
         let gaussian = Gaussian::new(
-            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.0, 0.0, 5.0),
             Vector3::new(0.1, 0.1, 0.1),
             Vector4::new(0.0, 0.0, 0.0, 1.0),
             Vector3::new(0.8, 0.5, 0.3),

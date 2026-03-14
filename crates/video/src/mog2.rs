@@ -212,9 +212,9 @@ impl Mog2 {
             alpha,
             var_threshold: self.var_threshold,
             background_ratio: self.background_ratio,
-            var_init: self.var_init / 255.0,
-            var_min: self.var_min / 255.0,
-            var_max: self.var_max / 255.0,
+            var_init: self.var_init / (255.0 * 255.0),
+            var_min: self.var_min / (255.0 * 255.0),
+            var_max: self.var_max / (255.0 * 255.0),
             _padding: [0; 3],
         };
 
@@ -251,7 +251,7 @@ impl Mog2 {
                         let base = i * self.n_mixtures * 3;
                         data[base] = 1.0;
                         data[base + 1] = pixel as f32 / 255.0;
-                        data[base + 2] = self.var_init / 255.0;
+                        data[base + 2] = self.var_init / (255.0 * 255.0);
                     }
                     let model_gpu = CpuTensor::from_vec(
                         data,
@@ -356,7 +356,7 @@ impl Mog2 {
                         let base = i * self.n_mixtures * 3;
                         data[base] = 1.0;
                         data[base + 1] = pixel as f32 / 255.0;
-                        data[base + 2] = self.var_init / 255.0;
+                        data[base + 2] = self.var_init / (255.0 * 255.0);
                     }
                     self.model = Some(Box::new(
                         CpuTensor::from_vec(

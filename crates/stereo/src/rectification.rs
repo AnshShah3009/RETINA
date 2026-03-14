@@ -100,7 +100,8 @@ fn compute_rectification_transforms(
     );
 
     let left_rect = intrinsics_matrix(left_intrinsics) * rect_rotation;
-    let right_rect = intrinsics_matrix(right_intrinsics) * rect_rotation * relative_rotation;
+    let right_rect =
+        intrinsics_matrix(right_intrinsics) * rect_rotation * relative_rotation.transpose();
 
     Ok((left_rect, right_rect, new_intrinsics))
 }
@@ -118,8 +119,15 @@ fn compute_rectification_rotation(
     // New x-axis: translation direction
     let e1 = t;
 
-    // New y-axis: orthogonal to x and old z
-    let e2 = t.cross(&Vector3::new(0.0, 0.0, 1.0)).normalize();
+    // New y-axis: orthogonal to x and old z (with fallback for degenerate case)
+    let z_axis = Vector3::new(0.0, 0.0, 1.0);
+    let y_axis = Vector3::new(0.0, 1.0, 0.0);
+    let cross = t.cross(&z_axis);
+    let e2 = if cross.norm() < 1e-10 {
+        t.cross(&y_axis).normalize()
+    } else {
+        cross.normalize()
+    };
 
     // New z-axis: orthogonal to x and y
     let e3 = e1.cross(&e2);

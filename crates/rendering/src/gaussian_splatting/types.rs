@@ -187,7 +187,13 @@ impl Gaussian {
         self.covariance().try_inverse().unwrap_or(Matrix3::zeros())
     }
 
-    pub fn project(&self, view_matrix: &Matrix3x4<f32>, focal_length: f32) -> ProjectedGaussian {
+    pub fn project(
+        &self,
+        view_matrix: &Matrix3x4<f32>,
+        focal_length: f32,
+        width: u32,
+        height: u32,
+    ) -> ProjectedGaussian {
         let pos = self.position.coords;
         let view_pos = Vector3::new(
             view_matrix[(0, 0)] * pos.x
@@ -209,8 +215,8 @@ impl Gaussian {
             return ProjectedGaussian::invalid();
         }
 
-        let px = view_pos[0] / depth * focal_length;
-        let py = view_pos[1] / depth * focal_length;
+        let px = view_pos[0] / depth * focal_length + width as f32 / 2.0;
+        let py = view_pos[1] / depth * focal_length + height as f32 / 2.0;
 
         let cov = self.covariance();
 

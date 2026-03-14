@@ -5,12 +5,10 @@
 //! - Farneback: Dense optical flow using polynomial expansion
 //! - Horn-Schunck: Global smoothness constraint
 
-#![allow(deprecated)]
-
 use crate::{MotionField, Result};
 use cv_core::{Error, KeyPoint};
 use image::GrayImage;
-use nalgebra::{Matrix2, Vector2};
+use nalgebra::{DMatrix, DVector, Matrix2, Vector2};
 
 /// Lucas-Kanade optical flow tracker
 ///
@@ -49,6 +47,14 @@ impl LucasKanade {
     }
 
     /// Track a single point from prev_frame to next_frame
+    ///
+    /// TODO: `pyramid_levels` is not yet implemented - tracking is performed at
+    ///       a single scale. Multi-scale pyramid processing would improve large
+    ///       motion estimation.
+    /// TODO: `max_iterations` is not yet implemented - the solver runs a single
+    ///       pass instead of iteratively refining the flow estimate.
+    /// TODO: `epsilon` convergence criterion is not yet implemented - related to
+    ///       iterative refinement above.
     pub fn track_point(
         &self,
         prev_frame: &GrayImage,
@@ -260,11 +266,17 @@ impl Farneback {
 
         for y in 0..height {
             for x in 0..width {
-                let (u, v) = flow.get_motion(x, y);
+                let (_u, _v) = flow.get_motion(x, y);
 
-                // Compute weighted least squares over window
-                let mut a: Matrix2<f64> = Matrix2::zeros();
-                let mut b: Vector2<f64> = Vector2::zeros();
+                // Correct Farneback formulation:
+                // For each pixel, build A from quadratic coefficients and b from linear terms.
+                // A_k = [[2*coeff.0, coeff.1], [coeff.1, 2*coeff.2]]
+                // b_k = [coeff.3, coeff.4]
+                // Then: A_avg = (A1 + A2) / 2, delta_b = -(b2 - b1) / 2
+                // displacement d = A_avg^{-1} * delta_b
+                let mut a_sum: Matrix2<f64> = Matrix2::zeros();
+                let mut db_sum: Vector2<f64> = Vector2::zeros();
+                let mut w_sum: f64 = 0.0;
 
                 for dy in -half_window..=half_window {
                     for dx in -half_window..=half_window {
@@ -275,36 +287,48 @@ impl Farneback {
                             continue;
                         }
 
-                        // Get polynomial coefficients
-                        let prev_coeffs = prev_poly.get(px, py);
-                        let next_coeffs = next_poly.get(px, py);
+                        let prev_c = prev_poly.get(px, py);
+                        let next_c = next_poly.get(px, py);
 
-                        // Compute spatial derivatives of polynomial
-                        let fx = prev_coeffs.1; // coefficient of x
-                        let fy = prev_coeffs.2; // coefficient of y
+                        let weight = gaussian_weight(dx as f32, dy as f32, self.poly_sigma) as f64;
 
-                        // Temporal derivative (difference in constant term)
-                        let ft = next_coeffs.0 - prev_coeffs.0;
+                        // A from quadratic coefficients: [[2*A, B], [B, 2*C]]
+                        let a1 = Matrix2::new(
+                            2.0 * prev_c.0 as f64,
+                            prev_c.1 as f64,
+                            prev_c.1 as f64,
+                            2.0 * prev_c.2 as f64,
+                        );
+                        let a2 = Matrix2::new(
+                            2.0 * next_c.0 as f64,
+                            next_c.1 as f64,
+                            next_c.1 as f64,
+                            2.0 * next_c.2 as f64,
+                        );
+                        let a_avg = (a1 + a2) * 0.5;
 
-                        // Weight (Gaussian)
-                        let weight = gaussian_weight(dx as f32, dy as f32, self.poly_sigma);
+                        // b from linear terms
+                        let b1 = Vector2::new(prev_c.3 as f64, prev_c.4 as f64);
+                        let b2 = Vector2::new(next_c.3 as f64, next_c.4 as f64);
+                        let delta_b = -(b2 - b1) * 0.5;
 
-                        a[(0, 0)] += (fx * fx * weight) as f64;
-                        a[(0, 1)] += (fx * fy * weight) as f64;
-                        a[(1, 0)] += (fx * fy * weight) as f64;
-                        a[(1, 1)] += (fy * fy * weight) as f64;
-
-                        b[0] += -(fx * ft * weight) as f64;
-                        b[1] += -(fy * ft * weight) as f64;
+                        // Accumulate weighted A^T * A and A^T * delta_b for least squares
+                        let a_t = a_avg.transpose();
+                        a_sum += a_t * a_avg * weight;
+                        db_sum += a_t * delta_b * weight;
+                        w_sum += weight;
                     }
                 }
 
-                // Solve for incremental flow
-                if let Some(a_inv) = a.try_inverse() {
-                    let delta = a_inv * b;
-                    new_flow.set_motion(x, y, u + delta[0] as f32, v + delta[1] as f32);
+                if w_sum > 0.0 {
+                    if let Some(a_inv) = a_sum.try_inverse() {
+                        let d = a_inv * db_sum;
+                        new_flow.set_motion(x, y, d[0] as f32, d[1] as f32);
+                    } else {
+                        new_flow.set_motion(x, y, _u, _v);
+                    }
                 } else {
-                    new_flow.set_motion(x, y, u, v);
+                    new_flow.set_motion(x, y, _u, _v);
                 }
             }
         }
@@ -313,18 +337,17 @@ impl Farneback {
     }
 }
 
-/// Polynomial expansion coefficients (A, B, C, D, E, F) for:
-/// f(x,y) ~ Ax^2 + Bxy + Cy^2 + Dx + Ey + F
+/// Polynomial expansion coefficients for f(x,y) ~ Ax^2 + Bxy + Cy^2 + Dx + Ey + F.
+/// Fields: (A: x^2, B: xy, C: y^2, D: x, E: y, F: constant)
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Field .5 (F constant) computed by full 6x6 solve, reserved for future use
 struct PolyCoeffs(f32, f32, f32, f32, f32, f32);
 
 /// Polynomial expansion result
 struct PolynomialExpansion {
     coeffs: Vec<PolyCoeffs>,
     width: u32,
-    #[allow(dead_code)]
-    height: u32,
+    _height: u32,
 }
 
 impl PolynomialExpansion {
@@ -384,15 +407,23 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
                 }
             }
 
-            // Solve using simplified approach (just use raw values as approximation)
-            let c = PolyCoeffs(
-                b[0] / (a[0][0] + 1e-6), // A: x^2
-                b[1] / (a[1][1] + 1e-6), // B: xy
-                b[2] / (a[2][2] + 1e-6), // C: y^2
-                b[3] / (a[3][3] + 1e-6), // D: x
-                b[4] / (a[4][4] + 1e-6), // E: y
-                b[5] / (a[5][5] + 1e-6), // F: constant
-            );
+            // Solve the full 6x6 system A*c = b using nalgebra matrix inverse
+            let a_mat = DMatrix::from_fn(6, 6, |i, j| a[i][j] as f64);
+            let b_vec = DVector::from_fn(6, |i, _| b[i] as f64);
+
+            let c = if let Some(a_inv) = a_mat.try_inverse() {
+                let sol = a_inv * b_vec;
+                PolyCoeffs(
+                    sol[0] as f32, // A: x^2
+                    sol[1] as f32, // B: xy
+                    sol[2] as f32, // C: y^2
+                    sol[3] as f32, // D: x
+                    sol[4] as f32, // E: y
+                    sol[5] as f32, // F: constant
+                )
+            } else {
+                PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            };
 
             coeffs.push(c);
         }
@@ -401,7 +432,7 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
     PolynomialExpansion {
         coeffs,
         width,
-        height,
+        _height: height,
     }
 }
 

@@ -32,7 +32,7 @@ impl Default for BlockMatcher {
             min_disparity: 0,
             max_disparity: 64,
             metric: MatchingMetric::SAD,
-            uniqueness_ratio: 0.95,
+            uniqueness_ratio: 0.15,
         }
     }
 }
@@ -212,7 +212,7 @@ impl BlockMatcher {
         }
 
         // Uniqueness check
-        if second_best_cost < best_cost * self.uniqueness_ratio {
+        if second_best_cost < best_cost * (1.0 + self.uniqueness_ratio) {
             // Ambiguous match
             -1
         } else {
@@ -239,7 +239,9 @@ impl BlockMatcher {
                 self.compute_ssd_simd(left_data, right_data, width, x, y, disparity, half_block)
             }
             MatchingMetric::NCC => {
-                let mut cost = 0.0f32;
+                // First pass: compute means
+                let mut sum_l = 0.0f32;
+                let mut sum_r = 0.0f32;
                 let mut count = 0usize;
 
                 for dy in -half_block..=half_block {
@@ -247,13 +249,37 @@ impl BlockMatcher {
                     for dx in -half_block..=half_block {
                         let lx = (x + dx) as usize;
                         let rx = (x + dx - disparity) as usize;
-                        let left_val = left_data[ly * width + lx] as f32;
-                        let right_val = right_data[ly * width + rx] as f32;
-                        cost += left_val * right_val;
+                        sum_l += left_data[ly * width + lx] as f32;
+                        sum_r += right_data[ly * width + rx] as f32;
                         count += 1;
                     }
                 }
-                cost / count as f32
+
+                let mean_l = sum_l / count as f32;
+                let mean_r = sum_r / count as f32;
+
+                // Second pass: compute ZNCC
+                let mut cross = 0.0f32;
+                let mut var_l = 0.0f32;
+                let mut var_r = 0.0f32;
+
+                for dy in -half_block..=half_block {
+                    let ly = (y + dy) as usize;
+                    for dx in -half_block..=half_block {
+                        let lx = (x + dx) as usize;
+                        let rx = (x + dx - disparity) as usize;
+                        let dl = left_data[ly * width + lx] as f32 - mean_l;
+                        let dr = right_data[ly * width + rx] as f32 - mean_r;
+                        cross += dl * dr;
+                        var_l += dl * dl;
+                        var_r += dr * dr;
+                    }
+                }
+
+                let denom = (var_l * var_r).sqrt();
+                let ncc = if denom > 1e-10 { cross / denom } else { 0.0 };
+                // Negate because the framework minimizes cost, but NCC should be maximized
+                -ncc
             }
         }
     }

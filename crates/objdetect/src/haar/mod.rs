@@ -6,6 +6,12 @@
 use cv_core::{Error, Rect, Result, Tensor};
 use image::GrayImage;
 
+/// Squared integral image for variance normalization (uses u64 to avoid overflow).
+struct SquaredIntegralImage {
+    data: Vec<u64>,
+    width: usize, // integral image width (src_width + 1)
+}
+
 /// Haar Cascade Classifier for object detection
 ///
 /// Implements the Viola-Jones cascade classifier using Haar-like features.
@@ -134,8 +140,9 @@ impl HaarCascade {
         scale_factor: f32,
         _min_neighbors: u32,
     ) -> Result<Vec<Rect>> {
-        // 1. Compute integral image
+        // 1. Compute integral image and squared integral image
         let integral = compute_integral_image(image)?;
+        let sq_integral = compute_squared_integral_image(image);
 
         let mut detections = Vec::new();
         let (img_w, img_h) = image.dimensions();
@@ -150,7 +157,7 @@ impl HaarCascade {
 
             for y in (0..img_h - win_h).step_by(step as usize) {
                 for x in (0..img_w - win_w).step_by(step as usize) {
-                    if self.evaluate_window(&integral, x, y, scale)? {
+                    if self.evaluate_window(&integral, &sq_integral, x, y, win_w, win_h, scale)? {
                         detections.push(Rect::new(x as f32, y as f32, win_w as f32, win_h as f32));
                     }
                 }
@@ -162,12 +169,31 @@ impl HaarCascade {
         Ok(detections)
     }
 
-    fn evaluate_window(&self, integral: &Tensor<u32>, x: u32, y: u32, scale: f32) -> Result<bool> {
+    fn evaluate_window(
+        &self,
+        integral: &Tensor<u32>,
+        sq_integral: &SquaredIntegralImage,
+        x: u32,
+        y: u32,
+        win_w: u32,
+        win_h: u32,
+        scale: f32,
+    ) -> Result<bool> {
+        // Compute window variance for normalization
+        let area = (win_w * win_h) as f64;
+        let win_sum = get_rect_sum(integral, x, y, win_w, win_h)? as f64;
+        let win_sq_sum = sq_integral.get_rect_sum(x, y, win_w, win_h) as f64;
+        let mean = win_sum / area;
+        let variance = (win_sq_sum / area - mean * mean).max(0.0);
+        let std_dev = variance.sqrt().max(1.0);
+
         for stage in &self.stages {
             let mut stage_sum = 0.0f32;
             for feature in &stage.features {
                 let feature_sum = feature.evaluate(integral, x, y, scale)?;
-                stage_sum += if feature_sum < feature.threshold * scale * scale {
+                // Normalize feature response by window variance
+                let normalized = feature_sum / std_dev as f32;
+                stage_sum += if normalized < feature.threshold * scale * scale {
                     feature.left_val
                 } else {
                     feature.right_val
@@ -234,6 +260,39 @@ fn compute_integral_image(src: &GrayImage) -> Result<Tensor<u32>> {
         cv_core::TensorShape::new(1, h as usize + 1, w as usize + 1),
     )
     .map_err(|_| Error::MemoryError("Failed to create integral image tensor".to_string()))
+}
+
+/// Compute squared integral image for variance normalization
+fn compute_squared_integral_image(src: &GrayImage) -> SquaredIntegralImage {
+    let (w, h) = src.dimensions();
+    let iw = w as usize + 1;
+    let mut data = vec![0u64; iw * (h as usize + 1)];
+    let src_raw = src.as_raw();
+
+    for y in 0..h as usize {
+        let mut row_sum = 0u64;
+        for x in 0..w as usize {
+            let val = src_raw[y * w as usize + x] as u64;
+            row_sum += val * val;
+            let idx = (y + 1) * iw + (x + 1);
+            data[idx] = data[idx - iw] + row_sum;
+        }
+    }
+
+    SquaredIntegralImage { data, width: iw }
+}
+
+impl SquaredIntegralImage {
+    fn get_rect_sum(&self, x: u32, y: u32, w: u32, h: u32) -> u64 {
+        let x0 = x as usize;
+        let y0 = y as usize;
+        let x1 = (x + w) as usize;
+        let y1 = (y + h) as usize;
+        let iw = self.width;
+        self.data[y1 * iw + x1] + self.data[y0 * iw + x0]
+            - self.data[y1 * iw + x0]
+            - self.data[y0 * iw + x1]
+    }
 }
 
 /// Compute sum of pixels in axis-aligned rectangle using integral image
