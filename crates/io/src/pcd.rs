@@ -179,8 +179,9 @@ where
         // Read colors
         if let Some(ref mut c) = colors {
             if let Some(idx) = rgb_idx {
-                // Packed RGB/RGBA
-                let packed: u32 = values.get(idx).copied().unwrap_or(0.0) as u32;
+                // Packed RGB/RGBA: the float is a bit-reinterpreted u32, not a numeric value
+                let float_value = values.get(idx).copied().unwrap_or(0.0);
+                let packed: u32 = float_value.to_bits();
                 let r = ((packed >> 16) & 0xFF) as f32 / 255.0;
                 let g = ((packed >> 8) & 0xFF) as f32 / 255.0;
                 let b = (packed & 0xFF) as f32 / 255.0;

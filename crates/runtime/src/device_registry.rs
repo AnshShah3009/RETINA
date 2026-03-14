@@ -96,11 +96,15 @@ impl DeviceRuntime {
     }
 
     pub fn next_submission(&self) -> SubmissionIndex {
-        if let Ok(mut last) = self.last_submitted.lock() {
-            last.next()
-        } else {
-            SubmissionIndex(0)
-        }
+        self.last_submitted
+            .lock()
+            .unwrap_or_else(|_| {
+                panic!(
+                    "last_submitted lock poisoned for device {:?}: a prior panic corrupted submission state",
+                    self.id
+                )
+            })
+            .next()
     }
 
     pub fn mark_completed(&self, index: SubmissionIndex) {

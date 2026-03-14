@@ -18,11 +18,11 @@ pub fn read_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
     let header_str = String::from_utf8_lossy(&header[..bytes_read]);
     if header_str.trim_start().starts_with("solid ") {
         // ASCII format
-        // Re-read from start
-        let _ = header;
-        drop(header_str);
-        let mut content = String::new();
-        reader.read_to_string(&mut content)?;
+        // Prepend the header bytes already consumed, then read the rest
+        let header_prefix = String::from_utf8_lossy(&header[..bytes_read]).into_owned();
+        let mut rest = String::new();
+        reader.read_to_string(&mut rest)?;
+        let content = header_prefix + &rest;
         parse_ascii_stl(&content)
     } else {
         // Binary format

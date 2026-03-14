@@ -117,12 +117,16 @@ impl ObjMesh {
                         .iter()
                         .map(|p| {
                             let idx_str = p.split('/').next().unwrap_or(p);
-                            idx_str
-                                .parse::<usize>()
-                                .map(|i| if i > 0 { i - 1 } else { 0 }) // OBJ uses 1-based indexing
-                                .map_err(|_| {
-                                    Error::ParseError(format!("Invalid face index: {}", p))
-                                })
+                            let i = idx_str.parse::<usize>().map_err(|_| {
+                                Error::ParseError(format!("Invalid face index: {}", p))
+                            })?;
+                            if i == 0 {
+                                return Err(Error::ParseError(format!(
+                                    "OBJ face index is 1-based, got 0 in: {}",
+                                    p
+                                )));
+                            }
+                            Ok(i - 1) // OBJ uses 1-based indexing
                         })
                         .collect::<Result<Vec<_>>>()?;
                     mesh.faces.push(face);
