@@ -296,11 +296,13 @@ impl Tracker {
         )
         .map_err(|e| format!("ICP step failed: {}", e))?;
 
-        // Solve the linear system for pose update: atA * delta_pose = atb
-        let delta = ata
+        // Solve the linear system for pose update: atA * delta = -atb
+        // The ICP energy is E = sum ||r_i||^2 where r_i are residuals.
+        // The normal equations give atA * delta = -atb (gradient descent direction).
+        let delta = -(ata
             .try_inverse()
             .ok_or_else(|| "ICP AtA matrix not invertible".to_string())?
-            * atb;
+            * atb);
 
         // Update pose with delta (parameterized as [omega (rotation), v (translation)])
         // Small angle approximation for rotation from omega

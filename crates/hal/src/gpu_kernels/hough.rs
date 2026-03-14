@@ -68,7 +68,9 @@ pub fn hough_lines<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let shader_source = include_str!("../../shaders/hough.wgsl");
+    // Use the f32 shader variant: reads array<f32> directly instead of unpacking
+    // u8 bytes from array<u32>. The dispatcher binds f32 storage buffers.
+    let shader_source = include_str!("../../shaders/hough_f32.wgsl");
     let shader_module = ctx
         .device
         .create_shader_module(wgpu::ShaderModuleDescriptor {

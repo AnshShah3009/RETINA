@@ -62,7 +62,9 @@ pub fn sobel(
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let shader_source = include_str!("../../shaders/sobel.wgsl");
+    // Use the f32 shader variant: reads array<f32> directly, one element per pixel,
+    // and writes f32 gradient outputs without byte-packing.
+    let shader_source = include_str!("../../shaders/sobel_f32.wgsl");
     let pipeline = ctx.create_compute_pipeline(shader_source, "main");
 
     let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -101,7 +103,7 @@ pub fn sobel(
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
 
-        let wg_x = (w as u32).div_ceil(4).div_ceil(16);
+        let wg_x = (w as u32).div_ceil(16);
         let wg_y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
     }

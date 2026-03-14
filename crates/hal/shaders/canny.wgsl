@@ -20,6 +20,13 @@ fn get_pixel(x: i32, y: i32) -> f32 {
     return f32((combined >> ((idx % 4u) * 8u)) & 0xFFu);
 }
 
+// TODO: This GPU Canny implementation applies Sobel directly to the raw input
+// without a Gaussian blur pre-smoothing pass. Standard Canny edge detection
+// requires Gaussian smoothing first to reduce noise before gradient computation.
+// A proper fix requires a multi-pass pipeline (blur then Canny) which cannot be
+// done within a single shader. Callers should pre-blur the input on the host side
+// or via a separate Gaussian blur dispatch before invoking this shader.
+
 // Pass 1: Gradients and Directions
 @compute @workgroup_size(16, 16)
 fn gradients(@builtin(global_invocation_id) global_id: vec3<u32>) {

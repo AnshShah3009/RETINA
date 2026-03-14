@@ -114,12 +114,18 @@ pub fn to_svg(figure: &Figure) -> String {
     ));
 
     // Plot each series
-    for (series_idx, subplot) in figure.subplots.iter().enumerate() {
-        let color = COLORS[series_idx % COLORS.len()];
-
-        for series in &subplot.series {
+    let max_series = figure
+        .subplots
+        .iter()
+        .map(|s| s.series.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    for (subplot_idx, subplot) in figure.subplots.iter().enumerate() {
+        for (series_idx, series) in subplot.series.iter().enumerate() {
+            let auto_color = COLORS[(subplot_idx * max_series + series_idx) % COLORS.len()];
             let series_color = if series.style.color.is_empty() {
-                color
+                auto_color
             } else {
                 &series.style.color
             };
@@ -211,10 +217,11 @@ pub fn to_svg(figure: &Figure) -> String {
         let legend_x = figure.width - margin_right - 100.0;
         let legend_y = margin_top + 10.0;
 
-        for (i, subplot) in figure.subplots.iter().enumerate() {
-            for (j, series) in subplot.series.iter().enumerate() {
+        let mut legend_idx = 0;
+        for (subplot_idx, subplot) in figure.subplots.iter().enumerate() {
+            for (series_idx, series) in subplot.series.iter().enumerate() {
                 let color = if series.style.color.is_empty() {
-                    COLORS[(i + j) % COLORS.len()]
+                    COLORS[(subplot_idx * max_series + series_idx) % COLORS.len()]
                 } else {
                     &series.style.color
                 };
@@ -223,12 +230,13 @@ pub fn to_svg(figure: &Figure) -> String {
   <text x="{}" y="{}" class="legend">{}</text>
 "#,
                     legend_x,
-                    legend_y + (i * 20 + j) as f64 * 15.0,
+                    legend_y + legend_idx as f64 * 15.0,
                     color,
                     legend_x + 18.0,
-                    legend_y + 10.0 + (i * 20 + j) as f64 * 15.0,
+                    legend_y + 10.0 + legend_idx as f64 * 15.0,
                     series.label
                 ));
+                legend_idx += 1;
             }
         }
     }
@@ -246,38 +254,21 @@ pub fn to_html(figure: &Figure) -> String {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>{}</title>
-  <script src="https://cdn.plot.ly/plotly-2.24.1.min.js"></script>
+  <title>{title}</title>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 20px; }}
-    .plot-container {{ max-width: {}px; margin: auto; }}
+    .plot-container {{ max-width: {width}px; margin: auto; }}
   </style>
 </head>
 <body>
   <div class="plot-container">
-    <div id="plot"></div>
+    {svg}
   </div>
-  <script>
-    // Extract data for interactive features
-    const data = [];
-    const layout = {{
-      title: '{}',
-      xaxis: {{ title: 'X' }},
-      yaxis: {{ title: 'Y' }},
-      hovermode: 'closest'
-    }};
-    
-    // Add traces from SVG data
-    // For full interactivity, data would be embedded as JSON
-    document.getElementById('plot').innerHTML = '{}';
-  </script>
 </body>
 </html>"#,
-        figure.title,
-        figure.width as i32,
-        figure.title,
-        svg.replace("</svg>", "")
-            .replace("<svg", "<div id=\"svg-content\"")
+        title = figure.title,
+        width = figure.width as i32,
+        svg = svg,
     )
 }
 
@@ -297,16 +288,13 @@ pub fn save_html(figure: &Figure, path: &str) -> Result<(), crate::PlotError> {
     Ok(())
 }
 
-/// Save figure to PNG (requires image processing - simplified version)
-pub fn save_png(figure: &Figure, path: &str) -> Result<(), crate::PlotError> {
-    // For PNG, we'd need an image library
-    // For now, save as SVG and note that conversion is needed
-    let svg = to_svg(figure);
-    let png_path = path.replace(".png", ".svg");
-    let mut file = File::create(&png_path)?;
-    file.write_all(svg.as_bytes())?;
-    Err(crate::PlotError::Export(format!(
-        "Saved as SVG instead. Convert {} to PNG manually",
-        png_path
-    )))
+/// Save figure to PNG.
+///
+/// PNG export is not currently supported. This function returns an error
+/// indicating that PNG format is unavailable. Use `save_svg` or `save_html`
+/// instead.
+pub fn save_png(_figure: &Figure, _path: &str) -> Result<(), crate::PlotError> {
+    Err(crate::PlotError::Export(
+        "PNG export is not supported. Use save_svg() or save_html() instead.".to_string(),
+    ))
 }

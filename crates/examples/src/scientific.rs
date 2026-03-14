@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example scientific
 
-use cv_scientific::{integrate, mean, special, std, Interp1d};
+use cv_scientific::{integrate, mean, special, std as cv_std, Interp1d};
 
 fn main() {
     println!("=== Scientific Computing Example ===\n");
@@ -49,7 +49,7 @@ fn main() {
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     println!("Data: {:?}", data);
     println!("Mean: {}", mean(&data).unwrap());
-    println!("Std:  {}", std(&data).unwrap());
+    println!("Std:  {}", cv_std(&data).unwrap());
 
     // ===== Interpolation =====
     println!("\n--- Interpolation ---");

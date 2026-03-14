@@ -120,11 +120,15 @@ impl PyDnnNet {
             .forward(&input_tensor)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        let mut py_outputs = Vec::new();
-        for tensor in outputs {
-            if let Ok(slice) = tensor.as_slice() {
-                py_outputs.push(slice.to_vec());
-            }
+        let mut py_outputs = Vec::with_capacity(outputs.len());
+        for (i, tensor) in outputs.iter().enumerate() {
+            let slice = tensor.as_slice().map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "Failed to read output tensor {}: {}",
+                    i, e
+                ))
+            })?;
+            py_outputs.push(slice.to_vec());
         }
 
         Ok(py_outputs)
@@ -142,14 +146,38 @@ pub struct PySlam {
 #[pymethods]
 impl PySlam {
     #[new]
-    pub fn new(hint: PyWorkloadHint) -> PyResult<Self> {
+    #[pyo3(signature = (width, height, fx=None, fy=None, cx=None, cy=None, hint=PyWorkloadHint::Default))]
+    pub fn new(
+        width: u32,
+        height: u32,
+        fx: Option<f64>,
+        fy: Option<f64>,
+        cx: Option<f64>,
+        cy: Option<f64>,
+        hint: PyWorkloadHint,
+    ) -> PyResult<Self> {
         let s = scheduler()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         let group = s
             .best_gpu_or_cpu_for(hint.into())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        let intrinsics = CameraIntrinsics::new_ideal(640, 480);
+        let intrinsics = match (fx, fy, cx, cy) {
+            (Some(fx_val), Some(fy_val), Some(cx_val), Some(cy_val)) => {
+                CameraIntrinsics::new(fx_val, fy_val, cx_val, cy_val, width, height)
+            }
+            _ => {
+                // If any intrinsic is missing, compute reasonable defaults from dimensions.
+                // Assume ~60 degree horizontal FOV: fx ≈ width / (2 * tan(30°)) ≈ width * 0.866
+                let default_fx = fx.unwrap_or(width as f64 * 0.866);
+                let default_fy = fy.unwrap_or(default_fx);
+                let default_cx = cx.unwrap_or(width as f64 / 2.0);
+                let default_cy = cy.unwrap_or(height as f64 / 2.0);
+                CameraIntrinsics::new(
+                    default_fx, default_fy, default_cx, default_cy, width, height,
+                )
+            }
+        };
         Ok(Self {
             inner: RustSlam::new(group.clone(), intrinsics),
             _group: group,
@@ -650,60 +678,94 @@ impl PyRuntime {
 // making them easy to use with numpy:
 //   normals = np.array(cv_native.estimate_normals_auto(points.tolist(), k=15))
 
+/// Convert a `catch_unwind` panic payload into a human-readable string.
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
 /// Auto-select the fastest available backend (GPU → CPU).
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_auto(points: Vec<(f32, f32, f32)>, k: usize) -> Vec<(f32, f32, f32)> {
-    normals_to_py(cv_point_cloud::estimate_normals_auto(
-        &pts_from_py(&points),
-        k,
-    ))
+fn estimate_normals_auto(points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
+    std::panic::catch_unwind(|| {
+        normals_to_py(cv_point_cloud::estimate_normals_auto(
+            &pts_from_py(&points),
+            k,
+        ))
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
 
 /// CPU-only: voxel-hash kNN + analytic eigensolver. ~19 ms / 40k pts.
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_cpu(points: Vec<(f32, f32, f32)>, k: usize) -> Vec<(f32, f32, f32)> {
-    normals_to_py(cv_point_cloud::estimate_normals_cpu(
-        &pts_from_py(&points),
-        k,
-    ))
+fn estimate_normals_cpu(points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
+    std::panic::catch_unwind(|| {
+        normals_to_py(cv_point_cloud::estimate_normals_cpu(
+            &pts_from_py(&points),
+            k,
+        ))
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
 
 /// GPU: Morton sort (CPU) + WebGPU PCA. Uses Metal on Apple Silicon. ~17 ms / 40k pts.
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_gpu(points: Vec<(f32, f32, f32)>, k: usize) -> Vec<(f32, f32, f32)> {
-    normals_to_py(cv_point_cloud::estimate_normals_gpu(
-        &pts_from_py(&points),
-        k,
-    ))
+fn estimate_normals_gpu(points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
+    std::panic::catch_unwind(|| {
+        normals_to_py(cv_point_cloud::estimate_normals_gpu(
+            &pts_from_py(&points),
+            k,
+        ))
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
 
 /// Hybrid: CPU kNN + GPU batch eigenvectors. Best for large clouds + discrete GPU.
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_hybrid(points: Vec<(f32, f32, f32)>, k: usize) -> Vec<(f32, f32, f32)> {
-    normals_to_py(cv_point_cloud::estimate_normals_hybrid(
-        &pts_from_py(&points),
-        k,
-    ))
+fn estimate_normals_hybrid(
+    points: Vec<(f32, f32, f32)>,
+    k: usize,
+) -> PyResult<Vec<(f32, f32, f32)>> {
+    std::panic::catch_unwind(|| {
+        normals_to_py(cv_point_cloud::estimate_normals_hybrid(
+            &pts_from_py(&points),
+            k,
+        ))
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
 
 /// Fast approximate: 2-neighbour cross-product. ~3× faster, slightly less accurate.
 #[pyfunction]
-fn estimate_normals_approx_cross(points: Vec<(f32, f32, f32)>) -> Vec<(f32, f32, f32)> {
-    normals_to_py(cv_point_cloud::estimate_normals_approx_cross(&pts_from_py(
-        &points,
-    )))
+fn estimate_normals_approx_cross(points: Vec<(f32, f32, f32)>) -> PyResult<Vec<(f32, f32, f32)>> {
+    std::panic::catch_unwind(|| {
+        normals_to_py(cv_point_cloud::estimate_normals_approx_cross(&pts_from_py(
+            &points,
+        )))
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
 
 /// Fast approximate: ring cross-product average. ~2.5× faster, smooth results.
 #[pyfunction]
-fn estimate_normals_approx_integral(points: Vec<(f32, f32, f32)>) -> Vec<(f32, f32, f32)> {
-    normals_to_py(cv_point_cloud::estimate_normals_approx_integral(
-        &pts_from_py(&points),
-    ))
+fn estimate_normals_approx_integral(
+    points: Vec<(f32, f32, f32)>,
+) -> PyResult<Vec<(f32, f32, f32)>> {
+    std::panic::catch_unwind(|| {
+        normals_to_py(cv_point_cloud::estimate_normals_approx_integral(
+            &pts_from_py(&points),
+        ))
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
 
 /// O(n) normals from a structured depth image — ideal for RGBD / depth cameras.
@@ -724,10 +786,13 @@ fn estimate_normals_from_depth(
     fy: f32,
     cx: f32,
     cy: f32,
-) -> Vec<(f32, f32, f32)> {
-    normals_to_py(cv_point_cloud::estimate_normals_from_depth(
-        &depth, width, height, fx, fy, cx, cy,
-    ))
+) -> PyResult<Vec<(f32, f32, f32)>> {
+    std::panic::catch_unwind(|| {
+        normals_to_py(cv_point_cloud::estimate_normals_from_depth(
+            &depth, width, height, fx, fy, cx, cy,
+        ))
+    })
+    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
 
 // ── NumPy-native normal estimation ───────────────────────────────────────────
@@ -844,10 +909,14 @@ fn estimate_normals_from_depth_np<'py>(
     fy: f32,
     cx: f32,
     cy: f32,
-) -> Bound<'py, PyArray2<f32>> {
-    let d = depth.as_slice().unwrap();
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let d = depth.as_slice().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Input depth array must be contiguous in memory",
+        )
+    })?;
     let normals = cv_point_cloud::estimate_normals_from_depth(d, width, height, fx, fy, cx, cy);
-    normals_to_ndarray(py, normals)
+    Ok(normals_to_ndarray(py, normals))
 }
 
 // ============== Factor Graph Bindings ==============

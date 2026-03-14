@@ -47,7 +47,7 @@ fn frame_conventions() {
     println!("  Custom (RH + WebGPU): {:?}", custom.camera_convention);
 
     // Convert pose between conventions
-    let rotation = Matrix3::identity();
+    let rotation = Matrix3::<f32>::identity();
     let converted = opencv.convert_rotation(&colmap, &rotation);
     println!("  Converted identity rotation");
 }
