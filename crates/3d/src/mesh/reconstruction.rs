@@ -165,55 +165,64 @@ pub fn poisson_reconstruction(
     }
 
     // Step 5: Solve Poisson equation: Laplacian(chi) = divergence
-    // Using Gauss-Seidel relaxation
+    // Using SOR (Successive Over-Relaxation) with red-black ordering
     let mut chi = vec![0.0f32; n * n * n];
     let max_iter = 100.max(n * 2);
     let h2 = voxel_size * voxel_size;
+    // Optimal SOR parameter for 3D Laplacian on a cube grid
+    let omega: f32 = 2.0 / (1.0 + (std::f32::consts::PI / n as f32).sin());
 
     for _ in 0..max_iter {
         let mut max_delta = 0.0f32;
-        for iz in 0..n {
-            for iy in 0..n {
-                for ix in 0..n {
-                    let center_idx = idx3(ix, iy, iz, n, n);
-                    let rhs = divergence[center_idx];
+        // Red-black sweep: two half-sweeps per iteration for better convergence
+        for color in 0..2u32 {
+            for iz in 0..n {
+                for iy in 0..n {
+                    // Start ix at the correct parity for this color
+                    let start = ((iz + iy + color as usize) % 2) as usize;
+                    let mut ix = start;
+                    while ix < n {
+                        let center_idx = iz * n * n + iy * n + ix;
+                        let rhs = divergence[center_idx];
 
-                    // Sum of neighbors and count of valid neighbors
-                    let mut neighbor_sum = 0.0f32;
-                    let mut neighbor_count = 0.0f32;
+                        let mut neighbor_sum = 0.0f32;
+                        let mut neighbor_count = 0.0f32;
 
-                    if ix > 0 {
-                        neighbor_sum += chi[idx3(ix - 1, iy, iz, n, n)];
-                        neighbor_count += 1.0;
-                    }
-                    if ix + 1 < n {
-                        neighbor_sum += chi[idx3(ix + 1, iy, iz, n, n)];
-                        neighbor_count += 1.0;
-                    }
-                    if iy > 0 {
-                        neighbor_sum += chi[idx3(ix, iy - 1, iz, n, n)];
-                        neighbor_count += 1.0;
-                    }
-                    if iy + 1 < n {
-                        neighbor_sum += chi[idx3(ix, iy + 1, iz, n, n)];
-                        neighbor_count += 1.0;
-                    }
-                    if iz > 0 {
-                        neighbor_sum += chi[idx3(ix, iy, iz - 1, n, n)];
-                        neighbor_count += 1.0;
-                    }
-                    if iz + 1 < n {
-                        neighbor_sum += chi[idx3(ix, iy, iz + 1, n, n)];
-                        neighbor_count += 1.0;
-                    }
-
-                    if neighbor_count > 0.0 {
-                        let new_val = (neighbor_sum - h2 * rhs) / neighbor_count;
-                        let delta = (new_val - chi[center_idx]).abs();
-                        if delta > max_delta {
-                            max_delta = delta;
+                        if ix > 0 {
+                            neighbor_sum += chi[center_idx - 1];
+                            neighbor_count += 1.0;
                         }
-                        chi[center_idx] = new_val;
+                        if ix + 1 < n {
+                            neighbor_sum += chi[center_idx + 1];
+                            neighbor_count += 1.0;
+                        }
+                        if iy > 0 {
+                            neighbor_sum += chi[center_idx - n];
+                            neighbor_count += 1.0;
+                        }
+                        if iy + 1 < n {
+                            neighbor_sum += chi[center_idx + n];
+                            neighbor_count += 1.0;
+                        }
+                        if iz > 0 {
+                            neighbor_sum += chi[center_idx - n * n];
+                            neighbor_count += 1.0;
+                        }
+                        if iz + 1 < n {
+                            neighbor_sum += chi[center_idx + n * n];
+                            neighbor_count += 1.0;
+                        }
+
+                        if neighbor_count > 0.0 {
+                            let gs_val = (neighbor_sum - h2 * rhs) / neighbor_count;
+                            let new_val = chi[center_idx] + omega * (gs_val - chi[center_idx]);
+                            let delta = (new_val - chi[center_idx]).abs();
+                            if delta > max_delta {
+                                max_delta = delta;
+                            }
+                            chi[center_idx] = new_val;
+                        }
+                        ix += 2;
                     }
                 }
             }

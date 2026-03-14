@@ -30,53 +30,27 @@ pub use gnc::{registration_gnc, GNCOptimizer, GNCResult};
 use cv_core::point_cloud::PointCloud;
 use nalgebra::{Matrix4, Point3};
 
-/// Simple nearest-neighbor search structure for point cloud registration
-///
-/// Provides O(N) linear search for nearest neighbors. While not optimal
-/// for large point clouds, it's suitable for smaller datasets and enables
-/// straightforward point-to-plane ICP implementation.
+/// Nearest-neighbor search structure for point cloud registration.
+/// Uses a balanced KDTree for O(log N) queries.
 struct SimpleNN {
-    /// Reference points for neighbor queries
-    points: Vec<Point3<f32>>,
+    tree: cv_3d::spatial::KDTree<usize>,
 }
 
 impl SimpleNN {
-    /// Create a new nearest-neighbor index from points
-    ///
-    /// # Arguments
-    ///
-    /// * `points` - Vector of 3D points to build index from
     fn new(points: Vec<Point3<f32>>) -> Self {
-        Self { points }
+        let mut items: Vec<_> = points
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| (p, i))
+            .collect();
+        let tree = cv_3d::spatial::KDTree::build(&mut items);
+        Self { tree }
     }
 
-    /// Find the nearest point to a query point
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - Query point coordinates
-    ///
-    /// # Returns
-    ///
-    /// * `Some((point, index, distance_squared))` - Nearest point and its index
-    /// * `None` - If point set is empty
     fn nearest(&self, query: &Point3<f32>) -> Option<(Point3<f32>, usize, f32)> {
-        let mut min_dist = f32::MAX;
-        let mut min_idx = 0;
-
-        for (i, pt) in self.points.iter().enumerate() {
-            let dist = (pt - query).norm_squared();
-            if dist < min_dist {
-                min_dist = dist;
-                min_idx = i;
-            }
-        }
-
-        if min_dist < f32::MAX {
-            Some((self.points[min_idx], min_idx, min_dist))
-        } else {
-            None
-        }
+        self.tree
+            .nearest_neighbor(query)
+            .map(|(pt, idx, dist_sq)| (pt, idx, dist_sq))
     }
 }
 

@@ -28,6 +28,7 @@ futures = { workspace = true }
 wgpu = { workspace = true }
 rand = { workspace = true }
 bytemuck = { workspace = true }
+cv-registration = { workspace = true }
 
 [features]
 default = ["full-precision"]
@@ -55,6 +56,11 @@ path = "benches/normals.rs"
 name = "cubecl_vs_wgpu"
 harness = false
 path = "benches/cubecl_vs_wgpu.rs"
+
+[[bench]]
+name = "pipeline_3d"
+harness = false
+path = "benches/pipeline_3d.rs"
 
 [workspace]
 resolver = "2"

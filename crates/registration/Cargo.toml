@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 nalgebra = { workspace = true }
 cv-core = { workspace = true }
 cv-hal = { workspace = true }
+cv-3d = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
