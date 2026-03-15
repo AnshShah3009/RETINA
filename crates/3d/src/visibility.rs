@@ -8,6 +8,7 @@
 //! very large point clouds but requires a projection model (perspective camera).
 
 use nalgebra::{Matrix4, Point3, Vector3, Vector4};
+use rayon::prelude::*;
 
 /// Depth-buffer based hidden point removal.
 ///
@@ -59,38 +60,35 @@ pub fn depth_buffer_visibility(
 
     let vp = proj * view;
 
-    // Project all points to screen space and populate z-buffer.
+    // Project all points to screen space (parallel).
     let n = points.len();
-    let mut screen_coords: Vec<Option<(usize, usize, f64)>> = Vec::with_capacity(n);
+    let screen_coords: Vec<Option<(usize, usize, f64)>> = points
+        .par_iter()
+        .map(|p| {
+            let clip = vp * Vector4::new(p.x, p.y, p.z, 1.0);
+            if clip.w.abs() < 1e-15 {
+                return None;
+            }
+            let ndc_x = clip.x / clip.w;
+            let ndc_y = clip.y / clip.w;
+            let ndc_z = clip.z / clip.w;
 
-    for p in points {
-        let clip = vp * Vector4::new(p.x, p.y, p.z, 1.0);
-        if clip.w.abs() < 1e-15 {
-            screen_coords.push(None);
-            continue;
-        }
-        let ndc_x = clip.x / clip.w;
-        let ndc_y = clip.y / clip.w;
-        let ndc_z = clip.z / clip.w;
+            let sx = ((ndc_x + 1.0) * 0.5 * w as f64) as isize;
+            let sy = ((1.0 - ndc_y) * 0.5 * h as f64) as isize;
 
-        // NDC to screen coordinates.
-        let sx = ((ndc_x + 1.0) * 0.5 * w as f64) as isize;
-        let sy = ((1.0 - ndc_y) * 0.5 * h as f64) as isize; // flip Y
+            if sx < 0
+                || sx >= w as isize
+                || sy < 0
+                || sy >= h as isize
+                || !(-1.0..=1.0).contains(&ndc_z)
+            {
+                return None;
+            }
 
-        if sx < 0
-            || sx >= w as isize
-            || sy < 0
-            || sy >= h as isize
-            || !(-1.0..=1.0).contains(&ndc_z)
-        {
-            screen_coords.push(None);
-            continue;
-        }
-
-        // Depth = distance from viewpoint (for z-buffer test).
-        let depth = (p - viewpoint).norm();
-        screen_coords.push(Some((sx as usize, sy as usize, depth)));
-    }
+            let depth = (p - viewpoint).norm();
+            Some((sx as usize, sy as usize, depth))
+        })
+        .collect();
 
     // Z-buffer: for each pixel, track the closest point index.
     let buf_size = w * h;

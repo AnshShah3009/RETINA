@@ -20,6 +20,7 @@
 //! ACM SIGGRAPH 2007.
 
 use nalgebra::Point3;
+use rayon::prelude::*;
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -57,9 +58,9 @@ pub fn hidden_point_removal(
         return Err("Need at least 4 points for HPR".into());
     }
 
-    // 1. Translate so viewpoint is at origin.
+    // 1. Translate so viewpoint is at origin (parallel).
     let translated: Vec<Point3<f64>> = points
-        .iter()
+        .par_iter()
         .map(|p| Point3::new(p.x - viewpoint.x, p.y - viewpoint.y, p.z - viewpoint.z))
         .collect();
 
@@ -70,25 +71,20 @@ pub fn hidden_point_removal(
         radius
     };
 
-    // 2. Spherical flip.
-    // flipped[i] corresponds to original point i.
-    // flipped[n] is the origin (viewpoint).
+    // 2. Spherical flip (parallel).
     let n = translated.len();
-    let mut flipped: Vec<Point3<f64>> = Vec::with_capacity(n + 1);
-    for p in &translated {
-        let norm = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt();
-        if norm < 1e-15 {
-            // Point coincides with viewpoint — always visible.
-            flipped.push(Point3::origin());
-        } else {
-            let factor = 2.0 * (r - norm) / norm;
-            flipped.push(Point3::new(
-                p.x + factor * p.x,
-                p.y + factor * p.y,
-                p.z + factor * p.z,
-            ));
-        }
-    }
+    let mut flipped: Vec<Point3<f64>> = translated
+        .par_iter()
+        .map(|p| {
+            let norm = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt();
+            if norm < 1e-15 {
+                Point3::origin()
+            } else {
+                let factor = 2.0 * (r - norm) / norm;
+                Point3::new(p.x + factor * p.x, p.y + factor * p.y, p.z + factor * p.z)
+            }
+        })
+        .collect();
     // Add the origin (viewpoint).
     flipped.push(Point3::origin());
 
