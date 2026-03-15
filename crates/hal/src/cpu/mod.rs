@@ -1518,12 +1518,85 @@ impl ComputeContext for CpuBackend {
         _uniforms: &[u8],
         _workgroups: (u32, u32, u32),
     ) -> Result<()> {
-        Err(crate::Error::NotSupported(format!(
-            "Generic kernel dispatch ('{}') is not supported on the CPU backend. \
-             Custom compute kernels require a GPU backend (WGPU/CubeCL). \
-             Use the dedicated ComputeContext methods for built-in operations instead.",
-            name,
-        )))
+        // The CPU backend cannot execute GPU shader source code directly.
+        // However, for well-known kernel names we provide guidance on the
+        // equivalent dedicated ComputeContext method that should be used
+        // instead.  This makes the error actionable rather than opaque.
+        let suggestion = match name {
+            n if n.contains("threshold") => {
+                Some("Use ComputeContext::threshold() for thresholding operations.")
+            }
+            n if n.contains("convolve") || n.contains("conv2d") || n.contains("convolution") => {
+                Some("Use ComputeContext::convolve_2d() for convolution operations.")
+            }
+            n if n.contains("sobel") => {
+                Some("Use ComputeContext::sobel() for Sobel gradient computation.")
+            }
+            n if n.contains("canny") => {
+                Some("Use ComputeContext::canny() for Canny edge detection.")
+            }
+            n if n.contains("gaussian") || n.contains("blur") => {
+                Some("Use ComputeContext::gaussian_blur() for Gaussian blurring.")
+            }
+            n if n.contains("morph") || n.contains("erode") || n.contains("dilate") => {
+                Some("Use ComputeContext::morphology() for morphological operations.")
+            }
+            n if n.contains("warp") || n.contains("affine") || n.contains("perspective") => {
+                Some("Use ComputeContext::warp() for geometric transformations.")
+            }
+            n if n.contains("nms") || n.contains("non_max") => {
+                Some("Use ComputeContext::nms() or nms_boxes() for non-maximum suppression.")
+            }
+            n if n.contains("hough") => {
+                Some("Use ComputeContext::hough_lines() or hough_circles() for Hough transforms.")
+            }
+            n if n.contains("resize") => Some("Use ComputeContext::resize() for image resizing."),
+            n if n.contains("color")
+                || n.contains("cvt")
+                || n.contains("rgb")
+                || n.contains("gray") =>
+            {
+                Some("Use ComputeContext::cvt_color() for color space conversion.")
+            }
+            n if n.contains("match_template") || n.contains("template") => {
+                Some("Use ComputeContext::match_template() for template matching.")
+            }
+            n if n.contains("bilateral") => {
+                Some("Use ComputeContext::bilateral_filter() for bilateral filtering.")
+            }
+            n if n.contains("fast") || n.contains("keypoint") => {
+                Some("Use ComputeContext::fast_detect() for FAST keypoint detection.")
+            }
+            n if n.contains("subtract") || n.contains("sub") => {
+                Some("Use ComputeContext::subtract() for element-wise subtraction.")
+            }
+            n if n.contains("sift") => {
+                Some("Use ComputeContext::sift_extrema() / compute_sift_descriptors() for SIFT.")
+            }
+            n if n.contains("icp") => {
+                Some("Use ComputeContext::icp_correspondences() / icp_accumulate() for ICP.")
+            }
+            n if n.contains("stereo") || n.contains("disparity") => {
+                Some("Use ComputeContext::stereo_match() for stereo matching.")
+            }
+            n if n.contains("optical_flow") || n.contains("lk") => {
+                Some("Use ComputeContext::optical_flow_lk() for optical flow computation.")
+            }
+            _ => None,
+        };
+
+        let detail = match suggestion {
+            Some(hint) => format!("CPU backend cannot execute GPU kernel '{}'. {}", name, hint),
+            None => format!(
+                "CPU backend cannot execute GPU kernel '{}'. \
+                 This kernel has no known CPU equivalent in ComputeContext. \
+                 Use a GPU backend (WGPU/CubeCL) for custom compute shaders, \
+                 or call the appropriate dedicated ComputeContext method instead.",
+                name
+            ),
+        };
+
+        Err(crate::Error::NotSupported(detail))
     }
 
     fn threshold<

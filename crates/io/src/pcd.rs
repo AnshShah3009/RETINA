@@ -53,11 +53,7 @@ pub fn read_pcd<R: BufRead>(mut reader: R) -> Result<PointCloud> {
             parse_pcd_ascii(lines, header.points_count, &header.fields)
         }
         PcdData::Binary => parse_pcd_binary(reader, &header),
-        PcdData::BinaryCompressed => Err(Error::InvalidInput(
-            "Binary compressed PCD requires LZF decompression which is not yet supported. \
-             Use DATA ascii or DATA binary instead."
-                .to_string(),
-        )),
+        PcdData::BinaryCompressed => parse_pcd_binary_compressed(reader, &header),
     }
 }
 
@@ -419,6 +415,291 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
     cloud.colors = colors;
 
     Ok(cloud)
+}
+
+/// Parse binary_compressed PCD data after the header has been read.
+///
+/// After the DATA line, the format contains two little-endian u32 values
+/// (compressed_size, uncompressed_size), followed by compressed_size bytes
+/// of LZF-compressed data. The decompressed data has the same layout as
+/// binary PCD point data.
+fn parse_pcd_binary_compressed<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointCloud> {
+    // Read compressed_size and uncompressed_size (two u32 LE values)
+    let mut size_buf = [0u8; 8];
+    reader.read_exact(&mut size_buf).map_err(|e| {
+        Error::ParseError(format!(
+            "PCD binary_compressed: failed to read size header: {}",
+            e
+        ))
+    })?;
+    let compressed_size = u32::from_le_bytes(size_buf[0..4].try_into().unwrap()) as usize;
+    let uncompressed_size = u32::from_le_bytes(size_buf[4..8].try_into().unwrap()) as usize;
+
+    // Read the compressed data
+    let mut compressed = vec![0u8; compressed_size];
+    reader.read_exact(&mut compressed).map_err(|e| {
+        Error::ParseError(format!(
+            "PCD binary_compressed: failed to read {} compressed bytes: {}",
+            compressed_size, e
+        ))
+    })?;
+
+    // Decompress
+    let decompressed = lzf_decompress(&compressed, uncompressed_size).map_err(|e| {
+        Error::ParseError(format!(
+            "PCD binary_compressed: LZF decompression failed: {}",
+            e
+        ))
+    })?;
+
+    if decompressed.len() != uncompressed_size {
+        return Err(Error::ParseError(format!(
+            "PCD binary_compressed: expected {} decompressed bytes, got {}",
+            uncompressed_size,
+            decompressed.len()
+        )));
+    }
+
+    // Parse the decompressed data as binary PCD
+    let cursor = std::io::Cursor::new(decompressed);
+    parse_pcd_binary(cursor, header)
+}
+
+/// LZF decompression (compatible with PCL's binary_compressed PCD format).
+///
+/// LZF is a simple byte-oriented compression algorithm. The compressed stream
+/// consists of literal runs and back-references:
+/// - Control byte < 32: literal run of (ctrl + 1) bytes
+/// - Control byte >= 32: back-reference with length and offset
+fn lzf_decompress(input: &[u8], expected_size: usize) -> std::result::Result<Vec<u8>, String> {
+    let mut out = Vec::with_capacity(expected_size);
+    let mut i = 0;
+
+    while i < input.len() {
+        let ctrl = input[i] as usize;
+        i += 1;
+
+        if ctrl < 32 {
+            // Literal run of ctrl+1 bytes
+            let count = ctrl + 1;
+            if i + count > input.len() {
+                return Err(format!(
+                    "LZF: literal run overflows input at offset {}: need {} bytes, have {}",
+                    i,
+                    count,
+                    input.len() - i
+                ));
+            }
+            out.extend_from_slice(&input[i..i + count]);
+            i += count;
+        } else {
+            // Back-reference
+            let mut len = (ctrl >> 5) + 2;
+            if len == 9 {
+                // Extended length
+                if i >= input.len() {
+                    return Err("LZF: unexpected end of input in extended length".to_string());
+                }
+                len += input[i] as usize;
+                i += 1;
+            }
+            if i >= input.len() {
+                return Err("LZF: unexpected end of input in back-reference offset".to_string());
+            }
+            let offset = ((ctrl & 0x1f) << 8) | (input[i] as usize);
+            i += 1;
+            let offset = offset + 1;
+
+            if offset > out.len() {
+                return Err(format!(
+                    "LZF: back-reference offset {} exceeds output length {}",
+                    offset,
+                    out.len()
+                ));
+            }
+
+            let start = out.len() - offset;
+            // Copy byte-by-byte (source and dest may overlap)
+            for j in 0..len {
+                out.push(out[start + j]);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// LZF compression (compatible with PCL's binary_compressed PCD format).
+///
+/// This is a simple implementation using a hash table for finding matches.
+/// Produces output that can be decompressed by `lzf_decompress`.
+fn lzf_compress(input: &[u8]) -> Vec<u8> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(input.len());
+    // Hash table mapping 3-byte sequences to positions
+    const HTAB_SIZE: usize = 1 << 16;
+    let mut htab = vec![0usize; HTAB_SIZE];
+
+    let mut ip = 0; // input position
+    let mut lit_start = ip; // start of current literal run
+    let mut lit_count = 0usize; // number of literal bytes pending
+
+    // Reserve space for the first literal control byte
+    let mut lit_ctrl_pos = out.len();
+    out.push(0);
+
+    let in_len = input.len();
+
+    while ip < in_len {
+        // Need at least 3 bytes to attempt a match
+        if ip + 2 >= in_len {
+            // Emit remaining as literals
+            out.push(input[ip]);
+            lit_count += 1;
+            ip += 1;
+
+            if lit_count == 32 {
+                out[lit_ctrl_pos] = (lit_count - 1) as u8;
+                lit_count = 0;
+                lit_ctrl_pos = out.len();
+                out.push(0);
+            }
+            continue;
+        }
+
+        // Compute hash of 3-byte sequence
+        let v = (input[ip] as u32) | ((input[ip + 1] as u32) << 8) | ((input[ip + 2] as u32) << 16);
+        let h = ((v.wrapping_mul(0x1e35a7bd)) >> 16) as usize & (HTAB_SIZE - 1);
+
+        let r = htab[h]; // reference position
+        htab[h] = ip;
+
+        // Check if this is a valid match
+        let offset = ip - r; // distance back
+        if offset > 0
+            && offset <= 8192
+            && r < ip
+            && ip + 2 < in_len
+            && r + 2 < in_len
+            && input[r] == input[ip]
+            && input[r + 1] == input[ip + 1]
+            && input[r + 2] == input[ip + 2]
+        {
+            // Found a match - determine length
+            let mut match_len = 3;
+            let max_match = 264.min(in_len - ip); // max length for LZF
+            while match_len < max_match && input[r + match_len] == input[ip + match_len] {
+                match_len += 1;
+            }
+
+            // Flush pending literals
+            if lit_count > 0 {
+                out[lit_ctrl_pos] = (lit_count - 1) as u8;
+            } else {
+                // Remove the unused control byte
+                out.pop();
+            }
+
+            let back_offset = offset - 1;
+
+            if match_len <= 8 {
+                // Short match: length encoded in upper 3 bits of control byte
+                let ctrl = ((match_len - 2) << 5) | (back_offset >> 8);
+                out.push(ctrl as u8);
+                out.push((back_offset & 0xff) as u8);
+            } else {
+                // Long match: ctrl >> 5 == 7 signals extended length
+                let ctrl = (7 << 5) | (back_offset >> 8);
+                out.push(ctrl as u8);
+                out.push((match_len - 9) as u8);
+                out.push((back_offset & 0xff) as u8);
+            }
+
+            ip += match_len;
+
+            // Start new literal run
+            lit_count = 0;
+            lit_ctrl_pos = out.len();
+            out.push(0);
+            lit_start = ip;
+        } else {
+            // No match, emit literal
+            out.push(input[ip]);
+            lit_count += 1;
+            ip += 1;
+
+            if lit_count == 32 {
+                out[lit_ctrl_pos] = (lit_count - 1) as u8;
+                lit_count = 0;
+                lit_ctrl_pos = out.len();
+                out.push(0);
+                lit_start = ip;
+            }
+        }
+    }
+
+    // Flush remaining literals
+    if lit_count > 0 {
+        out[lit_ctrl_pos] = (lit_count - 1) as u8;
+    } else {
+        // Remove unused control byte
+        out.pop();
+    }
+
+    let _ = lit_start; // suppress unused warning
+
+    out
+}
+
+/// Write point cloud to PCD format (binary_compressed with LZF compression).
+///
+/// The header is ASCII, followed by two u32 LE values (compressed_size,
+/// uncompressed_size), then the LZF-compressed point data.
+pub fn write_pcd_binary_compressed<W: Write>(writer: &mut W, cloud: &PointCloud) -> Result<()> {
+    let num_points = cloud.len();
+
+    write_pcd_header(writer, cloud, "binary_compressed")?;
+
+    // Build the uncompressed binary data (same format as DATA binary)
+    let mut raw_data = Vec::new();
+    for i in 0..num_points {
+        let p = cloud.points[i];
+        raw_data.extend_from_slice(&p.x.to_le_bytes());
+        raw_data.extend_from_slice(&p.y.to_le_bytes());
+        raw_data.extend_from_slice(&p.z.to_le_bytes());
+
+        if let Some(ref normals) = cloud.normals {
+            let n = normals[i];
+            raw_data.extend_from_slice(&n.x.to_le_bytes());
+            raw_data.extend_from_slice(&n.y.to_le_bytes());
+            raw_data.extend_from_slice(&n.z.to_le_bytes());
+        }
+
+        if let Some(ref colors) = cloud.colors {
+            let c = colors[i];
+            let r = (c.x.clamp(0.0, 1.0) * 255.0) as u32;
+            let g = (c.y.clamp(0.0, 1.0) * 255.0) as u32;
+            let b = (c.z.clamp(0.0, 1.0) * 255.0) as u32;
+            let packed: u32 = (r << 16) | (g << 8) | b;
+            let float_bits = f32::from_bits(packed);
+            raw_data.extend_from_slice(&float_bits.to_le_bytes());
+        }
+    }
+
+    // Compress with LZF
+    let compressed = lzf_compress(&raw_data);
+
+    // Write compressed_size and uncompressed_size
+    writer.write_all(&(compressed.len() as u32).to_le_bytes())?;
+    writer.write_all(&(raw_data.len() as u32).to_le_bytes())?;
+
+    // Write compressed data
+    writer.write_all(&compressed)?;
+
+    Ok(())
 }
 
 /// Compute byte offsets for each field within a point record.
@@ -842,29 +1123,133 @@ mod tests {
     }
 
     #[test]
-    fn test_pcd_binary_compressed_error_message() {
-        // Construct a minimal PCD with DATA binary_compressed header
-        let header = "# .PCD v0.7\n\
-                       VERSION 0.7\n\
-                       FIELDS x y z\n\
-                       SIZE 4 4 4\n\
-                       TYPE F F F\n\
-                       COUNT 1 1 1\n\
-                       WIDTH 1\n\
-                       HEIGHT 1\n\
-                       POINTS 1\n\
-                       DATA binary_compressed\n";
+    fn test_pcd_binary_compressed_round_trip_basic() {
+        let cloud = PointCloud::new(vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 2.0, 3.0),
+            Point3::new(-1.0, -2.0, -3.0),
+        ]);
 
-        let reader = BufReader::new(Cursor::new(header.as_bytes().to_vec()));
-        let result = read_pcd(reader);
+        let mut buffer = Vec::new();
+        write_pcd_binary_compressed(&mut buffer, &cloud).expect("compressed write failed");
 
-        assert!(result.is_err());
-        let err_msg = format!("{}", result.unwrap_err());
+        let reader = BufReader::new(Cursor::new(buffer));
+        let read_cloud = read_pcd(reader).expect("compressed read failed");
+
+        assert_eq!(read_cloud.len(), 3);
+        assert!((read_cloud.points[0].x - 0.0).abs() < 1e-6);
+        assert!((read_cloud.points[1].x - 1.0).abs() < 1e-6);
+        assert!((read_cloud.points[1].y - 2.0).abs() < 1e-6);
+        assert!((read_cloud.points[1].z - 3.0).abs() < 1e-6);
+        assert!((read_cloud.points[2].x - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_pcd_binary_compressed_with_normals_and_colors() {
+        let mut cloud =
+            PointCloud::new(vec![Point3::new(1.0, 2.0, 3.0), Point3::new(4.0, 5.0, 6.0)]);
+        cloud.normals = Some(vec![
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+        ]);
+        cloud.colors = Some(vec![Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)]);
+
+        let mut buffer = Vec::new();
+        write_pcd_binary_compressed(&mut buffer, &cloud).expect("compressed write failed");
+
+        let reader = BufReader::new(Cursor::new(buffer));
+        let read_cloud = read_pcd(reader).expect("compressed read failed");
+
+        assert_eq!(read_cloud.len(), 2);
+        assert!(read_cloud.normals.is_some());
+        let normals = read_cloud.normals.unwrap();
+        assert!((normals[0].z - 1.0).abs() < 1e-6);
+        assert!((normals[1].x - 1.0).abs() < 1e-6);
+
+        assert!(read_cloud.colors.is_some());
+        let colors = read_cloud.colors.unwrap();
+        assert!((colors[0].x - 1.0).abs() < 0.01);
+        assert!((colors[1].y - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_pcd_binary_compressed_large() {
+        let n = 1000;
+        let points: Vec<_> = (0..n)
+            .map(|i| Point3::new(i as f32 * 0.1, i as f32 * -0.2, i as f32 * 0.3))
+            .collect();
+        let cloud = PointCloud::new(points);
+
+        let mut buffer = Vec::new();
+        write_pcd_binary_compressed(&mut buffer, &cloud).expect("compressed write failed");
+
+        let reader = BufReader::new(Cursor::new(buffer));
+        let read_cloud = read_pcd(reader).expect("compressed read failed");
+
+        assert_eq!(read_cloud.len(), n);
+        for i in 0..n {
+            assert_eq!(read_cloud.points[i].x, cloud.points[i].x);
+            assert_eq!(read_cloud.points[i].y, cloud.points[i].y);
+            assert_eq!(read_cloud.points[i].z, cloud.points[i].z);
+        }
+    }
+
+    #[test]
+    fn test_pcd_binary_compressed_empty() {
+        let cloud = PointCloud::new(vec![]);
+
+        let mut buffer = Vec::new();
+        write_pcd_binary_compressed(&mut buffer, &cloud).expect("compressed write failed");
+
+        let reader = BufReader::new(Cursor::new(buffer));
+        let read_cloud = read_pcd(reader).expect("compressed read failed");
+
+        assert_eq!(read_cloud.len(), 0);
+    }
+
+    #[test]
+    fn test_lzf_round_trip() {
+        // Test the LZF compress/decompress cycle directly
+        let data = b"Hello, World! Hello, World! Hello, World! This is a test of LZF compression.";
+        let compressed = lzf_compress(data);
+        let decompressed = lzf_decompress(&compressed, data.len()).expect("decompress failed");
+        assert_eq!(&decompressed, data);
+    }
+
+    #[test]
+    fn test_lzf_round_trip_repeated() {
+        // Data with lots of repetition (good for compression)
+        let mut data = Vec::new();
+        for _ in 0..100 {
+            data.extend_from_slice(b"ABCDEFGH");
+        }
+        let compressed = lzf_compress(&data);
         assert!(
-            err_msg.contains("LZF"),
-            "Error should mention LZF decompression: {}",
-            err_msg
+            compressed.len() < data.len(),
+            "Compressed size {} should be less than original {}",
+            compressed.len(),
+            data.len()
         );
+        let decompressed = lzf_decompress(&compressed, data.len()).expect("decompress failed");
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_lzf_round_trip_random_ish() {
+        // Less compressible data
+        let data: Vec<u8> = (0..256).map(|i| (i * 37 + 13) as u8).collect();
+        let compressed = lzf_compress(&data);
+        let decompressed = lzf_decompress(&compressed, data.len()).expect("decompress failed");
+        assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_lzf_empty() {
+        let data = b"";
+        let compressed = lzf_compress(data);
+        assert!(compressed.is_empty());
+        let decompressed = lzf_decompress(&compressed, 0).expect("decompress failed");
+        assert!(decompressed.is_empty());
     }
 
     #[test]

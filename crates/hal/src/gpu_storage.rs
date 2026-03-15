@@ -86,15 +86,40 @@ impl GpuStorageMarker for GpuStorage {
     type Element = f32;
 
     fn to_cpu(&self) -> std::result::Result<Vec<Self::Element>, String> {
-        // GpuStorage is a lightweight handle; it does not hold a reference to the
-        // wgpu Device/Queue needed for a read-back.  To transfer data from GPU to
-        // CPU, use GpuContext::download_buffer (which owns the device) or the
-        // runtime orchestrator's transfer API instead of calling this method
-        // directly on the storage handle.
+        // GpuStorage is a lightweight handle-based design that does not hold a
+        // direct reference to a wgpu buffer.  Attempt a best-effort transfer by
+        // checking whether a global GPU context is available and whether the
+        // handle can be resolved.
+        //
+        // If a global GpuContext has been initialised we can at least verify
+        // reachability.  However, the handle-based GpuStorage does not maintain a
+        // mapping from BufferHandle → wgpu::Buffer, so a true read-back is not
+        // currently possible through this path.
+        //
+        // For a working GPU→CPU transfer, prefer:
+        //   1. `Tensor<T, WgpuGpuStorage<T>>::to_cpu()` (via the TensorToCpu trait)
+        //   2. `GpuContext::download_buffer()` on the wgpu-backed storage
+        //   3. The runtime orchestrator's transfer API
+
+        // Check whether a global GPU context exists.  If it does, include its
+        // device info in the error to aid debugging.
+        if let Ok(_ctx) = crate::gpu::GpuContext::global() {
+            return Err(format!(
+                "Handle-based GpuStorage (handle={:?}, device={}) cannot perform \
+                 GPU→CPU readback because there is no BufferHandle→wgpu::Buffer \
+                 registry.  The global GpuContext is available but the handle \
+                 cannot be resolved to a concrete buffer.  Use \
+                 Tensor<T, WgpuGpuStorage<T>>::to_cpu() or the TensorToCpu trait \
+                 for GPU→CPU transfers.",
+                self.handle, self.device_id,
+            ));
+        }
+
         Err(format!(
-            "GPU to CPU transfer cannot be performed through GpuStorage alone \
-             (handle={:?}, device={}). Use GpuContext::download_buffer or the \
-             runtime orchestrator to read GPU data back to the host.",
+            "GPU→CPU transfer cannot be performed through handle-based GpuStorage \
+             (handle={:?}, device={}).  No global GPU context is available.  \
+             Use Tensor<T, WgpuGpuStorage<T>>::to_cpu() via the TensorToCpu trait, \
+             or ensure GpuContext::init_global() has been called.",
             self.handle, self.device_id,
         ))
     }
