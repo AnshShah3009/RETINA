@@ -4,9 +4,14 @@
 //! - KDTree for fast nearest neighbor search
 //! - Octree for spatial partitioning
 //! - VoxelGrid for voxelization
+//! - BVH for accelerated ray-triangle intersection
+
+pub mod bvh;
 
 use nalgebra::Point3;
 use std::collections::{BinaryHeap, HashMap};
+
+pub use bvh::Bvh;
 
 /// KDTree for nearest neighbor queries.
 ///

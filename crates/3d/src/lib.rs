@@ -108,7 +108,7 @@ pub use raycasting::{
     cast_ray_mesh, cast_rays_mesh, closest_point_on_mesh, closest_points_on_mesh,
     mesh_to_mesh_distance, point_inside_mesh, Ray, RayHit,
 };
-pub use spatial::{KDTree, Octree, VoxelGrid};
+pub use spatial::{Bvh, KDTree, Octree, VoxelGrid};
 pub use tsdf::{CameraIntrinsics, TSDFVolume, Triangle, VoxelBlock};
 
 pub use filters::*;

@@ -7,6 +7,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use cv_3d::mesh::reconstruction::poisson_reconstruction;
+use cv_3d::spatial::bvh::Bvh;
 use cv_3d::spatial::KDTree;
 use cv_3d::tsdf::CameraIntrinsics;
 use cv_3d::TSDFVolume;
@@ -321,6 +322,25 @@ fn bench_raycasting(c: &mut Criterion) {
                         black_box(verts),
                         black_box(&faces),
                     ))
+                });
+            });
+
+            // BVH-accelerated
+            let bvh = Bvh::build(verts, &faces);
+            group.bench_with_input(BenchmarkId::new("bvh", &label), &(), |b, _| {
+                b.iter(|| {
+                    let results: Vec<_> = origins
+                        .iter()
+                        .zip(dirs.iter())
+                        .map(|(o, d)| {
+                            bvh.intersect_ray(o, d, verts, &faces)
+                                .map(|(t, _fi, _u, _v)| {
+                                    let hit = Point3::from(o.coords + d * t);
+                                    (t, hit)
+                                })
+                        })
+                        .collect();
+                    black_box(results)
                 });
             });
         }
