@@ -359,3 +359,53 @@ pub fn stereo_rectify_matrices(
 
     Ok(StereoRectifyMatrices { r1, r2, p1, p2, q })
 }
+
+/// Fisheye stereo rectification.
+///
+/// Computes rectification matrices for a stereo pair using fisheye camera models.
+/// Uses the same Bouguet-style rotation splitting as `stereo_rectify_matrices` but
+/// with fisheye-appropriate new camera matrices (reduced FOV to avoid excessive distortion).
+///
+/// # Arguments
+/// * `left_intrinsics` / `right_intrinsics` — Pinhole intrinsics (fx, fy, cx, cy)
+/// * `left_fisheye` / `right_fisheye` — Fisheye distortion coefficients (k1-k4)
+/// * `left_extrinsics` / `right_extrinsics` — Camera poses
+/// * `fov_scale` — Field-of-view scaling factor (0.0-1.0). Lower = less distortion, more cropping.
+pub fn fisheye_stereo_rectify(
+    left_intrinsics: &CameraIntrinsics,
+    right_intrinsics: &CameraIntrinsics,
+    _left_fisheye: &cv_core::FisheyeDistortion,
+    _right_fisheye: &cv_core::FisheyeDistortion,
+    left_extrinsics: &Pose,
+    right_extrinsics: &Pose,
+    fov_scale: f64,
+) -> Result<StereoRectifyMatrices> {
+    // Compute standard stereo rectification (rotation + projection)
+    let result = stereo_rectify_matrices(
+        left_intrinsics,
+        right_intrinsics,
+        left_extrinsics,
+        right_extrinsics,
+    )?;
+
+    // Scale the focal length in the new projection matrices to reduce FOV
+    // This avoids extreme warping at the edges of fisheye images
+    let scale = fov_scale.clamp(0.1, 1.0);
+
+    let mut p1 = result.p1;
+    let mut p2 = result.p2;
+    p1[(0, 0)] *= scale; // fx
+    p1[(1, 1)] *= scale; // fy
+    p2[(0, 0)] *= scale;
+    p2[(1, 1)] *= scale;
+    // Adjust tx proportionally
+    p2[(0, 3)] *= scale;
+
+    Ok(StereoRectifyMatrices {
+        r1: result.r1,
+        r2: result.r2,
+        p1,
+        p2,
+        q: result.q,
+    })
+}

@@ -1048,4 +1048,235 @@ mod tests {
             nyq_gain
         );
     }
+
+    #[test]
+    fn test_dwt_haar_roundtrip() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let (approx, detail) = dwt(&x, Wavelet::Haar);
+        let reconstructed = idwt(&approx, &detail, Wavelet::Haar);
+        for (a, b) in x.iter().zip(reconstructed.iter()) {
+            assert!(
+                (a - b).abs() < 1e-10,
+                "DWT roundtrip failed: {} vs {}",
+                a,
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn test_dwt_db2_roundtrip() {
+        let x: Vec<f64> = (0..16).map(|i| (i as f64 * 0.5).sin()).collect();
+        let (approx, detail) = dwt(&x, Wavelet::Db2);
+        let reconstructed = idwt(&approx, &detail, Wavelet::Db2);
+        for (a, b) in x.iter().zip(reconstructed.iter()) {
+            assert!(
+                (a - b).abs() < 1e-10,
+                "DB2 roundtrip failed: {} vs {}",
+                a,
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn test_wavedec_levels() {
+        let x: Vec<f64> = (0..32).map(|i| i as f64).collect();
+        let coeffs = wavedec(&x, Wavelet::Haar, 3);
+        assert_eq!(coeffs.len(), 4); // 3 detail levels + 1 approx
+        let reconstructed = waverec(&coeffs, Wavelet::Haar);
+        for (a, b) in x.iter().zip(reconstructed.iter()) {
+            assert!((a - b).abs() < 1e-8);
+        }
+    }
+
+    #[test]
+    fn test_cwt_morlet() {
+        let x: Vec<f64> = (0..64).map(|i| (i as f64 * 0.2).sin()).collect();
+        let scales = vec![1.0, 2.0, 4.0, 8.0];
+        let result = cwt(&x, &scales, CwtWavelet::Morlet);
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].len(), 64);
+    }
+}
+
+// ── Wavelet Transforms ──────────────────────────────────────────────────────
+
+/// Wavelet family for DWT.
+#[derive(Debug, Clone, Copy)]
+pub enum Wavelet {
+    /// Haar wavelet (simplest, equivalent to db1)
+    Haar,
+    /// Daubechies-2 wavelet
+    Db2,
+    /// Daubechies-4 wavelet
+    Db4,
+}
+
+impl Wavelet {
+    /// Low-pass decomposition filter coefficients.
+    pub fn lo_d(&self) -> &'static [f64] {
+        match self {
+            Wavelet::Haar => &[
+                std::f64::consts::FRAC_1_SQRT_2,
+                std::f64::consts::FRAC_1_SQRT_2,
+            ],
+            Wavelet::Db2 => &[
+                -0.12940952255092145,
+                0.22414386804185735,
+                0.836516303737469,
+                0.48296291314469025,
+            ],
+            Wavelet::Db4 => &[
+                -0.010597401784997278,
+                0.032883011666982945,
+                0.030841381835986965,
+                -0.18703481171888114,
+                -0.02798376941698385,
+                0.6308807679295904,
+                0.7148465705525415,
+                0.23037781330885523,
+            ],
+        }
+    }
+
+    /// High-pass decomposition filter coefficients.
+    pub fn hi_d(&self) -> Vec<f64> {
+        let lo = self.lo_d();
+        let n = lo.len();
+        (0..n)
+            .map(|i| (-1.0f64).powi(i as i32) * lo[n - 1 - i])
+            .collect()
+    }
+
+    /// Low-pass reconstruction filter coefficients.
+    pub fn lo_r(&self) -> Vec<f64> {
+        self.lo_d().iter().rev().copied().collect()
+    }
+
+    /// High-pass reconstruction filter coefficients.
+    pub fn hi_r(&self) -> Vec<f64> {
+        let hi = self.hi_d();
+        hi.iter().rev().copied().collect()
+    }
+}
+
+/// 1D Discrete Wavelet Transform (single level) with periodic boundary.
+///
+/// Returns (approximation_coefficients, detail_coefficients).
+pub fn dwt(signal: &[f64], wavelet: Wavelet) -> (Vec<f64>, Vec<f64>) {
+    let lo = wavelet.lo_d();
+    let hi = wavelet.hi_d();
+    let n = signal.len();
+    let fl = lo.len();
+    let out_len = n / 2;
+
+    let mut approx = Vec::with_capacity(out_len);
+    let mut detail = Vec::with_capacity(out_len);
+
+    for i in 0..out_len {
+        let mut a = 0.0;
+        let mut d = 0.0;
+        for k in 0..fl {
+            let idx = (2 * i + fl - 1 - k) % n;
+            a += signal[idx] * lo[k];
+            d += signal[idx] * hi[k];
+        }
+        approx.push(a);
+        detail.push(d);
+    }
+
+    (approx, detail)
+}
+
+/// 1D Inverse Discrete Wavelet Transform (single level) with periodic boundary.
+pub fn idwt(approx: &[f64], detail: &[f64], wavelet: Wavelet) -> Vec<f64> {
+    let lo = wavelet.lo_r();
+    let hi = wavelet.hi_r();
+    let fl = lo.len();
+    let half = approx.len();
+    let n = half * 2;
+
+    let mut result = vec![0.0; n];
+
+    for i in 0..half {
+        for k in 0..fl {
+            let idx = (2 * i + k) % n;
+            result[idx] += approx[i] * lo[k] + detail[i] * hi[k];
+        }
+    }
+
+    result
+}
+
+/// Multi-level DWT decomposition.
+///
+/// Returns `[detail_level_n, ..., detail_level_1, approx_level_n]`.
+pub fn wavedec(signal: &[f64], wavelet: Wavelet, levels: usize) -> Vec<Vec<f64>> {
+    let mut coeffs = Vec::with_capacity(levels + 1);
+    let mut current = signal.to_vec();
+
+    for _ in 0..levels {
+        let (approx, detail) = dwt(&current, wavelet);
+        coeffs.push(detail);
+        current = approx;
+    }
+    coeffs.push(current); // final approximation
+    coeffs.reverse(); // [approx, detail_1, detail_2, ..., detail_n]
+    coeffs
+}
+
+/// Multi-level DWT reconstruction.
+///
+/// Input format: `[approx, detail_1, detail_2, ..., detail_n]` (same as wavedec output).
+pub fn waverec(coeffs: &[Vec<f64>], wavelet: Wavelet) -> Vec<f64> {
+    if coeffs.is_empty() {
+        return vec![];
+    }
+    let mut current = coeffs[0].clone();
+    for i in 1..coeffs.len() {
+        current = idwt(&current, &coeffs[i], wavelet);
+    }
+    current
+}
+
+/// Wavelet family for CWT (Continuous Wavelet Transform).
+#[derive(Debug, Clone, Copy)]
+pub enum CwtWavelet {
+    /// Morlet wavelet (complex sinusoid × Gaussian)
+    Morlet,
+    /// Mexican hat (Ricker) wavelet
+    MexicanHat,
+}
+
+/// Continuous Wavelet Transform.
+///
+/// Computes the CWT of `signal` at the given `scales`.
+/// Returns a 2D vector: `result[scale_idx][time_idx]`.
+pub fn cwt(signal: &[f64], scales: &[f64], wavelet: CwtWavelet) -> Vec<Vec<f64>> {
+    let n = signal.len();
+    scales
+        .iter()
+        .map(|&scale| {
+            (0..n)
+                .map(|t| {
+                    let mut sum = 0.0;
+                    for (k, &s) in signal.iter().enumerate() {
+                        let x = (k as f64 - t as f64) / scale;
+                        let psi = match wavelet {
+                            CwtWavelet::Morlet => (-0.5 * x * x).exp() * (5.0 * x).cos(),
+                            CwtWavelet::MexicanHat => {
+                                let x2 = x * x;
+                                (2.0 / (3.0_f64.sqrt() * std::f64::consts::PI.powf(0.25)))
+                                    * (1.0 - x2)
+                                    * (-0.5 * x2).exp()
+                            }
+                        };
+                        sum += s * psi;
+                    }
+                    sum / scale.sqrt()
+                })
+                .collect()
+        })
+        .collect()
 }

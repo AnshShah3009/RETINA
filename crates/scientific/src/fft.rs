@@ -300,4 +300,100 @@ mod tests {
             freq
         );
     }
+
+    #[test]
+    fn test_dct_roundtrip() {
+        let x: Vec<f64> = (0..8).map(|i| (i as f64 * 0.5).sin()).collect();
+        let c = dct(&x);
+        let r = idct(&c);
+        for (a, b) in x.iter().zip(r.iter()) {
+            assert!((a - b).abs() < 1e-10, "DCT roundtrip: {} vs {}", a, b);
+        }
+    }
+
+    #[test]
+    fn test_dst_roundtrip() {
+        let x: Vec<f64> = (0..8).map(|i| (i as f64 * 0.3).cos()).collect();
+        let s = dst(&x);
+        let r = idst(&s);
+        for (a, b) in x.iter().zip(r.iter()) {
+            assert!((a - b).abs() < 1e-10, "DST roundtrip: {} vs {}", a, b);
+        }
+    }
+}
+
+// ── DCT / DST (Discrete Cosine / Sine Transform) ───────────────────────────
+
+/// Type-II Discrete Cosine Transform (DCT-II), the "standard" DCT.
+///
+/// Used in JPEG compression, BM3D, and signal processing.
+pub fn dct(input: &[f64]) -> Vec<f64> {
+    let n = input.len();
+    if n == 0 {
+        return vec![];
+    }
+    let mut output = vec![0.0; n];
+    let scale = std::f64::consts::PI / n as f64;
+    for k in 0..n {
+        let mut sum = 0.0;
+        for i in 0..n {
+            sum += input[i] * (scale * (i as f64 + 0.5) * k as f64).cos();
+        }
+        output[k] = sum;
+    }
+    // Orthogonal normalization
+    output[0] *= (1.0 / n as f64).sqrt();
+    let norm = (2.0 / n as f64).sqrt();
+    for k in 1..n {
+        output[k] *= norm;
+    }
+    output
+}
+
+/// Type-III Discrete Cosine Transform (inverse DCT).
+pub fn idct(input: &[f64]) -> Vec<f64> {
+    let n = input.len();
+    if n == 0 {
+        return vec![];
+    }
+    let mut output = vec![0.0; n];
+    let scale = std::f64::consts::PI / n as f64;
+    let norm0 = (1.0 / n as f64).sqrt();
+    let norm = (2.0 / n as f64).sqrt();
+    for i in 0..n {
+        let mut sum = input[0] * norm0;
+        for k in 1..n {
+            sum += input[k] * norm * (scale * k as f64 * (i as f64 + 0.5)).cos();
+        }
+        output[i] = sum;
+    }
+    output
+}
+
+/// Discrete Sine Transform (DST-I, orthogonal).
+///
+/// Uses the Type-I DST basis: `sin(pi * (i+1) * (k+1) / (N+1))`.
+/// Orthogonal and self-inverse (up to scaling): `idst(dst(x)) == x`.
+pub fn dst(input: &[f64]) -> Vec<f64> {
+    let n = input.len();
+    if n == 0 {
+        return vec![];
+    }
+    let mut output = vec![0.0; n];
+    let scale = std::f64::consts::PI / (n + 1) as f64;
+    let norm = (2.0 / (n + 1) as f64).sqrt();
+    for k in 0..n {
+        let mut sum = 0.0;
+        for i in 0..n {
+            sum += input[i] * (scale * (i as f64 + 1.0) * (k as f64 + 1.0)).sin();
+        }
+        output[k] = sum * norm;
+    }
+    output
+}
+
+/// Inverse Discrete Sine Transform (DST-I is self-inverse with orthogonal normalization).
+pub fn idst(input: &[f64]) -> Vec<f64> {
+    // DST-I is its own inverse with orthogonal normalization
+    dst(input)
 }
