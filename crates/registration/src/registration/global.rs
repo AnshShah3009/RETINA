@@ -8,6 +8,7 @@
 use cv_core::point_cloud::PointCloud;
 use cv_core::{Error, Result};
 use nalgebra::{Matrix4, Point3, Vector3};
+use rayon::prelude::*;
 
 /// KDTree-backed nearest neighbor for O(log N) queries.
 struct SimpleNN {
@@ -399,28 +400,33 @@ pub fn registration_ransac_based_on_feature_matching(
     ransac_n: usize,
     max_iterations: usize,
 ) -> Result<GlobalRegistrationResult> {
-    // Find correspondences (Brute force)
-    let mut correspondences: Vec<(usize, usize, f32)> = Vec::new();
-    for (i, source_feature) in source_features.iter().enumerate() {
-        let mut min_dist = f32::MAX;
-        let mut min_idx = 0;
-        for (j, target_feature) in target_features.iter().enumerate() {
-            let dist = source_feature
-                .histogram
-                .iter()
-                .zip(target_feature.histogram.iter())
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f32>()
-                .sqrt();
-            if dist < min_dist {
-                min_dist = dist;
-                min_idx = j;
+    // Find correspondences (parallel brute-force — 33D histograms defeat KDTree)
+    let mut correspondences: Vec<(usize, usize, f32)> = source_features
+        .par_iter()
+        .enumerate()
+        .filter_map(|(i, source_feature)| {
+            let mut min_dist = f32::MAX;
+            let mut min_idx = 0;
+            for (j, target_feature) in target_features.iter().enumerate() {
+                let dist = source_feature
+                    .histogram
+                    .iter()
+                    .zip(target_feature.histogram.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                if dist < min_dist {
+                    min_dist = dist;
+                    min_idx = j;
+                }
             }
-        }
-        if min_dist < max_correspondence_distance {
-            correspondences.push((i, min_idx, min_dist));
-        }
-    }
+            if min_dist < max_correspondence_distance {
+                Some((i, min_idx, min_dist))
+            } else {
+                None
+            }
+        })
+        .collect();
 
     correspondences.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
     let top_correspondences: Vec<_> = correspondences.into_iter().take(1000).collect();
@@ -486,27 +492,29 @@ pub fn registration_fgr_based_on_feature_matching(
     target_features: &[FPFHFeature],
     option: FastGlobalRegistrationOption,
 ) -> Result<GlobalRegistrationResult> {
-    // --- 1. Feature matching: nearest neighbour in feature space ---
-    let mut correspondences: Vec<(usize, usize)> = Vec::new();
-
-    for (i, sf) in source_features.iter().enumerate() {
-        let mut min_dist = f32::MAX;
-        let mut min_idx = 0;
-        for (j, tf) in target_features.iter().enumerate() {
-            let dist: f32 = sf
-                .histogram
-                .iter()
-                .zip(tf.histogram.iter())
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f32>()
-                .sqrt();
-            if dist < min_dist {
-                min_dist = dist;
-                min_idx = j;
+    // --- 1. Feature matching: parallel nearest neighbour in feature space ---
+    let correspondences: Vec<(usize, usize)> = source_features
+        .par_iter()
+        .enumerate()
+        .map(|(i, sf)| {
+            let mut min_dist = f32::MAX;
+            let mut min_idx = 0;
+            for (j, tf) in target_features.iter().enumerate() {
+                let dist: f32 = sf
+                    .histogram
+                    .iter()
+                    .zip(tf.histogram.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                if dist < min_dist {
+                    min_dist = dist;
+                    min_idx = j;
+                }
             }
-        }
-        correspondences.push((i, min_idx));
-    }
+            (i, min_idx)
+        })
+        .collect();
 
     if correspondences.len() < 3 {
         return Err(Error::RuntimeError(

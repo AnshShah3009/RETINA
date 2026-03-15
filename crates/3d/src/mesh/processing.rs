@@ -222,7 +222,28 @@ pub fn loop_subdivision(mesh: &mut TriangleMesh) {
     let num_vertices = mesh.vertices.len();
     let num_faces = mesh.faces.len();
 
-    // Compute new edge vertices
+    // Precompute edge→opposite vertices map (O(f) instead of O(f²) per edge)
+    let mut edge_opposites: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for face in &mesh.faces {
+        for i in 0..3 {
+            let v0 = face[i];
+            let v1 = face[(i + 1) % 3];
+            let opp = face[(i + 2) % 3];
+            let edge = (v0.min(v1), v0.max(v1));
+            edge_opposites.entry(edge).or_default().push(opp);
+        }
+    }
+
+    // Precompute vertex→neighbors map (O(f) instead of O(v×f))
+    let mut vertex_neighbors: Vec<HashSet<usize>> = vec![HashSet::new(); num_vertices];
+    for face in &mesh.faces {
+        for i in 0..3 {
+            vertex_neighbors[face[i]].insert(face[(i + 1) % 3]);
+            vertex_neighbors[face[i]].insert(face[(i + 2) % 3]);
+        }
+    }
+
+    // Compute new edge vertices using precomputed adjacency
     let mut edge_vertices: HashMap<(usize, usize), usize> = HashMap::new();
     let mut new_vertices = mesh.vertices.clone();
 
@@ -233,19 +254,8 @@ pub fn loop_subdivision(mesh: &mut TriangleMesh) {
             let edge = (v0.min(v1), v0.max(v1));
 
             if let std::collections::hash_map::Entry::Vacant(e) = edge_vertices.entry(edge) {
-                // Find opposite vertices
-                let mut opposite_vertices = Vec::new();
-                for other_face in &mesh.faces {
-                    if other_face.contains(&v0) && other_face.contains(&v1) {
-                        for &v in other_face.iter() {
-                            if v != v0 && v != v1 {
-                                opposite_vertices.push(v);
-                            }
-                        }
-                    }
-                }
+                let opposite_vertices = edge_opposites.get(&edge).cloned().unwrap_or_default();
 
-                // Loop subdivision rule for edge vertex
                 let new_pos = if opposite_vertices.len() == 2 {
                     let p0 = mesh.vertices[v0];
                     let p1 = mesh.vertices[v1];
@@ -256,7 +266,6 @@ pub fn loop_subdivision(mesh: &mut TriangleMesh) {
                             + (o0.coords + o1.coords) * (1.0 / 8.0),
                     )
                 } else {
-                    // Boundary edge
                     let p0 = mesh.vertices[v0];
                     let p1 = mesh.vertices[v1];
                     (p0 + p1.coords) * 0.5
@@ -269,27 +278,17 @@ pub fn loop_subdivision(mesh: &mut TriangleMesh) {
         }
     }
 
-    // Update existing vertices (smoothing)
+    // Update existing vertices using precomputed neighbors
     let mut smoothed_vertices = new_vertices.clone();
 
     for i in 0..num_vertices {
-        let mut neighbors = Vec::new();
-        for face in &mesh.faces {
-            if face.contains(&i) {
-                for &v in face.iter() {
-                    if v != i && !neighbors.contains(&v) {
-                        neighbors.push(v);
-                    }
-                }
-            }
-        }
-
+        let neighbors = &vertex_neighbors[i];
         if !neighbors.is_empty() {
             let n = neighbors.len() as f32;
             let beta = if n > 3.0 { 3.0 / (8.0 * n) } else { 3.0 / 16.0 };
 
             let mut new_pos = new_vertices[i].coords * (1.0 - n * beta);
-            for &neighbor in &neighbors {
+            for &neighbor in neighbors {
                 new_pos += new_vertices[neighbor].coords * beta;
             }
             smoothed_vertices[i] = Point3::from(new_pos);
