@@ -1962,17 +1962,226 @@ impl ComputeContext for CpuBackend {
 
     fn tsdf_raycast<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
-        _tsdf_volume: &Tensor<T, S>,
-        _camera_pose: &[[T; 4]; 4],
-        _intrinsics: &[T; 4],
-        _image_size: (u32, u32),
-        _depth_range: (T, T),
-        _voxel_size: T,
+        tsdf_volume: &Tensor<T, S>,
+        camera_pose: &[[T; 4]; 4],
+        intrinsics: &[T; 4],
+        image_size: (u32, u32),
+        depth_range: (T, T),
+        voxel_size: T,
         _truncation: T,
     ) -> Result<Tensor<T, S>> {
-        Err(crate::Error::NotSupported(
-            "CPU tsdf_raycast not yet implemented".into(),
-        ))
+        // Volume layout: shape.width = vol_x, shape.height = vol_y,
+        // shape.channels = vol_z * 2 (interleaved tsdf + weight per voxel).
+        let vol_data = tsdf_volume
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("TSDF volume not on CPU".into()))?;
+
+        let vx = tsdf_volume.shape.width;
+        let vy = tsdf_volume.shape.height;
+        let vz = tsdf_volume.shape.channels / 2;
+
+        let (img_h, img_w) = (image_size.1 as usize, image_size.0 as usize);
+
+        let fx = intrinsics[0].to_f32();
+        let fy = intrinsics[1].to_f32();
+        let cx = intrinsics[2].to_f32();
+        let cy = intrinsics[3].to_f32();
+
+        let vs = voxel_size.to_f32();
+        let d_min = depth_range.0.to_f32();
+        let d_max = depth_range.1.to_f32();
+
+        // Camera pose is world-to-camera; we need camera-to-world (inverse).
+        // Extract rotation R (3x3) and translation t from the 4x4 matrix.
+        // For a rigid transform [R|t], inverse is [R^T | -R^T * t].
+        let p: [[f32; 4]; 4] = [
+            [
+                camera_pose[0][0].to_f32(),
+                camera_pose[0][1].to_f32(),
+                camera_pose[0][2].to_f32(),
+                camera_pose[0][3].to_f32(),
+            ],
+            [
+                camera_pose[1][0].to_f32(),
+                camera_pose[1][1].to_f32(),
+                camera_pose[1][2].to_f32(),
+                camera_pose[1][3].to_f32(),
+            ],
+            [
+                camera_pose[2][0].to_f32(),
+                camera_pose[2][1].to_f32(),
+                camera_pose[2][2].to_f32(),
+                camera_pose[2][3].to_f32(),
+            ],
+            [
+                camera_pose[3][0].to_f32(),
+                camera_pose[3][1].to_f32(),
+                camera_pose[3][2].to_f32(),
+                camera_pose[3][3].to_f32(),
+            ],
+        ];
+        // R^T
+        let rt = [
+            [p[0][0], p[1][0], p[2][0]],
+            [p[0][1], p[1][1], p[2][1]],
+            [p[0][2], p[1][2], p[2][2]],
+        ];
+        // Camera origin in world = -R^T * t
+        let cam_origin = [
+            -(rt[0][0] * p[0][3] + rt[0][1] * p[1][3] + rt[0][2] * p[2][3]),
+            -(rt[1][0] * p[0][3] + rt[1][1] * p[1][3] + rt[1][2] * p[2][3]),
+            -(rt[2][0] * p[0][3] + rt[2][1] * p[1][3] + rt[2][2] * p[2][3]),
+        ];
+
+        // Output: 4-channel image (depth + 3 normal components) packed as channels.
+        // Shape: channels=4, height=img_h, width=img_w
+        let out_len = 4 * img_h * img_w;
+        let mut out_data = vec![T::ZERO; out_len];
+
+        // Helper to get TSDF value at integer voxel coordinates
+        let get_tsdf = |ix: usize, iy: usize, iz: usize| -> f32 {
+            if ix >= vx || iy >= vy || iz >= vz {
+                return 1.0;
+            }
+            let plane_stride = vx * vy * 2;
+            let idx = iz * plane_stride + (iy * vx + ix) * 2;
+            vol_data[idx].to_f32()
+        };
+
+        // Trilinear interpolation of TSDF
+        let sample_tsdf = |wx: f32, wy: f32, wz: f32| -> f32 {
+            // Convert world coords to voxel coords
+            let vxf = wx / vs - 0.5;
+            let vyf = wy / vs - 0.5;
+            let vzf = wz / vs - 0.5;
+
+            if vxf < 0.0 || vyf < 0.0 || vzf < 0.0 {
+                return 1.0;
+            }
+
+            let ix = vxf as usize;
+            let iy = vyf as usize;
+            let iz = vzf as usize;
+
+            if ix + 1 >= vx || iy + 1 >= vy || iz + 1 >= vz {
+                return 1.0;
+            }
+
+            let fx = vxf - ix as f32;
+            let fy = vyf - iy as f32;
+            let fz = vzf - iz as f32;
+
+            let c000 = get_tsdf(ix, iy, iz);
+            let c100 = get_tsdf(ix + 1, iy, iz);
+            let c010 = get_tsdf(ix, iy + 1, iz);
+            let c110 = get_tsdf(ix + 1, iy + 1, iz);
+            let c001 = get_tsdf(ix, iy, iz + 1);
+            let c101 = get_tsdf(ix + 1, iy, iz + 1);
+            let c011 = get_tsdf(ix, iy + 1, iz + 1);
+            let c111 = get_tsdf(ix + 1, iy + 1, iz + 1);
+
+            let c00 = c000 * (1.0 - fx) + c100 * fx;
+            let c10 = c010 * (1.0 - fx) + c110 * fx;
+            let c01 = c001 * (1.0 - fx) + c101 * fx;
+            let c11 = c011 * (1.0 - fx) + c111 * fx;
+
+            let c0 = c00 * (1.0 - fy) + c10 * fy;
+            let c1 = c01 * (1.0 - fy) + c11 * fy;
+
+            c0 * (1.0 - fz) + c1 * fz
+        };
+
+        // Step size for ray marching (half a voxel)
+        let step = vs * 0.5;
+
+        // For each pixel, cast a ray
+        for v in 0..img_h {
+            for u in 0..img_w {
+                // Compute ray direction in camera space
+                let dx = (u as f32 - cx) / fx;
+                let dy = (v as f32 - cy) / fy;
+                let dz = 1.0_f32;
+
+                // Transform ray direction to world space using R^T
+                let dir = [
+                    rt[0][0] * dx + rt[0][1] * dy + rt[0][2] * dz,
+                    rt[1][0] * dx + rt[1][1] * dy + rt[1][2] * dz,
+                    rt[2][0] * dx + rt[2][1] * dy + rt[2][2] * dz,
+                ];
+                let dir_len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+                let dir = [dir[0] / dir_len, dir[1] / dir_len, dir[2] / dir_len];
+
+                // March along the ray
+                let mut t = d_min;
+                let mut prev_tsdf = 1.0_f32;
+                let mut found = false;
+                let mut hit_depth = 0.0_f32;
+                let mut hit_pos = [0.0_f32; 3];
+
+                while t < d_max {
+                    let pos = [
+                        cam_origin[0] + dir[0] * t,
+                        cam_origin[1] + dir[1] * t,
+                        cam_origin[2] + dir[2] * t,
+                    ];
+
+                    let tsdf_val = sample_tsdf(pos[0], pos[1], pos[2]);
+
+                    // Detect zero-crossing (positive to negative)
+                    if prev_tsdf > 0.0 && tsdf_val < 0.0 {
+                        // Linear interpolation to find exact crossing
+                        let t_cross = t - step * tsdf_val / (prev_tsdf - tsdf_val);
+                        // Clamp to avoid going backwards
+                        let t_cross = if t_cross < t - step {
+                            t - step
+                        } else {
+                            t_cross
+                        };
+                        hit_depth = t_cross;
+                        hit_pos = [
+                            cam_origin[0] + dir[0] * t_cross,
+                            cam_origin[1] + dir[1] * t_cross,
+                            cam_origin[2] + dir[2] * t_cross,
+                        ];
+                        found = true;
+                        break;
+                    }
+
+                    prev_tsdf = tsdf_val;
+                    t += step;
+                }
+
+                let pix = v * img_w + u;
+                if found {
+                    // Store depth
+                    out_data[pix] = T::from_f32(hit_depth);
+
+                    // Compute normal via central differences of TSDF
+                    let eps = vs * 0.5;
+                    let gx = sample_tsdf(hit_pos[0] + eps, hit_pos[1], hit_pos[2])
+                        - sample_tsdf(hit_pos[0] - eps, hit_pos[1], hit_pos[2]);
+                    let gy = sample_tsdf(hit_pos[0], hit_pos[1] + eps, hit_pos[2])
+                        - sample_tsdf(hit_pos[0], hit_pos[1] - eps, hit_pos[2]);
+                    let gz = sample_tsdf(hit_pos[0], hit_pos[1], hit_pos[2] + eps)
+                        - sample_tsdf(hit_pos[0], hit_pos[1], hit_pos[2] - eps);
+                    let norm_len = (gx * gx + gy * gy + gz * gz).sqrt();
+                    let (nx, ny, nz) = if norm_len > 1e-10 {
+                        (gx / norm_len, gy / norm_len, gz / norm_len)
+                    } else {
+                        (0.0, 0.0, 1.0)
+                    };
+                    out_data[img_h * img_w + pix] = T::from_f32(nx);
+                    out_data[2 * img_h * img_w + pix] = T::from_f32(ny);
+                    out_data[3 * img_h * img_w + pix] = T::from_f32(nz);
+                }
+                // else: all zeros (no hit)
+            }
+        }
+
+        let out_shape = TensorShape::new(4, img_h, img_w);
+        Tensor::from_vec(out_data, out_shape)
+            .map_err(|e| crate::Error::RuntimeError(format!("{e}")))
     }
 
     fn tsdf_extract_mesh<

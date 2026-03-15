@@ -722,64 +722,176 @@ pub mod stereo {
 pub mod registration {
     use super::*;
 
-    /// ICP point-to-plane registration: NOT IMPLEMENTED
+    /// Simple ICP point-to-plane registration.
     ///
-    /// This function is a stub and returns an error indicating that the algorithm
-    /// is not yet implemented in the GPU module. Point-to-plane ICP requires:
-    /// 1. Surface normal computation
-    /// 2. Iterative closest point search with plane distance metrics
-    /// 3. Robust outlier rejection
-    ///
-    /// To use ICP registration, use the `cv-registration` crate instead.
+    /// For full-featured ICP (multi-scale, robust kernels, colored),
+    /// use the `cv-registration` crate instead.
     pub fn icp_point_to_plane(
-        _s: &[Point3<f32>],
-        _t: &[Point3<f32>],
-        _tn: &[Vector3<f32>],
-        _dist: f32,
-        _iters: usize,
+        source: &[Point3<f32>],
+        target: &[Point3<f32>],
+        target_normals: &[Vector3<f32>],
+        max_dist: f32,
+        max_iters: usize,
     ) -> Result<Matrix4<f32>, String> {
-        Err("ICP point-to-plane registration not yet implemented in GPU module. Use cv-registration crate instead.".to_string())
+        use crate::spatial::KDTree;
+
+        if target.is_empty() || source.is_empty() || target_normals.len() != target.len() {
+            return Err("Invalid input sizes".to_string());
+        }
+
+        let mut items: Vec<(Point3<f32>, usize)> =
+            target.iter().copied().zip(0..target.len()).collect();
+        let tree = KDTree::build(&mut items);
+        let mut transform = Matrix4::identity();
+        let max_dist_sq = max_dist * max_dist;
+
+        for _ in 0..max_iters {
+            // Find correspondences and build linear system (6x6)
+            let mut ata = nalgebra::Matrix6::<f64>::zeros();
+            let mut atb = nalgebra::Vector6::<f64>::zeros();
+            let mut n_corr = 0usize;
+
+            for sp in source {
+                // Transform source point
+                let tp = transform.transform_point(sp);
+                if let Some((closest, idx, dist_sq)) = tree.nearest_neighbor(&tp) {
+                    if dist_sq > max_dist_sq {
+                        continue;
+                    }
+                    let n: nalgebra::Vector3<f64> = nalgebra::Vector3::new(
+                        target_normals[idx].x as f64,
+                        target_normals[idx].y as f64,
+                        target_normals[idx].z as f64,
+                    );
+                    let p = nalgebra::Vector3::new(tp.x as f64, tp.y as f64, tp.z as f64);
+                    let q = nalgebra::Vector3::new(
+                        closest.x as f64,
+                        closest.y as f64,
+                        closest.z as f64,
+                    );
+                    let d = p - q;
+
+                    // Point-to-plane: minimize (n . (Rp + t - q))^2
+                    // Linearized: [n x p, n] . [alpha, beta, gamma, tx, ty, tz]^T = -n . d
+                    let cross = p.cross(&n);
+                    let row = nalgebra::Vector6::new(cross.x, cross.y, cross.z, n.x, n.y, n.z);
+                    let rhs = -n.dot(&d);
+
+                    ata += row * row.transpose();
+                    atb += row * rhs;
+                    n_corr += 1;
+                }
+            }
+
+            if n_corr < 6 {
+                return Err(format!("Too few correspondences: {n_corr}"));
+            }
+
+            // Solve 6x6 system
+            let x = ata
+                .lu()
+                .solve(&atb)
+                .ok_or("Failed to solve ICP linear system")?;
+
+            // Build incremental transform from twist vector
+            let (a, b, g) = (x[0] as f32, x[1] as f32, x[2] as f32);
+            let (tx, ty, tz) = (x[3] as f32, x[4] as f32, x[5] as f32);
+
+            let mut inc = Matrix4::identity();
+            inc[(0, 1)] = -g;
+            inc[(0, 2)] = b;
+            inc[(1, 0)] = g;
+            inc[(1, 2)] = -a;
+            inc[(2, 0)] = -b;
+            inc[(2, 1)] = a;
+            inc[(0, 3)] = tx;
+            inc[(1, 3)] = ty;
+            inc[(2, 3)] = tz;
+
+            transform = inc * transform;
+
+            // Convergence check
+            let delta = x.norm();
+            if delta < 1e-6 {
+                break;
+            }
+        }
+
+        Ok(transform)
     }
 }
 
 pub mod mesh {
     use super::*;
 
-    /// Laplacian mesh smoothing: NOT IMPLEMENTED
+    /// Laplacian mesh smoothing with uniform weights.
     ///
-    /// This function is a stub. Laplacian smoothing requires:
-    /// 1. Vertex-face adjacency graph construction
-    /// 2. Laplacian matrix computation (uniform or cotangent weights)
-    /// 3. Iterative smoothing with boundary preservation
-    ///
-    /// This operation is expensive on CPU and requires GPU acceleration
-    /// through a custom kernel implementation in cv-hal.
+    /// Iteratively moves each vertex towards the centroid of its neighbors.
+    /// `lambda` controls the smoothing strength (0..1, typically 0.5).
     pub fn laplacian_smooth(
-        _v: &mut [Point3<f32>],
-        _f: &[[usize; 3]],
-        _iters: usize,
-        _l: f32,
+        v: &mut [Point3<f32>],
+        f: &[[usize; 3]],
+        iters: usize,
+        lambda: f32,
     ) -> Result<(), String> {
-        Err(
-            "Laplacian mesh smoothing not yet implemented. Requires GPU kernel in cv-hal."
-                .to_string(),
-        )
+        if v.is_empty() || f.is_empty() {
+            return Ok(());
+        }
+        // Build adjacency: for each vertex, collect unique neighbor indices
+        let n = v.len();
+        let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for face in f {
+            for i in 0..3 {
+                let a = face[i];
+                let b = face[(i + 1) % 3];
+                if !adj[a].contains(&b) {
+                    adj[a].push(b);
+                }
+                if !adj[b].contains(&a) {
+                    adj[b].push(a);
+                }
+            }
+        }
+        // Iterative Laplacian smoothing
+        for _ in 0..iters {
+            let old = v.to_vec();
+            for i in 0..n {
+                if adj[i].is_empty() {
+                    continue;
+                }
+                let centroid: Vector3<f32> =
+                    adj[i].iter().map(|&j| old[j].coords).sum::<Vector3<f32>>()
+                        / adj[i].len() as f32;
+                v[i] = Point3::from(old[i].coords * (1.0 - lambda) + centroid * lambda);
+            }
+        }
+        Ok(())
     }
 
-    /// Compute vertex normals from mesh: NOT IMPLEMENTED
-    ///
-    /// Returns vertex normals computed by averaging face normals of adjacent faces.
-    /// This function is a stub that returns an error.
-    ///
-    /// Implementation should:
-    /// 1. For each face, compute normal from vertex positions
-    /// 2. For each vertex, accumulate normals from all adjacent faces
-    /// 3. Normalize per-vertex accumulated normals
+    /// Compute vertex normals by averaging adjacent face normals.
     pub fn compute_vertex_normals(
-        _v: &[Point3<f32>],
-        _f: &[[usize; 3]],
+        v: &[Point3<f32>],
+        f: &[[usize; 3]],
     ) -> Result<Vec<Vector3<f32>>, String> {
-        Err("Vertex normal computation not yet implemented.".to_string())
+        let mut normals = vec![Vector3::zeros(); v.len()];
+        for face in f {
+            let v0 = v[face[0]];
+            let v1 = v[face[1]];
+            let v2 = v[face[2]];
+            let e1 = v1 - v0;
+            let e2 = v2 - v0;
+            let fn_ = e1.cross(&e2); // area-weighted normal
+            for &idx in face {
+                normals[idx] += fn_;
+            }
+        }
+        for n in &mut normals {
+            let len = n.norm();
+            if len > 1e-9 {
+                *n /= len;
+            }
+        }
+        Ok(normals)
     }
 }
 
@@ -828,41 +940,81 @@ pub mod tsdf {
 pub mod raycasting {
     use super::*;
 
-    /// Ray-mesh intersection raycasting: NOT IMPLEMENTED
+    /// Ray-mesh intersection using Möller-Trumbore algorithm.
     ///
-    /// This function is a stub. Raycasting is essential for:
-    /// 1. Rendering: Visibility queries against mesh geometry
-    /// 2. Reconstruction: Point cloud alignment and normal estimation
-    /// 3. Simulation: Collision detection and occlusion queries
-    ///
-    /// Parameters:
-    /// - `ro`: Array of ray origins (Point3<f32>)
-    /// - `rd`: Array of ray directions (Vector3<f32>, assumed normalized)
-    /// - `v`: Mesh vertices
-    /// - `f`: Mesh triangle faces (indices into vertex array)
-    ///
-    /// Returns for each ray: (t, intersection_point, surface_normal) or None if no intersection
-    ///
-    /// Implementation should:
-    /// 1. Build BVH or spatial acceleration structure from mesh
-    /// 2. For each ray, traverse acceleration structure
-    /// 3. Perform triangle-ray intersection tests (Möller-Trumbore algorithm)
-    /// 4. Return closest intersection
-    ///
-    /// This is a performance-critical operation best implemented with:
-    /// - Spatial hashing or BVH
-    /// - SIMD vectorization or GPU acceleration
+    /// For each ray returns the closest hit: `(t, intersection_point, surface_normal)`.
+    /// Uses brute-force O(rays * triangles); suitable for small meshes.
     #[allow(clippy::type_complexity)]
     pub fn cast_rays(
-        _ro: &[Point3<f32>],
-        _rd: &[Vector3<f32>],
-        _v: &[Point3<f32>],
-        _f: &[[usize; 3]],
+        ro: &[Point3<f32>],
+        rd: &[Vector3<f32>],
+        v: &[Point3<f32>],
+        f: &[[usize; 3]],
     ) -> Result<Vec<Option<(f32, Point3<f32>, Vector3<f32>)>>, String> {
-        Err(
-            "Ray-mesh intersection not yet implemented. Requires BVH acceleration structure."
-                .to_string(),
-        )
+        let results: Vec<_> = ro
+            .par_iter()
+            .zip(rd.par_iter())
+            .map(|(origin, dir)| {
+                let mut best: Option<(f32, Point3<f32>, Vector3<f32>)> = None;
+                for face in f {
+                    let v0 = v[face[0]];
+                    let v1 = v[face[1]];
+                    let v2 = v[face[2]];
+                    if let Some((t, _u, _v)) = moller_trumbore(&origin.coords, dir, &v0, &v1, &v2) {
+                        if t > 1e-6 {
+                            let replace = match best {
+                                None => true,
+                                Some((bt, _, _)) => t < bt,
+                            };
+                            if replace {
+                                let hit = Point3::from(origin.coords + dir * t);
+                                let e1 = v1 - v0;
+                                let e2 = v2 - v0;
+                                let mut n = e1.cross(&e2);
+                                let len = n.norm();
+                                if len > 1e-9 {
+                                    n /= len;
+                                }
+                                best = Some((t, hit, n));
+                            }
+                        }
+                    }
+                }
+                best
+            })
+            .collect();
+        Ok(results)
+    }
+
+    /// Möller-Trumbore ray-triangle intersection.
+    /// Returns `Some((t, u, v))` if ray `origin + t*dir` hits the triangle.
+    fn moller_trumbore(
+        origin: &Vector3<f32>,
+        dir: &Vector3<f32>,
+        v0: &Point3<f32>,
+        v1: &Point3<f32>,
+        v2: &Point3<f32>,
+    ) -> Option<(f32, f32, f32)> {
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
+        let h = dir.cross(&e2);
+        let a = e1.dot(&h);
+        if a.abs() < 1e-9 {
+            return None; // parallel
+        }
+        let f = 1.0 / a;
+        let s = Point3::from(*origin) - v0;
+        let u = f * s.dot(&h);
+        if !(0.0..=1.0).contains(&u) {
+            return None;
+        }
+        let q = s.cross(&e1);
+        let v = f * dir.dot(&q);
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        let t = f * e2.dot(&q);
+        Some((t, u, v))
     }
 }
 
