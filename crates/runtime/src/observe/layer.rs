@@ -1,11 +1,16 @@
 use super::{Metrics, RuntimeEvent};
-use std::sync::{Arc, Mutex, OnceLock};
+use parking_lot::Mutex;
+use std::collections::VecDeque;
+use std::sync::{Arc, OnceLock};
 
-/// Global observability layer
+/// Global observability layer.
+///
+/// Uses a `VecDeque` ring buffer (O(1) push/pop) behind a `parking_lot::Mutex`
+/// for minimal contention on the hot path.
 #[derive(Debug, Clone)]
 pub struct ObservabilityLayer {
     metrics: Metrics,
-    events: Arc<Mutex<Vec<RuntimeEvent>>>,
+    events: Arc<Mutex<VecDeque<RuntimeEvent>>>,
     max_events: usize,
 }
 
@@ -14,20 +19,18 @@ impl ObservabilityLayer {
     pub fn new(max_events: usize) -> Self {
         Self {
             metrics: Metrics::new(),
-            events: Arc::new(Mutex::new(Vec::with_capacity(max_events))),
+            events: Arc::new(Mutex::new(VecDeque::with_capacity(max_events))),
             max_events,
         }
     }
 
-    /// Publish a runtime event
+    /// Publish a runtime event (O(1) amortized).
     pub fn publish_event(&self, event: RuntimeEvent) {
-        if let Ok(mut events) = self.events.lock() {
-            if events.len() >= self.max_events {
-                // Ring buffer: remove oldest if at capacity
-                events.remove(0);
-            }
-            events.push(event);
+        let mut events = self.events.lock();
+        if events.len() >= self.max_events {
+            events.pop_front(); // O(1) — VecDeque ring buffer
         }
+        events.push_back(event);
     }
 
     /// Get metrics
@@ -37,25 +40,13 @@ impl ObservabilityLayer {
 
     /// Get event count
     pub fn event_count(&self) -> usize {
-        self.events.lock().map(|e| e.len()).unwrap_or(0)
+        self.events.lock().len()
     }
 
     /// Get recent events (copy)
     pub fn get_recent_events(&self, count: usize) -> Vec<RuntimeEvent> {
-        self.events
-            .lock()
-            .map(|events| {
-                events
-                    .iter()
-                    .rev()
-                    .take(count)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect()
-            })
-            .unwrap_or_default()
+        let events = self.events.lock();
+        events.iter().rev().take(count).rev().cloned().collect()
     }
 }
 

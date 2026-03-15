@@ -2681,6 +2681,24 @@ impl GpuContext {
         self.queue.clone()
     }
 
+    /// Estimate usable GPU memory in megabytes.
+    ///
+    /// wgpu does not expose total VRAM directly. This uses `max_buffer_size` from
+    /// the device limits as a conservative lower bound (typically 25-50% of actual
+    /// VRAM). Override with `CV_GPU_MEMORY_MB` env var for precise control.
+    pub fn estimated_memory_mb(&self) -> u32 {
+        if let Ok(val) = std::env::var("CV_GPU_MEMORY_MB") {
+            if let Ok(mb) = val.parse::<u32>() {
+                return mb;
+            }
+        }
+        let max_buffer = self.device.limits().max_buffer_size;
+        // max_buffer_size is the largest single allocation, typically 256MB-2GB.
+        // Total VRAM is usually 2-4x this value. We report max_buffer_size as a
+        // conservative usable estimate to prevent overcommit.
+        (max_buffer / (1024 * 1024)) as u32
+    }
+
     /// Submit a command encoder (convenience method)
     pub fn submit(&self, encoder: wgpu::CommandEncoder) -> SubmissionIndex {
         let index = self.last_submission.fetch_add(1, Ordering::SeqCst) + 1;

@@ -118,6 +118,18 @@ impl DeviceRuntime {
         self.memory.collect_garbage(index);
     }
 
+    /// Estimate usable memory in MB for this device.
+    ///
+    /// For GPU devices, uses `GpuContext::estimated_memory_mb()` (wgpu limits or
+    /// `CV_GPU_MEMORY_MB` override). Returns 0 for CPU/MLX (not memory-constrained
+    /// in the same way).
+    pub fn estimated_memory_mb(&self) -> u32 {
+        match &self.context {
+            BackendContext::Gpu(ctx) => ctx.estimated_memory_mb(),
+            _ => 0,
+        }
+    }
+
     pub fn last_completed(&self) -> SubmissionIndex {
         match self.last_completed.lock() {
             Ok(l) => *l,

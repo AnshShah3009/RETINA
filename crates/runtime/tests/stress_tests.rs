@@ -1,4 +1,6 @@
+use cv_runtime::distributed::{ShmCoordinator, SHM_TOTAL_SIZE};
 use cv_runtime::{orchestrator::TaskPriority, scheduler, GroupPolicy};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::Duration;
@@ -155,4 +157,116 @@ fn stress_test_concurrent_par_iter() {
         // Cleanup
         let _ = s.remove_group(group_name);
     }
+}
+
+// --- ShmCoordinator stress tests ---
+
+#[test]
+fn stress_test_multi_process_reservation() {
+    let name = format!("stress_reserve_{}", std::process::id());
+    let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+
+    // Initialize device 0 with 2048 MB total
+    coord.init_device(0, 2048).unwrap();
+
+    let success_count = Arc::new(AtomicUsize::new(0));
+    let fail_count = Arc::new(AtomicUsize::new(0));
+    let start_barrier = Arc::new(Barrier::new(9)); // 8 workers + main
+    let hold_barrier = Arc::new(Barrier::new(9)); // keeps threads alive until main asserts
+
+    // Spawn 8 threads, each trying to reserve 256 MB (total would be 2048 = exactly capacity)
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let sc = success_count.clone();
+            let fc = fail_count.clone();
+            let sb = start_barrier.clone();
+            let hb = hold_barrier.clone();
+            let n = name.clone();
+            thread::spawn(move || {
+                // Each thread gets its own coordinator (same PID, reuses slot)
+                let c = ShmCoordinator::new(&n, SHM_TOTAL_SIZE).unwrap();
+                sb.wait();
+                match c.reserve_device(0, 256, 12) {
+                    Ok(()) => {
+                        sc.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        fc.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                // Hold reservation alive until main thread is done asserting
+                hb.wait();
+                // Now coordinator drops normally — no leak
+            })
+        })
+        .collect();
+
+    start_barrier.wait();
+    // Brief sleep to let all reservations land
+    thread::sleep(Duration::from_millis(10));
+
+    let successes = success_count.load(Ordering::Relaxed);
+    let failures = fail_count.load(Ordering::Relaxed);
+
+    // All 8 threads share the same PID/slot, so their reservations accumulate.
+    // 8 * 256 = 2048 exactly fits in the device budget.
+    assert_eq!(successes + failures, 8, "All 8 threads must complete");
+    assert_eq!(successes, 8, "All 8 * 256MB = 2048MB should fit");
+
+    // Verify device usage
+    let usage = coord.device_memory_usage();
+    assert_eq!(usage[0].1, 2048);
+
+    // Now a 9th reservation of 1 MB should fail
+    let res = coord.reserve_device(0, 1, 0);
+    assert!(res.is_err(), "9th reservation should fail: device is full");
+
+    // Release threads so coordinators drop cleanly
+    hold_barrier.wait();
+    for h in handles {
+        h.join().unwrap();
+    }
+}
+
+#[test]
+fn stress_test_reap_under_load() {
+    let name = format!("stress_reap_{}", std::process::id());
+    let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+
+    coord.init_device(0, 4096).unwrap();
+
+    // Verify reap_dead doesn't panic or corrupt state under concurrent load.
+    // All threads share the same PID/slot, so we just stress the reap + heartbeat
+    // paths concurrently and check nothing explodes.
+    let coord_name = name.clone();
+    let barrier = Arc::new(Barrier::new(5));
+
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let b = barrier.clone();
+            let n = coord_name.clone();
+            thread::spawn(move || {
+                let c = ShmCoordinator::new(&n, SHM_TOTAL_SIZE).unwrap();
+                b.wait();
+                // Rapid heartbeats and reaping
+                for _ in 0..100 {
+                    let _ = c.send_heartbeat();
+                    c.reap_dead();
+                    thread::yield_now();
+                }
+                // Drop normally — no leak
+            })
+        })
+        .collect();
+
+    barrier.wait();
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    // After all threads have completed, device state must be consistent:
+    // used_mb should not have gone negative (underflow).
+    let usage = coord.device_memory_usage();
+    assert_eq!(usage[0].0, 0); // device 0
+    assert!(usage[0].1 <= usage[0].2, "used must not exceed total");
 }

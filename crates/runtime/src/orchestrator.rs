@@ -1,5 +1,5 @@
 use crate::device_registry::{registry, DeviceRuntime};
-use crate::distributed::{FileCoordinator, LoadCoordinator};
+use crate::distributed::{FileCoordinator, LoadCoordinator, ShmCoordinator, SHM_SIZE};
 use crate::executor::{Executor, ExecutorConfig};
 use crate::Result;
 use cv_hal::{BackendType, DeviceId};
@@ -12,13 +12,31 @@ use std::time::{Duration, Instant};
 /// for longer than this period, it will be re-tried.
 const DEVICE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Priority level for a resource group
+/// Default timeout for waiting on GPU VRAM (30 seconds).
+/// Override system-wide with `CV_GPU_WAIT_TIMEOUT_MS`.
+const DEFAULT_GPU_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Read the GPU wait timeout from env or return the default.
+fn gpu_wait_timeout() -> Duration {
+    std::env::var("CV_GPU_WAIT_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_GPU_WAIT_TIMEOUT)
+}
+
+/// Priority level for scheduling tasks within resource groups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TaskPriority {
+    /// Lowest priority, suitable for non-urgent background work.
     Background = 0,
+    /// Below-normal priority.
     Low = 1,
+    /// Default priority for most workloads.
     Normal = 2,
+    /// Elevated priority for latency-sensitive work.
     High = 3,
+    /// Highest priority, reserved for must-complete operations.
     Critical = 4,
 }
 
@@ -35,10 +53,12 @@ pub enum WorkloadHint {
     Default,
 }
 
-/// Statistics for a workload across all coordinated processes.
+/// Aggregate workload statistics across all coordinated processes.
 #[derive(Debug, Clone, Default)]
 pub struct WorkloadStats {
+    /// Number of tasks currently executing or queued.
     pub active_tasks: usize,
+    /// Total number of resource groups across all processes.
     pub total_groups: usize,
 }
 
@@ -54,7 +74,7 @@ pub enum OrchestratorMode {
     },
 }
 
-/// Policy for a resource group
+/// Scheduling and scaling policy for a [`ResourceGroup`].
 #[derive(Debug, Clone, Copy)]
 pub struct GroupPolicy {
     /// If true, this group uses the global thread pool (work stealing enabled)
@@ -75,16 +95,25 @@ impl Default for GroupPolicy {
     }
 }
 
+/// A named group of threads bound to a single device, used for executing tasks.
+///
+/// Resource groups isolate workloads and allow per-group scheduling policies,
+/// core pinning, and dynamic resizing.
 #[derive(Debug)]
 pub struct ResourceGroup {
+    /// Human-readable name (e.g. `"default"`, `"gpu-0"`).
     pub name: String,
+    /// Scheduling policy for this group.
     pub policy: GroupPolicy,
     device_id: DeviceId,
+    /// Cached at creation so `get_best_group` doesn't hit the registry mutex per group.
+    backend: BackendType,
     pub(crate) executor: Arc<Executor>,
     core_ids: Option<Vec<usize>>,
 }
 
 impl ResourceGroup {
+    /// Create a new resource group with the given thread count and policy.
     pub fn new(
         name: &str,
         device_id: DeviceId,
@@ -97,26 +126,38 @@ impl ResourceGroup {
             name: name.to_string(),
             work_stealing: policy.allow_work_stealing,
             core_affinity: core_ids.clone(),
+            ..Default::default()
         };
 
         let executor = Arc::new(Executor::with_config(device_id, config)?);
+
+        // Cache backend type so get_best_group() doesn't hit the registry mutex.
+        let backend = registry()
+            .ok()
+            .and_then(|r| r.get_device(device_id))
+            .map(|d| d.backend())
+            .unwrap_or(BackendType::Cpu);
 
         Ok(Self {
             name: name.to_string(),
             policy,
             device_id,
+            backend,
             executor,
             core_ids,
         })
     }
 
-    pub fn spawn<F>(&self, f: F)
+    /// Spawn a fire-and-forget task on this group's thread pool.
+    pub fn spawn<F>(&self, f: F) -> crate::Result<()>
     where
         F: FnOnce() + Send + 'static,
     {
         self.executor.spawn(f);
+        Ok(())
     }
 
+    /// Run a closure synchronously on this group's thread pool and return its result.
     pub fn run<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R + Send,
@@ -125,22 +166,32 @@ impl ResourceGroup {
         self.executor.install(f)
     }
 
+    /// Return the device this group is bound to.
     pub fn device_id(&self) -> DeviceId {
         self.device_id
     }
 
+    /// Return the cached backend type (no registry mutex hit).
+    pub fn backend(&self) -> BackendType {
+        self.backend
+    }
+
+    /// Return the number of in-flight tasks on this group.
     pub fn load(&self) -> usize {
         self.executor.load()
     }
 
+    /// Return the number of threads in this group's pool.
     pub fn num_threads(&self) -> usize {
         self.executor.num_threads()
     }
 
+    /// Return the core IDs this group is pinned to, if any.
     pub fn core_ids(&self) -> Option<&[usize]> {
         self.core_ids.as_deref()
     }
 
+    /// Look up this group's [`DeviceRuntime`] in the global registry.
     pub fn device_runtime(&self) -> Result<Arc<DeviceRuntime>> {
         registry()?.get_device(self.device_id).ok_or_else(|| {
             crate::Error::RuntimeError(format!("Device {:?} not found", self.device_id))
@@ -153,6 +204,7 @@ impl ResourceGroup {
         self.try_device()
     }
 
+    /// Try to resolve the HAL compute device for this group.
     pub fn try_device(&self) -> Result<cv_hal::compute::ComputeDevice<'static>> {
         cv_hal::compute::get_device_by_id(self.device_id).map_err(|e| {
             crate::Error::RuntimeError(format!(
@@ -162,6 +214,7 @@ impl ResourceGroup {
         })
     }
 
+    /// Resize the thread pool. Fails if `allow_dynamic_scaling` is false.
     pub fn resize(&self, new_num_threads: usize) -> Result<()> {
         if !self.policy.allow_dynamic_scaling {
             return Err(crate::Error::RuntimeError(format!(
@@ -172,27 +225,40 @@ impl ResourceGroup {
         self.executor.resize(new_num_threads)
     }
 
+    /// Rebuild the thread pool with new core affinity settings.
     pub fn set_core_affinity(&self, cores: Vec<usize>) -> Result<()> {
         self.executor.set_core_affinity(cores)
     }
 }
 
+/// Central scheduler that manages resource groups and routes tasks to devices.
+///
+/// Supports both local and distributed (file/shared-memory) coordination modes.
+/// A singleton instance is accessible via [`scheduler()`].
 pub struct TaskScheduler {
     groups: Mutex<HashMap<String, Arc<ResourceGroup>>>,
     mode: OrchestratorMode,
     coordinator: Option<Box<dyn LoadCoordinator>>,
-    global_load_cache: Mutex<(HashMap<DeviceId, usize>, Instant)>,
+    global_load_cache: Mutex<(Arc<HashMap<DeviceId, usize>>, Instant)>,
     /// Maps failed devices to the time of failure. Devices are considered recovered
     /// after DEVICE_RECOVERY_TIMEOUT has elapsed.
     failed_devices: Mutex<HashMap<DeviceId, Instant>>,
+    /// How long to wait for GPU VRAM before giving up.
+    /// Defaults from `CV_GPU_WAIT_TIMEOUT_MS` env var or 30 s.
+    gpu_wait_timeout: Mutex<Duration>,
 }
 
+/// A handle for executing closures, either on a resource group's thread pool
+/// or synchronously on the calling thread.
 pub enum RuntimeRunner {
+    /// Execute on a resource group's thread pool.
     Group(Arc<ResourceGroup>),
+    /// Execute synchronously on the calling thread for the given device.
     Sync(DeviceId),
 }
 
 impl RuntimeRunner {
+    /// Run a closure on this runner and return its result.
     pub fn run<F, R>(&self, f: F) -> R
     where
         F: FnOnce() -> R + Send,
@@ -228,6 +294,7 @@ impl RuntimeRunner {
         res
     }
 
+    /// Return the device ID associated with this runner.
     pub fn device_id(&self) -> DeviceId {
         match self {
             RuntimeRunner::Group(g) => g.device_id(),
@@ -235,6 +302,7 @@ impl RuntimeRunner {
         }
     }
 
+    /// Look up this runner's [`DeviceRuntime`] in the global registry.
     pub fn device_runtime(&self) -> Result<Arc<DeviceRuntime>> {
         registry()?.get_device(self.device_id()).ok_or_else(|| {
             crate::Error::RuntimeError(format!("Device {:?} not found", self.device_id()))
@@ -247,6 +315,7 @@ impl RuntimeRunner {
         self.try_device()
     }
 
+    /// Try to resolve the HAL compute device for this runner.
     pub fn try_device(&self) -> Result<cv_hal::compute::ComputeDevice<'static>> {
         cv_hal::compute::get_device_by_id(self.device_id()).map_err(|e| {
             crate::Error::RuntimeError(format!(
@@ -258,12 +327,12 @@ impl RuntimeRunner {
     }
 }
 
-/// Get the best available runtime runner (GPU if available, else CPU)
-/// Returns a Result instead of panicking on error
+/// Get the best available runtime runner (GPU if available, else CPU).
 pub fn best_runner() -> Result<RuntimeRunner> {
     try_best_runner()
 }
 
+/// Try to get the best runner; falls back to synchronous CPU if no scheduler is available.
 pub fn try_best_runner() -> Result<RuntimeRunner> {
     if let Ok(s) = scheduler() {
         if let Ok(g) = s.best_gpu_or_cpu() {
@@ -280,12 +349,41 @@ pub fn try_best_runner() -> Result<RuntimeRunner> {
     ))
 }
 
-/// Get the default runtime runner (from configured default group or CPU fallback)
-/// Returns a Result instead of panicking on error
+/// Get the best GPU runner, waiting for VRAM if needed.
+///
+/// Waits up to the configured timeout for GPU memory to free up. If the
+/// timeout expires, falls back to CPU.  Returns `(runner, is_gpu)` so
+/// the caller knows which path was taken.
+pub fn best_runner_gpu_wait() -> Result<(RuntimeRunner, bool)> {
+    best_runner_gpu_wait_for(WorkloadHint::Default, None)
+}
+
+/// Like [`best_runner_gpu_wait`] with explicit hint and timeout.
+pub fn best_runner_gpu_wait_for(
+    hint: WorkloadHint,
+    timeout: Option<Duration>,
+) -> Result<(RuntimeRunner, bool)> {
+    if let Ok(s) = scheduler() {
+        if let Ok((group, is_gpu)) = s.best_gpu_with_wait(hint, timeout) {
+            return Ok((RuntimeRunner::Group(group), is_gpu));
+        }
+    }
+
+    if let Ok(reg) = registry() {
+        return Ok((RuntimeRunner::Sync(reg.default_cpu().id()), false));
+    }
+
+    Err(crate::Error::RuntimeError(
+        "Could not initialize even basic device registry".into(),
+    ))
+}
+
+/// Get the default runtime runner (from the `"default"` group or CPU fallback).
 pub fn default_runner() -> Result<RuntimeRunner> {
     try_default_runner()
 }
 
+/// Try to get the default runner; falls back to synchronous CPU if no scheduler is available.
 pub fn try_default_runner() -> Result<RuntimeRunner> {
     if let Ok(s) = scheduler() {
         if let Ok(g) = s.get_default_group() {
@@ -302,6 +400,39 @@ pub fn try_default_runner() -> Result<RuntimeRunner> {
     ))
 }
 
+/// Record a GPU→CPU fallback in the observability layer.
+///
+/// Call this from any algorithm at the point where it decides to run on CPU
+/// instead of GPU so profiling tools can identify silent fallbacks.
+///
+/// ```ignore
+/// if let Ok(ComputeDevice::Gpu(gpu)) = runner.device() {
+///     if let Ok(result) = my_gpu_kernel(gpu, ...) { return result; }
+///     record_fallback("my_kernel", runner.device_id(), DispatchReason::GpuError);
+/// } else {
+///     record_fallback("my_kernel", runner.device_id(), DispatchReason::NoGpu);
+/// }
+/// // ... CPU path ...
+/// ```
+pub fn record_fallback(
+    operation: &str,
+    actual_device: DeviceId,
+    reason: crate::observe::events::DispatchReason,
+) {
+    use crate::observe::events::{DispatchBackend, RuntimeEvent};
+    use crate::observe::observability;
+
+    observability().publish_event(RuntimeEvent::Dispatch {
+        operation: operation.to_string(),
+        actual_device,
+        intended_backend: DispatchBackend::Gpu,
+        actual_backend: DispatchBackend::Cpu,
+        reason,
+        wait_ms: 0,
+        timestamp: Instant::now(),
+    });
+}
+
 impl Default for TaskScheduler {
     fn default() -> Self {
         Self::new()
@@ -309,6 +440,8 @@ impl Default for TaskScheduler {
 }
 
 impl TaskScheduler {
+    /// Create a new scheduler, optionally enabling distributed coordination
+    /// if `CV_RUNTIME_COORDINATOR` or `CV_RUNTIME_SHM` is set.
     pub fn new() -> Self {
         let (mode, coordinator): (OrchestratorMode, Option<Box<dyn LoadCoordinator>>) =
             if let Ok(path) = std::env::var("CV_RUNTIME_COORDINATOR") {
@@ -319,31 +452,85 @@ impl TaskScheduler {
                     },
                     Some(Box::new(FileCoordinator::new(path_buf))),
                 )
+            } else if let Ok(name) = std::env::var("CV_RUNTIME_SHM") {
+                match ShmCoordinator::new(&name, SHM_SIZE) {
+                    Ok(c) => {
+                        c.start_heartbeat_thread(Duration::from_secs(1));
+                        (
+                            OrchestratorMode::Distributed {
+                                coordinator_path: std::path::PathBuf::from(format!(
+                                    "/dev/shm/{}",
+                                    name
+                                )),
+                            },
+                            Some(Box::new(c)),
+                        )
+                    }
+                    Err(_) => (OrchestratorMode::Local, None),
+                }
             } else {
                 (OrchestratorMode::Local, None)
             };
 
-        Self {
+        let scheduler = Self {
             groups: Mutex::new(HashMap::new()),
             mode,
             coordinator,
             global_load_cache: Mutex::new((
-                HashMap::new(),
+                Arc::new(HashMap::new()),
                 Instant::now() - Duration::from_secs(3600),
             )),
             failed_devices: Mutex::new(HashMap::new()),
+            gpu_wait_timeout: Mutex::new(gpu_wait_timeout()),
+        };
+
+        // Auto-initialize GPU devices in the coordinator so memory budgets work.
+        // This runs once at startup — zero cost on the compute path.
+        scheduler.auto_init_devices();
+
+        scheduler
+    }
+
+    /// Discover GPU devices from the registry and register their memory capacity
+    /// with the coordinator. Only the first process to initialize a device wins
+    /// (CAS inside init_device), so this is safe to call from every process.
+    fn auto_init_devices(&self) {
+        let coord = match self.coordinator.as_ref() {
+            Some(c) => c,
+            None => return,
+        };
+
+        let reg = match registry() {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let mut device_idx: u8 = 0;
+        for device in reg.all_devices() {
+            if device.backend() == BackendType::Cpu {
+                continue;
+            }
+            let mem_mb = device.estimated_memory_mb();
+            if mem_mb > 0 && device_idx < 8 {
+                // Use the coordinator's init_device — CAS ensures only first writer wins
+                let _ = coord.init_device(device_idx, mem_mb);
+                device_idx += 1;
+            }
         }
     }
 
+    /// Return the current orchestration mode (local or distributed).
     pub fn mode(&self) -> &OrchestratorMode {
         &self.mode
     }
 
+    /// Record a device failure so subsequent scheduling avoids it temporarily.
     pub fn report_failure(&self, device_id: DeviceId) {
         let mut failed = self.failed_devices.lock();
         failed.insert(device_id, Instant::now());
     }
 
+    /// Check whether a device is healthy (has not failed recently).
     pub fn is_device_healthy(&self, device_id: DeviceId) -> bool {
         let mut failed = self.failed_devices.lock();
 
@@ -362,6 +549,7 @@ impl TaskScheduler {
         }
     }
 
+    /// Create a new resource group on the default CPU device.
     pub fn create_group(
         &self,
         name: &str,
@@ -373,6 +561,7 @@ impl TaskScheduler {
         self.create_group_with_device(name, num_threads, cores, policy, cpu_id)
     }
 
+    /// Create a new resource group bound to a specific device.
     pub fn create_group_with_device(
         &self,
         name: &str,
@@ -413,6 +602,7 @@ impl TaskScheduler {
         Ok(group)
     }
 
+    /// Remove and return a resource group by name, if it exists.
     pub fn remove_group(&self, name: &str) -> Result<Option<Arc<ResourceGroup>>> {
         let mut groups = self.groups.lock();
         if let Some(group) = groups.remove(name) {
@@ -422,26 +612,26 @@ impl TaskScheduler {
         }
     }
 
+    /// Look up a resource group by name.
     pub fn get_group(&self, name: &str) -> Result<Option<Arc<ResourceGroup>>> {
         let groups = self.groups.lock();
         Ok(groups.get(name).cloned())
     }
 
-    fn get_global_load(&self) -> HashMap<DeviceId, usize> {
+    fn get_global_load(&self) -> Arc<HashMap<DeviceId, usize>> {
         let mut cache = self.global_load_cache.lock();
         if cache.1.elapsed() > Duration::from_millis(200) {
             if let Some(ref coord) = self.coordinator {
-                // Periodically update our own load too
                 let local_load = self.get_local_load();
                 let _ = coord.update_load(&local_load);
 
                 if let Ok(global) = coord.get_global_load() {
-                    cache.0 = global;
+                    cache.0 = Arc::new(global);
                 }
             }
             cache.1 = Instant::now();
         }
-        cache.0.clone()
+        cache.0.clone() // Arc clone = atomic pointer bump, no heap alloc
     }
 
     fn get_local_load(&self) -> HashMap<DeviceId, usize> {
@@ -483,8 +673,9 @@ impl TaskScheduler {
                 continue;
             }
 
-            let runtime = group.device_runtime()?;
-            let matches = match (backend_type, runtime.backend()) {
+            // Use cached backend — no registry mutex hit.
+            let group_backend = group.backend();
+            let matches = match (backend_type, group_backend) {
                 (BackendType::Cpu, BackendType::Cpu) => true,
                 // Any GPU backend matches a GPU device for now
                 (t, b) if t != BackendType::Cpu && b != BackendType::Cpu => true,
@@ -522,16 +713,19 @@ impl TaskScheduler {
         Ok(best_group)
     }
 
+    /// Return the `"default"` resource group.
     pub fn get_default_group(&self) -> Result<Arc<ResourceGroup>> {
         self.get_group("default")?.ok_or_else(|| {
             crate::Error::RuntimeError("Default resource group not found".to_string())
         })
     }
 
+    /// Return the best GPU group, falling back to the default CPU group.
     pub fn best_gpu_or_cpu(&self) -> Result<Arc<ResourceGroup>> {
         self.best_gpu_or_cpu_for(WorkloadHint::Default)
     }
 
+    /// Like [`best_gpu_or_cpu`](Self::best_gpu_or_cpu) but with a workload hint for scheduling.
     pub fn best_gpu_or_cpu_for(&self, hint: WorkloadHint) -> Result<Arc<ResourceGroup>> {
         // Try WebGPU first (as it's our primary accelerator)
         if let Some(group) = self.get_best_group(BackendType::WebGPU, hint)? {
@@ -543,12 +737,169 @@ impl TaskScheduler {
         self.get_default_group()
     }
 
+    /// Get the best GPU group, waiting for VRAM if the device is currently full.
+    /// Falls back to CPU only after the timeout expires — GPU work stays on GPU
+    /// as long as possible.
+    ///
+    /// Flow: pick GPU → VRAM available? run on GPU : wait up to timeout →
+    ///       VRAM freed? run on GPU : fall back to CPU.
+    ///
+    /// The timeout is read from (in priority order):
+    /// 1. The explicit `timeout` parameter (if `Some`)
+    /// 2. `set_gpu_wait_timeout()` (per-process override)
+    /// 3. `CV_GPU_WAIT_TIMEOUT_MS` environment variable (system-wide)
+    /// 4. 30 second default
+    ///
+    /// Every decision is recorded as a [`RuntimeEvent::Dispatch`] in the
+    /// observability layer so profiling tools can see fallbacks.
+    ///
+    /// Returns `(group, true)` when running on GPU, `(group, false)` on CPU fallback.
+    pub fn best_gpu_with_wait(
+        &self,
+        hint: WorkloadHint,
+        timeout: Option<Duration>,
+    ) -> Result<(Arc<ResourceGroup>, bool)> {
+        use crate::observe::events::{DispatchBackend, DispatchReason};
+        use crate::observe::{observability, RuntimeEvent};
+
+        let gpu_group = self
+            .get_best_group(BackendType::WebGPU, hint)?
+            .or(self.get_best_group(BackendType::Vulkan, hint)?);
+
+        let gpu_group = match gpu_group {
+            Some(g) => g,
+            None => {
+                // No GPU groups at all → CPU
+                let cpu = self.get_default_group()?;
+                observability().publish_event(RuntimeEvent::Dispatch {
+                    operation: String::new(),
+                    actual_device: cpu.device_id(),
+                    intended_backend: DispatchBackend::Gpu,
+                    actual_backend: DispatchBackend::Cpu,
+                    reason: DispatchReason::NoGpu,
+                    wait_ms: 0,
+                    timestamp: Instant::now(),
+                });
+                return Ok((cpu, false));
+            }
+        };
+
+        // If there's a coordinator, check VRAM budget
+        if let Some(ref coord) = self.coordinator {
+            let dev_idx = (gpu_group.device_id().0 & 0xFF) as u8;
+            let usage = coord.device_memory_usage();
+
+            let is_over_budget = usage
+                .iter()
+                .any(|&(idx, used, total)| idx == dev_idx && total > 0 && used >= total);
+
+            if is_over_budget {
+                let wait = timeout.unwrap_or_else(|| *self.gpu_wait_timeout.lock());
+
+                if wait.is_zero() {
+                    let cpu = self.get_default_group()?;
+                    observability().publish_event(RuntimeEvent::Dispatch {
+                        operation: String::new(),
+                        actual_device: cpu.device_id(),
+                        intended_backend: DispatchBackend::Gpu,
+                        actual_backend: DispatchBackend::Cpu,
+                        reason: DispatchReason::VramTimeout,
+                        wait_ms: 0,
+                        timestamp: Instant::now(),
+                    });
+                    return Ok((cpu, false));
+                }
+
+                let wait_start = Instant::now();
+                match coord.wait_for_device_memory(dev_idx, 1, wait) {
+                    Ok(()) => {
+                        let waited = wait_start.elapsed().as_millis() as u64;
+                        observability().publish_event(RuntimeEvent::Dispatch {
+                            operation: String::new(),
+                            actual_device: gpu_group.device_id(),
+                            intended_backend: DispatchBackend::Gpu,
+                            actual_backend: DispatchBackend::Gpu,
+                            reason: DispatchReason::VramFreedAfterWait,
+                            wait_ms: waited,
+                            timestamp: Instant::now(),
+                        });
+                        return Ok((gpu_group, true));
+                    }
+                    Err(_) => {
+                        let waited = wait_start.elapsed().as_millis() as u64;
+                        let cpu = self.get_default_group()?;
+                        observability().publish_event(RuntimeEvent::Dispatch {
+                            operation: String::new(),
+                            actual_device: cpu.device_id(),
+                            intended_backend: DispatchBackend::Gpu,
+                            actual_backend: DispatchBackend::Cpu,
+                            reason: DispatchReason::VramTimeout,
+                            wait_ms: waited,
+                            timestamp: Instant::now(),
+                        });
+                        return Ok((cpu, false));
+                    }
+                }
+            }
+        }
+
+        // GPU is available (no coordinator or not over budget)
+        observability().publish_event(RuntimeEvent::Dispatch {
+            operation: String::new(),
+            actual_device: gpu_group.device_id(),
+            intended_backend: DispatchBackend::Gpu,
+            actual_backend: DispatchBackend::Gpu,
+            reason: DispatchReason::GpuAvailable,
+            wait_ms: 0,
+            timestamp: Instant::now(),
+        });
+        Ok((gpu_group, true))
+    }
+
+    /// Set the process-wide GPU VRAM wait timeout.
+    ///
+    /// Overrides the `CV_GPU_WAIT_TIMEOUT_MS` env var for this process.
+    /// Pass `Duration::ZERO` to disable waiting (fail immediately on over-budget).
+    pub fn set_gpu_wait_timeout(&self, timeout: Duration) {
+        *self.gpu_wait_timeout.lock() = timeout;
+    }
+
+    /// Get the current GPU wait timeout.
+    pub fn gpu_wait_timeout(&self) -> Duration {
+        *self.gpu_wait_timeout.lock()
+    }
+
+    /// Wait for VRAM on a specific device, using the configured timeout.
+    ///
+    /// Blocks until the device has at least `needed_mb` free or the timeout
+    /// expires. Returns `Err` on timeout.
+    pub fn wait_for_gpu(&self, device_idx: u8, needed_mb: u32) -> Result<()> {
+        self.wait_for_gpu_with_timeout(device_idx, needed_mb, None)
+    }
+
+    /// Wait for VRAM with an explicit timeout override.
+    pub fn wait_for_gpu_with_timeout(
+        &self,
+        device_idx: u8,
+        needed_mb: u32,
+        timeout: Option<Duration>,
+    ) -> Result<()> {
+        let coord = self.coordinator.as_ref().ok_or_else(|| {
+            crate::Error::RuntimeError("No coordinator available for VRAM waiting".into())
+        })?;
+        let wait = timeout.unwrap_or_else(|| *self.gpu_wait_timeout.lock());
+        coord
+            .wait_for_device_memory(device_idx, needed_mb, wait)
+            .map_err(|e| crate::Error::RuntimeError(format!("GPU VRAM wait failed: {}", e)))
+    }
+
+    /// Submit a task to the named resource group for asynchronous execution.
     pub fn submit<F>(&self, group_name: &str, f: F) -> Result<()>
     where
         F: FnOnce() + Send + 'static,
     {
         if let Some(group) = self.get_group(group_name)? {
-            group.spawn(f);
+            group.spawn(f)?;
             Ok(())
         } else {
             Err(crate::Error::RuntimeError(format!(
@@ -557,10 +908,63 @@ impl TaskScheduler {
             )))
         }
     }
+
+    // --- Coordinator delegation ---
+
+    /// Query per-device memory usage from the coordinator, if available.
+    pub fn coordinator_device_usage(&self) -> Option<Vec<(u8, u32, u32)>> {
+        self.coordinator.as_ref().map(|c| c.device_memory_usage())
+    }
+
+    /// Join an affinity group via the coordinator.
+    pub fn join_affinity_group(&self, group_id: u32) -> Result<()> {
+        match self.coordinator.as_ref() {
+            Some(c) => c
+                .join_group(group_id)
+                .map_err(|e| crate::Error::RuntimeError(format!("Failed to join group: {}", e))),
+            None => Err(crate::Error::RuntimeError(
+                "No coordinator available".into(),
+            )),
+        }
+    }
+
+    /// Reserve a device via the coordinator.
+    pub fn reserve_device(&self, device_idx: u8, memory_mb: u32) -> Result<()> {
+        match self.coordinator.as_ref() {
+            Some(c) => c.reserve_device(device_idx, memory_mb, 0).map_err(|e| {
+                crate::Error::RuntimeError(format!("Failed to reserve device: {}", e))
+            }),
+            None => Err(crate::Error::RuntimeError(
+                "No coordinator available".into(),
+            )),
+        }
+    }
+
+    /// Release a device reservation via the coordinator.
+    pub fn release_device(&self, device_idx: u8) -> Result<()> {
+        match self.coordinator.as_ref() {
+            Some(c) => c.release_device(device_idx).map_err(|e| {
+                crate::Error::RuntimeError(format!("Failed to release device: {}", e))
+            }),
+            None => Err(crate::Error::RuntimeError(
+                "No coordinator available".into(),
+            )),
+        }
+    }
+
+    /// Find the best device considering affinity group via the coordinator.
+    pub fn best_device_for_group(&self, needed_mb: u32) -> Option<u8> {
+        self.coordinator
+            .as_ref()
+            .and_then(|c| c.best_device_for_group(needed_mb))
+    }
 }
 
 static GLOBAL_SCHEDULER: OnceLock<Result<TaskScheduler>> = OnceLock::new();
 
+/// Return the global [`TaskScheduler`] singleton, creating it on first call.
+///
+/// Initializes a `"default"` resource group with one thread per logical CPU core.
 pub fn scheduler() -> Result<&'static TaskScheduler> {
     GLOBAL_SCHEDULER
         .get_or_init(|| {

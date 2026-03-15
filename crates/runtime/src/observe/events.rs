@@ -46,6 +46,52 @@ pub enum RuntimeEvent {
         reason: Option<String>,
         timestamp: Instant,
     },
+    /// A GPU/CPU dispatch decision was made.
+    ///
+    /// Emitted by the scheduler and by algorithm-level fallback paths so
+    /// profiling tools can see exactly when and why work ran on CPU instead
+    /// of GPU (or vice versa).
+    Dispatch {
+        /// What was being dispatched (e.g. "compute_normals", "convolve_2d").
+        operation: String,
+        /// The device that actually executed the work.
+        actual_device: DeviceId,
+        /// What we originally wanted.
+        intended_backend: DispatchBackend,
+        /// What we actually got.
+        actual_backend: DispatchBackend,
+        /// Why we ended up on this backend.
+        reason: DispatchReason,
+        /// How long we waited for VRAM (zero if no wait).
+        wait_ms: u64,
+        timestamp: Instant,
+    },
+}
+
+/// Which backend a dispatch targeted or landed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchBackend {
+    Gpu,
+    Cpu,
+}
+
+/// Why a dispatch decision was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchReason {
+    /// GPU was available and had VRAM — normal path.
+    GpuAvailable,
+    /// No GPU groups registered in the scheduler.
+    NoGpu,
+    /// GPU device was unhealthy (failed recently).
+    DeviceUnhealthy,
+    /// Waited for VRAM and it freed up in time.
+    VramFreedAfterWait,
+    /// Waited for VRAM but timed out — fell back to CPU.
+    VramTimeout,
+    /// GPU shader/operation failed at runtime — fell back to CPU.
+    GpuError,
+    /// Caller explicitly requested CPU.
+    ForcedCpu,
 }
 
 /// Type of memory event
@@ -75,7 +121,20 @@ impl RuntimeEvent {
             RuntimeEvent::PipelineNodeCompleted { timestamp, .. } => *timestamp,
             RuntimeEvent::MemoryEvent { timestamp, .. } => *timestamp,
             RuntimeEvent::DeviceHealthChanged { timestamp, .. } => *timestamp,
+            RuntimeEvent::Dispatch { timestamp, .. } => *timestamp,
         }
+    }
+
+    /// Is this a dispatch event where the actual backend differs from the intended one?
+    pub fn is_fallback(&self) -> bool {
+        matches!(
+            self,
+            RuntimeEvent::Dispatch {
+                intended_backend,
+                actual_backend,
+                ..
+            } if intended_backend != actual_backend
+        )
     }
 }
 

@@ -11,10 +11,13 @@ pub mod pipeline;
 pub use device_registry::{registry, DeviceRegistry, DeviceRuntime, SubmissionIndex};
 pub use error::ErrorContext;
 pub use memory::UnifiedBuffer;
-pub use observe::{observability, Metrics, ObservabilityLayer, RuntimeEvent};
+pub use observe::{
+    observability, DispatchBackend, DispatchReason, Metrics, ObservabilityLayer, RuntimeEvent,
+};
 pub use orchestrator::{
-    best_runner, default_runner, scheduler, try_best_runner, try_default_runner, GroupPolicy,
-    ResourceGroup, RuntimeRunner, TaskPriority, TaskScheduler, WorkloadHint,
+    best_runner, best_runner_gpu_wait, best_runner_gpu_wait_for, default_runner, record_fallback,
+    scheduler, try_best_runner, try_default_runner, GroupPolicy, ResourceGroup, RuntimeRunner,
+    TaskPriority, TaskScheduler, WorkloadHint,
 };
 pub use pipeline::{AsyncPipelineHandle, ExecutionEvent, PipelineResult};
 pub use pipeline::{BufferAlloc, TransientBufferPool};
