@@ -95,7 +95,7 @@ fn bench_marching_cubes(c: &mut Criterion) {
             let _ = cv_hal::gpu_kernels::marching_cubes::extract_mesh(ctx, &vol, vs, 0.0, 500_000);
             ctx.wait_idle().ok();
 
-            group.bench_with_input(BenchmarkId::new("wgpu", &label), &(), |b, _| {
+            group.bench_with_input(BenchmarkId::new("v1_atomic", &label), &(), |b, _| {
                 b.iter(|| {
                     let out = cv_hal::gpu_kernels::marching_cubes::extract_mesh(
                         black_box(ctx),
@@ -103,6 +103,24 @@ fn bench_marching_cubes(c: &mut Criterion) {
                         vs,
                         0.0,
                         500_000,
+                    )
+                    .unwrap();
+                    ctx.wait_idle().ok();
+                    black_box(out)
+                });
+            });
+
+            // Two-pass version (no atomics, exact-size allocation)
+            let _ = cv_hal::gpu_kernels::marching_cubes::extract_mesh_v2(ctx, &vol, vs, 0.0);
+            ctx.wait_idle().ok();
+
+            group.bench_with_input(BenchmarkId::new("v2_two_pass", &label), &(), |b, _| {
+                b.iter(|| {
+                    let out = cv_hal::gpu_kernels::marching_cubes::extract_mesh_v2(
+                        black_box(ctx),
+                        black_box(&vol),
+                        vs,
+                        0.0,
                     )
                     .unwrap();
                     ctx.wait_idle().ok();
