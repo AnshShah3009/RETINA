@@ -21,12 +21,7 @@ pub fn hough_circles<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     max_radius: T,
     threshold: u32,
 ) -> Result<Vec<HoughCircle>> {
-    // Only f32 WGSL shader available
-    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
-        return Err(crate::Error::NotSupported(
-            "Hough Circles GPU kernel only supports f32".into(),
-        ));
-    }
+    let _precision = crate::gpu_kernels::shader_template::precision_for_type::<T>()?;
 
     let (h, w) = input.shape.hw();
     let min_radius_f32 = min_radius.to_f32();

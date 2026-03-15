@@ -24,12 +24,7 @@ pub fn convolve_2d<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     kernel: &crate::GpuTensor<T>,
     border_mode: BorderMode<T>,
 ) -> Result<crate::GpuTensor<T>> {
-    // Only f32 WGSL shader available
-    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
-        return Err(crate::Error::NotSupported(
-            "Convolve2D GPU kernel only supports f32".into(),
-        ));
-    }
+    let precision = crate::gpu_kernels::shader_template::precision_for_type::<T>()?;
 
     let (h, w) = input.shape.hw();
     let (kh, kw) = kernel.shape.hw();
@@ -68,8 +63,11 @@ pub fn convolve_2d<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let shader_source = include_str!("../../shaders/convolve_2d.wgsl");
-    let pipeline = ctx.create_compute_pipeline(shader_source, "main");
+    let shader_source = crate::gpu_kernels::shader_template::resolve(
+        include_str!("../../shaders/convolve_2d.wgsl"),
+        precision,
+    );
+    let pipeline = ctx.create_compute_pipeline(&shader_source, "main");
 
     let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Convolve Bind Group"),
@@ -156,12 +154,7 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
     k_size: usize,
     border_mode: BorderMode<T>,
 ) -> Result<crate::GpuTensor<T>> {
-    // Only f32 WGSL shader available
-    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
-        return Err(crate::Error::NotSupported(
-            "Gaussian Blur GPU kernel only supports f32".into(),
-        ));
-    }
+    let precision = crate::gpu_kernels::shader_template::precision_for_type::<T>()?;
 
     let (h, w) = input.shape.hw();
     let kernel_1d = crate::cpu::gaussian_kernel_1d(sigma.to_f32(), k_size);
@@ -193,8 +186,11 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
             usage: wgpu::BufferUsages::STORAGE,
         });
 
-    let shader_source = include_str!("../../shaders/gaussian_blur_separable.wgsl");
-    let pipeline = ctx.create_compute_pipeline(shader_source, "main");
+    let shader_source = crate::gpu_kernels::shader_template::resolve(
+        include_str!("../../shaders/gaussian_blur_separable.wgsl"),
+        precision,
+    );
+    let pipeline = ctx.create_compute_pipeline(&shader_source, "main");
 
     let h_params = SeparableParams {
         width: w as u32,

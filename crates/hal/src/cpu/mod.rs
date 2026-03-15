@@ -878,12 +878,129 @@ impl ComputeContext for CpuBackend {
 
     fn detect_objects<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
-        _input: &Tensor<T, S>,
-        _threshold: T,
+        input: &Tensor<T, S>,
+        threshold: T,
     ) -> Result<Vec<cv_core::Detection>> {
-        Err(crate::Error::NotSupported(
-            "CPU detect_objects not yet implemented".into(),
-        ))
+        // Sliding-window cascade classifier using an integral image approach.
+        // The input tensor is expected to be a single-channel image (1, H, W).
+        let data = input
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
+        let (h, w) = input.shape.hw();
+        if h < 24 || w < 24 {
+            return Ok(Vec::new());
+        }
+
+        // Build integral image for fast rectangle-sum queries.
+        let mut integral = vec![0.0f64; (h + 1) * (w + 1)];
+        for y in 0..h {
+            let mut row_sum = 0.0f64;
+            for x in 0..w {
+                row_sum += data[y * w + x].to_f64();
+                integral[(y + 1) * (w + 1) + (x + 1)] = integral[y * (w + 1) + (x + 1)] + row_sum;
+            }
+        }
+
+        // Helper: sum of pixels in rectangle [y0, y1) x [x0, x1) using the integral image.
+        let rect_sum = |y0: usize, x0: usize, y1: usize, x1: usize| -> f64 {
+            let iw = w + 1;
+            integral[y1 * iw + x1] - integral[y0 * iw + x1] - integral[y1 * iw + x0]
+                + integral[y0 * iw + x0]
+        };
+
+        // Simple Haar-like feature evaluation at multiple scales.
+        // We use a two-rectangle horizontal feature (left half dark, right half bright)
+        // as a basic edge detector, common in face/object detection cascades.
+        let base_win = 24usize;
+        let mut detections = Vec::new();
+        let threshold_f64 = threshold.to_f64();
+
+        let mut scale = 1.0f64;
+        while (scale * base_win as f64) as usize <= h.min(w) {
+            let win = (scale * base_win as f64) as usize;
+            let step = (scale * 2.0).max(1.0) as usize;
+            let half_w = win / 2;
+
+            let area = (win * win) as f64;
+            let half_area = (win * half_w) as f64;
+
+            for y in (0..=h.saturating_sub(win)).step_by(step) {
+                for x in (0..=w.saturating_sub(win)).step_by(step) {
+                    // Evaluate a set of simple Haar-like features.
+                    let total = rect_sum(y, x, y + win, x + win);
+                    let mean = total / area;
+
+                    // Feature 1: vertical edge (left vs right halves)
+                    let left = rect_sum(y, x, y + win, x + half_w);
+                    let right = rect_sum(y, x + half_w, y + win, x + win);
+                    let f1 = ((left - right) / half_area).abs();
+
+                    // Feature 2: horizontal edge (top vs bottom halves)
+                    let half_h = win / 2;
+                    let top = rect_sum(y, x, y + half_h, x + win);
+                    let bottom = rect_sum(y + half_h, x, y + win, x + win);
+                    let f2 = ((top - bottom) / half_area).abs();
+
+                    // Feature 3: center-surround (center quarter vs rest)
+                    let qx = win / 4;
+                    let qy = win / 4;
+                    let center = rect_sum(y + qy, x + qx, y + qy + half_h, x + qx + half_w);
+                    let center_area = (half_h * half_w) as f64;
+                    let surround = (total - center) / (area - center_area);
+                    let f3 = ((center / center_area) - surround).abs();
+
+                    // Combine features into a simple score.
+                    // Normalize by the mean intensity to be somewhat contrast-invariant.
+                    let norm = mean.max(1e-6);
+                    let score = (f1 + f2 + f3) / (3.0 * norm);
+
+                    if score > threshold_f64 {
+                        detections.push(cv_core::Detection {
+                            rect: cv_core::Rect::new(x as f32, y as f32, win as f32, win as f32),
+                            score: score as f32,
+                            class_id: 0,
+                        });
+                    }
+                }
+            }
+            scale *= 1.2;
+        }
+
+        // Simple greedy NMS to remove overlapping detections.
+        detections.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut keep = Vec::new();
+        let mut suppressed = vec![false; detections.len()];
+        for i in 0..detections.len() {
+            if suppressed[i] {
+                continue;
+            }
+            keep.push(detections[i]);
+            let ri = &detections[i].rect;
+            for j in (i + 1)..detections.len() {
+                if suppressed[j] {
+                    continue;
+                }
+                let rj = &detections[j].rect;
+                // Compute IoU.
+                let x1 = ri.x.max(rj.x);
+                let y1 = ri.y.max(rj.y);
+                let x2 = (ri.x + ri.w).min(rj.x + rj.w);
+                let y2 = (ri.y + ri.h).min(rj.y + rj.h);
+                let inter = (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
+                let union = ri.w * ri.h + rj.w * rj.h - inter;
+                if union > 0.0 && inter / union > 0.4 {
+                    suppressed[j] = true;
+                }
+            }
+        }
+
+        Ok(keep)
     }
 
     #[allow(clippy::needless_range_loop)]
@@ -981,14 +1098,232 @@ impl ComputeContext for CpuBackend {
         OS: Storage<T> + cv_core::StorageFactory<T> + 'static,
     >(
         &self,
-        _proj_left: &[[T; 4]; 3],
-        _proj_right: &[[T; 4]; 3],
-        _points_left: &Tensor<T, S>,
-        _points_right: &Tensor<T, S>,
+        proj_left: &[[T; 4]; 3],
+        proj_right: &[[T; 4]; 3],
+        points_left: &Tensor<T, S>,
+        points_right: &Tensor<T, S>,
     ) -> Result<Tensor<T, OS>> {
-        Err(crate::Error::NotSupported(
-            "CPU triangulate_points not yet implemented in HAL".into(),
-        ))
+        // DLT triangulation: given projection matrices P1, P2 and corresponding
+        // 2D point pairs, compute 3D points via SVD of the linear system.
+        //
+        // Input tensors: (1, N, 2) — N points, each with (x, y) coordinates.
+        // Output tensor: (1, N, 3) — N 3D points (x, y, z).
+        let left_data = points_left
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Left points not on CPU".into()))?;
+        let right_data = points_right
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Right points not on CPU".into()))?;
+
+        // Determine number of points. The tensor is (1, N, 2), so total elements = N*2.
+        let n = left_data.len() / 2;
+        if n == 0 || right_data.len() / 2 != n {
+            return Err(crate::Error::InvalidInput(
+                "Left and right point counts must match and be > 0".into(),
+            ));
+        }
+
+        // Convert projection matrices to f64 for numerical stability.
+        let p1: [[f64; 4]; 3] = [
+            [
+                proj_left[0][0].to_f64(),
+                proj_left[0][1].to_f64(),
+                proj_left[0][2].to_f64(),
+                proj_left[0][3].to_f64(),
+            ],
+            [
+                proj_left[1][0].to_f64(),
+                proj_left[1][1].to_f64(),
+                proj_left[1][2].to_f64(),
+                proj_left[1][3].to_f64(),
+            ],
+            [
+                proj_left[2][0].to_f64(),
+                proj_left[2][1].to_f64(),
+                proj_left[2][2].to_f64(),
+                proj_left[2][3].to_f64(),
+            ],
+        ];
+        let p2: [[f64; 4]; 3] = [
+            [
+                proj_right[0][0].to_f64(),
+                proj_right[0][1].to_f64(),
+                proj_right[0][2].to_f64(),
+                proj_right[0][3].to_f64(),
+            ],
+            [
+                proj_right[1][0].to_f64(),
+                proj_right[1][1].to_f64(),
+                proj_right[1][2].to_f64(),
+                proj_right[1][3].to_f64(),
+            ],
+            [
+                proj_right[2][0].to_f64(),
+                proj_right[2][1].to_f64(),
+                proj_right[2][2].to_f64(),
+                proj_right[2][3].to_f64(),
+            ],
+        ];
+
+        let mut output = vec![T::ZERO; n * 3];
+
+        for i in 0..n {
+            let x1 = left_data[i * 2].to_f64();
+            let y1 = left_data[i * 2 + 1].to_f64();
+            let x2 = right_data[i * 2].to_f64();
+            let y2 = right_data[i * 2 + 1].to_f64();
+
+            // Build the 4x4 DLT matrix A:
+            //   row 0: x1 * P1[2,:] - P1[0,:]
+            //   row 1: y1 * P1[2,:] - P1[1,:]
+            //   row 2: x2 * P2[2,:] - P2[0,:]
+            //   row 3: y2 * P2[2,:] - P2[1,:]
+            let a: [[f64; 4]; 4] = [
+                [
+                    x1 * p1[2][0] - p1[0][0],
+                    x1 * p1[2][1] - p1[0][1],
+                    x1 * p1[2][2] - p1[0][2],
+                    x1 * p1[2][3] - p1[0][3],
+                ],
+                [
+                    y1 * p1[2][0] - p1[1][0],
+                    y1 * p1[2][1] - p1[1][1],
+                    y1 * p1[2][2] - p1[1][2],
+                    y1 * p1[2][3] - p1[1][3],
+                ],
+                [
+                    x2 * p2[2][0] - p2[0][0],
+                    x2 * p2[2][1] - p2[0][1],
+                    x2 * p2[2][2] - p2[0][2],
+                    x2 * p2[2][3] - p2[0][3],
+                ],
+                [
+                    y2 * p2[2][0] - p2[1][0],
+                    y2 * p2[2][1] - p2[1][1],
+                    y2 * p2[2][2] - p2[1][2],
+                    y2 * p2[2][3] - p2[1][3],
+                ],
+            ];
+
+            // Solve via SVD of A^T A (4x4 symmetric matrix).
+            // The solution is the eigenvector corresponding to the smallest eigenvalue.
+            // Compute A^T * A.
+            let mut ata = [[0.0f64; 4]; 4];
+            for r in 0..4 {
+                for c in r..4 {
+                    let mut s = 0.0f64;
+                    for row in &a {
+                        s += row[r] * row[c];
+                    }
+                    ata[r][c] = s;
+                    ata[c][r] = s;
+                }
+            }
+
+            // Use the Jacobi eigenvalue algorithm for the 4x4 symmetric matrix A^T A.
+            // We need the eigenvector corresponding to the smallest eigenvalue.
+            let mut v = [[0.0f64; 4]; 4];
+            for (j, row) in v.iter_mut().enumerate() {
+                row[j] = 1.0;
+            }
+            let mut d = ata;
+
+            for _ in 0..100 {
+                // Find the largest off-diagonal element.
+                let mut max_val = 0.0f64;
+                let mut p_idx = 0;
+                let mut q_idx = 1;
+                #[allow(clippy::needless_range_loop)]
+                for r in 0..4 {
+                    for c in (r + 1)..4 {
+                        let val = d[r][c].abs();
+                        if val > max_val {
+                            max_val = val;
+                            p_idx = r;
+                            q_idx = c;
+                        }
+                    }
+                }
+                if max_val < 1e-15 {
+                    break;
+                }
+
+                // Compute Jacobi rotation.
+                let app = d[p_idx][p_idx];
+                let aqq = d[q_idx][q_idx];
+                let apq = d[p_idx][q_idx];
+
+                let tau = (aqq - app) / (2.0 * apq);
+                let t = if tau >= 0.0 {
+                    1.0 / (tau + (1.0 + tau * tau).sqrt())
+                } else {
+                    -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+                };
+                let c = 1.0 / (1.0 + t * t).sqrt();
+                let s = t * c;
+
+                // Update D = G^T D G.
+                let mut new_d = d;
+                new_d[p_idx][p_idx] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+                new_d[q_idx][q_idx] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+                new_d[p_idx][q_idx] = 0.0;
+                new_d[q_idx][p_idx] = 0.0;
+
+                for j in 0..4 {
+                    if j == p_idx || j == q_idx {
+                        continue;
+                    }
+                    let djp = d[j][p_idx];
+                    let djq = d[j][q_idx];
+                    new_d[j][p_idx] = c * djp - s * djq;
+                    new_d[p_idx][j] = new_d[j][p_idx];
+                    new_d[j][q_idx] = s * djp + c * djq;
+                    new_d[q_idx][j] = new_d[j][q_idx];
+                }
+                d = new_d;
+
+                // Update eigenvectors V = V * G.
+                for row in &mut v {
+                    let vjp = row[p_idx];
+                    let vjq = row[q_idx];
+                    row[p_idx] = c * vjp - s * vjq;
+                    row[q_idx] = s * vjp + c * vjq;
+                }
+            }
+
+            // Find the index of the smallest eigenvalue (diagonal of d).
+            let mut min_idx = 0;
+            let mut min_ev = d[0][0];
+            for (j, d_row) in d.iter().enumerate().skip(1) {
+                if d_row[j] < min_ev {
+                    min_ev = d_row[j];
+                    min_idx = j;
+                }
+            }
+
+            // The corresponding column of V is the solution in homogeneous coords.
+            let w_val = v[3][min_idx];
+            if w_val.abs() < 1e-12 {
+                // Point at infinity; set to large values.
+                output[i * 3] = T::from_f64(v[0][min_idx]);
+                output[i * 3 + 1] = T::from_f64(v[1][min_idx]);
+                output[i * 3 + 2] = T::from_f64(v[2][min_idx]);
+            } else {
+                output[i * 3] = T::from_f64(v[0][min_idx] / w_val);
+                output[i * 3 + 1] = T::from_f64(v[1][min_idx] / w_val);
+                output[i * 3 + 2] = T::from_f64(v[2][min_idx] / w_val);
+            }
+        }
+
+        let output_storage = OS::from_vec(output).map_err(crate::Error::MemoryError)?;
+        Ok(Tensor {
+            storage: output_storage,
+            shape: TensorShape::new(1, n, 3),
+            dtype: points_left.dtype,
+            _phantom: std::marker::PhantomData,
+        })
     }
 
     fn find_chessboard_corners<

@@ -23,12 +23,7 @@ pub fn match_template<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     template: &crate::GpuTensor<T>,
     method: TemplateMatchMethod,
 ) -> Result<crate::GpuTensor<T>> {
-    // Only f32 WGSL shader available
-    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
-        return Err(crate::Error::NotSupported(
-            "Template Matching GPU kernel only supports f32".into(),
-        ));
-    }
+    let _precision = crate::gpu_kernels::shader_template::precision_for_type::<T>()?;
 
     let (img_h, img_w) = image.shape.hw();
     let (templ_h, templ_w) = template.shape.hw();

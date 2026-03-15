@@ -24,12 +24,7 @@ pub fn stereo_match<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     right: &crate::GpuTensor<T>,
     params: &StereoMatchParams,
 ) -> Result<crate::GpuTensor<T>> {
-    // Only f32 WGSL shader available
-    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
-        return Err(crate::Error::NotSupported(
-            "Stereo Match GPU kernel only supports f32".into(),
-        ));
-    }
+    let _precision = crate::gpu_kernels::shader_template::precision_for_type::<T>()?;
 
     let (h, w) = left.shape.hw();
     let out_len = w * h;

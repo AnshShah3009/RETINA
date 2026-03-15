@@ -123,18 +123,12 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
             mapped_at_creation: false,
         });
 
-        let shader_source_nms = match cv_core::DataType::from_type::<T>() {
-            Ok(cv_core::DataType::F32) => include_str!("../../shaders/fast_nms_f32.wgsl"),
-            Ok(_) => {
-                return Err(crate::Error::NotSupported(
-                    "Unsupported fast precision type".into(),
-                ))
-            }
-            _ => {
-                include_str!("../../shaders/fast_nms_f32.wgsl")
-            }
-        };
-        let pipeline_nms = ctx.create_compute_pipeline(shader_source_nms, "main");
+        let nms_precision = crate::gpu_kernels::shader_template::precision_for_type::<T>()?;
+        let shader_source_nms = crate::gpu_kernels::shader_template::resolve(
+            include_str!("../../shaders/fast_nms_f32.wgsl"),
+            nms_precision,
+        );
+        let pipeline_nms = ctx.create_compute_pipeline(&shader_source_nms, "main");
 
         let nms_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("FAST NMS Bind Group"),
