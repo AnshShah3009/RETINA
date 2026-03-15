@@ -9,6 +9,8 @@ description = "3D file format I/O for point clouds and meshes (PLY, OBJ, STL, PC
 cv-core = { workspace = true }
 cv-3d = { workspace = true }
 nalgebra = { workspace = true }
+las = { version = "0.9", optional = true, features = ["laz"] }
 
 [features]
 default = []
+las = ["dep:las"]

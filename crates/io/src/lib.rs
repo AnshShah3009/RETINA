@@ -12,6 +12,14 @@ pub mod pcd;
 pub mod ply;
 pub mod stl;
 
+#[cfg(feature = "las")]
+pub mod las_io;
+
+#[cfg(feature = "las")]
+pub use las_io::{
+    filter_by_classification, filter_by_mask, las_to_point_cloud, point_cloud_to_las, read_las,
+    write_las, LasData,
+};
 pub use obj::{read_obj, write_obj, ObjMesh};
 pub use pcd::{read_pcd, write_pcd, write_pcd_binary, write_pcd_binary_compressed, PcdData};
 pub use ply::{read_ply, write_ply};
