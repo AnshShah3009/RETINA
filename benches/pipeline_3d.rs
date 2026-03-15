@@ -252,6 +252,128 @@ fn bench_tsdf(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// 6. GPU ICP (new implementation in crates/3d/src/gpu)
+// ---------------------------------------------------------------------------
+
+fn bench_gpu_icp(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gpu_icp");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(10);
+
+    for &n in &[1_000usize, 10_000] {
+        let label = format!("n={}", n);
+        let target = sphere_cloud(n, 1.0);
+        let offset = Vector3::new(0.05, 0.03, 0.02);
+        let src_pts: Vec<_> = target.points.iter().map(|p| p + offset).collect();
+        let tgt_normals = target.normals.clone().unwrap();
+
+        group.bench_with_input(BenchmarkId::new("point_to_plane", &label), &(), |b, _| {
+            b.iter(|| {
+                black_box(cv_3d::gpu::registration::icp_point_to_plane(
+                    black_box(&src_pts),
+                    black_box(&target.points),
+                    black_box(&tgt_normals),
+                    0.5,
+                    30,
+                ))
+            });
+        });
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 7. Ray casting (brute-force — O(rays × triangles))
+// ---------------------------------------------------------------------------
+
+fn bench_raycasting(c: &mut Criterion) {
+    let mut group = c.benchmark_group("raycasting");
+    group.measurement_time(Duration::from_secs(8));
+    group.sample_size(10);
+
+    // Build a simple mesh from sphere cloud via Poisson
+    let cloud = sphere_cloud(5_000, 1.0);
+    let mesh = poisson_reconstruction(&cloud, 5, 1.0);
+
+    if let Some(ref mesh) = mesh {
+        let verts = &mesh.vertices;
+        let faces: Vec<[usize; 3]> = mesh.faces.clone();
+        let n_faces = faces.len();
+
+        for &n_rays in &[100usize, 1000] {
+            let label = format!("{}rays_{}tris", n_rays, n_faces);
+            let origins: Vec<_> = (0..n_rays)
+                .map(|i| {
+                    let t = i as f32 / n_rays as f32 * std::f32::consts::PI * 2.0;
+                    Point3::new(3.0 * t.cos(), 3.0 * t.sin(), 0.0)
+                })
+                .collect();
+            let dirs: Vec<_> = origins
+                .iter()
+                .map(|o| (Point3::origin() - o).normalize())
+                .collect();
+
+            group.bench_with_input(BenchmarkId::new("brute_force", &label), &(), |b, _| {
+                b.iter(|| {
+                    black_box(cv_3d::gpu::raycasting::cast_rays(
+                        black_box(&origins),
+                        black_box(&dirs),
+                        black_box(verts),
+                        black_box(&faces),
+                    ))
+                });
+            });
+        }
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
+// 8. Vertex normals + Laplacian smoothing
+// ---------------------------------------------------------------------------
+
+fn bench_mesh_ops(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mesh_ops");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(15);
+
+    let cloud = sphere_cloud(10_000, 1.0);
+    let mesh = poisson_reconstruction(&cloud, 6, 1.0);
+
+    if let Some(ref mesh) = mesh {
+        let n_v = mesh.vertices.len();
+        let n_f = mesh.faces.len();
+        let label = format!("{}v_{}f", n_v, n_f);
+
+        group.bench_with_input(BenchmarkId::new("vertex_normals", &label), &(), |b, _| {
+            b.iter(|| {
+                black_box(cv_3d::gpu::mesh::compute_vertex_normals(
+                    black_box(&mesh.vertices),
+                    black_box(&mesh.faces),
+                ))
+            });
+        });
+
+        group.bench_with_input(
+            BenchmarkId::new("laplacian_smooth_5iter", &label),
+            &(),
+            |b, _| {
+                b.iter(|| {
+                    let mut verts = mesh.vertices.clone();
+                    black_box(cv_3d::gpu::mesh::laplacian_smooth(
+                        black_box(&mut verts),
+                        black_box(&mesh.faces),
+                        5,
+                        0.5,
+                    ))
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
@@ -262,5 +384,8 @@ criterion_group!(
     bench_icp,
     bench_poisson,
     bench_tsdf,
+    bench_gpu_icp,
+    bench_raycasting,
+    bench_mesh_ops,
 );
 criterion_main!(pipeline_3d);

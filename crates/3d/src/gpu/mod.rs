@@ -746,42 +746,57 @@ pub mod registration {
         let max_dist_sq = max_dist * max_dist;
 
         for _ in 0..max_iters {
-            // Find correspondences and build linear system (6x6)
-            let mut ata = nalgebra::Matrix6::<f64>::zeros();
-            let mut atb = nalgebra::Vector6::<f64>::zeros();
-            let mut n_corr = 0usize;
-
-            for sp in source {
-                // Transform source point
-                let tp = transform.transform_point(sp);
-                if let Some((closest, idx, dist_sq)) = tree.nearest_neighbor(&tp) {
-                    if dist_sq > max_dist_sq {
-                        continue;
-                    }
-                    let n: nalgebra::Vector3<f64> = nalgebra::Vector3::new(
-                        target_normals[idx].x as f64,
-                        target_normals[idx].y as f64,
-                        target_normals[idx].z as f64,
-                    );
-                    let p = nalgebra::Vector3::new(tp.x as f64, tp.y as f64, tp.z as f64);
-                    let q = nalgebra::Vector3::new(
-                        closest.x as f64,
-                        closest.y as f64,
-                        closest.z as f64,
-                    );
-                    let d = p - q;
-
-                    // Point-to-plane: minimize (n . (Rp + t - q))^2
-                    // Linearized: [n x p, n] . [alpha, beta, gamma, tx, ty, tz]^T = -n . d
-                    let cross = p.cross(&n);
-                    let row = nalgebra::Vector6::new(cross.x, cross.y, cross.z, n.x, n.y, n.z);
-                    let rhs = -n.dot(&d);
-
-                    ata += row * row.transpose();
-                    atb += row * rhs;
-                    n_corr += 1;
-                }
-            }
+            // Find correspondences and build linear system (6x6) — parallel reduction
+            let (ata, atb, n_corr) = source
+                .par_iter()
+                .fold(
+                    || {
+                        (
+                            nalgebra::Matrix6::<f64>::zeros(),
+                            nalgebra::Vector6::<f64>::zeros(),
+                            0usize,
+                        )
+                    },
+                    |(mut ata, mut atb, mut count), sp| {
+                        let tp = transform.transform_point(sp);
+                        if let Some((closest, idx, dist_sq)) = tree.nearest_neighbor(&tp) {
+                            if dist_sq <= max_dist_sq {
+                                let n = nalgebra::Vector3::new(
+                                    target_normals[idx].x as f64,
+                                    target_normals[idx].y as f64,
+                                    target_normals[idx].z as f64,
+                                );
+                                let p =
+                                    nalgebra::Vector3::new(tp.x as f64, tp.y as f64, tp.z as f64);
+                                let q = nalgebra::Vector3::new(
+                                    closest.x as f64,
+                                    closest.y as f64,
+                                    closest.z as f64,
+                                );
+                                let d = p - q;
+                                let cross = p.cross(&n);
+                                let row = nalgebra::Vector6::new(
+                                    cross.x, cross.y, cross.z, n.x, n.y, n.z,
+                                );
+                                let rhs = -n.dot(&d);
+                                ata += row * row.transpose();
+                                atb += row * rhs;
+                                count += 1;
+                            }
+                        }
+                        (ata, atb, count)
+                    },
+                )
+                .reduce(
+                    || {
+                        (
+                            nalgebra::Matrix6::<f64>::zeros(),
+                            nalgebra::Vector6::<f64>::zeros(),
+                            0usize,
+                        )
+                    },
+                    |(a1, b1, c1), (a2, b2, c2)| (a1 + a2, b1 + b2, c1 + c2),
+                );
 
             if n_corr < 6 {
                 return Err(format!("Too few correspondences: {n_corr}"));
