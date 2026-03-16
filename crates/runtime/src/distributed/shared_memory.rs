@@ -602,8 +602,12 @@ impl ShmCoordinator {
             }
 
             let hb = slot.heartbeat_ns.load(Ordering::Acquire);
-            // Check staleness: heartbeat must be nonzero and older than threshold
-            if hb == 0 || (now > hb && now - hb < STALE_THRESHOLD_NS) {
+            // A slot is stale if:
+            //   - heartbeat was never sent (hb == 0), OR
+            //   - heartbeat is older than STALE_THRESHOLD_NS
+            // A slot is fresh (skip it) only if hb > 0 and recent.
+            let is_fresh = hb > 0 && now >= hb && (now - hb) < STALE_THRESHOLD_NS;
+            if is_fresh {
                 continue;
             }
 
@@ -716,7 +720,8 @@ impl ShmCoordinator {
                             continue;
                         }
                         let hb = slot.heartbeat_ns.load(Ordering::Acquire);
-                        if hb == 0 || (now > hb && now - hb < STALE_THRESHOLD_NS) {
+                        let is_fresh = hb > 0 && now >= hb && (now - hb) < STALE_THRESHOLD_NS;
+                        if is_fresh {
                             continue;
                         }
                         let slot_pid = slot.pid.load(Ordering::Relaxed);
@@ -1124,10 +1129,10 @@ mod tests {
         let fake_slot_idx = (coord.slot_index + 1) % MAX_SLOTS;
         let slot = ShmCoordinator::slot_ptr(&coord.mmap, fake_slot_idx).unwrap();
 
-        // Set it up as if a dead process owned it
+        // Set it up as if a dead process that never sent a heartbeat.
         slot.state.store(SLOT_ACTIVE, Ordering::Release);
         slot.pid.store(u32::MAX - 1, Ordering::Release); // above any OS PID limit
-        slot.heartbeat_ns.store(1, Ordering::Release); // very old heartbeat
+        slot.heartbeat_ns.store(0, Ordering::Release); // never heartbeated = stale
         slot.memory_budget_mb[0].store(512, Ordering::Release);
         slot.device_mask.store(1, Ordering::Release);
 
