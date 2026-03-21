@@ -10,6 +10,7 @@ use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 use cv_runtime::orchestrator::RuntimeRunner;
 use nalgebra::{Matrix4, Point3, Vector3};
 use rayon::prelude::*;
+use tracing::{info, warn};
 
 /// GPU-accelerated point cloud operations
 pub mod point_cloud {
@@ -42,7 +43,7 @@ pub mod point_cloud {
     /// Compute normals using the runtime scheduler
     pub fn compute_normals(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32>> {
         let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-            // Fallback to CPU registry on error
+            warn!("GPU not available for compute_normals, using CPU");
             cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
         });
         compute_normals_ctx(points, k, &runner)
@@ -61,22 +62,64 @@ pub mod point_cloud {
             return compute_normals_gpu_with_ctx(points, k, gpu);
         }
 
+        warn!("GPU compute_normals: runner.device() failed, falling back to CPU");
         compute_normals_cpu(points, k, 0.0)
     }
 
     fn compute_normals_gpu_with_ctx(
         points: &[Point3<f32>],
         k: usize,
-        gpu: &cv_hal::gpu::GpuContext,
+        _gpu: &cv_hal::gpu::GpuContext,
     ) -> Vec<Vector3<f32>> {
-        use cv_hal::gpu_kernels::pointcloud_gpu;
-        let k = k.min(points.len().saturating_sub(1)).max(3);
-        let pts: Vec<nalgebra::Vector3<f32>> = points.iter().map(|p| p.coords).collect();
+        eprintln!(
+            "[GPU] compute_normals_gpu_with_ctx: {} points - using hybrid path (CPU kNN + GPU PCA)",
+            points.len()
+        );
+        // Full GPU path (Morton + LBVH) has bind group layout issues.
+        // Use hybrid path: CPU voxel-hash kNN + GPU batch PCA
+        compute_normals_hybrid(points, k)
+    }
 
-        match pointcloud_gpu::compute_normals_morton_gpu(gpu, &pts, k as u32) {
-            Ok(n) => n,
-            Err(_) => compute_normals_cpu(points, k, 0.0),
+    /// Estimate normals using tiled GPU brute-force kNN + analytic PCA.
+    ///
+    /// Each workgroup cooperatively loads tiles of 256 points into shared memory,
+    /// giving 256x better memory bandwidth than naive global scans.
+    ///
+    /// Complexity: O(n²) but with ~256x lower bandwidth cost.
+    /// Works well for small-medium clouds (1K-100K points).
+    ///
+    /// Falls back to CPU voxel-hash if GPU is unavailable.
+    pub fn compute_normals_gpu_tiled(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32>> {
+        if points.is_empty() {
+            return Vec::new();
         }
+        let k = k.min(points.len().saturating_sub(1)).max(3);
+
+        let runner = cv_runtime::best_runner().ok();
+        if let Some(ref r) = runner {
+            if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = r.device() {
+                let pts: Vec<nalgebra::Vector3<f32>> = points.iter().map(|p| p.coords).collect();
+                match cv_hal::gpu_kernels::pointcloud_gpu::compute_normals_tiled_gpu(
+                    gpu, &pts, k as u32,
+                ) {
+                    Ok(n) => {
+                        info!(
+                            "GPU compute_normals_gpu_tiled: executed on GPU ({} points)",
+                            points.len()
+                        );
+                        return n;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "GPU tiled normals kernel failed: {:?}, falling back to CPU",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+        warn!("GPU not available for compute_normals_gpu_tiled, falling back to CPU");
+        compute_normals_cpu(points, k, 0.0)
     }
 
     /// CPU path with optimized spatial hashing
@@ -242,6 +285,51 @@ pub mod point_cloud {
             return Vector3::z();
         }
         best / len
+    }
+
+    /// Estimate normals on CPU using KDTree + analytic eigensolver.
+    ///
+    /// This is the classic approach used by Open3D and most 3D libraries.
+    /// O(n log n) construction, O(n log k) queries.
+    pub fn compute_normals_cpu_kdtree(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32>> {
+        eprintln!(
+            "[CPU-KDTREE] compute_normals_cpu_kdtree: {} points",
+            points.len()
+        );
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let k = k.min(points.len().saturating_sub(1)).max(3);
+
+        let pts_vec: Vec<Vec<f64>> = points
+            .iter()
+            .map(|p| vec![p.x as f64, p.y as f64, p.z as f64])
+            .collect();
+
+        let tree = match cv_scientific::spatial::KDTree::new(&pts_vec) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("[CPU-KDTREE] Failed to build KDTree: {}", e);
+                return vec![Vector3::z(); points.len()];
+            }
+        };
+
+        points
+            .par_iter()
+            .enumerate()
+            .map(|(i, center)| {
+                let query = vec![center.x as f64, center.y as f64, center.z as f64];
+                let neighbors = tree.query(&query, k + 1);
+                let filtered: Vec<(f32, usize)> = neighbors
+                    .into_iter()
+                    .filter(|(idx, _)| *idx != i)
+                    .take(k)
+                    .map(|(idx, dist)| (dist as f32, idx))
+                    .collect();
+
+                compute_pca_normal(center, &filtered, points)
+            })
+            .collect()
     }
 
     /// Estimate a good voxel size in O(n) from the bounding box.
@@ -518,17 +606,29 @@ pub mod point_cloud {
         let runner = cv_runtime::best_runner().ok();
         if let Some(ref r) = runner {
             if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = r.device() {
-                if let Ok(normals) =
-                    cv_hal::gpu_kernels::pointcloud::compute_normals_from_covariances_gpu(
-                        gpu, &covs,
-                    )
-                {
-                    return normals;
+                match cv_hal::gpu_kernels::pointcloud::compute_normals_from_covariances_gpu(
+                    gpu, &covs,
+                ) {
+                    Ok(normals) => {
+                        info!(
+                            "GPU compute_normals_hybrid Phase 2: executed on GPU ({} points)",
+                            points.len()
+                        );
+                        return normals;
+                    }
+                    Err(e) => {
+                        warn!("GPU PCA failed: {:?}, falling back to CPU", e);
+                    }
                 }
+            } else {
+                warn!("No GPU device available for hybrid normals, falling back to CPU");
             }
+        } else {
+            warn!("No runner available for hybrid normals, falling back to CPU");
         }
 
         // CPU fallback: analytic eigenvectors in parallel.
+        warn!("Hybrid normals Phase 2: falling back to CPU eigenvectors");
         covs.par_iter()
             .map(|c| {
                 let mut m = nalgebra::Matrix3::zeros();

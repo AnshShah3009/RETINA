@@ -42,18 +42,8 @@ pub fn radix_sort_u32(
     });
 
     // Load Shaders
-    let sort_shader = ctx
-        .device
-        .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Radix Sort Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("radix_sort.wgsl").into()),
-        });
-    let scan_shader = ctx
-        .device
-        .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Scan Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("prefix_sum.wgsl").into()),
-        });
+    let sort_source = include_str!("radix_sort_keys.wgsl");
+    let scan_source = include_str!("prefix_sum.wgsl");
 
     let result_buffer = ctx.get_buffer(buffer_size, usages);
 
@@ -88,16 +78,7 @@ pub fn radix_sort_u32(
             });
         encoder.clear_buffer(&histogram_buffer, 0, None);
 
-        let histogram_pipeline =
-            ctx.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("Histogram Pipeline"),
-                    layout: None,
-                    module: &sort_shader,
-                    entry_point: Some("histogram"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
+        let histogram_pipeline = ctx.create_compute_pipeline(sort_source, "histogram");
         let bg_hist = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Hist BG"),
             layout: &histogram_pipeline.get_bind_group_layout(0),
@@ -106,10 +87,6 @@ pub fn radix_sort_u32(
                     binding: 0,
                     resource: in_ref.as_entire_binding(),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: out_ref.as_entire_binding(),
-                }, // Dummy
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: histogram_buffer.as_entire_binding(),
@@ -129,7 +106,7 @@ pub fn radix_sort_u32(
         ctx.submit(encoder);
 
         // 2. GPU-Side Scan Histogram
-        if let Err(e) = gpu_exclusive_scan(ctx, &histogram_buffer, histogram_size, &scan_shader) {
+        if let Err(e) = gpu_exclusive_scan(ctx, &histogram_buffer, histogram_size, scan_source) {
             loop_res = Err(e);
             break;
         }
@@ -140,16 +117,7 @@ pub fn radix_sort_u32(
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Scatter Pass"),
             });
-        let scatter_pipeline =
-            ctx.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("Scatter Pipeline"),
-                    layout: None,
-                    module: &sort_shader,
-                    entry_point: Some("scatter"),
-                    compilation_options: Default::default(),
-                    cache: None,
-                });
+        let scatter_pipeline = ctx.create_compute_pipeline(sort_source, "scatter");
         let bg_scatter = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Scatter BG"),
             layout: &scatter_pipeline.get_bind_group_layout(0),
@@ -183,11 +151,6 @@ pub fn radix_sort_u32(
         std::mem::swap(&mut in_ref, &mut out_ref);
     }
 
-    // Result is in in_ref.
-    // Logic to return correctly:
-    // If in_ref is result_buffer, then out_ref is temp_buffer.
-    // If in_ref is temp_buffer, then out_ref is result_buffer.
-
     let (final_buf, other_buf) = if std::ptr::eq(in_ref, &result_buffer) {
         (result_buffer, temp_buffer)
     } else {
@@ -207,12 +170,246 @@ pub fn radix_sort_u32(
     })
 }
 
+pub fn radix_sort_key_value_u32(
+    ctx: &GpuContext,
+    keys: &Tensor<u32, GpuStorage<u32>>,
+    values: &Tensor<u32, GpuStorage<u32>>,
+) -> Result<(Tensor<u32, GpuStorage<u32>>, Tensor<u32, GpuStorage<u32>>)> {
+    let num_elements = keys.shape.len() as u32;
+    if num_elements == 0 {
+        return Ok((keys.clone(), values.clone()));
+    }
+
+    let workgroup_size = 256;
+    let num_workgroups = num_elements.div_ceil(workgroup_size);
+    let histogram_size = num_workgroups * 256;
+
+    let usages =
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+
+    // We use packed Key-Value buffers to fit within iGPU storage limits (max 4 per stage)
+    let kv_buffer_size = (num_elements as u64) * 8; // 8 bytes per KV pair
+    let in_kv_buf = ctx.get_buffer(kv_buffer_size, usages);
+    let out_kv_buf = ctx.get_buffer(kv_buffer_size, usages);
+    let histogram_buffer = ctx.get_buffer((histogram_size as u64) * 4, usages);
+
+    let params_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Sort Params"),
+        size: std::mem::size_of::<SortParams>() as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let sort_source = include_str!("radix_sort_kv.wgsl");
+    let scan_source = include_str!("prefix_sum.wgsl");
+
+    // 1. Pack Pass
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("KV Pack"),
+        });
+    let pack_pipeline = ctx.create_compute_pipeline(sort_source, "pack");
+
+    // Using a special params for packing
+    let pack_params = SortParams {
+        num_elements,
+        shift: 0,
+        num_workgroups: 0,
+        padding: 0,
+    };
+    ctx.queue
+        .write_buffer(&params_buffer, 0, bytemuck::bytes_of(&pack_params));
+
+    let bg_pack = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Pack BG"),
+        layout: &pack_pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: keys.storage.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: values.storage.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: in_kv_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: params_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        cpass.set_pipeline(&pack_pipeline);
+        cpass.set_bind_group(0, &bg_pack, &[]);
+        cpass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
+    }
+    ctx.submit(encoder);
+
+    let mut in_ref: &wgpu::Buffer = &in_kv_buf;
+    let mut out_ref: &wgpu::Buffer = &out_kv_buf;
+
+    let mut loop_res = Ok(());
+    for pass in 0..4 {
+        let shift = pass * 8;
+        let params = SortParams {
+            num_elements,
+            shift,
+            num_workgroups,
+            padding: 0,
+        };
+        ctx.queue
+            .write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
+
+        // Histogram Pass
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.clear_buffer(&histogram_buffer, 0, None);
+        let histogram_pipeline = ctx.create_compute_pipeline(sort_source, "histogram");
+        let bg_hist = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Hist BG"),
+            layout: &histogram_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: in_ref.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: histogram_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            cpass.set_pipeline(&histogram_pipeline);
+            cpass.set_bind_group(0, &bg_hist, &[]);
+            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+        }
+        ctx.submit(encoder);
+
+        if let Err(e) = gpu_exclusive_scan(ctx, &histogram_buffer, histogram_size, scan_source) {
+            loop_res = Err(e);
+            break;
+        }
+
+        // Scatter Pass
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        let scatter_pipeline = ctx.create_compute_pipeline(sort_source, "scatter");
+        let bg_scatter = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Scatter BG"),
+            layout: &scatter_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: in_ref.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out_ref.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: histogram_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            cpass.set_pipeline(&scatter_pipeline);
+            cpass.set_bind_group(0, &bg_scatter, &[]);
+            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+        }
+        ctx.submit(encoder);
+
+        std::mem::swap(&mut in_ref, &mut out_ref);
+    }
+
+    // Unpack Pass
+    let result_keys_buf = ctx.get_buffer((num_elements as u64) * 4, usages);
+    let result_values_buf = ctx.get_buffer((num_elements as u64) * 4, usages);
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("KV Unpack"),
+        });
+    let unpack_pipeline = ctx.create_compute_pipeline(sort_source, "unpack");
+    let bg_unpack = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Unpack BG"),
+        layout: &unpack_pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: in_ref.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: result_keys_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: result_values_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: params_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    {
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        cpass.set_pipeline(&unpack_pipeline);
+        cpass.set_bind_group(0, &bg_unpack, &[]);
+        cpass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
+    }
+    ctx.submit(encoder);
+
+    // Return temporary packed buffers
+    ctx.return_buffer(in_kv_buf, usages);
+    ctx.return_buffer(out_kv_buf, usages);
+    ctx.return_buffer(histogram_buffer, usages);
+
+    loop_res?;
+
+    Ok((
+        Tensor {
+            storage: GpuStorage::from_buffer(Arc::new(result_keys_buf), num_elements as usize),
+            shape: keys.shape,
+            dtype: keys.dtype,
+            _phantom: std::marker::PhantomData,
+        },
+        Tensor {
+            storage: GpuStorage::from_buffer(Arc::new(result_values_buf), num_elements as usize),
+            shape: values.shape,
+            dtype: values.dtype,
+            _phantom: std::marker::PhantomData,
+        },
+    ))
+}
+
 /// Recursively performs an exclusive prefix sum on the GPU.
 pub fn gpu_exclusive_scan(
     ctx: &GpuContext,
     buffer: &wgpu::Buffer,
     num_elements: u32,
-    scan_shader: &wgpu::ShaderModule,
+    scan_source: &str,
 ) -> Result<()> {
     if num_elements == 0 {
         return Ok(());
@@ -240,19 +437,9 @@ pub fn gpu_exclusive_scan(
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Scan Blocks"),
         });
-    let scan_pipeline = ctx
-        .device
-        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Scan Blocks Pipeline"),
-            layout: None,
-            module: scan_shader,
-            entry_point: Some("scan_blocks"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+    let scan_pipeline = ctx.create_compute_pipeline(scan_source, "scan_blocks");
 
     let bg_scan = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Scan BG"),
         layout: &scan_pipeline.get_bind_group_layout(0),
         entries: &[
             wgpu::BindGroupEntry {
@@ -268,6 +455,7 @@ pub fn gpu_exclusive_scan(
                 resource: n_elements_buffer.as_entire_binding(),
             },
         ],
+        label: Some("Scan BG"),
     });
 
     {
@@ -280,7 +468,7 @@ pub fn gpu_exclusive_scan(
 
     // 2. Scan Block Sums (Recursive)
     if num_workgroups > 1 {
-        gpu_exclusive_scan(ctx, &block_sums_buffer, num_workgroups, scan_shader)?;
+        gpu_exclusive_scan(ctx, &block_sums_buffer, num_workgroups, scan_source)?;
 
         // 3. Add Offsets Back
         let mut encoder = ctx
@@ -288,19 +476,9 @@ pub fn gpu_exclusive_scan(
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Add Offsets"),
             });
-        let add_pipeline = ctx
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("Add Offsets Pipeline"),
-                layout: None,
-                module: scan_shader,
-                entry_point: Some("add_offsets"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+        let add_pipeline = ctx.create_compute_pipeline(scan_source, "add_offsets");
 
         let bg_add = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Add BG"),
             layout: &add_pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
@@ -316,6 +494,7 @@ pub fn gpu_exclusive_scan(
                     resource: n_elements_buffer.as_entire_binding(),
                 },
             ],
+            label: Some("Add BG"),
         });
 
         {

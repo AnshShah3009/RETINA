@@ -16,5 +16,4 @@ classifiers = [
 [tool.maturin]
 features = ["pyo3/extension-module"]
 module-name = "cv_native"
-python-source = "python"
 manifest-path = "crates/python/Cargo.toml"

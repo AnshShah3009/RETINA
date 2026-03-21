@@ -10,7 +10,10 @@ struct OdometryParams {
     max_iterations: u32,
     min_depth: f32,
     max_depth: f32,
-    padding: array<u32, 3>,
+    // Pad to 48 bytes (3 x 16) for proper WGSL uniform alignment
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
 @group(0) @binding(0) var<storage, read> source_depth: array<f32>;

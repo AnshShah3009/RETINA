@@ -1,6 +1,14 @@
 use crate::{BackendType, DeviceId, Result};
 use cv_core::{storage::Storage, Float, Tensor};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Interpolation {
+    Nearest,
+    Linear,
+    Cubic,
+    Lanczos,
+}
+
 /// A unified context for executing compute operations.
 ///
 /// This trait abstracts over different compute backends (CPU, CUDA, Vulkan/WebGPU),
@@ -478,6 +486,36 @@ pub trait ComputeContext: Send + Sync {
         image: &Tensor<T, S>,
         pattern_size: (usize, usize),
     ) -> Result<Vec<cv_core::KeyPoint>>;
+
+    /// Execute a remap operation
+    fn remap<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+        S2: Storage<f32> + 'static,
+    >(
+        &self,
+        input: &Tensor<T, S>,
+        map_x: &Tensor<f32, S2>,
+        map_y: &Tensor<f32, S2>,
+        interpolation: Interpolation,
+        border_mode: BorderMode<T>,
+    ) -> Result<Tensor<T, S>>;
+
+    /// Execute an undistort operation
+    #[allow(clippy::too_many_arguments)]
+    fn undistort<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
+        &self,
+        input: &Tensor<T, S>,
+        intrinsics: &cv_core::CameraIntrinsics,
+        distortion: &cv_core::Distortion,
+        rectification: &nalgebra::Matrix3<f64>,
+        new_intrinsics: &cv_core::CameraIntrinsics,
+        interpolation: Interpolation,
+        border_mode: BorderMode<T>,
+    ) -> Result<Tensor<T, S>>;
 }
 
 #[derive(Debug, Clone, Copy)]

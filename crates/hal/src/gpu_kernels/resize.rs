@@ -9,12 +9,18 @@ use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct ResizeParams {
-    src_w: u32,
-    src_h: u32,
-    dst_w: u32,
-    dst_h: u32,
-    channels: u32,
+pub struct ResizeParams {
+    pub src_w: u32,
+    pub src_h: u32,
+    pub dst_w: u32,
+    pub dst_h: u32,
+    pub channels: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterpolationMode {
+    Bilinear,
+    Lanczos4,
 }
 
 pub fn resize<T: cv_core::float::Float + bytemuck::Pod>(
@@ -23,14 +29,30 @@ pub fn resize<T: cv_core::float::Float + bytemuck::Pod>(
     new_width: u32,
     new_height: u32,
 ) -> Result<GpuTensor<T>> {
+    resize_with_mode(
+        ctx,
+        input,
+        new_width,
+        new_height,
+        InterpolationMode::Bilinear,
+    )
+}
+
+pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
+    ctx: &GpuContext,
+    input: &GpuTensor<T>,
+    new_width: u32,
+    new_height: u32,
+    mode: InterpolationMode,
+) -> Result<GpuTensor<T>> {
     use crate::storage::GpuStorage;
     let (src_h, src_w) = input.shape.hw();
     let (dst_w, dst_h) = (new_width as usize, new_height as usize);
     let c = input.shape.channels;
 
-    if c != 1 {
-        return Err(crate::Error::NotSupported(
-            "GPU Resize currently only for grayscale".into(),
+    if c == 0 {
+        return Err(crate::Error::InvalidInput(
+            "Resize requires at least one channel".into(),
         ));
     }
 
@@ -61,18 +83,17 @@ pub fn resize<T: cv_core::float::Float + bytemuck::Pod>(
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let shader_source = match cv_core::DataType::from_type::<T>() {
-        Ok(cv_core::DataType::F32) => include_str!("../../shaders/resize_f32.wgsl"),
-        Ok(_) => {
-            return Err(crate::Error::NotSupported(
-                "Unsupported resize precision type".into(),
-            ))
+    let shader_source = match mode {
+        InterpolationMode::Bilinear => {
+            if c == 1 {
+                include_str!("../../shaders/resize_f32.wgsl").to_string()
+            } else {
+                include_str!("../../shaders/resize_f32_multichannel.wgsl").to_string()
+            }
         }
-        _ => {
-            include_str!("../../shaders/resize_f32.wgsl")
-        }
+        InterpolationMode::Lanczos4 => include_str!("../../shaders/lanczos4.wgsl").to_string(),
     };
-    let pipeline = ctx.create_compute_pipeline(shader_source, "main");
+    let pipeline = ctx.create_compute_pipeline(&shader_source, "main");
 
     let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Resize Bind Group"),
@@ -122,4 +143,19 @@ pub fn resize<T: cv_core::float::Float + bytemuck::Pod>(
         _phantom: PhantomData,
     };
     Ok(res_gpu)
+}
+
+pub fn resize_lanczos4<T: cv_core::float::Float + bytemuck::Pod>(
+    ctx: &GpuContext,
+    input: &GpuTensor<T>,
+    new_width: u32,
+    new_height: u32,
+) -> Result<GpuTensor<T>> {
+    resize_with_mode(
+        ctx,
+        input,
+        new_width,
+        new_height,
+        InterpolationMode::Lanczos4,
+    )
 }

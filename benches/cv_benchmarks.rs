@@ -16,11 +16,7 @@ fn create_stereo_pair(width: u32, height: u32, disparity: i32) -> (GrayImage, Gr
             let pattern = ((x / 10) % 2) * 200;
             left.put_pixel(x, y, Luma([pattern as u8]));
 
-            let shifted_x = if x >= disparity as u32 {
-                x - disparity as u32
-            } else {
-                0
-            };
+            let shifted_x = x.saturating_sub(disparity as u32);
             let right_pattern = ((shifted_x / 10) % 2) * 200;
             right.put_pixel(x, y, Luma([right_pattern as u8]));
         }

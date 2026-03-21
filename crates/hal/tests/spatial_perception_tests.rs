@@ -2,12 +2,36 @@ use cv_core::{Tensor, TensorShape};
 use cv_hal::context::ComputeContext;
 use cv_hal::gpu::GpuContext;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
+use pollster::block_on;
+
+fn get_gpu_context() -> Option<&'static GpuContext> {
+    // Try to get global context first
+    if let Ok(ctx) = GpuContext::global() {
+        return Some(ctx);
+    }
+
+    // Initialize if not initialized yet
+    if let Ok(ctx) = pollster::block_on(GpuContext::init_global()) {
+        Some(ctx)
+    } else {
+        None
+    }
+}
 
 #[test]
 fn test_gpu_nms_pixel() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => return,
+    let ctx = match get_gpu_context() {
+        Some(ctx) => {
+            println!(
+                "✓ test_gpu_nms_pixel: Using GPU backend: {:?}",
+                ctx.backend_type()
+            );
+            ctx
+        }
+        None => {
+            println!("✗ test_gpu_nms_pixel: Skipping - no GPU available");
+            return;
+        }
     };
 
     let shape = TensorShape::new(1, 100, 100);
@@ -30,9 +54,18 @@ fn test_gpu_nms_pixel() {
 
 #[test]
 fn test_gpu_tsdf_pipeline() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => return,
+    let ctx = match get_gpu_context() {
+        Some(ctx) => {
+            println!(
+                "✓ test_gpu_tsdf_pipeline: Using GPU backend: {:?}",
+                ctx.backend_type()
+            );
+            ctx
+        }
+        None => {
+            println!("✗ test_gpu_tsdf_pipeline: Skipping - no GPU available");
+            return;
+        }
     };
 
     let vx = 64;
@@ -102,9 +135,18 @@ fn test_gpu_tsdf_pipeline() {
 
 #[test]
 fn test_gpu_dense_icp() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => return,
+    let ctx = match get_gpu_context() {
+        Some(ctx) => {
+            println!(
+                "✓ test_gpu_dense_icp: Using GPU backend: {:?}",
+                ctx.backend_type()
+            );
+            ctx
+        }
+        None => {
+            println!("✗ test_gpu_dense_icp: Skipping - no GPU available");
+            return;
+        }
     };
 
     let w = 160;
@@ -211,9 +253,18 @@ fn test_gpu_dense_icp() {
 
 #[test]
 fn test_gpu_optical_flow_multi_level() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => return,
+    let ctx = match get_gpu_context() {
+        Some(ctx) => {
+            println!(
+                "✓ test_gpu_optical_flow_multi_level: Using GPU backend: {:?}",
+                ctx.backend_type()
+            );
+            ctx
+        }
+        None => {
+            println!("✗ test_gpu_optical_flow_multi_level: Skipping - no GPU available");
+            return;
+        }
     };
 
     let shape = TensorShape::new(1, 128, 128);
@@ -240,7 +291,8 @@ fn test_gpu_optical_flow_multi_level() {
         .unwrap();
     let p1 = vec![t1];
     let p2 = vec![t2];
-    let pts = vec![[65.0, 65.0]];
+    // Need 2 points (4 floats total) for the GPU kernel
+    let pts: Vec<[f32; 2]> = vec![[65.0, 65.0], [66.0, 66.0]];
     let tracked = ctx.optical_flow_lk(&p1, &p2, &pts, 11, 10).unwrap();
     let dx = tracked[0][0] - pts[0][0];
     let dy = tracked[0][1] - pts[0][1];

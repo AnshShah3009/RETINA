@@ -638,4 +638,39 @@ impl ComputeContext for MlxContext {
     ) -> Result<()> {
         self.cpu_fallback.mog2_update(frame, model, mask, params)
     }
+
+    fn remap<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+        S2: Storage<f32> + 'static,
+    >(
+        &self,
+        _input: &Tensor<T, S>,
+        _map_x: &Tensor<f32, S2>,
+        _map_y: &Tensor<f32, S2>,
+        _interpolation: crate::context::Interpolation,
+        _border_mode: BorderMode<T>,
+    ) -> Result<Tensor<T, S>> {
+        Err(crate::Error::NotSupported(
+            "remap not yet implemented on MLX backend".into(),
+        ))
+    }
+
+    fn undistort<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
+        &self,
+        _input: &Tensor<T, S>,
+        _intrinsics: &cv_core::CameraIntrinsics,
+        _distortion: &cv_core::Distortion,
+        _rectification: &nalgebra::Matrix3<f64>,
+        _new_intrinsics: &cv_core::CameraIntrinsics,
+        _interpolation: crate::context::Interpolation,
+        _border_mode: BorderMode<T>,
+    ) -> Result<Tensor<T, S>> {
+        Err(crate::Error::NotSupported(
+            "undistort not yet implemented on MLX backend".into(),
+        ))
+    }
 }

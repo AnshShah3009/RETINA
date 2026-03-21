@@ -1,5 +1,5 @@
 use cv_runtime::device_registry::registry;
-use cv_runtime::orchestrator::{scheduler, WorkloadHint};
+use cv_runtime::orchestrator::{scheduler, AdaptiveLevel, ExecutionMode, WorkloadHint};
 use pyo3::prelude::*;
 
 #[pyclass]
@@ -18,6 +18,28 @@ impl From<PyWorkloadHint> for WorkloadHint {
             PyWorkloadHint::Throughput => WorkloadHint::Throughput,
             PyWorkloadHint::PowerSave => WorkloadHint::PowerSave,
             PyWorkloadHint::Default => WorkloadHint::Default,
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PyExecutionMode {
+    Strict,
+    Normal,
+    AdaptiveBasic,
+    AdaptiveAggressive,
+}
+
+impl From<PyExecutionMode> for ExecutionMode {
+    fn from(mode: PyExecutionMode) -> Self {
+        match mode {
+            PyExecutionMode::Strict => ExecutionMode::Strict,
+            PyExecutionMode::Normal => ExecutionMode::Normal,
+            PyExecutionMode::AdaptiveBasic => ExecutionMode::Adaptive(AdaptiveLevel::Basic),
+            PyExecutionMode::AdaptiveAggressive => {
+                ExecutionMode::Adaptive(AdaptiveLevel::Aggressive)
+            }
         }
     }
 }
@@ -284,17 +306,27 @@ impl PyRuntime {
             .collect()
     }
 
-    /// Count how many GPU→CPU fallbacks have occurred since startup.
+    /// Manually initialize a device in the coordinator with a specific memory limit.
+    /// Useful for testing coordination when no real GPU is present.
     #[staticmethod]
-    pub fn fallback_count() -> usize {
-        let layer = cv_runtime::observability();
-        let events = layer.get_recent_events(10000);
-        events.iter().filter(|e| e.is_fallback()).count()
+    pub fn mock_init_device(device_idx: u8, total_mb: u32) -> PyResult<()> {
+        let s = scheduler()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        s.mock_init_device(device_idx, total_mb)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Set the process-wide execution mode.
+    #[staticmethod]
+    pub fn set_execution_mode(mode: PyExecutionMode) {
+        cv_runtime::orchestrator::set_execution_mode(mode.into());
     }
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWorkloadHint>()?;
+    m.add_class::<PyExecutionMode>()?;
     m.add_class::<PyRuntime>()?;
     m.add_class::<PyDeviceInfo>()?;
     m.add_class::<PyAffinityGroup>()?;

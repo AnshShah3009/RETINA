@@ -5,24 +5,31 @@ use crate::context::{
 use crate::{BackendType, DeviceId, SubmissionIndex};
 use cv_core::{storage::Storage, Tensor};
 use futures::executor::block_on;
-use futures::FutureExt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use wgpu::util::DeviceExt;
 use wgpu::{Backends, Device, Instance, PowerPreference, Queue, RequestAdapterOptions};
 
 static GLOBAL_CONTEXT: OnceLock<crate::Result<GpuContext>> = OnceLock::new();
+static NEXT_GPU_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Shared GPU Context containing Device and Queue.
 #[derive(Debug, Clone)]
 pub struct GpuContext {
     pub device: Arc<Device>,
     pub queue: Arc<Queue>,
+    gpu_index: u32,
+    is_unified: bool,
     pipeline_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, wgpu::ComputePipeline>>>,
     last_submission: Arc<AtomicU64>,
 }
 
 impl GpuContext {
+    /// Returns true if the GPU and CPU share the same physical memory (unified memory).
+    pub fn is_unified_memory(&self) -> bool {
+        self.is_unified
+    }
+
     /// Safely downcasts a GpuStorage result to the requested generic storage S.
     /// Uses TypeId checks to avoid allocations when S is GpuStorage.
     #[allow(dead_code)]
@@ -52,6 +59,71 @@ impl GpuContext {
             ))
         }
     }
+
+    /// Get shader source for a named kernel.
+    pub fn get_kernel_source(&self, name: &str) -> crate::Result<String> {
+        let source = match name {
+            "gaussian_blur" => include_str!("../shaders/gaussian_blur_separable.wgsl"),
+            "sobel" => include_str!("../shaders/sobel.wgsl"),
+            "sobel_f32" => include_str!("../shaders/sobel_f32.wgsl"),
+            "threshold" => include_str!("../shaders/threshold.wgsl"),
+            "threshold_f32" => include_str!("../shaders/threshold_f32.wgsl"),
+            "resize" => include_str!("../shaders/resize.wgsl"),
+            "resize_f32" => include_str!("../shaders/resize_f32.wgsl"),
+            "warp" => include_str!("../shaders/warp.wgsl"),
+            "morphology" => include_str!("../shaders/morphology.wgsl"),
+            "convolve_2d" => include_str!("../shaders/convolve_2d.wgsl"),
+            "color_cvt" => include_str!("../shaders/color_cvt.wgsl"),
+            "color_cvt_f32" => include_str!("../shaders/color_cvt_f32.wgsl"),
+            "bilateral" => include_str!("../shaders/bilateral.wgsl"),
+            "bilateral_f32" => include_str!("../shaders/bilateral_f32.wgsl"),
+            "fast" => include_str!("../shaders/fast.wgsl"),
+            "fast_f32" => include_str!("../shaders/fast_f32.wgsl"),
+            "fast_nms" => include_str!("../shaders/fast_nms.wgsl"),
+            "fast_nms_f32" => include_str!("../shaders/fast_nms_f32.wgsl"),
+            "canny" => include_str!("../shaders/canny.wgsl"),
+            "nms" => include_str!("../shaders/nms.wgsl"),
+            "matching" => include_str!("../shaders/matching.wgsl"),
+            "match_template" => include_str!("../shaders/match_template.wgsl"),
+            "stereo_match" => include_str!("../shaders/stereo_match.wgsl"),
+            "hough" => include_str!("../shaders/hough.wgsl"),
+            "hough_f32" => include_str!("../shaders/hough_f32.wgsl"),
+            "hough_circles" => include_str!("../shaders/hough_circles.wgsl"),
+            "subtract" => include_str!("../shaders/subtract.wgsl"),
+            "spmv" => include_str!("../shaders/spmv.wgsl"),
+            "vector_ops" => include_str!("../shaders/vector_ops.wgsl"),
+            "cast" => include_str!("../shaders/cast.wgsl"),
+            "lucas_kanade" => include_str!("../shaders/lucas_kanade.wgsl"),
+            "pointcloud_transform" => include_str!("../shaders/pointcloud_transform.wgsl"),
+            "remap" => include_str!("../shaders/remap.wgsl"),
+            "undistort" => include_str!("../shaders/undistort.wgsl"),
+            "lbvh_build" => include_str!("../shaders/lbvh_build.wgsl"),
+            "sift_extrema" => include_str!("../shaders/sift_extrema.wgsl"),
+            "sift_orientation" => include_str!("../shaders/sift_orientation.wgsl"),
+            "sift_descriptor" => include_str!("../shaders/sift_descriptor.wgsl"),
+            "akaze_derivatives" => include_str!("../shaders/akaze_derivatives.wgsl"),
+            "akaze_diffusion" => include_str!("../shaders/akaze_diffusion.wgsl"),
+            "akaze_contrast" => include_str!("../shaders/akaze_contrast.wgsl"),
+            "icp_dense" => include_str!("../shaders/icp_dense.wgsl"),
+            "icp_correspondence" => include_str!("../shaders/icp_correspondence.wgsl"),
+            "icp_accumulate" => include_str!("../shaders/icp_accumulate.wgsl"),
+            "icp_reduce" => include_str!("../shaders/icp_reduce.wgsl"),
+            "tsdf_raycast" => include_str!("../shaders/tsdf_raycast.wgsl"),
+            "marching_cubes_count" => include_str!("../shaders/marching_cubes_count.wgsl"),
+            "marching_cubes_emit" => include_str!("../shaders/marching_cubes_emit.wgsl"),
+            "marching_cubes" => include_str!("../shaders/marching_cubes.wgsl"),
+            "mog2_update" => include_str!("../shaders/mog2_update.wgsl"),
+            "iou_matrix" => include_str!("../shaders/iou_matrix.wgsl"),
+            "matrix_multiply" => include_str!("../shaders/matrix_multiply.wgsl"),
+            _ => {
+                return Err(crate::Error::InvalidInput(format!(
+                    "Unknown kernel name: {}",
+                    name
+                )))
+            }
+        };
+        Ok(source.to_string())
+    }
 }
 
 impl ComputeContext for GpuContext {
@@ -60,7 +132,7 @@ impl ComputeContext for GpuContext {
     }
 
     fn device_id(&self) -> DeviceId {
-        DeviceId(0)
+        DeviceId(self.gpu_index)
     }
 
     fn wait_idle(&self) -> crate::Result<()> {
@@ -151,13 +223,14 @@ impl ComputeContext for GpuContext {
 
     fn dispatch<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
-        shader_source: &str,
+        name: &str,
         buffers: &[&Tensor<u8, S>],
         uniforms: &[u8],
         workgroups: (u32, u32, u32),
     ) -> crate::Result<()> {
         use crate::storage::GpuStorage;
-        let pipeline = self.create_compute_pipeline(shader_source, "main");
+        let shader_source = self.get_kernel_source(name)?;
+        let pipeline = self.create_compute_pipeline(&shader_source, "main");
 
         let mut gpu_buffers = Vec::with_capacity(buffers.len());
         for tensor in buffers {
@@ -179,28 +252,32 @@ impl ComputeContext for GpuContext {
             });
         }
 
-        let _uniform_buf;
-        if !uniforms.is_empty() {
-            _uniform_buf = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("Dispatch Uniforms"),
-                    contents: uniforms,
-                    usage: wgpu::BufferUsages::UNIFORM,
-                },
-            ));
-            entries.push(wgpu::BindGroupEntry {
-                binding: gpu_buffers.len() as u32,
-                resource: _uniform_buf.as_ref().unwrap().as_entire_binding(),
-            });
-        } else {
-            _uniform_buf = None;
-        };
+        let bind_group = {
+            let uniform_buf = if !uniforms.is_empty() {
+                Some(self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("Dispatch Uniforms"),
+                        contents: uniforms,
+                        usage: wgpu::BufferUsages::UNIFORM,
+                    },
+                ))
+            } else {
+                None
+            };
 
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Dispatch Bind Group"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &entries,
-        });
+            if let Some(ref buf) = uniform_buf {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: gpu_buffers.len() as u32,
+                    resource: buf.as_entire_binding(),
+                });
+            }
+
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Dispatch Bind Group"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &entries,
+            })
+        };
 
         let mut encoder = self
             .device
@@ -211,7 +288,7 @@ impl ComputeContext for GpuContext {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, Some(&bind_group), &[]);
             pass.dispatch_workgroups(workgroups.0, workgroups.1, workgroups.2);
         }
         self.submit(encoder);
@@ -1306,7 +1383,11 @@ impl ComputeContext for GpuContext {
                 }
             }
 
-            // Safety: T == f32 verified above; points slice is &[T] = &[f32]
+            if points.len() % 2 != 0 {
+                return Err(crate::Error::InvalidInput(
+                    "Optical flow points array must have even length".into(),
+                ));
+            }
             let points_f32: &[[f32; 2]] = unsafe {
                 std::slice::from_raw_parts(points.as_ptr() as *const [f32; 2], points.len() / 2)
             };
@@ -1319,7 +1400,8 @@ impl ComputeContext for GpuContext {
                 max_iters,
             )?;
 
-            // Safety: we verified T == f32, so Vec<[f32;2]> and Vec<[T;2]> have identical layout.
+            // Safety: T == f32 verified by TypeId check above. In debug builds, we assert this.
+            debug_assert_eq!(TypeId::of::<T>(), TypeId::of::<f32>());
             let results_t: Vec<[T; 2]> = unsafe { std::mem::transmute(results) };
             Ok(results_t)
         } else {
@@ -2403,7 +2485,16 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData::<f32>,
                 };
 
-                // Safe: we verified T is f32 via TypeId check above
+                debug_assert_eq!(
+                    TypeId::of::<T>(),
+                    TypeId::of::<f32>(),
+                    "pointcloud_transform requires f32 type"
+                );
+                if TypeId::of::<T>() != TypeId::of::<f32>() {
+                    return Err(crate::Error::NotSupported(
+                        "GPU pointcloud_transform only supports f32".into(),
+                    ));
+                }
                 let transform_f32: &[[f32; 4]; 4] =
                     unsafe { &*(transform as *const [[T; 4]; 4] as *const [[f32; 4]; 4]) };
 
@@ -2434,6 +2525,167 @@ impl ComputeContext for GpuContext {
         } else {
             Err(crate::Error::NotSupported(
                 "GPU pointcloud_transform only supports f32".into(),
+            ))
+        }
+    }
+
+    fn remap<
+        T: cv_core::Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+        S2: Storage<f32> + 'static,
+    >(
+        &self,
+        input: &Tensor<T, S>,
+        map_x: &Tensor<f32, S2>,
+        map_y: &Tensor<f32, S2>,
+        interpolation: crate::context::Interpolation,
+        border_mode: crate::context::BorderMode<T>,
+    ) -> crate::Result<Tensor<T, S>> {
+        use crate::storage::GpuStorage;
+        use std::any::TypeId;
+        use std::marker::PhantomData;
+
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            if let (Some(input_s), Some(mx_s), Some(my_s)) = (
+                input.storage.as_any().downcast_ref::<GpuStorage<f32>>(),
+                map_x.storage.as_any().downcast_ref::<GpuStorage<f32>>(),
+                map_y.storage.as_any().downcast_ref::<GpuStorage<f32>>(),
+            ) {
+                let input_gpu = Tensor {
+                    storage: input_s.clone(),
+                    shape: input.shape,
+                    dtype: input.dtype,
+                    _phantom: PhantomData,
+                };
+                let mx_gpu = Tensor {
+                    storage: mx_s.clone(),
+                    shape: map_x.shape,
+                    dtype: map_x.dtype,
+                    _phantom: PhantomData,
+                };
+                let my_gpu = Tensor {
+                    storage: my_s.clone(),
+                    shape: map_y.shape,
+                    dtype: map_y.dtype,
+                    _phantom: PhantomData,
+                };
+
+                let border_f32 = match border_mode {
+                    crate::context::BorderMode::Constant(v) => {
+                        crate::context::BorderMode::Constant(v.to_f32())
+                    }
+                    crate::context::BorderMode::Replicate => crate::context::BorderMode::Replicate,
+                    crate::context::BorderMode::Reflect => crate::context::BorderMode::Reflect,
+                    crate::context::BorderMode::Wrap => crate::context::BorderMode::Wrap,
+                    crate::context::BorderMode::Reflect101 => {
+                        crate::context::BorderMode::Reflect101
+                    }
+                };
+
+                let result_gpu = crate::gpu_kernels::remap::remap(
+                    self,
+                    &input_gpu,
+                    &mx_gpu,
+                    &my_gpu,
+                    interpolation,
+                    border_f32,
+                )?;
+
+                let storage_any = result_gpu.storage.as_any();
+                if let Some(storage_s) = storage_any.downcast_ref::<S>() {
+                    Ok(Tensor {
+                        storage: storage_s.clone(),
+                        shape: result_gpu.shape,
+                        dtype: result_gpu.dtype,
+                        _phantom: PhantomData,
+                    })
+                } else {
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast GPU remap result".into(),
+                    ))
+                }
+            } else {
+                Err(crate::Error::InvalidInput(
+                    "Remap requires GpuStorage<f32> tensors".into(),
+                ))
+            }
+        } else {
+            Err(crate::Error::NotSupported(
+                "GPU remap only supports f32".into(),
+            ))
+        }
+    }
+
+    fn undistort<
+        T: cv_core::Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
+        &self,
+        input: &Tensor<T, S>,
+        intrinsics: &cv_core::CameraIntrinsics,
+        distortion: &cv_core::Distortion,
+        rectification: &nalgebra::Matrix3<f64>,
+        new_intrinsics: &cv_core::CameraIntrinsics,
+        interpolation: crate::context::Interpolation,
+        border_mode: crate::context::BorderMode<T>,
+    ) -> crate::Result<Tensor<T, S>> {
+        use crate::storage::GpuStorage;
+        use std::any::TypeId;
+        use std::marker::PhantomData;
+
+        if TypeId::of::<T>() == TypeId::of::<f32>() {
+            if let Some(input_storage) = input.storage.as_any().downcast_ref::<GpuStorage<f32>>() {
+                let input_gpu = Tensor {
+                    storage: input_storage.clone(),
+                    shape: input.shape,
+                    dtype: input.dtype,
+                    _phantom: PhantomData,
+                };
+
+                let border_f32 = match border_mode {
+                    crate::context::BorderMode::Constant(v) => {
+                        crate::context::BorderMode::Constant(v.to_f32())
+                    }
+                    crate::context::BorderMode::Replicate => crate::context::BorderMode::Replicate,
+                    crate::context::BorderMode::Reflect => crate::context::BorderMode::Reflect,
+                    crate::context::BorderMode::Wrap => crate::context::BorderMode::Wrap,
+                    crate::context::BorderMode::Reflect101 => {
+                        crate::context::BorderMode::Reflect101
+                    }
+                };
+
+                let result_gpu = crate::gpu_kernels::undistort::undistort(
+                    self,
+                    &input_gpu,
+                    intrinsics,
+                    distortion,
+                    rectification,
+                    new_intrinsics,
+                    interpolation,
+                    border_f32,
+                )?;
+
+                let storage_any = result_gpu.storage.as_any();
+                if let Some(storage_s) = storage_any.downcast_ref::<S>() {
+                    Ok(Tensor {
+                        storage: storage_s.clone(),
+                        shape: result_gpu.shape,
+                        dtype: result_gpu.dtype,
+                        _phantom: PhantomData,
+                    })
+                } else {
+                    Err(crate::Error::InvalidInput(
+                        "Failed to downcast GPU undistort result".into(),
+                    ))
+                }
+            } else {
+                Err(crate::Error::InvalidInput(
+                    "Undistort requires GpuStorage<f32> tensors".into(),
+                ))
+            }
+        } else {
+            Err(crate::Error::NotSupported(
+                "GPU undistort only supports f32".into(),
             ))
         }
     }
@@ -2559,21 +2811,8 @@ impl GpuContext {
 
     /// Initialize the global GPU context asynchronously.
     pub async fn init_global() -> crate::Result<&'static GpuContext> {
-        let res = GLOBAL_CONTEXT.get_or_init(|| {
-            // We still need a sync way to call the async new_async if we are in init_global
-            // But init_global is itself async, so we can await it.
-            // Wait, get_or_init doesn't support async closures.
-            // We use a different pattern: initialize outside and then set.
-            Box::pin(Self::new_async())
-                .now_or_never()
-                .unwrap_or_else(|| {
-                    // If it wasn't ready immediately, we have a problem with get_or_init.
-                    // Modern OnceCell/OnceLock don't easily support async.
-                    // For now, we'll keep the block_on inside the init_global ONLY if called from a non-async thread,
-                    // or use a mutex to guard the async init.
-                    block_on(Self::new_async())
-                })
-        });
+        let res = GLOBAL_CONTEXT.get_or_init(|| block_on(Self::new_async()));
+
         res.as_ref()
             .map_err(|e| crate::Error::InitError(e.to_string()))
     }
@@ -2619,12 +2858,18 @@ impl GpuContext {
             features |= wgpu::Features::TIMESTAMP_QUERY;
         }
 
-        // Request device
+        // Request device with increased limits for large point clouds
+        let limits = wgpu::Limits {
+            max_storage_buffer_binding_size: 256 * 1024 * 1024,
+            max_buffer_size: 256 * 1024 * 1024,
+            ..wgpu::Limits::downlevel_defaults()
+        };
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("CV-HAL Device"),
                 required_features: features,
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: limits,
                 memory_hints: wgpu::MemoryHints::default(),
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 trace: wgpu::Trace::default(),
@@ -2632,9 +2877,17 @@ impl GpuContext {
             .await
             .map_err(|e| crate::Error::InitError(format!("Failed to create GPU device: {}", e)))?;
 
+        let info = adapter.get_info();
+        let is_unified = info.device_type == wgpu::DeviceType::IntegratedGpu
+            || (info.backend == wgpu::Backend::Metal && info.name.contains("Apple"));
+
+        let gpu_index = NEXT_GPU_ID.fetch_add(1, Ordering::Relaxed);
+
         Ok(Self {
             device: Arc::new(device),
             queue: Arc::new(queue),
+            gpu_index,
+            is_unified,
             pipeline_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             last_submission: Arc::new(AtomicU64::new(0)),
         })
@@ -2713,9 +2966,17 @@ impl GpuContext {
         entry_point: &str,
     ) -> wgpu::ComputePipeline {
         let cache_key = format!("{}:{}", shader_source, entry_point);
-        if let Ok(cache) = self.pipeline_cache.lock() {
-            if let Some(pipeline) = cache.get(&cache_key) {
-                return pipeline.clone();
+
+        // Try to get from cache, handling mutex poison gracefully
+        let cache_result = self.pipeline_cache.lock();
+        match cache_result {
+            Ok(cache) => {
+                if let Some(pipeline) = cache.get(&cache_key) {
+                    return pipeline.clone();
+                }
+            }
+            Err(_) => {
+                // Cache is poisoned, continue without cached pipeline
             }
         }
 
@@ -2737,8 +2998,14 @@ impl GpuContext {
                 cache: None,
             });
 
-        if let Ok(mut cache) = self.pipeline_cache.lock() {
-            cache.insert(cache_key, pipeline.clone());
+        // Try to insert into cache
+        match self.pipeline_cache.lock() {
+            Ok(mut cache) => {
+                cache.insert(cache_key, pipeline.clone());
+            }
+            Err(_) => {
+                // Cache is poisoned, pipeline not cached
+            }
         }
 
         pipeline

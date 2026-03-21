@@ -64,6 +64,10 @@ pub enum RuntimeEvent {
         reason: DispatchReason,
         /// How long we waited for VRAM (zero if no wait).
         wait_ms: u64,
+        /// Memory requested in MB (if any).
+        requested_memory_mb: u32,
+        /// Affinity group ID (zero if none).
+        affinity_group: u32,
         timestamp: Instant,
     },
 }

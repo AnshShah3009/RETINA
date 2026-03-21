@@ -1,3 +1,4 @@
+use cv_core::DeviceType;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -10,6 +11,36 @@ pub enum BackendType {
     TensorRT,
     WebGPU,
     Mlx,
+}
+
+impl From<BackendType> for DeviceType {
+    fn from(backend: BackendType) -> Self {
+        match backend {
+            BackendType::Cpu => DeviceType::Cpu,
+            BackendType::Cuda => DeviceType::Cuda,
+            BackendType::Vulkan => DeviceType::Vulkan,
+            BackendType::Metal => DeviceType::Metal,
+            BackendType::DirectML => DeviceType::Dml,
+            BackendType::TensorRT => DeviceType::TensorRT,
+            BackendType::WebGPU => DeviceType::WebGPU,
+            BackendType::Mlx => DeviceType::Mlx,
+        }
+    }
+}
+
+impl From<DeviceType> for BackendType {
+    fn from(device: DeviceType) -> Self {
+        match device {
+            DeviceType::Cpu => BackendType::Cpu,
+            DeviceType::Cuda => BackendType::Cuda,
+            DeviceType::Vulkan => BackendType::Vulkan,
+            DeviceType::Metal => BackendType::Metal,
+            DeviceType::Dml => BackendType::DirectML,
+            DeviceType::TensorRT => BackendType::TensorRT,
+            DeviceType::WebGPU => BackendType::WebGPU,
+            DeviceType::Mlx => BackendType::Mlx,
+        }
+    }
 }
 
 impl fmt::Display for BackendType {

@@ -403,7 +403,7 @@ pub fn draw_text(img: &mut RgbImage, text: &str, origin: (i32, i32), scale: u32,
 
     for ch in text.chars() {
         let idx = ch as u32;
-        if idx < 32 || idx > 126 {
+        if !(32..=126).contains(&idx) {
             cursor_x += 8 * scale as i32;
             continue;
         }
@@ -437,7 +437,7 @@ pub fn draw_text_gray(img: &mut GrayImage, text: &str, origin: (i32, i32), scale
 
     for ch in text.chars() {
         let idx = ch as u32;
-        if idx < 32 || idx > 126 {
+        if !(32..=126).contains(&idx) {
             cursor_x += 8 * scale as i32;
             continue;
         }

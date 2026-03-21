@@ -2,8 +2,9 @@ use crate::executor::ExecutorPool;
 use crate::memory_manager::MemoryManager;
 use crate::Result;
 pub use cv_hal::{context::ComputeContext, BackendType, ComputeBackend, DeviceId, SubmissionIndex};
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Supported compute backend contexts.
 pub enum BackendContext {
@@ -96,22 +97,16 @@ impl DeviceRuntime {
     }
 
     pub fn next_submission(&self) -> SubmissionIndex {
-        self.last_submitted
-            .lock()
-            .unwrap_or_else(|_| {
-                panic!(
-                    "last_submitted lock poisoned for device {:?}: a prior panic corrupted submission state",
-                    self.id
-                )
-            })
-            .next()
+        let mut last = self.last_submitted.lock();
+        let next = last.next();
+        *last = next;
+        next
     }
 
     pub fn mark_completed(&self, index: SubmissionIndex) {
-        if let Ok(mut last) = self.last_completed.lock() {
-            if index > *last {
-                *last = index;
-            }
+        let mut last = self.last_completed.lock();
+        if index > *last {
+            *last = index;
         }
 
         // Collect garbage when GPU operations complete
@@ -131,19 +126,7 @@ impl DeviceRuntime {
     }
 
     pub fn last_completed(&self) -> SubmissionIndex {
-        match self.last_completed.lock() {
-            Ok(l) => *l,
-            Err(_) => {
-                // Lock is poisoned. This indicates a panic occurred while holding the lock.
-                // We conservatively return 0 to avoid cascading panics in Drop or cleanup paths.
-                // NOTE: A poisoned lock means system integrity may be compromised.
-                eprintln!(
-                    "WARNING: last_completed lock poisoned for device {:?}",
-                    self.id
-                );
-                SubmissionIndex(0)
-            }
-        }
+        *self.last_completed.lock()
     }
 }
 
@@ -179,21 +162,17 @@ impl DeviceRegistry {
 
     /// Register a new device context
     pub fn register_device(&self, context: BackendContext, is_default_gpu: bool) {
-        if let Ok(mut devices) = self.devices.lock() {
-            let id = context.device_id();
-            let runtime = Arc::new(DeviceRuntime::new(context));
-            devices.insert(id, runtime);
+        let id = context.device_id();
+        let runtime = Arc::new(DeviceRuntime::new(context));
+        self.devices.lock().insert(id, runtime);
 
-            if is_default_gpu {
-                if let Ok(mut default_gpu) = self.default_gpu.lock() {
-                    *default_gpu = Some(id);
-                }
-            }
+        if is_default_gpu {
+            *self.default_gpu.lock() = Some(id);
         }
     }
 
     pub fn get_device(&self, id: DeviceId) -> Option<Arc<DeviceRuntime>> {
-        self.devices.lock().ok()?.get(&id).cloned()
+        self.devices.lock().get(&id).cloned()
     }
 
     pub fn default_cpu(&self) -> Arc<DeviceRuntime> {
@@ -201,17 +180,44 @@ impl DeviceRegistry {
             .expect("CPU device must exist")
     }
 
+    /// Re-scan for devices (e.g., to find newly plugged-in GPUs or recover failed ones).
+    pub fn refresh(&self) -> Result<()> {
+        let mut found_device = false;
+
+        // Re-detect GPU
+        if let Ok(gpu_context) = cv_hal::gpu::GpuContext::global() {
+            let id = ComputeContext::device_id(gpu_context);
+            if self.get_device(id).is_none() {
+                self.register_device(BackendContext::Gpu(Arc::new(gpu_context.clone())), true);
+                found_device = true;
+            }
+        }
+
+        // Re-detect MLX
+        if let Some(mlx_context) = cv_hal::mlx::MlxContext::new() {
+            let id = ComputeContext::device_id(&mlx_context);
+            if self.get_device(id).is_none() {
+                self.register_device(BackendContext::Mlx(Arc::new(mlx_context)), false);
+                found_device = true;
+            }
+        }
+
+        if !found_device && self.devices.lock().is_empty() {
+            return Err(crate::Error::RuntimeError(
+                "No devices found during refresh".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
     pub fn default_gpu(&self) -> Option<Arc<DeviceRuntime>> {
-        let id = *self.default_gpu.lock().ok()?;
+        let id = *self.default_gpu.lock();
         id.and_then(|id| self.get_device(id))
     }
 
     pub fn all_devices(&self) -> Vec<Arc<DeviceRuntime>> {
-        self.devices
-            .lock()
-            .ok()
-            .map(|m| m.values().cloned().collect())
-            .unwrap_or_default()
+        self.devices.lock().values().cloned().collect()
     }
 }
 
@@ -224,8 +230,8 @@ pub fn registry() -> Result<Arc<DeviceRegistry>> {
         .get_or_init(|| {
             let registry = Arc::new(DeviceRegistry::new()?);
 
-            // Attempt to auto-detect GPU
-            if let Ok(gpu_context) = cv_hal::gpu::GpuContext::global() {
+            // Attempt to auto-detect GPU (ensuring it is initialized)
+            if let Ok(gpu_context) = pollster::block_on(cv_hal::gpu::GpuContext::init_global()) {
                 registry.register_device(BackendContext::Gpu(Arc::new(gpu_context.clone())), true);
             }
 

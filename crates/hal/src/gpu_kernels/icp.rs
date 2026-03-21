@@ -461,3 +461,465 @@ pub fn dense_step(
 
     Ok((ata, atb))
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColoredICPConfig {
+    pub lambda_geometric: f32,
+    pub max_correspondence_distance: f32,
+    pub max_iterations: u32,
+    pub relative_fitness: f32,
+    pub relative_rmse: f32,
+}
+
+impl Default for ColoredICPConfig {
+    fn default() -> Self {
+        Self {
+            lambda_geometric: 0.97,
+            max_correspondence_distance: 0.07,
+            max_iterations: 100,
+            relative_fitness: 1e-6,
+            relative_rmse: 1e-6,
+        }
+    }
+}
+
+pub fn colored_icp_kernel() -> &'static str {
+    r#"
+struct ColoredICPParams {
+    lambda_geometric: f32,
+    max_dist_sq: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+
+@group(0) @binding(0) var<storage, read> source_points: array<vec3<f32>>;
+@group(0) @binding(1) var<storage, read> target_points: array<vec3<f32>>;
+@group(0) @binding(2) var<storage, read> target_normals: array<vec3<f32>>;
+@group(0) @binding(3) var<storage, read> target_colors: array<vec3<f32>>;
+@group(0) @binding(4) var<storage, read> color_gradients: array<vec3<f32>>;
+@group(0) @binding(5) var<storage, read> transform: mat4x4<f32>;
+@group(0) @binding(6) var<storage, read> params: ColoredICPParams;
+@group(0) @binding(7) var<storage, read_write> output: array<f32>;
+
+fn transform_point(p: vec3<f32>, transform: mat4x4<f32>) -> vec3<f32> {
+    let q = transform * vec4(p, 1.0);
+    return q.xyz / q.w;
+}
+
+fn apply_rotation(p: vec3<f32>, transform: mat4x4<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        transform[0][0] * p.x + transform[0][1] * p.y + transform[0][2] * p.z,
+        transform[1][0] * p.x + transform[1][1] * p.y + transform[1][2] * p.z,
+        transform[2][0] * p.x + transform[2][1] * p.y + transform[2][2] * p.z,
+    );
+}
+
+fn skew(v: vec3<f32>) -> mat3x3<f32> {
+    return mat3x3<f32>(
+        0.0, -v.z, v.y,
+        v.z, 0.0, -v.x,
+        -v.y, v.x, 0.0
+    );
+}
+
+fn find_nearest_point(src: vec3<f32>, targets: array<vec3<f32>>, max_dist: f32) -> u32 {
+    var min_dist = max_dist;
+    var nearest_idx = 0u;
+    
+    let n = arrayLength(&targets);
+    for (var i = 0u; i < n; i = i + 1u) {
+        let diff = targets[i] - src;
+        let dist = dot(diff, diff);
+        if (dist < min_dist) {
+            min_dist = dist;
+            nearest_idx = i;
+        }
+    }
+    
+    return nearest_idx;
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&source_points)) {
+        return;
+    }
+    
+    let sp = source_points[idx];
+    let transformed = transform_point(sp, transform);
+    
+    let nearest = find_nearest_point(transformed, target_points, params.max_dist_sq);
+    let tp = target_points[nearest];
+    let tn = target_normals[nearest];
+    
+    let diff = transformed - tp;
+    let dist_sq = dot(diff, diff);
+    
+    if (dist_sq > params.max_dist_sq || dist_sq < 1e-10) {
+        for (var i = 0u; i < 21u; i = i + 1u) {
+            output[idx * 21u + i] = 0.0;
+        }
+        return;
+    }
+    
+    let sqrt_lambda = params.lambda_geometric;
+    let sqrt_photo = 1.0 - params.lambda_geometric;
+    
+    let Rp = apply_rotation(sp, transform);
+    
+    let skew_Rp = skew(Rp);
+    let J_geo = skew_Rp * tn;
+    
+    let residual_geo = dot(diff, tn);
+    
+    let color_grad = color_gradients[nearest];
+    let tc = target_colors[nearest];
+    
+    let grad_c = vec3<f32>(color_grad.x, color_grad.y, 0.0);
+    let dIdx = dot(grad_c, tn);
+    
+    let J_photo = dIdx * tn;
+    let residual_photo = dot(tc - vec3<f32>(0.0, 0.0, 0.0), tn);
+    
+    let J0 = J_geo * sqrt_lambda;
+    let J1 = tn * sqrt_lambda;
+    let r = residual_geo * sqrt_lambda;
+    
+    var base = idx * 21u;
+    
+    output[base + 0u] = J0.x * J0.x;
+    output[base + 1u] = J0.y * J0.y;
+    output[base + 2u] = J0.z * J0.z;
+    output[base + 3u] = J1.x * J1.x;
+    output[base + 4u] = J1.y * J1.y;
+    output[base + 5u] = J1.z * J1.z;
+    output[base + 6u] = J0.x * J0.y;
+    output[base + 7u] = J0.x * J0.z;
+    output[base + 8u] = J0.x * J1.x;
+    output[base + 9u] = J0.x * J1.y;
+    output[base + 10u] = J0.x * J1.z;
+    output[base + 11u] = J0.y * J0.z;
+    output[base + 12u] = J0.y * J1.x;
+    output[base + 13u] = J0.y * J1.y;
+    output[base + 14u] = J0.y * J1.z;
+    output[base + 15u] = J0.z * J1.x;
+    output[base + 16u] = J0.z * J1.y;
+    output[base + 17u] = J0.z * J1.z;
+    output[base + 18u] = J1.x * J1.y;
+    output[base + 19u] = J1.x * J1.z;
+    output[base + 20u] = J1.y * J1.z;
+    
+    output[base + 0u] = J0.x * r;
+    output[base + 1u] = J0.y * r;
+    output[base + 2u] = J0.z * r;
+    output[base + 3u] = J1.x * r;
+    output[base + 4u] = J1.y * r;
+    output[base + 5u] = J1.z * r;
+}
+"#
+}
+
+pub fn compute_color_gradients_kernel() -> &'static str {
+    r#"
+struct GradientParams {
+    width: u32,
+    height: u32,
+    search_radius: f32,
+    _pad: f32,
+}
+
+@group(0) @binding(0) var<storage, read> points: array<vec3<f32>>;
+@group(0) @binding(1) var<storage, read> colors: array<vec3<f32>>;
+@group(0) @binding(2) var<storage, read> normals: array<vec3<f32>>;
+@group(0) @binding(3) var<storage, read> params: GradientParams;
+@group(0) @binding(4) var<storage, read_write> gradients: array<vec3<f32>>;
+
+fn get_color(colors: array<vec3<f32>>, width: u32, idx: u32) -> vec3<f32> {
+    if (idx >= arrayLength(&colors)) {
+        return vec3<f32>(0.0, 0.0, 0.0);
+    }
+    return colors[idx];
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&points)) {
+        return;
+    }
+    
+    let width = params.width;
+    let radius = u32(params.search_radius);
+    
+    let x = idx % width;
+    let y = idx / width;
+    
+    let c = colors[idx];
+    let intensity = (c.r + c.g + c.b) / 3.0;
+    
+    var grad_x = 0.0;
+    var grad_y = 0.0;
+    var count = 0.0;
+    
+    for (var ox: i32 = -1; ox <= 1; ox = ox + 1) {
+        for (var oy: i32 = -1; oy <= 1; oy = oy + 1) {
+            let nx = u32(i32(x) + ox);
+            let ny = u32(i32(y) + oy);
+            if (nx < width && ny < params.height) {
+                let nidx = ny * width + nx;
+                if (nidx != idx && nidx < arrayLength(&colors)) {
+                    let nc = colors[nidx];
+                    let nintensity = (nc.r + nc.g + nc.b) / 3.0;
+                    grad_x = grad_x + f32(ox) * (nintensity - intensity);
+                    grad_y = grad_y + f32(oy) * (nintensity - intensity);
+                    count = count + 1.0;
+                }
+            }
+        }
+    }
+    
+    if (count > 0.0) {
+        grad_x = grad_x / count;
+        grad_y = grad_y / count;
+    }
+    
+    let n = normals[idx];
+    let grad_mag = sqrt(grad_x * grad_x + grad_y * grad_y);
+    if (grad_mag > 1e-6) {
+        grad_x = grad_x / grad_mag;
+        grad_y = grad_y / grad_mag;
+    }
+    
+    gradients[idx] = vec3<f32>(grad_x, grad_y, grad_mag);
+}
+"#
+}
+
+pub struct GeneralizedICPConfig {
+    pub max_correspondence_distance: f32,
+    pub max_iterations: u32,
+    pub relative_fitness: f32,
+    pub relative_rmse: f32,
+}
+
+impl Default for GeneralizedICPConfig {
+    fn default() -> Self {
+        Self {
+            max_correspondence_distance: 0.05,
+            max_iterations: 100,
+            relative_fitness: 1e-6,
+            relative_rmse: 1e-6,
+        }
+    }
+}
+
+pub fn generalized_icp_kernel() -> &'static str {
+    r#"
+struct GICPParams {
+    max_dist_sq: f32,
+    _pad: f32,
+}
+
+@group(0) @binding(0) var<storage, read> source_points: array<vec3<f32>>;
+@group(0) @binding(1) var<storage, read> target_points: array<vec3<f32>>;
+@group(0) @binding(2) var<storage, read> target_cov: array<mat3x3<f32>>;
+@group(0) @binding(3) var<storage, read> transform: mat4x4<f32>;
+@group(0) @binding(4) var<storage, read> params: GICPParams;
+@group(0) @binding(5) var<storage, read_write> output: array<f32>;
+
+fn transform_point(p: vec3<f32>, transform: mat4x4<f32>) -> vec3<f32> {
+    let q = transform * vec4(p, 1.0);
+    return q.xyz / q.w;
+}
+
+fn apply_rotation(p: vec3<f32>, transform: mat4x4<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        transform[0][0] * p.x + transform[0][1] * p.y + transform[0][2] * p.z,
+        transform[1][0] * p.x + transform[1][1] * p.y + transform[1][2] * p.z,
+        transform[2][0] * p.x + transform[2][1] * p.y + transform[2][2] * p.z,
+    );
+}
+
+fn skew(v: vec3<f32>) -> mat3x3<f32> {
+    return mat3x3<f32>(
+        0.0, -v.z, v.y,
+        v.z, 0.0, -v.x,
+        -v.y, v.x, 0.0
+    );
+}
+
+fn find_correspondence(src: vec3<f32>, targets: array<vec3<f32>>, max_dist_sq: f32) -> vec4<u32> {
+    var min_dist = max_dist_sq;
+    var nearest_idx = 0u;
+    
+    let n = arrayLength(&targets);
+    for (var i = 0u; i < n; i = i + 1u) {
+        let diff = targets[i] - src;
+        let dist = dot(diff, diff);
+        if (dist < min_dist) {
+            min_dist = dist;
+            nearest_idx = i;
+        }
+    }
+    
+    return vec4<u32>(nearest_idx, 0u, 0u, 0u);
+}
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&source_points)) {
+        return;
+    }
+    
+    let sp = source_points[idx];
+    let transformed = transform_point(sp, transform);
+    
+    let corr = find_correspondence(transformed, target_points, params.max_dist_sq);
+    let target_idx = corr.x;
+    
+    let tp = target_points[target_idx];
+    let tcov = target_cov[target_idx];
+    
+    let diff = transformed - tp;
+    let dist_sq = dot(diff, diff);
+    
+    if (dist_sq > params.max_dist_sq || dist_sq < 1e-10) {
+        for (var i = 0u; i < 21u; i = i + 1u) {
+            output[idx * 21u + i] = 0.0;
+        }
+        return;
+    }
+    
+    let Rp = apply_rotation(sp, transform);
+    let skew_Rp = skew(Rp);
+    
+    let cov_sum = tcov + tcov;
+    let cov_diff = mat3x3<f32>(
+        cov_sum[0][0], cov_sum[0][1], cov_sum[0][2],
+        cov_sum[1][0], cov_sum[1][1], cov_sum[1][2],
+        cov_sum[2][0], cov_sum[2][1], cov_sum[2][2],
+    );
+    
+    let J = skew_Rp;
+    let cov_diff_t = transpose(cov_diff);
+    
+    let J_cov = mat3x3<f32>(
+        J[0][0] * cov_diff_t[0][0] + J[0][1] * cov_diff_t[1][0] + J[0][2] * cov_diff_t[2][0],
+        J[0][0] * cov_diff_t[0][1] + J[0][1] * cov_diff_t[1][1] + J[0][2] * cov_diff_t[2][1],
+        J[0][0] * cov_diff_t[0][2] + J[0][1] * cov_diff_t[1][2] + J[0][2] * cov_diff_t[2][2],
+        J[1][0] * cov_diff_t[0][0] + J[1][1] * cov_diff_t[1][0] + J[1][2] * cov_diff_t[2][0],
+        J[1][0] * cov_diff_t[0][1] + J[1][1] * cov_diff_t[1][1] + J[1][2] * cov_diff_t[2][1],
+        J[1][0] * cov_diff_t[0][2] + J[1][1] * cov_diff_t[1][2] + J[1][2] * cov_diff_t[2][2],
+        J[2][0] * cov_diff_t[0][0] + J[2][1] * cov_diff_t[1][0] + J[2][2] * cov_diff_t[2][0],
+        J[2][0] * cov_diff_t[0][1] + J[2][1] * cov_diff_t[1][1] + J[2][2] * cov_diff_t[2][1],
+        J[2][0] * cov_diff_t[0][2] + J[2][1] * cov_diff_t[1][2] + J[2][2] * cov_diff_t[2][2],
+    );
+    
+    let residual = diff;
+    
+    var base = idx * 21u;
+    
+    output[base + 0u] = J_cov[0][0] * J_cov[0][0];
+    output[base + 1u] = J_cov[0][1] * J_cov[0][1];
+    output[base + 2u] = J_cov[0][2] * J_cov[0][2];
+    output[base + 3u] = J_cov[1][0] * J_cov[1][0];
+    output[base + 4u] = J_cov[1][1] * J_cov[1][1];
+    output[base + 5u] = J_cov[1][2] * J_cov[1][2];
+    output[base + 6u] = J_cov[2][0] * J_cov[2][0];
+    output[base + 7u] = J_cov[2][1] * J_cov[2][1];
+    output[base + 8u] = J_cov[2][2] * J_cov[2][2];
+    
+    output[base + 9u] = J_cov[0][0] * residual.x;
+    output[base + 10u] = J_cov[0][1] * residual.y;
+    output[base + 11u] = J_cov[0][2] * residual.z;
+    output[base + 12u] = J_cov[1][0] * residual.x;
+    output[base + 13u] = J_cov[1][1] * residual.y;
+    output[base + 14u] = J_cov[1][2] * residual.z;
+    output[base + 15u] = J_cov[2][0] * residual.x;
+    output[base + 16u] = J_cov[2][1] * residual.y;
+    output[base + 17u] = J_cov[2][2] * residual.z;
+    
+    for (var i = 18u; i < 21u; i = i + 1u) {
+        output[base + i] = 0.0;
+    }
+}
+"#
+}
+
+pub fn gicp_accumulate_kernel() -> &'static str {
+    r#"
+struct GICPAccumParams {
+    num_correspondences: u32,
+    num_source: u32,
+    _pad: vec2<u32>,
+}
+
+@group(0) @binding(0) var<storage, read> contributions: array<f32>;
+@group(0) @binding(1) var<storage, read> params: GICPAccumParams;
+@group(0) @binding(2) var<storage, read_write> ata: array<f32>;
+@group(0) @binding(3) var<storage, read_write> atb: array<f32>;
+
+var<workgroup> shared_ata: array<f32, 21>;
+var<workgroup> shared_atb: array<f32, 6>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    
+    if (idx == 0u) {
+        for (var i = 0u; i < 21u; i = i + 1u) {
+            shared_ata[i] = 0.0;
+        }
+        for (var i = 0u; i < 6u; i = i + 1u) {
+            shared_atb[i] = 0.0;
+        }
+    }
+    
+    workgroupBarrier();
+    
+    if (idx < params.num_source) {
+        var base = idx * 21u;
+        
+        atomicAdd(&shared_ata[0], contributions[base + 0u]);
+        atomicAdd(&shared_ata[1], contributions[base + 1u]);
+        atomicAdd(&shared_ata[2], contributions[base + 2u]);
+        atomicAdd(&shared_ata[3], contributions[base + 3u]);
+        atomicAdd(&shared_ata[4], contributions[base + 4u]);
+        atomicAdd(&shared_ata[5], contributions[base + 5u]);
+        atomicAdd(&shared_ata[6], contributions[base + 6u]);
+        atomicAdd(&shared_ata[7], contributions[base + 7u]);
+        atomicAdd(&shared_ata[8], contributions[base + 8u]);
+        
+        atomicAdd(&shared_atb[0], contributions[base + 9u]);
+        atomicAdd(&shared_atb[1], contributions[base + 10u]);
+        atomicAdd(&shared_atb[2], contributions[base + 11u]);
+        atomicAdd(&shared_atb[3], contributions[base + 12u]);
+        atomicAdd(&shared_atb[4], contributions[base + 13u]);
+        atomicAdd(&shared_atb[5], contributions[base + 14u]);
+    }
+    
+    workgroupBarrier();
+    
+    if (idx == 0u) {
+        ata[0] = shared_ata[0];
+        ata[1] = shared_ata[1];
+        ata[2] = shared_ata[2];
+        ata[3] = shared_ata[3];
+        ata[4] = shared_ata[4];
+        ata[5] = shared_ata[5];
+        ata[6] = shared_ata[6];
+        ata[7] = shared_ata[7];
+        ata[8] = shared_ata[8];
+        
+        atb[0] = shared_atb[0];
+        atb[1] = shared_atb[1];
+        atb[2] = shared_atb[2];
+        atb[3] = shared_atb[3];
+        atb[4] = shared_atb[4];
+        atb[5] = shared_atb[5];
+    }
+}
+"#
+}

@@ -4,6 +4,7 @@ use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 use cv_runtime::orchestrator::RuntimeRunner;
 use image::GrayImage;
 use rayon::prelude::*;
+use tracing::{info, warn};
 use wide::*;
 
 use crate::convolve::{convolve_with_border_into_ctx, gaussian_blur_ctx, BorderMode, Kernel};
@@ -58,7 +59,7 @@ pub fn sobel_ex(
     match cv_runtime::best_runner() {
         Ok(runner) => sobel_ex_ctx(src, dx, dy, ksize, scale, delta, border, &runner),
         Err(_) => {
-            // Fallback: compute on CPU
+            warn!("GPU not available for sobel, falling back to CPU");
             sobel_ex_ctx(
                 src,
                 dx,
@@ -93,6 +94,11 @@ pub fn sobel_ex_ctx(
         // upload.  Until then, all other cases fall through to the CPU separable path.
         if ksize == 3 && ((dx == 1 && dy == 0) || (dx == 0 && dy == 1)) {
             if let Ok(result) = sobel_gpu(gpu, src, ksize) {
+                info!(
+                    "GPU sobel_ex: executed on GPU ({}x{})",
+                    src.width(),
+                    src.height()
+                );
                 let (gx, gy) = result;
                 let target = if dx == 1 { gx } else { gy };
                 return apply_linear_transform(target, scale, delta);
@@ -513,7 +519,7 @@ fn hysteresis(width: usize, height: usize, nms: &[f32], low: f32, high: f32) -> 
 
 pub fn canny(src: &GrayImage, low_threshold: u8, high_threshold: u8) -> GrayImage {
     let runner = cv_runtime::default_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
+        warn!("GPU not available for canny, falling back to CPU");
         cv_runtime::registry()
             .ok()
             .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
@@ -530,8 +536,14 @@ pub fn canny_ctx(
 ) -> GrayImage {
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
         if let Ok(res) = canny_gpu(gpu, src, low_threshold as f32, high_threshold as f32) {
+            info!(
+                "GPU canny: executed on GPU ({}x{})",
+                src.width(),
+                src.height()
+            );
             return res;
         }
+        warn!("GPU canny failed, falling back to CPU");
     }
 
     let blurred = gaussian_blur_ctx(src, 1.0, BorderMode::Reflect101, group);

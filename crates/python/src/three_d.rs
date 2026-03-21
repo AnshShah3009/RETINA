@@ -132,15 +132,6 @@ fn estimate_normals_hybrid(
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
 
-/// Fast approximate: 2-neighbour cross-product.
-#[pyfunction]
-fn estimate_normals_approx_cross(points: Vec<(f32, f32, f32)>) -> PyResult<Vec<(f32, f32, f32)>> {
-    std::panic::catch_unwind(|| {
-        normals_to_py(cv_3d::estimate_normals_approx_cross(&pts_from_py(&points)))
-    })
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
-}
-
 /// Fast approximate: ring cross-product average.
 #[pyfunction]
 fn estimate_normals_approx_integral(
@@ -221,16 +212,6 @@ fn estimate_normals_hybrid_np<'py>(
 ) -> Bound<'py, PyArray2<f32>> {
     let pts = ndarray_to_points(&points);
     normals_to_ndarray(py, cv_3d::estimate_normals_hybrid(&pts, k))
-}
-
-/// Fast approximate (cross-product) normals -- numpy array in/out.
-#[pyfunction]
-fn estimate_normals_approx_cross_np<'py>(
-    py: Python<'py>,
-    points: PyReadonlyArray2<f32>,
-) -> Bound<'py, PyArray2<f32>> {
-    let pts = ndarray_to_points(&points);
-    normals_to_ndarray(py, cv_3d::estimate_normals_approx_cross(&pts))
 }
 
 /// Depth image normals -- numpy array in/out (O(n), fastest path for RGBD).
@@ -394,7 +375,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(estimate_normals_cpu, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_normals_gpu, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_normals_hybrid, m)?)?;
-    m.add_function(wrap_pyfunction!(estimate_normals_approx_cross, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_normals_approx_integral, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_normals_from_depth, m)?)?;
     // NumPy-native versions
@@ -402,7 +382,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(estimate_normals_cpu_np, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_normals_gpu_np, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_normals_hybrid_np, m)?)?;
-    m.add_function(wrap_pyfunction!(estimate_normals_approx_cross_np, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_normals_from_depth_np, m)?)?;
     // Point cloud operations
     m.add_function(wrap_pyfunction!(hidden_point_removal, m)?)?;

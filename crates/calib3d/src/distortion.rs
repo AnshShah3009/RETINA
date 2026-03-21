@@ -154,6 +154,140 @@ pub fn fisheye_init_undistort_rectify_map(
 }
 
 /// Undistort a grayscale image using camera intrinsics and distortion model.
+pub fn undistort_image_ex(
+    src: &GrayImage,
+    intrinsics: &CameraIntrinsics,
+    distortion: &Distortion,
+    rectification: &Matrix3<f64>,
+    new_intrinsics: &CameraIntrinsics,
+    interpolation: cv_imgproc::Interpolation,
+    border: cv_imgproc::BorderMode,
+) -> Result<GrayImage> {
+    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
+        cv_runtime::registry()
+            .ok()
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+    });
+    undistort_image_ex_ctx(
+        src,
+        intrinsics,
+        distortion,
+        rectification,
+        new_intrinsics,
+        interpolation,
+        border,
+        &runner,
+    )
+}
+
+pub fn undistort_image_ex_ctx(
+    src: &GrayImage,
+    intrinsics: &CameraIntrinsics,
+    distortion: &Distortion,
+    rectification: &Matrix3<f64>,
+    new_intrinsics: &CameraIntrinsics,
+    interpolation: cv_imgproc::Interpolation,
+    border: cv_imgproc::BorderMode,
+    group: &cv_runtime::orchestrator::RuntimeRunner,
+) -> Result<GrayImage> {
+    // 1. Try direct fused GPU undistort (fastest)
+    if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = group.device() {
+        if let Ok(result) = undistort_gpu(
+            gpu,
+            src,
+            intrinsics,
+            distortion,
+            rectification,
+            new_intrinsics,
+            interpolation,
+            border,
+        ) {
+            return Ok(result);
+        }
+    }
+
+    // 2. Fallback to CPU precompute + remap
+    let (map_x, map_y) = init_undistort_rectify_map(
+        (new_intrinsics.width, new_intrinsics.height),
+        intrinsics,
+        distortion,
+        rectification,
+        new_intrinsics,
+    )?;
+
+    Ok(cv_imgproc::geometry::remap_ex_ctx(
+        src,
+        &map_x,
+        &map_y,
+        new_intrinsics.width,
+        new_intrinsics.height,
+        interpolation,
+        border,
+        group,
+    ))
+}
+
+fn undistort_gpu(
+    gpu: &cv_hal::gpu::GpuContext,
+    src: &GrayImage,
+    intrinsics: &CameraIntrinsics,
+    distortion: &Distortion,
+    rectification: &Matrix3<f64>,
+    new_intrinsics: &CameraIntrinsics,
+    interpolation: cv_imgproc::Interpolation,
+    border: cv_imgproc::BorderMode,
+) -> cv_hal::Result<GrayImage> {
+    use cv_hal::context::ComputeContext;
+    use cv_hal::storage::GpuStorage;
+    use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
+
+    let src_f32: Vec<f32> = src.as_raw().iter().map(|&p| p as f32).collect();
+    let input_tensor = cv_core::CpuTensor::from_vec(
+        src_f32,
+        cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
+    )
+    .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
+
+    let input_gpu = input_tensor.to_gpu_ctx(gpu)?;
+
+    let interp = match interpolation {
+        cv_imgproc::Interpolation::Nearest => cv_hal::context::Interpolation::Nearest,
+        _ => cv_hal::context::Interpolation::Linear,
+    };
+
+    let border_hal = match border {
+        cv_imgproc::BorderMode::Constant(v) => cv_hal::context::BorderMode::Constant(v as f32),
+        cv_imgproc::BorderMode::Replicate => cv_hal::context::BorderMode::Replicate,
+        cv_imgproc::BorderMode::Reflect => cv_hal::context::BorderMode::Reflect,
+        cv_imgproc::BorderMode::Reflect101 => cv_hal::context::BorderMode::Reflect101,
+        cv_imgproc::BorderMode::Wrap => cv_hal::context::BorderMode::Wrap,
+    };
+
+    let res_gpu = gpu.undistort::<f32, GpuStorage<f32>>(
+        &input_gpu,
+        intrinsics,
+        distortion,
+        rectification,
+        new_intrinsics,
+        interp,
+        border_hal,
+    )?;
+
+    let res_cpu: cv_core::Tensor<f32, cv_core::CpuStorage<f32>> = res_gpu.to_cpu_ctx(gpu)?;
+    use cv_core::storage::Storage;
+    let res_data: Vec<u8> = res_cpu
+        .storage
+        .as_slice()
+        .ok_or_else(|| cv_hal::Error::MemoryError("Failed to get CPU slice".into()))?
+        .iter()
+        .map(|v: &f32| v.clamp(0.0, 255.0) as u8)
+        .collect();
+
+    GrayImage::from_raw(new_intrinsics.width, new_intrinsics.height, res_data)
+        .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
+}
+
 pub fn undistort_image(
     src: &GrayImage,
     intrinsics: &CameraIntrinsics,

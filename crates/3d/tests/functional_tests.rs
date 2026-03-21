@@ -1,6 +1,24 @@
 use cv_3d::mesh::processing::*;
 use cv_3d::mesh::TriangleMesh;
+use cv_hal::context::ComputeContext;
+use cv_hal::gpu::GpuContext;
 use nalgebra::Point3;
+use pollster::block_on;
+
+/// Try to get GPU context, initializing if needed.
+/// Returns None if no GPU is available.
+fn get_gpu_context() -> Option<&'static GpuContext> {
+    // Try to get global context first
+    if let Ok(ctx) = GpuContext::global() {
+        return Some(ctx);
+    }
+
+    // Initialize if not initialized yet
+    match block_on(GpuContext::init_global()) {
+        Ok(ctx) => Some(ctx),
+        Err(_) => None,
+    }
+}
 
 #[test]
 fn test_mesh_normals_and_area() {
@@ -102,10 +120,16 @@ fn test_odometry_gpu_cpu_parity() {
     use nalgebra::Matrix4;
 
     // Skip if no GPU is available
-    let gpu = match cv_hal::gpu::GpuContext::global() {
-        Ok(g) => g,
-        Err(_) => {
-            eprintln!("Skipping GPU parity test: no GPU available");
+    let gpu = match get_gpu_context() {
+        Some(g) => {
+            println!(
+                "✓ test_odometry_gpu_cpu_parity: Using GPU backend: {:?}",
+                g.backend_type()
+            );
+            g
+        }
+        None => {
+            println!("✗ test_odometry_gpu_cpu_parity: Skipping - no GPU available");
             return;
         }
     };

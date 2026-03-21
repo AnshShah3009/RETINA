@@ -29,7 +29,7 @@ fn stress_test_concurrent_group_churn() {
                     // Use a loop to retry if name collision happens (though names are unique here)
                     if let Ok(group) = s_inner.create_group(&name, 1, None, policy) {
                         // Submit some work
-                        group.spawn(|| {
+                        let _ = group.spawn(|| {
                             let _ = 2 + 2;
                         });
 

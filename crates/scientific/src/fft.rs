@@ -327,6 +327,7 @@ mod tests {
 /// Type-II Discrete Cosine Transform (DCT-II), the "standard" DCT.
 ///
 /// Used in JPEG compression, BM3D, and signal processing.
+#[allow(clippy::needless_range_loop)]
 pub fn dct(input: &[f64]) -> Vec<f64> {
     let n = input.len();
     if n == 0 {
@@ -351,6 +352,7 @@ pub fn dct(input: &[f64]) -> Vec<f64> {
 }
 
 /// Type-III Discrete Cosine Transform (inverse DCT).
+#[allow(clippy::needless_range_loop)]
 pub fn idct(input: &[f64]) -> Vec<f64> {
     let n = input.len();
     if n == 0 {
@@ -374,6 +376,7 @@ pub fn idct(input: &[f64]) -> Vec<f64> {
 ///
 /// Uses the Type-I DST basis: `sin(pi * (i+1) * (k+1) / (N+1))`.
 /// Orthogonal and self-inverse (up to scaling): `idst(dst(x)) == x`.
+#[allow(clippy::needless_range_loop)]
 pub fn dst(input: &[f64]) -> Vec<f64> {
     let n = input.len();
     if n == 0 {

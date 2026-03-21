@@ -5,9 +5,12 @@ use crate::context::{
 use crate::{BackendType, Capability, ComputeBackend, DeviceId, QueueId, QueueType, Result};
 use cv_core::{storage::Storage, Float, Tensor, TensorShape};
 use rayon::prelude::*;
+use std::sync::atomic::{AtomicU32, Ordering};
 use wide::*;
 
 pub mod simd;
+
+static NEXT_CPU_ID: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Debug)]
 pub struct CpuBackend {
@@ -23,8 +26,10 @@ impl CpuBackend {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(rayon::current_num_threads);
 
+        let device_id = DeviceId(NEXT_CPU_ID.fetch_add(1, Ordering::Relaxed));
+
         Some(Self {
-            device_id: DeviceId(0),
+            device_id,
             num_threads,
             simd_available: true,
         })
@@ -164,7 +169,7 @@ impl CpuBackend {
         h: usize,
         kx: &[T],
         ky: &[T],
-    ) {
+    ) -> Result<()> {
         let rx = kx.len() / 2;
         let ry = ky.len() / 2;
 
@@ -173,11 +178,10 @@ impl CpuBackend {
         let mut intermediate_vec = pool.get(required_bytes);
 
         if intermediate_vec.capacity() < required_bytes {
-            eprintln!(
-                "Warning: Buffer pool returned insufficient buffer for separable convolution (capacity {} < required {})",
+            return Err(crate::Error::MemoryError(format!(
+                "Buffer pool returned insufficient buffer for separable convolution (capacity {} < required {})",
                 intermediate_vec.capacity(), required_bytes
-            );
-            return;
+            )));
         }
 
         intermediate_vec.resize(required_bytes, 0);
@@ -215,6 +219,7 @@ impl CpuBackend {
         });
 
         pool.return_buffer(intermediate_vec);
+        Ok(())
     }
 }
 
@@ -349,10 +354,10 @@ impl ComputeContext for CpuBackend {
         };
 
         if dx > 0 {
-            self.convolve_separable(src, gx_slice, w, h, &kx_deriv, &kx_smooth);
+            self.convolve_separable(src, gx_slice, w, h, &kx_deriv, &kx_smooth)?;
         }
         if dy > 0 {
-            self.convolve_separable(src, gy_slice, w, h, &kx_smooth, &kx_deriv);
+            self.convolve_separable(src, gy_slice, w, h, &kx_smooth, &kx_deriv)?;
         }
 
         Ok((
@@ -536,6 +541,11 @@ impl ComputeContext for CpuBackend {
         let num_rho = ((2.0 * diag) / rho_f).ceil() as usize + 1;
         let num_theta = (std::f32::consts::PI / theta_f).ceil() as usize;
 
+        // Check for overflow in accumulator size
+        let acc_size = num_rho
+            .checked_mul(num_theta)
+            .ok_or_else(|| crate::Error::InvalidInput("Hough accumulator size too large".into()))?;
+
         // Precompute sin/cos tables
         let cos_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).cos()).collect();
         let sin_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).sin()).collect();
@@ -546,7 +556,7 @@ impl ComputeContext for CpuBackend {
         let row_accums: Vec<Vec<u32>> = (0..h)
             .into_par_iter()
             .map(|y| {
-                let mut acc = vec![0u32; num_rho * num_theta];
+                let mut acc = vec![0u32; acc_size];
                 for x in 0..w {
                     if src[y * w + x] > T::ZERO {
                         let xf = x as f32;
@@ -555,7 +565,13 @@ impl ComputeContext for CpuBackend {
                             let r = xf * cos_table[t] + yf * sin_table[t];
                             let r_idx = ((r + rho_offset) / rho_f).round() as usize;
                             if r_idx < num_rho {
-                                acc[t * num_rho + r_idx] += 1;
+                                if let Some(idx) =
+                                    t.checked_mul(num_rho).and_then(|v| v.checked_add(r_idx))
+                                {
+                                    if idx < acc_size {
+                                        acc[idx] += 1;
+                                    }
+                                }
                             }
                         }
                     }
@@ -565,7 +581,7 @@ impl ComputeContext for CpuBackend {
             .collect();
 
         // Merge accumulators
-        let mut accumulator = vec![0u32; num_rho * num_theta];
+        let mut accumulator = vec![0u32; acc_size];
         for row_acc in &row_accums {
             for i in 0..accumulator.len() {
                 accumulator[i] += row_acc[i];
@@ -576,15 +592,19 @@ impl ComputeContext for CpuBackend {
         let mut lines = Vec::new();
         for t in 0..num_theta {
             for r in 0..num_rho {
-                let votes = accumulator[t * num_rho + r];
-                if votes >= threshold {
-                    let rho_val = r as f32 * rho_f - rho_offset;
-                    let theta_val = t as f32 * theta_f;
-                    lines.push(cv_core::HoughLine {
-                        rho: rho_val,
-                        theta: theta_val,
-                        score: votes,
-                    });
+                if let Some(idx) = t.checked_mul(num_rho).and_then(|v| v.checked_add(r)) {
+                    if idx < acc_size {
+                        let votes = accumulator[idx];
+                        if votes >= threshold {
+                            let rho_val = r as f32 * rho_f - rho_offset;
+                            let theta_val = t as f32 * theta_f;
+                            lines.push(cv_core::HoughLine {
+                                rho: rho_val,
+                                theta: theta_val,
+                                score: votes,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -2465,11 +2485,21 @@ impl ComputeContext for CpuBackend {
             let truncation_f32 = truncation.to_f32();
 
             let (img_h, img_w) = depth_image.shape.hw();
-            let (vx, vy, _vz) = (
+            let (vx, vy, vz) = (
                 voxel_volume.shape.width,
                 voxel_volume.shape.height,
                 voxel_volume.shape.channels,
             );
+
+            if vx == 0 || vy == 0 || vz < 2 {
+                return Err(crate::Error::InvalidInput(
+                    format!(
+                        "TSDF volume must have at least 2 depth slices, got {}x{}x{}",
+                        vx, vy, vz
+                    )
+                    .into(),
+                ));
+            }
 
             let fx = intrinsics_f32[0];
             let fy = intrinsics_f32[1];
@@ -2765,6 +2795,41 @@ impl ComputeContext for CpuBackend {
         let out_shape = TensorShape::new(4, img_h, img_w);
         Tensor::from_vec(out_data, out_shape)
             .map_err(|e| crate::Error::RuntimeError(format!("{e}")))
+    }
+
+    fn remap<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+        S2: Storage<f32> + 'static,
+    >(
+        &self,
+        _input: &Tensor<T, S>,
+        _map_x: &Tensor<f32, S2>,
+        _map_y: &Tensor<f32, S2>,
+        _interpolation: crate::context::Interpolation,
+        _border_mode: crate::context::BorderMode<T>,
+    ) -> Result<Tensor<T, S>> {
+        Err(crate::Error::NotSupported(
+            "remap not yet implemented on CPU backend".into(),
+        ))
+    }
+
+    fn undistort<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
+        &self,
+        _input: &Tensor<T, S>,
+        _intrinsics: &cv_core::CameraIntrinsics,
+        _distortion: &cv_core::Distortion,
+        _rectification: &nalgebra::Matrix3<f64>,
+        _new_intrinsics: &cv_core::CameraIntrinsics,
+        _interpolation: crate::context::Interpolation,
+        _border_mode: crate::context::BorderMode<T>,
+    ) -> Result<Tensor<T, S>> {
+        Err(crate::Error::NotSupported(
+            "undistort not yet implemented on CPU backend".into(),
+        ))
     }
 
     fn tsdf_extract_mesh<
@@ -3252,89 +3317,115 @@ impl ComputeContext for CpuBackend {
             ));
         }
 
+        if prev_pyramid.len() != next_pyramid.len() {
+            return Err(crate::Error::InvalidInput(
+                "Previous and next pyramids must have the same number of levels".into(),
+            ));
+        }
+
         use std::any::TypeId;
         if TypeId::of::<T>() == TypeId::of::<f32>() {
-            // Single level implementation for CPU fallback
-            let prev = &prev_pyramid[0];
-            let next = &next_pyramid[0];
-            let prev_data = prev
-                .storage
-                .as_slice()
-                .ok_or_else(|| crate::Error::MemoryError("Prev not on CPU".into()))?;
-            let next_data = next
-                .storage
-                .as_slice()
-                .ok_or_else(|| crate::Error::MemoryError("Next not on CPU".into()))?;
-
-            let prev_data_f32: &[f32] = bytemuck::cast_slice(prev_data);
-            let next_data_f32: &[f32] = bytemuck::cast_slice(next_data);
-            let points_f32: &[[f32; 2]] = bytemuck::cast_slice(points);
-
-            let (h, w) = prev.shape.hw();
-
-            let win = window_size as i32;
-            let half_win = win / 2;
-
-            let results: Vec<[f32; 2]> = points_f32
-                .par_iter()
+            let levels = prev_pyramid.len();
+            let mut scaled_points: Vec<[f32; 2]> = points
+                .iter()
                 .map(|&pt| {
-                    let mut u = pt[0];
-                    let mut v = pt[1];
-
-                    for _ in 0..max_iters {
-                        let ix = u.round() as i32;
-                        let iy = v.round() as i32;
-
-                        if ix - half_win < 0
-                            || ix + half_win >= w as i32
-                            || iy - half_win < 0
-                            || iy + half_win >= h as i32
-                        {
-                            break;
-                        }
-
-                        let mut g: nalgebra::Matrix2<f32> = nalgebra::Matrix2::zeros();
-                        let mut b: nalgebra::Vector2<f32> = nalgebra::Vector2::zeros();
-
-                        for dy in -half_win..=half_win {
-                            for dx in -half_win..=half_win {
-                                let x = ix + dx;
-                                let y = iy + dy;
-                                let idx = (y * w as i32 + x) as usize;
-
-                                // Spatial gradient on prev image
-                                let i_x = (prev_data_f32[idx + 1] - prev_data_f32[idx - 1]) * 0.5;
-                                let i_y = (prev_data_f32[idx + w] - prev_data_f32[idx - w]) * 0.5;
-
-                                // Temporal gradient
-                                let next_val = get_val_cpu(next_data_f32, w, h, x, y);
-                                let i_t = next_val - prev_data_f32[idx];
-
-                                g[(0, 0)] += i_x * i_x;
-                                g[(0, 1)] += i_x * i_y;
-                                g[(1, 0)] += i_x * i_y;
-                                g[(1, 1)] += i_y * i_y;
-
-                                b[0] -= i_x * i_t;
-                                b[1] -= i_y * i_t;
-                            }
-                        }
-
-                        if let Some(delta) = g.try_inverse().map(|inv| inv * b) {
-                            u += delta[0];
-                            v += delta[1];
-                            if delta.norm_squared() < 0.01 {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    [u, v]
+                    let pt_f: [f32; 2] = bytemuck::cast_slice(&[pt])[0];
+                    pt_f
                 })
                 .collect();
 
-            Ok(bytemuck::cast_vec(results))
+            for level in (0..levels).rev() {
+                let prev = &prev_pyramid[level];
+                let next = &next_pyramid[level];
+
+                let prev_data = prev
+                    .storage
+                    .as_slice()
+                    .ok_or_else(|| crate::Error::MemoryError("Prev not on CPU".into()))?;
+                let next_data = next
+                    .storage
+                    .as_slice()
+                    .ok_or_else(|| crate::Error::MemoryError("Next not on CPU".into()))?;
+
+                let prev_data_f32: &[f32] = bytemuck::cast_slice(prev_data);
+                let next_data_f32: &[f32] = bytemuck::cast_slice(next_data);
+
+                let (h, w) = prev.shape.hw();
+
+                let win = window_size as i32;
+                let half_win = win / 2;
+
+                let level_scale = 1 << level;
+                let scaled: Vec<[f32; 2]> = scaled_points
+                    .par_iter()
+                    .map(|&pt| {
+                        let scale = level_scale as f32;
+                        let mut u = pt[0] * scale;
+                        let mut v = pt[1] * scale;
+
+                        for _ in 0..max_iters {
+                            let ix = u.round() as i32;
+                            let iy = v.round() as i32;
+
+                            if ix - half_win < 0
+                                || ix + half_win >= w as i32
+                                || iy - half_win < 0
+                                || iy + half_win >= h as i32
+                            {
+                                break;
+                            }
+
+                            let mut g: nalgebra::Matrix2<f32> = nalgebra::Matrix2::zeros();
+                            let mut b: nalgebra::Vector2<f32> = nalgebra::Vector2::zeros();
+
+                            for dy in -half_win..=half_win {
+                                for dx in -half_win..=half_win {
+                                    let x = ix + dx;
+                                    let y = iy + dy;
+
+                                    let i_x = (get_pixel_cpu(prev_data_f32, w, h, x + 1, y)
+                                        - get_pixel_cpu(prev_data_f32, w, h, x - 1, y))
+                                        * 0.5;
+                                    let i_y = (get_pixel_cpu(prev_data_f32, w, h, x, y + 1)
+                                        - get_pixel_cpu(prev_data_f32, w, h, x, y - 1))
+                                        * 0.5;
+
+                                    let next_val = get_val_cpu(next_data_f32, w, h, x, y);
+                                    let i_t = next_val - get_pixel_cpu(prev_data_f32, w, h, x, y);
+
+                                    g[(0, 0)] += i_x * i_x;
+                                    g[(0, 1)] += i_x * i_y;
+                                    g[(1, 0)] += i_x * i_y;
+                                    g[(1, 1)] += i_y * i_y;
+
+                                    b[0] -= i_x * i_t;
+                                    b[1] -= i_y * i_t;
+                                }
+                            }
+
+                            if let Some(delta) = g.try_inverse().map(|inv| inv * b) {
+                                u += delta[0];
+                                v += delta[1];
+                                if delta.norm_squared() < 0.01 {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        [u, v]
+                    })
+                    .collect();
+
+                scaled_points = scaled;
+            }
+
+            let results: Vec<[T; 2]> = scaled_points
+                .iter()
+                .map(|&pt| bytemuck::cast_slice(&[pt])[0])
+                .collect();
+
+            Ok(results)
         } else {
             Err(crate::Error::NotSupported(
                 "optical_flow_lk currently only supports f32 on CPU".into(),
@@ -3934,8 +4025,17 @@ impl ComputeContext for CpuBackend {
         input: &Tensor<T, S>,
     ) -> Result<Tensor<T, S>> {
         let (h, w) = input.shape.hw();
-        let nw = w / 2;
-        let nh = h / 2;
+        if w < 2 || h < 2 {
+            return Err(crate::Error::InvalidInput(
+                format!(
+                    "Pyramid down requires input dimensions >= 2x2, got {}x{}",
+                    w, h
+                )
+                .into(),
+            ));
+        }
+        let nw = (w + 1) / 2;
+        let nh = (h + 1) / 2;
         let c = input.shape.channels;
 
         // Gaussian blur first
@@ -4920,6 +5020,12 @@ impl ComputeContext for CpuBackend {
 fn get_val_cpu<T: Float>(src: &[T], w: usize, h: usize, x: i32, y: i32) -> T {
     let cx = x.clamp(0, w as i32 - 1) as usize;
     let cy = y.clamp(0, h as i32 - 1) as usize;
+    src[cy * w + cx]
+}
+
+fn get_pixel_cpu(src: &[f32], w: usize, h: usize, x: i32, y: i32) -> f32 {
+    let cx = (x as i32).clamp(0, w as i32 - 1) as usize;
+    let cy = (y as i32).clamp(0, h as i32 - 1) as usize;
     src[cy * w + cx]
 }
 

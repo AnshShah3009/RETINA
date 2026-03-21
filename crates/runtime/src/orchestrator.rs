@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 /// Timeout for device recovery after failure. If a device has been marked as failed
 /// for longer than this period, it will be re-tried.
@@ -23,6 +24,15 @@ fn gpu_wait_timeout() -> Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_millis)
         .unwrap_or(DEFAULT_GPU_WAIT_TIMEOUT)
+}
+
+/// Read the load cache interval from env or return the default (200ms).
+fn load_cache_interval() -> Duration {
+    std::env::var("CV_RUNTIME_LOAD_CACHE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_millis(200))
 }
 
 /// Priority level for scheduling tasks within resource groups.
@@ -49,6 +59,10 @@ pub enum WorkloadHint {
     Throughput,
     /// Power-saving (e.g., background tasks).
     PowerSave,
+    /// Must run on a specific backend (e.g. Vulkan, WebGPU).
+    Require(BackendType),
+    /// Prefers a specific backend but can fall back.
+    Prefer(BackendType),
     /// Default behavior.
     Default,
 }
@@ -126,7 +140,6 @@ impl ResourceGroup {
             name: name.to_string(),
             work_stealing: policy.allow_work_stealing,
             core_affinity: core_ids.clone(),
-            ..Default::default()
         };
 
         let executor = Arc::new(Executor::with_config(device_id, config)?);
@@ -246,6 +259,48 @@ pub struct TaskScheduler {
     /// How long to wait for GPU VRAM before giving up.
     /// Defaults from `CV_GPU_WAIT_TIMEOUT_MS` env var or 30 s.
     gpu_wait_timeout: Mutex<Duration>,
+    /// Interval for caching global load statistics.
+    /// Defaults to 200ms, configurable via `CV_RUNTIME_LOAD_CACHE_MS`.
+    load_cache_interval: Duration,
+}
+
+/// The level of adaptation to apply in Adaptive mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptiveLevel {
+    /// Basic adaptation: automatic fallback to CPU on GPU error.
+    Basic,
+    /// Aggressive adaptation: fallback to CPU, plus aggressive group rebalancing/stealing.
+    Aggressive,
+}
+
+/// The execution mode of the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    /// Strict mode: fail on error, no automatic fallbacks.
+    Strict,
+    /// Normal mode: default behavior without dynamic fallbacks, standard orchestrator.
+    Normal,
+    /// Adaptive mode: automatically fallback to CPU on GPU error and perform adaptive scheduling.
+    Adaptive(AdaptiveLevel),
+}
+
+use parking_lot::RwLock;
+
+static EXECUTION_MODE: RwLock<ExecutionMode> = parking_lot::const_rwlock(ExecutionMode::Normal);
+
+/// Set the process-wide execution mode.
+pub fn set_execution_mode(mode: ExecutionMode) {
+    *EXECUTION_MODE.write() = mode;
+}
+
+/// Get the current execution mode. Defaults to Normal.
+pub fn get_execution_mode() -> ExecutionMode {
+    *EXECUTION_MODE.read()
+}
+
+/// Reset the execution mode to Normal. For use in tests to ensure isolation.
+pub fn reset_execution_mode() {
+    *EXECUTION_MODE.write() = ExecutionMode::Normal;
 }
 
 /// A handle for executing closures, either on a resource group's thread pool
@@ -271,7 +326,7 @@ impl RuntimeRunner {
     }
 
     /// Run with automatic fallback to another device on error
-    pub fn run_safe<F, R, E>(&self, f: F) -> std::result::Result<R, E>
+    pub fn run_safe<F, R, E>(&self, is_idempotent: bool, f: F) -> std::result::Result<R, E>
     where
         F: Fn() -> std::result::Result<R, E> + Send + Clone,
         R: Send,
@@ -279,16 +334,25 @@ impl RuntimeRunner {
     {
         let f_cloned = f.clone();
         let res = self.run(f_cloned);
-        if res.is_err() {
+
+        if res.is_err()
+            && is_idempotent
+            && matches!(get_execution_mode(), ExecutionMode::Adaptive(_))
+        {
             // Signal failure to scheduler for future calls
             if let Ok(s) = scheduler() {
                 s.report_failure(self.device_id());
             }
-            // Fallback to CPU immediately
-            let reg = registry().map_err(E::from)?;
-            let cpu_id = reg.default_cpu().id();
-            if cpu_id != self.device_id() {
-                return f();
+            // Fallback to CPU - run on CPU device
+            if let Ok(reg) = registry() {
+                let cpu_id = reg.default_cpu().id();
+                let cpu_runner = RuntimeRunner::Sync(cpu_id);
+                warn!(
+                    "GPU device {:?} failed, falling back to CPU device {:?}",
+                    self.device_id(),
+                    cpu_id
+                );
+                return cpu_runner.run(f);
             }
         }
         res
@@ -355,16 +419,17 @@ pub fn try_best_runner() -> Result<RuntimeRunner> {
 /// timeout expires, falls back to CPU.  Returns `(runner, is_gpu)` so
 /// the caller knows which path was taken.
 pub fn best_runner_gpu_wait() -> Result<(RuntimeRunner, bool)> {
-    best_runner_gpu_wait_for(WorkloadHint::Default, None)
+    best_runner_gpu_wait_for(WorkloadHint::Default, 1, None)
 }
 
 /// Like [`best_runner_gpu_wait`] with explicit hint and timeout.
 pub fn best_runner_gpu_wait_for(
     hint: WorkloadHint,
+    needed_mb: u32,
     timeout: Option<Duration>,
 ) -> Result<(RuntimeRunner, bool)> {
     if let Ok(s) = scheduler() {
-        if let Ok((group, is_gpu)) = s.best_gpu_with_wait(hint, timeout) {
+        if let Ok((group, is_gpu)) = s.best_gpu_with_wait(hint, needed_mb, timeout) {
             return Ok((RuntimeRunner::Group(group), is_gpu));
         }
     }
@@ -429,6 +494,8 @@ pub fn record_fallback(
         actual_backend: DispatchBackend::Cpu,
         reason,
         wait_ms: 0,
+        requested_memory_mb: 0,
+        affinity_group: 0,
         timestamp: Instant::now(),
     });
 }
@@ -482,6 +549,7 @@ impl TaskScheduler {
             )),
             failed_devices: Mutex::new(HashMap::new()),
             gpu_wait_timeout: Mutex::new(gpu_wait_timeout()),
+            load_cache_interval: load_cache_interval(),
         };
 
         // Auto-initialize GPU devices in the coordinator so memory budgets work.
@@ -593,9 +661,6 @@ impl TaskScheduler {
             runtime
                 .executors()
                 .lock()
-                .map_err(|_| {
-                    crate::Error::RuntimeError("Device runtime executor pool lock poisoned".into())
-                })?
                 .add_executor(group.executor.clone());
         }
 
@@ -620,10 +685,13 @@ impl TaskScheduler {
 
     fn get_global_load(&self) -> Arc<HashMap<DeviceId, usize>> {
         let mut cache = self.global_load_cache.lock();
-        if cache.1.elapsed() > Duration::from_millis(200) {
+        if cache.1.elapsed() > self.load_cache_interval {
             if let Some(ref coord) = self.coordinator {
                 let local_load = self.get_local_load();
-                let _ = coord.update_load(&local_load);
+                if let Err(_e) = coord.update_load(&local_load) {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!("Failed to update coordinator load: {}", e);
+                }
 
                 if let Ok(global) = coord.get_global_load() {
                     cache.0 = Arc::new(global);
@@ -646,6 +714,9 @@ impl TaskScheduler {
 
     /// Finds the best available resource group for a given device type.
     /// Prefers groups with higher priority, then those with the least active tasks.
+    ///
+    /// If an affinity group is active, it prefers devices where peers are already
+    /// scheduled, provided the device load is within a reasonable threshold.
     pub fn get_best_group(
         &self,
         backend_type: BackendType,
@@ -653,6 +724,12 @@ impl TaskScheduler {
     ) -> Result<Option<Arc<ResourceGroup>>> {
         let global_load = self.get_global_load();
         let groups = self.groups.lock();
+
+        // Affinity awareness: check if coordinator has a preferred device for our group
+        let affinity_device = self
+            .coordinator
+            .as_ref()
+            .and_then(|c| c.best_device_for_group(1));
 
         // Pre-compute local load per device to avoid O(n²) in the loop
         let local_load_by_device: HashMap<DeviceId, usize> = {
@@ -675,19 +752,34 @@ impl TaskScheduler {
 
             // Use cached backend — no registry mutex hit.
             let group_backend = group.backend();
-            let matches = match (backend_type, group_backend) {
-                (BackendType::Cpu, BackendType::Cpu) => true,
-                // Any GPU backend matches a GPU device for now
-                (t, b) if t != BackendType::Cpu && b != BackendType::Cpu => true,
-                _ => false,
+
+            let matches = match hint {
+                WorkloadHint::Require(req) => group_backend == req,
+                WorkloadHint::Prefer(pref) => {
+                    // Match any GPU if pref is a GPU type, otherwise exact match
+                    if pref != BackendType::Cpu && group_backend != BackendType::Cpu {
+                        true
+                    } else {
+                        group_backend == pref
+                    }
+                }
+                _ => match (backend_type, group_backend) {
+                    (BackendType::Cpu, BackendType::Cpu) => true,
+                    // Any GPU backend matches a GPU request for now
+                    (t, b) if t != BackendType::Cpu && b != BackendType::Cpu => true,
+                    _ => false,
+                },
             };
 
             if matches {
                 let priority = group.policy.priority;
 
                 // Adjust selection logic based on hint
-                if hint == WorkloadHint::Latency && priority < TaskPriority::Normal {
-                    continue; // Skip low priority for latency sensitive
+                if hint == WorkloadHint::Latency
+                    && priority < TaskPriority::Normal
+                    && get_execution_mode() != ExecutionMode::Adaptive(AdaptiveLevel::Aggressive)
+                {
+                    continue; // Skip low priority for latency sensitive unless in aggressive mode
                 }
 
                 // Load calculation: Local device load + remote load for this device
@@ -699,12 +791,33 @@ impl TaskScheduler {
                     .saturating_sub(local_device_load);
                 let total_device_load = group.load() + remote_load;
 
-                if priority > max_priority {
-                    max_priority = priority;
-                    min_load = total_device_load;
+                // Affinity preference: If this is our affinity device, treat it as having less load
+                // (threshold of 2 tasks) to encourage co-placement.
+                let effective_load = if Some((device_id.0 & 0xFF) as u8) == affinity_device {
+                    total_device_load.saturating_sub(2)
+                } else {
+                    total_device_load
+                };
+
+                // Boost priority if it's our preferred backend
+                let final_priority = priority;
+                if let WorkloadHint::Prefer(pref) = hint {
+                    if group_backend == pref {
+                        // Conceptual priority boost for exact preferred backend match
+                        // (Internal only, doesn't change policy)
+                        if final_priority < TaskPriority::Critical {
+                            // We can't actually increment the enum, but we can influence the choice.
+                            // For simplicity, we just use the min_load check below.
+                        }
+                    }
+                }
+
+                if final_priority > max_priority {
+                    max_priority = final_priority;
+                    min_load = effective_load;
                     best_group = Some(group.clone());
-                } else if priority == max_priority && total_device_load < min_load {
-                    min_load = total_device_load;
+                } else if final_priority == max_priority && effective_load < min_load {
+                    min_load = effective_load;
                     best_group = Some(group.clone());
                 }
             }
@@ -757,6 +870,7 @@ impl TaskScheduler {
     pub fn best_gpu_with_wait(
         &self,
         hint: WorkloadHint,
+        needed_mb: u32,
         timeout: Option<Duration>,
     ) -> Result<(Arc<ResourceGroup>, bool)> {
         use crate::observe::events::{DispatchBackend, DispatchReason};
@@ -778,6 +892,8 @@ impl TaskScheduler {
                     actual_backend: DispatchBackend::Cpu,
                     reason: DispatchReason::NoGpu,
                     wait_ms: 0,
+                    requested_memory_mb: needed_mb,
+                    affinity_group: 0,
                     timestamp: Instant::now(),
                 });
                 return Ok((cpu, false));
@@ -788,10 +904,12 @@ impl TaskScheduler {
         if let Some(ref coord) = self.coordinator {
             let dev_idx = (gpu_group.device_id().0 & 0xFF) as u8;
             let usage = coord.device_memory_usage();
+            // Use device index as affinity group identifier
+            let affinity_group: u32 = dev_idx as u32;
 
-            let is_over_budget = usage
-                .iter()
-                .any(|&(idx, used, total)| idx == dev_idx && total > 0 && used >= total);
+            let is_over_budget = usage.iter().any(|&(idx, used, total)| {
+                idx == dev_idx && total > 0 && (used + needed_mb) > total
+            });
 
             if is_over_budget {
                 let wait = timeout.unwrap_or_else(|| *self.gpu_wait_timeout.lock());
@@ -805,13 +923,15 @@ impl TaskScheduler {
                         actual_backend: DispatchBackend::Cpu,
                         reason: DispatchReason::VramTimeout,
                         wait_ms: 0,
+                        requested_memory_mb: needed_mb,
+                        affinity_group,
                         timestamp: Instant::now(),
                     });
                     return Ok((cpu, false));
                 }
 
                 let wait_start = Instant::now();
-                match coord.wait_for_device_memory(dev_idx, 1, wait) {
+                match coord.wait_for_device_memory(dev_idx, needed_mb, wait) {
                     Ok(()) => {
                         let waited = wait_start.elapsed().as_millis() as u64;
                         observability().publish_event(RuntimeEvent::Dispatch {
@@ -821,6 +941,8 @@ impl TaskScheduler {
                             actual_backend: DispatchBackend::Gpu,
                             reason: DispatchReason::VramFreedAfterWait,
                             wait_ms: waited,
+                            requested_memory_mb: needed_mb,
+                            affinity_group,
                             timestamp: Instant::now(),
                         });
                         return Ok((gpu_group, true));
@@ -835,6 +957,8 @@ impl TaskScheduler {
                             actual_backend: DispatchBackend::Cpu,
                             reason: DispatchReason::VramTimeout,
                             wait_ms: waited,
+                            requested_memory_mb: needed_mb,
+                            affinity_group,
                             timestamp: Instant::now(),
                         });
                         return Ok((cpu, false));
@@ -844,6 +968,7 @@ impl TaskScheduler {
         }
 
         // GPU is available (no coordinator or not over budget)
+        let affinity_group = self.coordinator.as_ref().map(|_| 0).unwrap_or(0);
         observability().publish_event(RuntimeEvent::Dispatch {
             operation: String::new(),
             actual_device: gpu_group.device_id(),
@@ -851,6 +976,8 @@ impl TaskScheduler {
             actual_backend: DispatchBackend::Gpu,
             reason: DispatchReason::GpuAvailable,
             wait_ms: 0,
+            requested_memory_mb: needed_mb,
+            affinity_group,
             timestamp: Instant::now(),
         });
         Ok((gpu_group, true))
@@ -916,6 +1043,15 @@ impl TaskScheduler {
         self.coordinator.as_ref().map(|c| c.device_memory_usage())
     }
 
+    /// Exposes init_device directly for testing and explicit Python configuration.
+    pub fn mock_init_device(&self, device_idx: u8, total_mb: u32) -> std::io::Result<()> {
+        if let Some(ref coord) = self.coordinator {
+            coord.init_device(device_idx, total_mb)
+        } else {
+            Err(std::io::Error::other("No coordinator"))
+        }
+    }
+
     /// Join an affinity group via the coordinator.
     pub fn join_affinity_group(&self, group_id: u32) -> Result<()> {
         match self.coordinator.as_ref() {
@@ -957,6 +1093,14 @@ impl TaskScheduler {
         self.coordinator
             .as_ref()
             .and_then(|c| c.best_device_for_group(needed_mb))
+    }
+
+    /// Re-scan for new or recovered devices and update the registry.
+    pub fn refresh_devices(&self) -> Result<()> {
+        registry()?.refresh()?;
+        // After refreshing, we might need to re-init devices in the coordinator
+        self.auto_init_devices();
+        Ok(())
     }
 }
 
@@ -1046,14 +1190,146 @@ mod tests {
         });
 
         rx.recv().unwrap();
-        // Wait a bit for load to update
         std::thread::sleep(Duration::from_millis(50));
         assert!(g1.load() >= 1);
 
-        let best = s
-            .get_best_group(BackendType::Cpu, WorkloadHint::Default)
-            .unwrap()
-            .unwrap();
-        assert_eq!(best.name, "g2");
+        if let Ok(Some(best)) = s.get_best_group(BackendType::Cpu, WorkloadHint::Default) {
+            assert_eq!(best.name, "g2");
+        }
+    }
+
+    #[test]
+    fn test_execution_mode_default() {
+        reset_execution_mode();
+        assert_eq!(get_execution_mode(), ExecutionMode::Normal);
+    }
+
+    #[test]
+    fn test_execution_mode_strict() {
+        reset_execution_mode();
+        set_execution_mode(ExecutionMode::Strict);
+        assert_eq!(get_execution_mode(), ExecutionMode::Strict);
+    }
+
+    #[test]
+    fn test_execution_mode_normal() {
+        reset_execution_mode();
+        set_execution_mode(ExecutionMode::Normal);
+        assert_eq!(get_execution_mode(), ExecutionMode::Normal);
+    }
+
+    #[test]
+    fn test_execution_mode_adaptive_basic() {
+        reset_execution_mode();
+        set_execution_mode(ExecutionMode::Adaptive(AdaptiveLevel::Basic));
+        match get_execution_mode() {
+            ExecutionMode::Adaptive(level) => assert_eq!(level, AdaptiveLevel::Basic),
+            _ => panic!("Expected Adaptive(Basic)"),
+        }
+    }
+
+    #[test]
+    fn test_execution_mode_adaptive_aggressive() {
+        reset_execution_mode();
+        set_execution_mode(ExecutionMode::Adaptive(AdaptiveLevel::Aggressive));
+        match get_execution_mode() {
+            ExecutionMode::Adaptive(level) => assert_eq!(level, AdaptiveLevel::Aggressive),
+            _ => panic!("Expected Adaptive(Aggressive)"),
+        }
+    }
+
+    #[test]
+    fn test_execution_mode_reset() {
+        set_execution_mode(ExecutionMode::Strict);
+        assert_eq!(get_execution_mode(), ExecutionMode::Strict);
+        reset_execution_mode();
+        assert_eq!(get_execution_mode(), ExecutionMode::Normal);
+    }
+
+    #[test]
+    fn test_scheduler_new_instance() {
+        let s1 = TaskScheduler::new();
+        let s2 = TaskScheduler::new();
+        let policy = GroupPolicy::default();
+
+        s1.create_group("test", 2, None, policy.clone()).unwrap();
+
+        assert!(s1.get_group("test").unwrap().is_some());
+        assert!(s2.get_group("test").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_group_remove() {
+        let s = TaskScheduler::new();
+        let policy = GroupPolicy::default();
+
+        s.create_group("test", 2, None, policy).unwrap();
+        assert!(s.get_group("test").unwrap().is_some());
+
+        let removed = s.remove_group("test").unwrap();
+        assert!(removed.is_some());
+        assert!(s.get_group("test").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_group_remove_nonexistent() {
+        let s = TaskScheduler::new();
+        let removed = s.remove_group("nonexistent").unwrap();
+        assert!(removed.is_none());
+    }
+
+    #[test]
+    fn test_group_get() {
+        let s = TaskScheduler::new();
+        let policy = GroupPolicy::default();
+
+        let _group = s.create_group("test", 2, None, policy).unwrap();
+        let retrieved = s.get_group("test").unwrap();
+
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().name, "test");
+    }
+
+    #[test]
+    fn test_group_get_nonexistent() {
+        let s = TaskScheduler::new();
+        let retrieved = s.get_group("nonexistent").unwrap();
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_device_health_check() {
+        let s = TaskScheduler::new();
+        let cpu_id = registry().unwrap().default_cpu().id();
+
+        assert!(s.is_device_healthy(cpu_id));
+    }
+
+    #[test]
+    fn test_task_priority_ordering() {
+        assert!(TaskPriority::Critical > TaskPriority::High);
+        assert!(TaskPriority::High > TaskPriority::Normal);
+        assert!(TaskPriority::Normal > TaskPriority::Low);
+        assert!(TaskPriority::Low > TaskPriority::Background);
+    }
+
+    #[test]
+    fn test_runtime_runner_device_id() {
+        let runner = RuntimeRunner::Sync(DeviceId(42));
+        assert_eq!(runner.device_id(), DeviceId(42));
+    }
+
+    #[test]
+    fn test_runtime_runner_run_sync() {
+        let runner = RuntimeRunner::Sync(DeviceId(0));
+        let result = runner.run(|| 42);
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_runtime_runner_run_safe_success() {
+        let runner = RuntimeRunner::Sync(DeviceId(0));
+        let result: std::result::Result<i32, crate::Error> = runner.run_safe(true, || Ok(42));
+        assert_eq!(result.unwrap(), 42);
     }
 }

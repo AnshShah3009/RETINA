@@ -11,6 +11,7 @@ pub use handle::{AsyncPipelineHandle, ExecutionEvent, PipelineResult};
 use crate::device_registry::registry;
 use crate::orchestrator::RuntimeRunner;
 use crate::Result;
+use cv_core::Tensor;
 use cv_hal::context::ComputeContext;
 use cv_hal::DeviceId;
 use std::collections::HashMap;
@@ -171,16 +172,11 @@ impl Pipeline {
         for &node_id in &graph.topology_order {
             match &self.nodes[node_id.0] {
                 PipelineNode::Kernel {
-                    name,
+                    name: _name,
                     inputs,
                     outputs,
-                    params,
+                    params: _params,
                 } => {
-                    let _input_buffers: Vec<_> = inputs
-                        .iter()
-                        .filter_map(|&id| allocator.get_buffer(id))
-                        .collect();
-
                     let output_sizes: Vec<_> = outputs
                         .iter()
                         .filter_map(|&id| self.buffers.get(&id).copied())
@@ -189,8 +185,8 @@ impl Pipeline {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
                         "Executing kernel: {} ({} inputs, {} outputs)",
-                        name,
-                        input_buffers.len(),
+                        _name,
+                        inputs.len(),
                         output_sizes.len()
                     );
 
@@ -202,7 +198,60 @@ impl Pipeline {
                         }
                     }
 
-                    let _: (_, _, _) = (name, params, device_runtime.as_ref());
+                    // Execute kernel via cv-hal dispatch
+                    if let crate::device_registry::BackendContext::Gpu(gpu_ctx) =
+                        device_runtime.context()
+                    {
+                        // Create tensors for all buffers (keep them alive for dispatch)
+                        let mut all_tensors: Vec<Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> = Vec::new();
+
+                        // Input tensors
+                        for &input_id in inputs {
+                            if let Some(tensor) = allocator.create_tensor(input_id) {
+                                all_tensors.push(tensor);
+                            }
+                        }
+
+                        // Output tensors
+                        for &output_id in outputs {
+                            if let Some(tensor) = allocator.create_tensor(output_id) {
+                                all_tensors.push(tensor);
+                            }
+                        }
+
+                        // Get references to tensors
+                        let all_refs: Vec<&Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> =
+                            all_tensors.iter().collect();
+
+                        // Compute workgroup size based on largest buffer
+                        let max_size = outputs
+                            .iter()
+                            .filter_map(|&id| allocator.get_buffer_alloc(id))
+                            .map(|alloc| alloc.size)
+                            .max()
+                            .unwrap_or(1);
+
+                        let workgroups = (
+                            ((max_size as f64 / 64.0).ceil() as u32).max(1),
+                            1,
+                            1,
+                        );
+
+                        // Dispatch kernel - tensors stay alive through this call
+                        gpu_ctx.dispatch(_name, &all_refs, _params, workgroups)?;
+
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            "Dispatched kernel '{}' with {} buffers, workgroups {:?}",
+                            _name,
+                            all_refs.len(),
+                            workgroups
+                        );
+                    } else {
+                        return Err(crate::Error::NotSupported(
+                            "Kernel execution only supported on GPU".into(),
+                        ));
+                    }
                 }
                 PipelineNode::CpuOp {
                     inputs,

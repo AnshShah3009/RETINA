@@ -2,7 +2,7 @@ use crate::BufferHandle;
 use std::any::Any;
 use std::fmt::Debug;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// Enumeration of supported compute devices.
 pub enum DeviceType {
     /// CPU (system RAM)
@@ -17,6 +17,26 @@ pub enum DeviceType {
     Dml,
     /// NVIDIA TensorRT
     TensorRT,
+    /// WebGPU / WGPU
+    WebGPU,
+    /// Apple MLX (Metal Performance Shaders)
+    Mlx,
+}
+
+impl DeviceType {
+    /// Returns a user-friendly name for the device type.
+    pub fn name(&self) -> &'static str {
+        match self {
+            DeviceType::Cpu => "CPU",
+            DeviceType::Cuda => "CUDA",
+            DeviceType::Vulkan => "Vulkan",
+            DeviceType::Metal => "Metal",
+            DeviceType::Dml => "DirectML",
+            DeviceType::TensorRT => "TensorRT",
+            DeviceType::WebGPU => "WebGPU",
+            DeviceType::Mlx => "MLX",
+        }
+    }
 }
 
 /// A unified trait for storage backends across different compute devices.

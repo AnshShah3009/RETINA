@@ -1,22 +1,25 @@
 use super::BufferId;
 use crate::device_registry::registry;
 use crate::Result;
+use cv_core::Tensor;
+use cv_hal::storage::WgpuGpuStorage;
 use cv_hal::DeviceId;
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::{Buffer, BufferUsages, Device};
 
 pub struct BufferAlloc {
-    pub buffer: Buffer,
+    pub buffer: Arc<Buffer>,
     pub size: usize,
-    pub data: Option<Vec<u8>>,
+    pub data: Mutex<Option<Vec<u8>>>,
 }
 
 pub struct TransientBufferPool {
     device_id: DeviceId,
-    buffers: DashMap<BufferId, Arc<RwLock<BufferAlloc>>>,
+    buffers: DashMap<BufferId, Arc<BufferAlloc>>,
     free_lists: RwLock<HashMap<u64, Vec<Buffer>>>,
     total_allocated: RwLock<usize>,
 }
@@ -40,7 +43,7 @@ impl TransientBufferPool {
         }
     }
 
-    pub fn allocate(&self, id: BufferId, size: usize) -> Result<Arc<RwLock<BufferAlloc>>> {
+    pub fn allocate(&self, id: BufferId, size: usize) -> Result<Arc<BufferAlloc>> {
         let reg = registry()?;
         let device_runtime = reg.get_device(self.device_id).ok_or_else(|| {
             crate::Error::RuntimeError(format!("Device {:?} not found", self.device_id))
@@ -57,11 +60,11 @@ impl TransientBufferPool {
 
         let buffer = self.get_or_create_buffer(device, size)?;
 
-        let alloc = Arc::new(RwLock::new(BufferAlloc {
+        let alloc = Arc::new(BufferAlloc {
             buffer,
             size,
-            data: None,
-        }));
+            data: Mutex::new(None),
+        });
 
         self.buffers.insert(id, alloc.clone());
         *self.total_allocated.write() += size;
@@ -75,57 +78,67 @@ impl TransientBufferPool {
         }
 
         if let Some(entry) = self.buffers.get(&id) {
-            let mut alloc = entry.write();
-            alloc.data = Some(data.to_vec());
+            *entry.data.lock() = Some(data.to_vec());
         }
 
         Ok(())
     }
 
-    fn get_or_create_buffer(&self, device: &Device, size: usize) -> Result<Buffer> {
+    fn get_or_create_buffer(&self, device: &Device, size: usize) -> Result<Arc<Buffer>> {
         let bucket = Self::size_bucket(size);
 
         {
             let mut free_lists = self.free_lists.write();
             if let Some(pool) = free_lists.get_mut(&bucket) {
                 if let Some(buffer) = pool.pop() {
-                    return Ok(buffer);
+                    return Ok(Arc::new(buffer));
                 }
             }
         }
 
         let usages = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
 
-        Ok(device.create_buffer(&wgpu::BufferDescriptor {
+        Ok(Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Transient Buffer"),
             size: bucket,
             usage: usages,
             mapped_at_creation: false,
-        }))
+        })))
     }
 
-    pub fn get_buffer(&self, id: BufferId) -> Option<Buffer> {
-        self.buffers
-            .get(&id)
-            .map(|entry| entry.read().buffer.clone())
+    pub fn get_buffer(&self, id: BufferId) -> Option<Arc<Buffer>> {
+        self.buffers.get(&id).map(|entry| entry.buffer.clone())
     }
 
     pub fn get_buffer_data(&self, id: BufferId) -> Option<Vec<u8>> {
         self.buffers
             .get(&id)
-            .and_then(|entry| entry.read().data.clone())
+            .and_then(|entry| entry.data.lock().clone())
     }
 
-    pub fn get_buffer_alloc(&self, id: BufferId) -> Option<Arc<RwLock<BufferAlloc>>> {
+    pub fn get_buffer_alloc(&self, id: BufferId) -> Option<Arc<BufferAlloc>> {
         self.buffers.get(&id).map(|entry| entry.clone())
+    }
+
+    pub fn create_tensor(&self, id: BufferId) -> Option<Tensor<u8, WgpuGpuStorage<u8>>> {
+        let alloc = self.buffers.get(&id)?;
+        let storage = WgpuGpuStorage::from_buffer(alloc.buffer.clone(), alloc.size);
+        Some(Tensor {
+            storage,
+            shape: cv_core::TensorShape {
+                channels: 1,
+                height: alloc.size,
+                width: 1,
+            },
+            dtype: cv_core::DataType::U8,
+            _phantom: std::marker::PhantomData,
+        })
     }
 
     pub fn release(&self, id: BufferId) {
         if let Some((_, alloc)) = self.buffers.remove(&id) {
-            let alloc_guard = alloc.read();
-            let buffer = alloc_guard.buffer.clone();
-            let size = alloc_guard.size;
-            drop(alloc_guard);
+            let buffer = alloc.buffer.clone();
+            let size = alloc.size;
 
             // Decrement total_allocated when releasing buffer
             {
@@ -133,12 +146,15 @@ impl TransientBufferPool {
                 *total = total.saturating_sub(size);
             }
 
-            let bucket = Self::size_bucket(size);
-            let mut free_lists = self.free_lists.write();
-            let pool = free_lists.entry(bucket).or_default();
+            // Only return to pool if this is the last reference
+            if let Ok(raw_buffer) = Arc::try_unwrap(buffer) {
+                let bucket = Self::size_bucket(size);
+                let mut free_lists = self.free_lists.write();
+                let pool = free_lists.entry(bucket).or_default();
 
-            if pool.len() < 16 {
-                pool.push(buffer);
+                if pool.len() < 16 {
+                    pool.push(raw_buffer);
+                }
             }
         }
     }

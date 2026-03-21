@@ -82,7 +82,6 @@ impl PyPointCloud {
     /// - `"cpu"` -- voxel-hash kNN + analytic eigensolver
     /// - `"gpu"` -- Morton sort + WebGPU PCA (Metal on Apple Silicon)
     /// - `"hybrid"` -- CPU kNN + GPU batch eigenvectors
-    /// - `"approx_cross"` -- fast 2-neighbour cross-product (~3x faster)
     /// - `"approx_integral"` -- fast ring cross-product (~2.5x faster)
     #[pyo3(signature = (k=15, method="auto"))]
     pub fn estimate_normals(&mut self, k: usize, method: &str) {
@@ -90,7 +89,6 @@ impl PyPointCloud {
             "cpu" => cv_3d::estimate_normals_cpu(&self.points, k),
             "gpu" => cv_3d::estimate_normals_gpu(&self.points, k),
             "hybrid" => cv_3d::estimate_normals_hybrid(&self.points, k),
-            "approx_cross" => cv_3d::estimate_normals_approx_cross(&self.points),
             "approx_integral" => cv_3d::estimate_normals_approx_integral(&self.points),
             _ => cv_3d::estimate_normals_auto(&self.points, k),
         };

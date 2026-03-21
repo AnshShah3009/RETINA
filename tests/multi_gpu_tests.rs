@@ -361,7 +361,6 @@ fn test_pc_transform_parity<T: cv_core::float::Float + bytemuck::Pod>(
                 "  ⊘ PC Transform skipped for {} (GPU kernel not implemented)",
                 gpu_name
             );
-            return;
         }
         Err(e) => panic!("PC Transform failed on {}: {:?}", gpu_name, e),
         Ok(res_gpu_encoded) => {

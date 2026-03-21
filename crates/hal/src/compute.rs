@@ -649,6 +649,85 @@ impl<'a> ComputeDevice<'a> {
         }
     }
 
+    pub fn find_chessboard_corners<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
+        &self,
+        image: &Tensor<T, S>,
+        pattern_size: (usize, usize),
+    ) -> Result<Vec<cv_core::KeyPoint>> {
+        match self {
+            ComputeDevice::Cpu(cpu) => cpu.find_chessboard_corners(image, pattern_size),
+            ComputeDevice::Gpu(gpu) => gpu.find_chessboard_corners(image, pattern_size),
+            ComputeDevice::Mlx(mlx) => mlx.find_chessboard_corners(image, pattern_size),
+        }
+    }
+
+    pub fn remap<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+        S2: Storage<f32> + 'static,
+    >(
+        &self,
+        input: &Tensor<T, S>,
+        map_x: &Tensor<f32, S2>,
+        map_y: &Tensor<f32, S2>,
+        interpolation: crate::context::Interpolation,
+        border_mode: BorderMode<T>,
+    ) -> Result<Tensor<T, S>> {
+        match self {
+            ComputeDevice::Cpu(cpu) => cpu.remap(input, map_x, map_y, interpolation, border_mode),
+            ComputeDevice::Gpu(gpu) => gpu.remap(input, map_x, map_y, interpolation, border_mode),
+            ComputeDevice::Mlx(mlx) => mlx.remap(input, map_x, map_y, interpolation, border_mode),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn undistort<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
+        &self,
+        input: &Tensor<T, S>,
+        intrinsics: &cv_core::CameraIntrinsics,
+        distortion: &cv_core::Distortion,
+        rectification: &nalgebra::Matrix3<f64>,
+        new_intrinsics: &cv_core::CameraIntrinsics,
+        interpolation: crate::context::Interpolation,
+        border_mode: BorderMode<T>,
+    ) -> Result<Tensor<T, S>> {
+        match self {
+            ComputeDevice::Cpu(cpu) => cpu.undistort(
+                input,
+                intrinsics,
+                distortion,
+                rectification,
+                new_intrinsics,
+                interpolation,
+                border_mode,
+            ),
+            ComputeDevice::Gpu(gpu) => gpu.undistort(
+                input,
+                intrinsics,
+                distortion,
+                rectification,
+                new_intrinsics,
+                interpolation,
+                border_mode,
+            ),
+            ComputeDevice::Mlx(mlx) => mlx.undistort(
+                input,
+                intrinsics,
+                distortion,
+                rectification,
+                new_intrinsics,
+                interpolation,
+                border_mode,
+            ),
+        }
+    }
+
     /// Get a pooled GPU buffer if this is a GPU device.
     pub fn get_buffer(&self, size: u64, usage: wgpu::BufferUsages) -> Result<wgpu::Buffer> {
         match self {
@@ -675,7 +754,21 @@ impl<'a> ComputeDevice<'a> {
 
 /// Get a compute device by its ID.
 pub fn get_device_by_id(id: crate::DeviceId) -> Result<ComputeDevice<'static>> {
-    // Check CPU
+    // Check GPU first (high priority)
+    if let Ok(gpu) = GpuContext::global() {
+        if gpu.device_id() == id {
+            return Ok(ComputeDevice::Gpu(gpu));
+        }
+    }
+
+    // Check MLX (Apple Silicon)
+    if let Some(mlx) = MLX_CONTEXT.get() {
+        if mlx.device_id() == id {
+            return Ok(ComputeDevice::Mlx(mlx));
+        }
+    }
+
+    // Check CPU last
     if let Some(cpu) = CPU_CONTEXT.get() {
         if cpu.device_id() == id {
             return Ok(ComputeDevice::Cpu(cpu));
@@ -687,20 +780,6 @@ pub fn get_device_by_id(id: crate::DeviceId) -> Result<ComputeDevice<'static>> {
             if cpu.device_id() == id {
                 return Ok(ComputeDevice::Cpu(cpu));
             }
-        }
-    }
-
-    // Check GPU
-    if let Ok(gpu) = GpuContext::global() {
-        if gpu.device_id() == id {
-            return Ok(ComputeDevice::Gpu(gpu));
-        }
-    }
-
-    // Check MLX
-    if let Some(mlx) = MLX_CONTEXT.get() {
-        if mlx.device_id() == id {
-            return Ok(ComputeDevice::Mlx(mlx));
         }
     }
 

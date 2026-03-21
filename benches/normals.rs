@@ -11,7 +11,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use cv_3d::gpu::point_cloud as gpu_pc;
 use cv_scientific::point_cloud as sci_pc;
-use nalgebra::{Point3, Vector3};
+use nalgebra::Point3;
 use rand::Rng;
 use std::time::Duration;
 
@@ -22,9 +22,9 @@ fn sphere_cloud(n: usize) -> Vec<Point3<f32>> {
     let mut rng = rand::rng();
     (0..n)
         .map(|_| {
-            let theta = rng.gen::<f32>() * std::f32::consts::TAU;
-            let phi = (rng.gen::<f32>() * 2.0 - 1.0).acos();
-            let r = 1.0 + rng.gen::<f32>() * 0.01;
+            let theta = rng.random::<f32>() * std::f32::consts::TAU;
+            let phi = (rng.random::<f32>() * 2.0 - 1.0).acos();
+            let r = 1.0 + rng.random::<f32>() * 0.01;
             Point3::new(
                 r * phi.sin() * theta.cos(),
                 r * phi.sin() * theta.sin(),
@@ -90,6 +90,34 @@ fn bench_voxel_cpu(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_kdtree_cpu(c: &mut Criterion) {
+    let mut group = c.benchmark_group("normals/kdtree_cpu");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(20);
+
+    for &n in &[1_000usize, 10_000, 100_000] {
+        let pts = sphere_cloud(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| gpu_pc::compute_normals_cpu_kdtree(black_box(&pts), 15));
+        });
+    }
+    group.finish();
+}
+
+fn bench_tiled_gpu(c: &mut Criterion) {
+    let mut group = c.benchmark_group("normals/tiled_gpu");
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(20);
+
+    for &n in &[1_000usize, 10_000, 100_000] {
+        let pts = sphere_cloud(n);
+        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
+            b.iter(|| gpu_pc::compute_normals_gpu_tiled(black_box(&pts), 15));
+        });
+    }
+    group.finish();
+}
+
 fn bench_hybrid(c: &mut Criterion) {
     let mut group = c.benchmark_group("normals/hybrid_cpu_knn_gpu_pca");
     group.measurement_time(Duration::from_secs(15));
@@ -144,20 +172,6 @@ fn bench_depth_image(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_approx_cross(c: &mut Criterion) {
-    let mut group = c.benchmark_group("normals/approx_cross_product (fast)");
-    group.measurement_time(Duration::from_secs(5));
-    group.sample_size(30);
-
-    for &n in &[1_000usize, 10_000, 100_000] {
-        let pts = sphere_cloud(n);
-        group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, _| {
-            b.iter(|| gpu_pc::compute_normals_approx_cross(black_box(&pts), 0.0));
-        });
-    }
-    group.finish();
-}
-
 fn bench_approx_integral(c: &mut Criterion) {
     let mut group = c.benchmark_group("normals/approx_integral (fast)");
     group.measurement_time(Duration::from_secs(5));
@@ -178,10 +192,11 @@ criterion_group!(
     normals_benches,
     bench_rtree_pca,
     bench_voxel_cpu,
+    bench_kdtree_cpu,
+    bench_tiled_gpu,
     bench_hybrid,
     bench_morton_gpu,
     bench_depth_image,
-    bench_approx_cross,
     bench_approx_integral,
 );
 criterion_main!(normals_benches);

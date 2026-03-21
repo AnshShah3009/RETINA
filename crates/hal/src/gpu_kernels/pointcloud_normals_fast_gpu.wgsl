@@ -84,10 +84,10 @@ fn main(
     let num_points = u32(params.num_points);
     // Cap k at 16 to reduce register pressure; still high-quality results.
     let k = min(u32(params.k_neighbors), 16u);
-    let active = idx < num_points;
+    let is_valid = idx < num_points;
 
     // Load this thread's point (or a dummy if out of range).
-    let point = select(vec3<f32>(0.0), points[min(idx, num_points - 1u)].xyz, active);
+    let point = select(vec3<f32>(0.0), points[min(idx, num_points - 1u)].xyz, is_valid);
 
     // k-NN bookkeeping: fixed-size arrays for up to 16 neighbours.
     var nb_idx:   array<u32, 16>;
@@ -98,7 +98,7 @@ fn main(
     }
 
     // --- Tiled brute-force kNN using workgroup shared memory ---
-    // Each tile cooperatively loads 256 points, then every active thread
+    // Each tile cooperatively loads 256 points, then every thread
     // compares its query point against all 256 loaded points.
     let tiles = (num_points + 255u) / 256u;
     for (var tile = 0u; tile < tiles; tile++) {
@@ -112,8 +112,8 @@ fn main(
         );
         workgroupBarrier();
 
-        // Active threads process every point in this tile.
-        if active {
+        // Threads process every point in this tile.
+        if is_valid {
             let tile_count = min(256u, num_points - tile * 256u);
             for (var j = 0u; j < tile_count; j++) {
                 let global_j = tile * 256u + j;
@@ -140,7 +140,7 @@ fn main(
     }
 
     // Inactive threads exit here; past all barriers so this is safe.
-    if !active { return; }
+    if !is_valid { return; }
 
     // Count valid neighbours.
     var valid = 0u;

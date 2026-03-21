@@ -1229,6 +1229,7 @@ pub fn wavedec(signal: &[f64], wavelet: Wavelet, levels: usize) -> Vec<Vec<f64>>
 /// Multi-level DWT reconstruction.
 ///
 /// Input format: `[approx, detail_1, detail_2, ..., detail_n]` (same as wavedec output).
+#[allow(clippy::needless_range_loop)]
 pub fn waverec(coeffs: &[Vec<f64>], wavelet: Wavelet) -> Vec<f64> {
     if coeffs.is_empty() {
         return vec![];

@@ -10,8 +10,9 @@
 //!   cargo bench --bench cubecl_vs_wgpu -- --quick      # fast smoke-test
 //!   cargo bench --bench cubecl_vs_wgpu -- threshold    # single group
 
+#[allow(unused_imports)]
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use cv_core::{CpuTensor, KeyPointF32, Tensor, TensorShape};
+use cv_core::{CpuTensor, KeyPointF32, Storage, Tensor, TensorShape};
 use cv_hal::context::{BorderMode, ComputeContext, ThresholdType};
 use cv_hal::cpu::CpuBackend;
 use cv_hal::gpu::GpuContext;

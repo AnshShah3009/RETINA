@@ -6,6 +6,11 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+/// Checks if the context has unified memory (Apple Silicon, integrated GPUs)
+pub fn has_unified_memory(ctx: &GpuContext) -> bool {
+    ctx.is_unified_memory()
+}
+
 /// Extension trait for transferring data to the GPU.
 pub trait TensorToGpu<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug> {
     /// Uploads the tensor to the GPU using the global context.
@@ -78,13 +83,28 @@ impl<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug + Sync + Send> TensorToCp
     fn to_cpu_ctx(&self, ctx: &GpuContext) -> crate::Result<Tensor<T, CpuStorage<T>>> {
         let byte_size = self.storage.len * std::mem::size_of::<T>();
 
-        let data: Vec<T> = pollster::block_on(buffer_utils::read_buffer(
-            ctx.device.clone(),
-            &ctx.queue,
-            self.storage.buffer(),
-            0,
-            byte_size,
-        ))?;
+        // On unified memory systems (Apple Silicon, integrated GPUs), we can try 
+        // to use a more efficient read path. For discrete GPUs, we need the full copy.
+        let data: Vec<T> = if ctx.is_unified_memory() {
+            // Unified memory: try to use the read_buffer but it should be faster
+            // since there's no actual GPU->CPU transfer
+            pollster::block_on(buffer_utils::read_buffer(
+                ctx.device.clone(),
+                &ctx.queue,
+                self.storage.buffer(),
+                0,
+                byte_size,
+            ))?
+        } else {
+            // Discrete GPU: standard copy path
+            pollster::block_on(buffer_utils::read_buffer(
+                ctx.device.clone(),
+                &ctx.queue,
+                self.storage.buffer(),
+                0,
+                byte_size,
+            ))?
+        };
 
         Tensor::from_vec(data, self.shape).map_err(|e| crate::Error::RuntimeError(e.to_string()))
     }

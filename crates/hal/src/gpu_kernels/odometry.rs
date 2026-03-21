@@ -22,7 +22,9 @@ struct OdometryParams {
     max_iterations: u32,
     min_depth: f32,
     max_depth: f32,
-    padding: [u32; 3],
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
 }
 
 /// SE(3) exponential map: maps a 6-vector [tx, ty, tz, rx, ry, rz] to a 4x4 transformation.
@@ -209,7 +211,9 @@ pub fn compute_odometry(
             max_iterations: 1,
             min_depth: 0.1,
             max_depth: 10.0,
-            padding: [0; 3],
+            _pad1: 0,
+            _pad2: 0,
+            _pad3: 0,
         };
         let params_buf = ctx
             .device
@@ -404,7 +408,9 @@ pub fn compute_odometry(
         max_iterations: 1,
         min_depth: 0.1,
         max_depth: 10.0,
-        padding: [0; 3],
+        _pad1: 0,
+        _pad2: 0,
+        _pad3: 0,
     };
     let params_buf = ctx
         .device

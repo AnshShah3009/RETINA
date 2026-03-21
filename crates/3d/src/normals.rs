@@ -16,7 +16,6 @@
 //! // Or choose the method that fits your needs:
 //! let normals = estimate_normals_cpu(&points, 15);
 //! let normals = estimate_normals_gpu(&points, 15);
-//! let normals = estimate_normals_approx_cross(&points);
 //!
 //! // For RGBD / depth cameras (fastest — O(n)):
 //! let normals = estimate_normals_from_depth(&depth, 640, 480, fx, fy, cx, cy);
@@ -30,7 +29,6 @@
 //! | [`estimate_normals_cpu`] | exact | ~19 ms | CPU-only / no GPU |
 //! | [`estimate_normals_gpu`] | exact | ~17 ms | GPU available |
 //! | [`estimate_normals_hybrid`] | exact | ~20 ms | large clouds + discrete GPU |
-//! | [`estimate_normals_approx_cross`] | fast approx | ~10 ms | real-time preview, ICP init |
 //! | [`estimate_normals_approx_integral`] | smooth approx | ~12 ms | rendering, visualisation |
 //! | [`estimate_normals_from_depth`] | exact (structured) | **< 1 ms** | RGBD / depth cameras |
 
@@ -77,6 +75,38 @@ pub fn estimate_normals_gpu(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32
     crate::gpu::point_cloud::compute_normals(points, k)
 }
 
+/// Estimate normals on CPU using KDTree + analytic eigensolver.
+///
+/// This is the classic approach used by Open3D and most 3D libraries.
+/// O(n log n) tree construction, O(n log k) queries.
+///
+/// For uniformly distributed point clouds, [`estimate_normals_cpu`] (voxel hash)
+/// is typically faster. For non-uniform clouds, KDTree may find better neighbors.
+///
+/// # Parameters
+/// - `points`: Input point cloud.
+/// - `k`: Nearest-neighbour count (typical: 10-30).
+pub fn estimate_normals_cpu_kdtree(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32>> {
+    crate::gpu::point_cloud::compute_normals_cpu_kdtree(points, k)
+}
+
+/// Estimate normals using tiled GPU brute-force kNN + analytic PCA.
+///
+/// Each workgroup cooperatively loads tiles of 256 points into shared memory,
+/// giving 256x better memory bandwidth than naive global scans.
+///
+/// Complexity: O(n²) but with ~256x lower bandwidth cost.
+/// Works well for small-medium clouds (1K-100K points).
+///
+/// Falls back to CPU voxel-hash if GPU is unavailable.
+///
+/// # Parameters
+/// - `points`: Input point cloud.
+/// - `k`: Nearest-neighbour count (typical: 10-30, capped at 16 on GPU).
+pub fn estimate_normals_gpu_tiled(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32>> {
+    crate::gpu::point_cloud::compute_normals_gpu_tiled(points, k)
+}
+
 /// Estimate normals: CPU voxel-hash kNN + GPU batch eigenvectors.
 ///
 /// Splits work by hardware affinity:
@@ -93,21 +123,11 @@ pub fn estimate_normals_hybrid(points: &[Point3<f32>], k: usize) -> Vec<Vector3<
     crate::gpu::point_cloud::compute_normals_hybrid(points, k)
 }
 
-/// Fast-approximate normals using the 2 nearest neighbours (cross-product method).
-///
-/// `normal = normalize(cross(v_nearest1, v_nearest2))`
-///
-/// No covariance matrix, no eigensolver -- ~3x faster than exact PCA.
-/// Suitable for real-time previews or as an initialiser for ICP.
-pub fn estimate_normals_approx_cross(points: &[Point3<f32>]) -> Vec<Vector3<f32>> {
-    crate::gpu::point_cloud::compute_normals_approx_cross(points, 0.0)
-}
-
 /// Fast-approximate normals by averaging cross-products from a ring of neighbours.
 ///
 /// Accumulates `cross(n_i, n_{i+1})` over all neighbours in the local voxel,
 /// then normalises the sum.  Produces smoother normals than
-/// [`estimate_normals_approx_cross`] at similar speed (~2.5x faster than exact PCA).
+/// standard PCA at similar speed (~2.5x faster than exact PCA).
 pub fn estimate_normals_approx_integral(points: &[Point3<f32>]) -> Vec<Vector3<f32>> {
     crate::gpu::point_cloud::compute_normals_approx_integral(points, 0.0)
 }

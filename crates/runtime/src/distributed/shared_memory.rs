@@ -8,22 +8,22 @@ use std::time::Duration;
 
 // --- Layout constants ---
 
-const MAX_SLOTS: usize = 64;
-const MAX_DEVICES: usize = 8;
+const MAX_SLOTS: usize = 128;
+const MAX_DEVICES: usize = 16;
 
 /// Total shared memory size: header + device states + process slots.
-/// 64 + 8*128 + 64*256 = 17472 -> round up to 18432 (18 KB).
-pub const SHM_TOTAL_SIZE: usize = 18432;
+/// 64 + 16*128 + 128*256 = 34880 -> round up to 40960 (40 KB).
+pub const SHM_TOTAL_SIZE: usize = 40960;
 
 const HEADER_SIZE: usize = 64;
 const DEVICE_STATE_SIZE: usize = 128;
 const PROCESS_SLOT_SIZE: usize = 256;
 
 const DEVICE_REGION_OFFSET: usize = HEADER_SIZE; // 64
-const SLOT_REGION_OFFSET: usize = DEVICE_REGION_OFFSET + MAX_DEVICES * DEVICE_STATE_SIZE; // 1088
+const SLOT_REGION_OFFSET: usize = DEVICE_REGION_OFFSET + MAX_DEVICES * DEVICE_STATE_SIZE; // 2112
 
 const SHM_MAGIC: u32 = 0x52455449; // "RETI"
-const SHM_VERSION: u32 = 2;
+const SHM_VERSION: u32 = 3;
 
 // --- Slot states ---
 
@@ -39,13 +39,13 @@ const STALE_THRESHOLD_NS: u64 = 5_000_000_000;
 
 /// Cache-line aligned header (64 bytes).
 #[repr(C, align(64))]
-struct ShmHeaderV2 {
+struct ShmHeaderV3 {
     magic: AtomicU32,
     version: AtomicU32,
     num_slots: AtomicU32,
     num_devices: AtomicU32,
-    epoch: AtomicU64,
-    _pad: [u8; 40],
+    epoch: AtomicU32,
+    _pad: [u8; 44],
 }
 
 /// Per-device state (128 bytes, cache-line aligned).
@@ -71,11 +71,11 @@ struct ProcessSlot {
     memory_budget_mb: [AtomicU32; MAX_DEVICES],
     compute_budget_pct: [AtomicU32; MAX_DEVICES],
     affinity_group: AtomicU32,
-    _pad: [u8; 132],
+    _pad: [u8; 68],
 }
 
 // Compile-time size checks
-const _: () = assert!(std::mem::size_of::<ShmHeaderV2>() == HEADER_SIZE);
+const _: () = assert!(std::mem::size_of::<ShmHeaderV3>() == HEADER_SIZE);
 const _: () = assert!(std::mem::size_of::<DeviceState>() == DEVICE_STATE_SIZE);
 const _: () = assert!(std::mem::size_of::<ProcessSlot>() == PROCESS_SLOT_SIZE);
 
@@ -114,7 +114,7 @@ impl ShmCoordinator {
                     if meta.len() >= size as u64 {
                         let mmap = unsafe { memmap2::MmapOptions::new().map(&f)? };
                         if mmap.len() >= HEADER_SIZE {
-                            let hdr = unsafe { &*(mmap.as_ptr() as *const ShmHeaderV2) };
+                            let hdr = unsafe { &*(mmap.as_ptr() as *const ShmHeaderV3) };
                             let magic = hdr.magic.load(Ordering::Relaxed);
                             let version = hdr.version.load(Ordering::Relaxed);
                             magic != SHM_MAGIC || version != SHM_VERSION
@@ -190,8 +190,8 @@ impl ShmCoordinator {
 
     // --- Pointer helpers ---
 
-    fn header_ptr(mmap: &memmap2::MmapMut) -> &ShmHeaderV2 {
-        unsafe { &*(mmap.as_ptr() as *const ShmHeaderV2) }
+    fn header_ptr(mmap: &memmap2::MmapMut) -> &ShmHeaderV3 {
+        unsafe { &*(mmap.as_ptr() as *const ShmHeaderV3) }
     }
 
     fn device_ptr(mmap: &memmap2::MmapMut, idx: usize) -> Option<&DeviceState> {
@@ -223,6 +223,30 @@ impl ShmCoordinator {
     fn bump_epoch(&self) {
         let header = Self::header_ptr(&self.mmap);
         header.epoch.fetch_add(1, Ordering::Release);
+        Self::wake_all_on_address(&header.epoch);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wake_all_on_address(addr: &AtomicU32) {
+        // Wake only 1 waiter to avoid thundering herd problem
+        // Multiple wakeups will happen as needed when each waiter checks the condition
+        unsafe {
+            libc::syscall(
+                libc::SYS_futex,
+                addr as *const AtomicU32 as *mut libc::c_int,
+                libc::FUTEX_WAKE,
+                1, // Wake only one waiter
+                std::ptr::null::<libc::timespec>(),
+                std::ptr::null::<libc::c_int>(),
+                0,
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn wake_all_on_address(addr: &AtomicU32) {
+        // Wake only 1 waiter to avoid thundering herd problem
+        atomic_wait::wake_one(addr);
     }
 
     // --- Slot acquisition (lock-free CAS state machine) ---
@@ -515,9 +539,8 @@ impl ShmCoordinator {
 
     /// Block until `device_idx` has at least `needed_mb` free, or `timeout` expires.
     ///
-    /// Watches the shared-memory epoch counter so it wakes up as soon as any
-    /// process releases memory, instead of blind polling.  The backoff starts at
-    /// 1 ms and caps at 50 ms between epoch checks.
+    /// Watches the shared-memory epoch counter using futex-like wait
+    /// so it wakes up instantly as soon as any process releases memory, with 0% CPU overhead.
     ///
     /// Returns `Ok(())` when memory is available, or `Err(TimedOut)` on timeout.
     pub fn wait_for_device_memory(
@@ -535,18 +558,17 @@ impl ShmCoordinator {
         })?;
 
         let header = Self::header_ptr(&self.mmap);
-        let deadline = std::time::Instant::now() + timeout;
-        let mut last_epoch = header.epoch.load(Ordering::Acquire);
-        let mut sleep_ms: u64 = 1;
+        let start = std::time::Instant::now();
 
         loop {
-            let total = dev.total_memory_mb.load(Ordering::Acquire);
             let used = dev.used_memory_mb.load(Ordering::Acquire);
+            let total = dev.total_memory_mb.load(Ordering::Acquire);
             if total > 0 && total.saturating_sub(used) >= needed_mb {
                 return Ok(());
             }
 
-            if std::time::Instant::now() >= deadline {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
@@ -556,21 +578,47 @@ impl ShmCoordinator {
                 ));
             }
 
-            // Sleep with adaptive backoff, but wake early if epoch changes
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let nap = Duration::from_millis(sleep_ms).min(remaining);
-            std::thread::sleep(nap);
+            let last_epoch = header.epoch.load(Ordering::Acquire);
 
-            let epoch = header.epoch.load(Ordering::Acquire);
-            if epoch != last_epoch {
-                // Something changed — reset backoff and re-check immediately
-                last_epoch = epoch;
-                sleep_ms = 1;
-            } else {
-                // Nothing changed — grow backoff (cap 50 ms)
-                sleep_ms = (sleep_ms * 2).min(50);
+            // Double check condition before waiting to avoid missed-wakeups
+            let used = dev.used_memory_mb.load(Ordering::Acquire);
+            if total > 0 && total.saturating_sub(used) >= needed_mb {
+                return Ok(());
             }
+
+            let remaining = timeout.saturating_sub(elapsed);
+            Self::wait_on_address(&header.epoch, last_epoch, Some(remaining));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_on_address(addr: &AtomicU32, expected: u32, timeout: Option<Duration>) {
+        use std::ptr;
+        let ts = timeout.map(|d| libc::timespec {
+            tv_sec: d.as_secs() as libc::time_t,
+            tv_nsec: d.subsec_nanos() as libc::c_long,
+        });
+        let ts_ptr = ts.as_ref().map(|t| t as *const _).unwrap_or(ptr::null());
+
+        // FUTEX_WAIT blocks if *addr == expected.
+        // We do NOT use FUTEX_PRIVATE_FLAG because this is shared memory across processes.
+        unsafe {
+            libc::syscall(
+                libc::SYS_futex,
+                addr as *const AtomicU32 as *mut libc::c_int,
+                libc::FUTEX_WAIT,
+                expected as libc::c_int,
+                ts_ptr,
+                ptr::null::<libc::c_int>(),
+                0,
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn wait_on_address(addr: &AtomicU32, expected: u32, _timeout: Option<Duration>) {
+        // Fallback to blocking wait or simple sleep if timeout is not supported via atomic-wait
+        atomic_wait::wait(addr, expected);
     }
 
     // --- Heartbeat & reaping ---

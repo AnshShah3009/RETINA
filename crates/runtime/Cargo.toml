@@ -15,17 +15,19 @@ num_cpus = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 parking_lot = { workspace = true }
+atomic-wait = { workspace = true }
+crossbeam-channel = { workspace = true }
 dashmap = { workspace = true }
 memmap2 = { workspace = true }
 bincode = { workspace = true }
 futures = { workspace = true }
-tracing = { workspace = true, optional = true }
+tracing = { workspace = true }
 libc = { workspace = true }
+pollster = { workspace = true }
 
 [features]
 default = []
-tracing = ["dep:tracing"]
 
 [dev-dependencies]
-pollster = { workspace = true }
 tempfile = { workspace = true }
+proptest = "1.5"

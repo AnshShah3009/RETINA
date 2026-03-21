@@ -345,6 +345,140 @@ pub fn warp_affine_ex_ctx(
     warp_perspective_ex_ctx(src, &inv, width, height, interpolation, border, group)
 }
 
+pub fn remap_ex(
+    src: &GrayImage,
+    map_x: &[f32],
+    map_y: &[f32],
+    width: u32,
+    height: u32,
+    interpolation: Interpolation,
+    border: BorderMode,
+) -> GrayImage {
+    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
+        cv_runtime::registry()
+            .ok()
+            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+    });
+    remap_ex_ctx(
+        src,
+        map_x,
+        map_y,
+        width,
+        height,
+        interpolation,
+        border,
+        &runner,
+    )
+}
+
+pub fn remap_ex_ctx(
+    src: &GrayImage,
+    map_x: &[f32],
+    map_y: &[f32],
+    width: u32,
+    height: u32,
+    interpolation: Interpolation,
+    border: BorderMode,
+    group: &cv_runtime::orchestrator::RuntimeRunner,
+) -> GrayImage {
+    // Check for GPU acceleration
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        if let Ok(result) = remap_gpu(gpu, src, map_x, map_y, width, height, interpolation, border)
+        {
+            return result;
+        }
+    }
+
+    let mut dst = GrayImage::new(width, height);
+
+    dst.as_mut()
+        .par_chunks_mut(width as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y = y as u32;
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let sx = map_x[idx];
+                let sy = map_y[idx];
+                let val = interpolate_sample(src, sx, sy, interpolation, border);
+                row[x as usize] = val.clamp(0.0, 255.0) as u8;
+            }
+        });
+
+    dst
+}
+
+fn remap_gpu(
+    gpu: &cv_hal::gpu::GpuContext,
+    src: &GrayImage,
+    map_x: &[f32],
+    map_y: &[f32],
+    width: u32,
+    height: u32,
+    interpolation: Interpolation,
+    border: BorderMode,
+) -> cv_hal::Result<GrayImage> {
+    use cv_hal::context::ComputeContext;
+    use cv_hal::storage::GpuStorage;
+    use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
+
+    let src_f32: Vec<f32> = src.as_raw().iter().map(|&p| p as f32).collect();
+    let input_tensor = cv_core::CpuTensor::from_vec(
+        src_f32,
+        cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
+    )
+    .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
+
+    let map_x_tensor = cv_core::CpuTensor::from_vec(
+        map_x.to_vec(),
+        cv_core::TensorShape::new(1, height as usize, width as usize),
+    )
+    .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
+
+    let map_y_tensor = cv_core::CpuTensor::from_vec(
+        map_y.to_vec(),
+        cv_core::TensorShape::new(1, height as usize, width as usize),
+    )
+    .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
+
+    let input_gpu = input_tensor.to_gpu_ctx(gpu)?;
+    let mx_gpu = map_x_tensor.to_gpu_ctx(gpu)?;
+    let my_gpu = map_y_tensor.to_gpu_ctx(gpu)?;
+
+    let interp = match interpolation {
+        Interpolation::Nearest => cv_hal::context::Interpolation::Nearest,
+        Interpolation::Linear => cv_hal::context::Interpolation::Linear,
+        Interpolation::Cubic => cv_hal::context::Interpolation::Cubic,
+        Interpolation::Lanczos => cv_hal::context::Interpolation::Lanczos,
+    };
+
+    let border_hal = match border {
+        BorderMode::Constant(v) => cv_hal::context::BorderMode::Constant(v as f32),
+        BorderMode::Replicate => cv_hal::context::BorderMode::Replicate,
+        BorderMode::Reflect => cv_hal::context::BorderMode::Reflect,
+        BorderMode::Reflect101 => cv_hal::context::BorderMode::Reflect101,
+        BorderMode::Wrap => cv_hal::context::BorderMode::Wrap,
+    };
+
+    let res_gpu = gpu.remap::<f32, GpuStorage<f32>, GpuStorage<f32>>(
+        &input_gpu, &mx_gpu, &my_gpu, interp, border_hal,
+    )?;
+
+    let res_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = res_gpu.to_cpu_ctx(gpu)?;
+    use cv_core::storage::Storage;
+    let res_data: Vec<u8> = res_cpu
+        .storage
+        .as_slice()
+        .ok_or_else(|| cv_hal::Error::MemoryError("Failed to get CPU slice".into()))?
+        .iter()
+        .map(|v: &f32| v.clamp(0.0, 255.0) as u8)
+        .collect();
+
+    GrayImage::from_raw(width, height, res_data)
+        .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
+}
+
 pub fn remap(
     src: &GrayImage,
     map_x: &[f32],

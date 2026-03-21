@@ -13,14 +13,20 @@ pub struct MemoryManager {
     device_id: DeviceId,
     device: Option<Arc<Device>>,
     retirement_queue: Mutex<Vec<RetiredBuffer>>,
+    /// Lock-free queue for retiring buffers from Drop implementations.
+    drop_sender: crossbeam_channel::Sender<RetiredBuffer>,
+    drop_receiver: crossbeam_channel::Receiver<RetiredBuffer>,
 }
 
 impl MemoryManager {
     pub fn new(device_id: DeviceId, device: Option<Arc<Device>>) -> Self {
+        let (tx, rx) = crossbeam_channel::unbounded();
         Self {
             device_id,
             device,
             retirement_queue: Mutex::new(Vec::new()),
+            drop_sender: tx,
+            drop_receiver: rx,
         }
     }
 
@@ -28,18 +34,36 @@ impl MemoryManager {
         self.device_id
     }
 
+    /// Return a sender for the lock-free retirement queue.
+    pub fn drop_sender(&self) -> crossbeam_channel::Sender<RetiredBuffer> {
+        self.drop_sender.clone()
+    }
+
     /// Enqueue a buffer for retirement.
     ///
     /// The buffer will only be returned to the pool after the GPU has finished
     /// executing all commands up to `safe_after`.
     pub fn retire_buffer(&self, buffer: Buffer, safe_after: SubmissionIndex) {
-        if let Ok(mut queue) = self.retirement_queue.lock() {
-            queue.push(RetiredBuffer { buffer, safe_after });
+        // Use the channel for all retirements to keep logic unified and lock-free for caller
+        if let Err(e) = self.drop_sender.send(RetiredBuffer { buffer, safe_after }) {
+            // Ignore errors - if receiver is disconnected, buffer will be dropped
+            let _ = e;
         }
     }
 
     /// Reclaim retired buffers that are now safe to reuse.
     pub fn collect_garbage(&self, last_completed: SubmissionIndex) {
+        // 1. Drain the lock-free channel into the retirement queue
+        {
+            let mut queue = match self.retirement_queue.lock() {
+                Ok(q) => q,
+                Err(_) => return,
+            };
+            while let Ok(retired) = self.drop_receiver.try_recv() {
+                queue.push(retired);
+            }
+        }
+
         let mut queue = match self.retirement_queue.lock() {
             Ok(q) => q,
             Err(_) => return,

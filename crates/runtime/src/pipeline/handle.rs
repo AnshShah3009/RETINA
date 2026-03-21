@@ -7,6 +7,9 @@ use cv_hal::SubmissionIndex;
 use std::collections::HashMap;
 use tokio::sync::{broadcast, oneshot};
 
+#[cfg(feature = "tracing")]
+use tracing::{error, warn};
+
 #[derive(Debug)]
 pub struct PipelineResult {
     pub device_id: DeviceId,
@@ -102,7 +105,10 @@ pub(crate) fn spawn_pipeline_execution(
         let start = std::time::Instant::now();
         let node_count = nodes.len();
 
-        let _ = event_tx_clone.send(ExecutionEvent::Started { node_count });
+        if event_tx_clone.send(ExecutionEvent::Started { node_count }).is_err() {
+            #[cfg(feature = "tracing")]
+            warn!("No listeners for pipeline started event");
+        }
 
         let result = execute_pipeline(nodes, buffers, graph, device_id, &event_tx_clone).await;
 
@@ -115,21 +121,32 @@ pub(crate) fn spawn_pipeline_execution(
                     submissions,
                     execution_time_ms,
                 };
-                let _ = event_tx_clone.send(ExecutionEvent::Completed {
+                if event_tx_clone.send(ExecutionEvent::Completed {
                     success: true,
                     error_msg: None,
-                });
+                }).is_err() {
+                    #[cfg(feature = "tracing")]
+                    warn!("No listeners for pipeline completed event");
+                }
                 let _ = result_tx.send(Ok(pipeline_result));
             }
             Err(e) => {
                 let err_str = e.to_string();
-                let _ = event_tx_clone.send(ExecutionEvent::Error {
+                if event_tx_clone.send(ExecutionEvent::Error {
                     error: err_str.clone(),
-                });
-                let _ = event_tx_clone.send(ExecutionEvent::Completed {
+                }).is_err() {
+                    #[cfg(feature = "tracing")]
+                    warn!("No listeners for pipeline error event");
+                }
+                if event_tx_clone.send(ExecutionEvent::Completed {
                     success: false,
-                    error_msg: Some(err_str),
-                });
+                    error_msg: Some(err_str.clone()),
+                }).is_err() {
+                    #[cfg(feature = "tracing")]
+                    warn!("No listeners for pipeline completed event");
+                }
+                #[cfg(feature = "tracing")]
+                error!("Pipeline execution failed: {}", err_str);
                 let _ = result_tx.send(Err(e));
             }
         }
