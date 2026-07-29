@@ -313,8 +313,8 @@ impl ComputeContext for CpuBackend {
 
         // Accumulator dimensions
         let diag = ((w * w + h * h) as f32).sqrt();
-        let num_rho = ((2.0 * diag) / rho_f).ceil() as usize + 1;
-        let num_theta = (std::f32::consts::PI / theta_f).ceil() as usize;
+        let num_rho = ((2.0 * diag) / rho_f.max(1e-6)).ceil() as usize + 1;
+        let num_theta = (std::f32::consts::PI / theta_f.max(1e-6)).ceil() as usize;
 
         // Check for overflow in accumulator size
         let acc_size = num_rho

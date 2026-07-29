@@ -289,7 +289,13 @@ fn solve_dlt_fundamental(a: &[f64], n_rows: usize) -> Option<Matrix3<f64>> {
     let mut svd_f = f.svd(true, true);
     svd_f.singular_values[2] = 0.0;
 
-    svd_f.recompose().ok()
+    match svd_f.recompose() {
+        Ok(matrix) => Some(matrix),
+        Err(e) => {
+            tracing::warn!("Fundamental matrix rank-2 enforcement failed: {}", e);
+            None
+        }
+    }
 }
 
 /// Count inliers for homography

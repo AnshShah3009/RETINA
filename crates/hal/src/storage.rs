@@ -23,6 +23,19 @@ pub struct WgpuGpuStorage<T> {
 }
 
 impl<T> WgpuGpuStorage<T> {
+    /// Reinterpret this storage as holding a different element type.
+    /// The underlying GPU buffer is type-erased, so this is always safe.
+    pub fn retype<U>(mut self) -> WgpuGpuStorage<U> {
+        let buffer = self.buffer.take();
+        WgpuGpuStorage {
+            buffer,
+            len: self.len,
+            usage: self.usage,
+            shape: std::mem::take(&mut self.shape),
+            _phantom: PhantomData,
+        }
+    }
+
     pub fn from_buffer(buffer: Arc<wgpu::Buffer>, len: usize) -> Self {
         Self::from_buffer_with_usage(
             buffer,

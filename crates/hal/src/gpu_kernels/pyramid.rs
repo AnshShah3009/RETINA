@@ -78,9 +78,12 @@ pub fn pyramid_down<T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'st
         };
         let blurred = crate::gpu_kernels::convolve::gaussian_blur(ctx, &input_f32_tensor, 1.0, 5)?;
         let scaled = crate::gpu_kernels::resize::resize(ctx, &blurred, new_w as u32, new_h as u32)?;
-        // Safety: f32 is a special case of T (we only reach here when T == f32)
-        let scaled_t =
-            unsafe { std::mem::transmute::<crate::GpuTensor<f32>, crate::GpuTensor<T>>(scaled) };
+        let scaled_t = cv_core::Tensor {
+            storage: scaled.storage.retype::<T>(),
+            shape: scaled.shape,
+            dtype: scaled.dtype,
+            _phantom: PhantomData,
+        };
         Ok(scaled_t)
     } else {
         // For non-f32: skip gaussian blur, just resize

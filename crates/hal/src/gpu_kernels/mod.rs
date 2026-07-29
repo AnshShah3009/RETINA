@@ -460,7 +460,9 @@ pub mod buffer_utils {
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         let slice = staging_buffer.slice(..);
         slice.map_async(MapMode::Read, move |res| {
-            tx.send(res).ok();
+            if tx.send(res).is_err() {
+                tracing::warn!("GPU readback: receiver dropped before mapping completed");
+            }
         });
 
         // Block until specifically this submission is finished

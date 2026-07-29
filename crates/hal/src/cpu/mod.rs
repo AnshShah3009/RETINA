@@ -25,7 +25,16 @@ impl CpuBackend {
     pub fn new() -> Option<Self> {
         let num_threads = std::env::var("RUSTCV_CPU_THREADS")
             .ok()
-            .and_then(|v| v.parse().ok())
+            .and_then(|v| match v.parse() {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    tracing::warn!(
+                        "RUSTCV_CPU_THREADS '{}' is invalid ({}), using default {}",
+                        v, e, rayon::current_num_threads()
+                    );
+                    None
+                }
+            })
             .unwrap_or_else(rayon::current_num_threads);
 
         let device_id = DeviceId(NEXT_CPU_ID.fetch_add(1, Ordering::Relaxed));

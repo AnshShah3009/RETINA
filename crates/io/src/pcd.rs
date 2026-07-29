@@ -24,10 +24,6 @@ struct PcdHeader {
     sizes: Vec<usize>,
     types: Vec<char>,
     counts: Vec<usize>,
-    #[allow(dead_code)]
-    width: usize,
-    #[allow(dead_code)]
-    height: usize,
     points_count: usize,
     data_format: PcdData,
 }
@@ -148,8 +144,6 @@ fn parse_header<R: BufRead>(reader: &mut R) -> Result<PcdHeader> {
         sizes,
         types,
         counts,
-        width,
-        height,
         points_count,
         data_format,
     })

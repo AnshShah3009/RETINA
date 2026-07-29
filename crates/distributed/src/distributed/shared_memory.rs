@@ -694,14 +694,13 @@ impl ShmCoordinator {
 
             // Release all device reservations for this slot
             for d in 0..MAX_DEVICES {
-                let budget = slot.memory_budget_mb[d].load(Ordering::Acquire);
+                let budget = slot.memory_budget_mb[d].swap(0, Ordering::AcqRel);
                 if budget > 0 {
                     if let Some(dev) = Self::device_ptr(&self.mmap, d) {
                         dev.used_memory_mb.fetch_sub(budget, Ordering::AcqRel);
                         let bit = 1u64 << i;
                         dev.owner_mask.fetch_and(!bit, Ordering::AcqRel);
                     }
-                    slot.memory_budget_mb[d].store(0, Ordering::Release);
                     slot.compute_budget_pct[d].store(0, Ordering::Release);
                 }
             }
