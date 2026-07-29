@@ -1315,6 +1315,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cv-geometry2d"
+version = "0.1.0"
+
+[[package]]
 name = "cv-hal"
 version = "0.1.0"
 dependencies = [
@@ -1366,6 +1370,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cv-math"
+version = "0.1.0"
+dependencies = [
+ "cv-core",
+ "geo 0.28.0",
+ "geo-buffer",
+ "nalgebra",
+ "ndarray 0.17.2",
+ "rayon",
+ "rstar 0.12.2",
+]
+
+[[package]]
 name = "cv-optimize"
 version = "0.1.0"
 dependencies = [
@@ -1390,6 +1407,17 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cv-pointcloud"
+version = "0.1.0"
+dependencies = [
+ "cv-core",
+ "cv-math",
+ "nalgebra",
+ "rayon",
+ "rstar 0.12.2",
 ]
 
 [[package]]
@@ -1469,13 +1497,12 @@ name = "cv-scientific"
 version = "0.1.0"
 dependencies = [
  "cv-core",
+ "cv-geometry2d",
+ "cv-math",
+ "cv-pointcloud",
+ "cv-signal",
  "geo 0.28.0",
- "geo-buffer",
  "nalgebra",
- "ndarray 0.17.2",
- "rayon",
- "rstar 0.12.2",
- "rustfft",
 ]
 
 [[package]]
@@ -1488,6 +1515,14 @@ dependencies = [
  "nalgebra",
  "rayon",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "cv-signal"
+version = "0.1.0"
+dependencies = [
+ "cv-math",
+ "rustfft",
 ]
 
 [[package]]

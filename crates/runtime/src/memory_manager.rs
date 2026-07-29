@@ -55,19 +55,13 @@ impl MemoryManager {
     pub fn collect_garbage(&self, last_completed: SubmissionIndex) {
         // 1. Drain the lock-free channel into the retirement queue
         {
-            let mut queue = match self.retirement_queue.lock() {
-                Ok(q) => q,
-                Err(_) => return,
-            };
+            let mut queue = self.retirement_queue.lock().unwrap_or_else(|e| e.into_inner());
             while let Ok(retired) = self.drop_receiver.try_recv() {
                 queue.push(retired);
             }
         }
 
-        let mut queue = match self.retirement_queue.lock() {
-            Ok(q) => q,
-            Err(_) => return,
-        };
+        let mut queue = self.retirement_queue.lock().unwrap_or_else(|e| e.into_inner());
 
         // If we don't have a device, we can't have GPU buffers to return to a pool.
         let device = match &self.device {

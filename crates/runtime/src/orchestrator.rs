@@ -688,9 +688,10 @@ impl TaskScheduler {
         if cache.1.elapsed() > self.load_cache_interval {
             if let Some(ref coord) = self.coordinator {
                 let local_load = self.get_local_load();
-                if let Err(_e) = coord.update_load(&local_load) {
+                if let Err(e) = coord.update_load(&local_load) {
                     #[cfg(feature = "tracing")]
                     tracing::warn!("Failed to update coordinator load: {}", e);
+                    let _ = e; // suppress unused variable warning when tracing is disabled
                 }
 
                 if let Ok(global) = coord.get_global_load() {

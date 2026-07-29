@@ -45,7 +45,8 @@ struct ShmHeaderV3 {
     num_slots: AtomicU32,
     num_devices: AtomicU32,
     epoch: AtomicU32,
-    _pad: [u8; 44],
+    refcount: AtomicU32,
+    _pad: [u8; 40],
 }
 
 /// Per-device state (128 bytes, cache-line aligned).
@@ -173,10 +174,15 @@ impl ShmCoordinator {
                 .num_devices
                 .store(MAX_DEVICES as u32, Ordering::Release);
             header.epoch.store(0, Ordering::Release);
+            header.refcount.store(0, Ordering::Release);
         }
 
         let pid = std::process::id();
         let slot_index = Self::acquire_slot(&mmap, pid)?;
+
+        // Increment refcount atomically — protects against premature
+        // file deletion in Drop when multiple processes attach concurrently
+        Self::header_ptr(&mmap).refcount.fetch_add(1, Ordering::Release);
 
         Ok(Self {
             mmap,
@@ -387,20 +393,28 @@ impl ShmCoordinator {
         })?;
 
         let slot = self.my_slot();
-        let budget = slot.memory_budget_mb[idx].load(Ordering::Acquire);
+        // Atomically swap out the budget to avoid a TOCTOU race:
+        // if another thread in the same process calls reserve_device() between
+        // the load and store(0), the newly-added budget would be silently lost.
+        let budget = slot.memory_budget_mb[idx].swap(0, Ordering::AcqRel);
         if budget == 0 {
             return Ok(()); // nothing to release
         }
 
         // Subtract our budget from the device's used total
-        dev.used_memory_mb.fetch_sub(budget, Ordering::AcqRel);
+        // (saturating to guard against wrapping arithmetic if budget accounting
+        // has already drifted due to a prior race)
+        dev.used_memory_mb
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                Some(used.saturating_sub(budget))
+            })
+            .ok();
 
         // Clear owner bit
         let bit = 1u64 << self.slot_index;
         dev.owner_mask.fetch_and(!bit, Ordering::AcqRel);
 
-        // Clear slot's per-device fields
-        slot.memory_budget_mb[idx].store(0, Ordering::Release);
+        // Clear slot's per-device fields (memory_budget_mb already zeroed via swap above)
         slot.compute_budget_pct[idx].store(0, Ordering::Release);
         slot.device_mask.fetch_and(!(1u64 << idx), Ordering::AcqRel);
 
@@ -805,6 +819,11 @@ impl ShmCoordinator {
                         slot.start_time_ms.store(0, Ordering::Relaxed);
                         slot.affinity_group.store(0, Ordering::Relaxed);
                         slot.state.store(SLOT_EMPTY, Ordering::Release);
+                        // Bump epoch to wake waiters blocked on VRAM availability
+                        // (matching reap_dead() behavior)
+                        let header = ShmCoordinator::header_ptr(&mmap);
+                        header.epoch.fetch_add(1, Ordering::Release);
+                        ShmCoordinator::wake_all_on_address(&header.epoch);
                     }
                 }
             })
@@ -1057,8 +1076,9 @@ impl Drop for ShmCoordinator {
     fn drop(&mut self) {
         self.stop_heartbeat();
         self.cleanup();
-        // Only remove the file if we're the last process
-        if self.active_slot_count() == 0 {
+        // Atomically decrement refcount; only the last process removes the file
+        let header = Self::header_ptr(&self.mmap);
+        if header.refcount.fetch_sub(1, Ordering::AcqRel) == 1 {
             let _ = std::fs::remove_file(&self.path);
         }
     }

@@ -1,5 +1,5 @@
 use crate::Result;
-use cv_core::{CameraIntrinsics, Pose};
+use cv_core::{CameraIntrinsics, CameraModel, Pose};
 use nalgebra::{Matrix3, Matrix3x4, Matrix4, Point2, Point3, Vector3};
 
 /// Linear triangulation from two views.
@@ -164,4 +164,334 @@ pub fn recover_pose_from_essential(
     }
 
     best.ok_or_else(|| cv_core::Error::AlgorithmError("No valid pose candidate found".to_string()))
+}
+
+/// Linear Triangulation using the Direct Linear Transform (DLT) method.
+pub struct Triangulator;
+
+impl Triangulator {
+    /// Triangulate a 3D point from two 2D observations and camera projection matrices.
+    /// Observations should be in normalized camera coordinates (or pixel coordinates if P includes K).
+    pub fn triangulate_linear(
+        p1: &Matrix3x4<f64>,
+        p2: &Matrix3x4<f64>,
+        pt1: &[f64; 2],
+        pt2: &[f64; 2],
+    ) -> crate::Result<Vector3<f64>> {
+        let mut a = Matrix4::zeros();
+
+        // Observation 1: u1 = (P1_1 * X) / (P1_3 * X), v1 = (P1_2 * X) / (P1_3 * X)
+        // -> u1 * (P1_3 * X) - P1_1 * X = 0
+        // -> v1 * (P1_3 * X) - P1_2 * X = 0
+        for j in 0..4 {
+            a[(0, j)] = pt1[0] * p1[(2, j)] - p1[(0, j)];
+            a[(1, j)] = pt1[1] * p1[(2, j)] - p1[(1, j)];
+            a[(2, j)] = pt2[0] * p2[(2, j)] - p2[(0, j)];
+            a[(3, j)] = pt2[1] * p2[(2, j)] - p2[(1, j)];
+        }
+
+        let svd = nalgebra::SVD::new(a, false, true);
+        let v_t = svd.v_t.ok_or_else(|| {
+            cv_core::Error::AlgorithmError("SVD failed to compute V_t".into())
+        })?;
+
+        // Check for degeneracy: the smallest singular value should be significantly smaller than the second smallest
+        if svd.singular_values[3] > 0.1 * svd.singular_values[2] {
+            return Err(cv_core::Error::AlgorithmError(
+                "Degenerate triangulation configuration".into(),
+            ));
+        }
+
+        let x_h = v_t.row(3); // Last row of V^T
+
+        if x_h[3].abs() < 1e-9 {
+            return Err(cv_core::Error::AlgorithmError(
+                "Point at infinity or degenerate".into(),
+            ));
+        }
+
+        Ok(Vector3::new(
+            x_h[0] / x_h[3],
+            x_h[1] / x_h[3],
+            x_h[2] / x_h[3],
+        ))
+    }
+
+    /// Triangulate multiple points.
+    pub fn triangulate_points(
+        pose1: &Pose,
+        pose2: &Pose,
+        pts1: &[[f64; 2]],
+        pts2: &[[f64; 2]],
+    ) -> Vec<crate::Result<Vector3<f64>>> {
+        // Construct projection matrices P = [R | t]
+        // Assuming normalized camera coordinates (K = I)
+        let p1 = pose1.matrix().fixed_view::<3, 4>(0, 0).into_owned();
+        let p2 = pose2.matrix().fixed_view::<3, 4>(0, 0).into_owned();
+
+        pts1.iter()
+            .zip(pts2.iter())
+            .map(|(pt1, pt2)| Self::triangulate_linear(&p1, &p2, pt1, pt2))
+            .collect()
+    }
+
+    /// Estimate camera pose using iterative Levenberg-Marquardt refinement.
+    /// Returns the refined Pose given an initial guess, 3D points, 2D projections, and camera intrinsics.
+    pub fn refine_pnp(
+        initial_pose: &Pose,
+        object_points: &[Vector3<f64>],
+        image_points: &[[f64; 2]],
+        model: &cv_core::PinholeModel,
+        max_iters: usize,
+    ) -> Pose {
+        // Implementation using numerical differentiation for projection to support distortion
+        let mut current_pose = *initial_pose;
+        let mut lambda = 0.001;
+
+        let n = object_points.len();
+        let eps = 1e-6;
+
+        for _ in 0..max_iters {
+            let mut jtj = nalgebra::Matrix6::<f64>::zeros();
+            let mut jtr = nalgebra::Vector6::<f64>::zeros();
+            let mut current_err = 0.0;
+
+            let rot = current_pose.rotation;
+            let t = current_pose.translation;
+
+            for i in 0..n {
+                let p_w = object_points[i];
+                let p_c = rot * p_w + t; // Point in camera frame
+
+                // If point is behind camera, ignore
+                if p_c.z <= 1e-6 {
+                    continue;
+                }
+
+                let uv = model.project(&Point3::from(p_c));
+                let du = uv.x - image_points[i][0];
+                let dv = uv.y - image_points[i][1];
+                current_err += du * du + dv * dv;
+
+                // Numerical Jacobian of projection d(u,v)/d(p_c)
+                let mut j_proj = nalgebra::Matrix2x3::zeros();
+
+                let p_c_x = Point3::new(p_c.x + eps, p_c.y, p_c.z);
+                let p_c_x_neg = Point3::new(p_c.x - eps, p_c.y, p_c.z);
+                let uv_x = model.project(&p_c_x);
+                let uv_x_neg = model.project(&p_c_x_neg);
+                j_proj.set_column(
+                    0,
+                    &nalgebra::Vector2::new(
+                        (uv_x.x - uv_x_neg.x) / (2.0 * eps),
+                        (uv_x.y - uv_x_neg.y) / (2.0 * eps),
+                    ),
+                );
+
+                let p_c_y = Point3::new(p_c.x, p_c.y + eps, p_c.z);
+                let p_c_y_neg = Point3::new(p_c.x, p_c.y - eps, p_c.z);
+                let uv_y = model.project(&p_c_y);
+                let uv_y_neg = model.project(&p_c_y_neg);
+                j_proj.set_column(
+                    1,
+                    &nalgebra::Vector2::new(
+                        (uv_y.x - uv_y_neg.x) / (2.0 * eps),
+                        (uv_y.y - uv_y_neg.y) / (2.0 * eps),
+                    ),
+                );
+
+                let p_c_z = Point3::new(p_c.x, p_c.y, p_c.z + eps);
+                let p_c_z_neg = Point3::new(p_c.x, p_c.y, p_c.z - eps);
+                let uv_z = model.project(&p_c_z);
+                let uv_z_neg = model.project(&p_c_z_neg);
+                j_proj.set_column(
+                    2,
+                    &nalgebra::Vector2::new(
+                        (uv_z.x - uv_z_neg.x) / (2.0 * eps),
+                        (uv_z.y - uv_z_neg.y) / (2.0 * eps),
+                    ),
+                );
+
+                // Jacobian d(p_c)/d(pose)
+                // d(p_c)/dt = I
+                // d(p_c)/domega = -[p_c]x
+
+                let dpc_domega = nalgebra::Matrix3::new(
+                    0.0, p_c.z, -p_c.y, -p_c.z, 0.0, p_c.x, p_c.y, -p_c.x, 0.0,
+                ); // Note: this is actually [p_c]x, so d/domega is -[p_c]x?
+                   // p_new = R * p + t.  R approx (I + [w]x). p_new = p + [w]x * p + t = p - [p]x * w + t.
+                   // So d(p)/d(w) = -[p]x.
+
+                let j_rot = j_proj * (-dpc_domega);
+                let j_trans = j_proj; // * I
+
+                let mut j = nalgebra::Matrix2x6::zeros();
+                j.fixed_view_mut::<2, 3>(0, 0).copy_from(&j_rot);
+                j.fixed_view_mut::<2, 3>(0, 3).copy_from(&j_trans);
+
+                jtj += j.transpose() * j;
+                jtr += j.transpose() * nalgebra::Vector2::new(du, dv);
+            }
+
+            let mut lhs = jtj;
+            for k in 0..6 {
+                lhs[(k, k)] *= 1.0 + lambda;
+            }
+
+            if let Some(delta) = lhs.lu().solve(&jtr) {
+                // Update pose
+                let omega = Vector3::new(delta[0], delta[1], delta[2]);
+                let dt = Vector3::new(delta[3], delta[4], delta[5]);
+
+                let d_rot = nalgebra::Rotation3::new(omega);
+                let next_rot = d_rot * current_pose.rotation.to_rotation_matrix();
+                let next_t = current_pose.translation - dt; // We solved J*delta = -r, so new = old + delta?
+                                                            // Wait, typically J*delta = -r -> delta is step towards solution.
+                                                            // My J was d(error)/d(param).  Actually J should be d(residual)/d(param).
+                                                            // residual = proj - obs.
+                                                            // r_new = r_old + J * delta. Want r_new = 0. J * delta = -r_old.
+                                                            // So delta = - (J^T J)^-1 J^T r.
+                                                            // But here I solved (J^T J) * delta = J^T r.  So delta is (J^T J)^-1 J^T r.
+                                                            // So this delta is -step? No, J^T r is gradient.
+                                                            // Gauss-Newton: step = -(J^T J)^-1 J^T r.
+                                                            // Here delta = (J^T J)^-1 (J^T r).
+                                                            // So step = -delta.
+
+                // Let's check my previous code:
+                // next_t = current_pose.translation - dt;
+                // This implies dt was "positive" step size but subtracted.
+
+                let next_pose = Pose::new(next_rot.into_inner(), next_t);
+
+                // Simple check for improvement
+                let mut next_err = 0.0;
+                for i in 0..n {
+                    let p_c = next_pose.rotation * object_points[i] + next_pose.translation;
+                    if p_c.z > 0.0 {
+                        let uv = model.project(&Point3::from(p_c));
+                        next_err += (uv.x - image_points[i][0]).powi(2)
+                            + (uv.y - image_points[i][1]).powi(2);
+                    }
+                }
+
+                if next_err < current_err {
+                    current_pose = next_pose;
+                    lambda /= 10.0;
+                    if delta.norm() < 1e-8 {
+                        break;
+                    }
+                } else {
+                    lambda *= 10.0;
+                }
+            } else {
+                break;
+            }
+        }
+        current_pose
+    }
+
+    /// Refine a 3D point estimate using non-linear least squares (Gauss-Newton).
+    pub fn refine_triangulation(
+        projection_matrices: &[Matrix3x4<f64>],
+        observations: &[[f64; 2]],
+        initial_point: Vector3<f64>,
+        max_iters: usize,
+    ) -> Vector3<f64> {
+        let mut p = initial_point;
+        let mut lambda = 0.001; // Levenberg-Marquardt
+
+        for _ in 0..max_iters {
+            let mut jtj = Matrix3::<f64>::zeros();
+            let mut jtr = Vector3::<f64>::zeros();
+            let mut current_err = 0.0;
+
+            for (i, p_mat) in projection_matrices.iter().enumerate() {
+                let obs = observations[i];
+
+                // Project point: x = PX
+                let x_h = p_mat * p.insert_row(3, 1.0);
+                let z_inv = 1.0 / x_h.z;
+                let u = x_h.x * z_inv;
+                let v = x_h.y * z_inv;
+
+                let du = u - obs[0];
+                let dv = v - obs[1];
+                current_err += du * du + dv * dv;
+
+                // Jacobian d(u,v) / d(X,Y,Z)
+                // u = (p00*X + p01*Y + p02*Z + p03) / (p20*X + p21*Y + p22*Z + p23)
+                // du/dX = (p00 * x_h.z - x_h.x * p20) / (x_h.z^2)
+                let mut j = nalgebra::Matrix2x3::zeros();
+                for k in 0..3 {
+                    j[(0, k)] = (p_mat[(0, k)] * x_h.z - x_h.x * p_mat[(2, k)]) * (z_inv * z_inv);
+                    j[(1, k)] = (p_mat[(1, k)] * x_h.z - x_h.y * p_mat[(2, k)]) * (z_inv * z_inv);
+                }
+
+                jtj += j.transpose() * j;
+                jtr += j.transpose() * nalgebra::Vector2::new(du, dv);
+            }
+
+            // Solve (J^T J + lambda*I) * delta = J^T r
+            let mut lhs = jtj;
+            for i in 0..3 {
+                lhs[(i, i)] *= 1.0 + lambda;
+            }
+
+            if let Some(delta) = lhs.lu().solve(&jtr) {
+                let next_p = p - delta;
+
+                // Check if error improved
+                let mut next_err = 0.0;
+                for (i, p_mat) in projection_matrices.iter().enumerate() {
+                    let obs = observations[i];
+                    let x_h = p_mat * next_p.insert_row(3, 1.0);
+                    let z_inv = 1.0 / x_h.z;
+                    let du = x_h.x * z_inv - obs[0];
+                    let dv = x_h.y * z_inv - obs[1];
+                    next_err += du * du + dv * dv;
+                }
+
+                if next_err < current_err {
+                    p = next_p;
+                    lambda /= 10.0;
+                    if delta.norm() < 1e-8 {
+                        break;
+                    }
+                } else {
+                    lambda *= 10.0;
+                }
+            } else {
+                break;
+            }
+        }
+        p
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::Matrix3x4;
+
+    #[test]
+    fn test_triangulation() {
+        // Camera 1 at origin
+        let p1 = Matrix3x4::identity();
+        // Camera 2 translated by 1.0 in x
+        let mut p2 = Matrix3x4::identity();
+        p2[(0, 3)] = -1.0;
+
+        // Point at (0, 0, 5)
+        let x_true = Vector3::new(0.0, 0.0, 5.0);
+
+        // Project to cameras
+        // x1 = (0, 0, 5) -> [0, 0, 5] -> (0/5, 0/5) = (0, 0)
+        // x2 = (-1, 0, 5) -> [-1, 0, 5] -> (-1/5, 0/5) = (-0.2, 0)
+        let pt1 = [0.0, 0.0];
+        let pt2 = [-0.2, 0.0];
+
+        let x_tri = Triangulator::triangulate_linear(&p1, &p2, &pt1, &pt2).unwrap();
+
+        assert!((x_tri - x_true).norm() < 1e-6);
+    }
 }

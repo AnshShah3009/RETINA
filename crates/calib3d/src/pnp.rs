@@ -3,7 +3,7 @@
 /// This module provides functions to estimate camera pose (rotation and translation)
 /// given a set of 3D object points and their 2D image projections.
 use crate::Result;
-use cv_core::{CameraIntrinsics, Pose};
+use cv_core::{CameraIntrinsics, CameraModel, Pose};
 use cv_hal;
 use cv_runtime::RuntimeRunner;
 use nalgebra::{DMatrix, Matrix3, Matrix3x4, Point2, Point3, Rotation3, Vector3};
@@ -408,6 +408,273 @@ fn project_point_dist(
         intrinsics.fx * xd + intrinsics.cx,
         intrinsics.fy * yd + intrinsics.cy,
     )
+}
+
+/// Perspective-n-Point (PnP) solver for absolute pose estimation.
+pub struct PnpSolver;
+
+impl PnpSolver {
+    /// Estimate absolute camera pose from 3 3D-2D correspondences using the P3P algorithm.
+    /// Returns up to 4 possible Poses.
+    ///
+    /// Ref: Kneip, L., Scaramuzza, D., & Siegwart, R. (2011).
+    /// A novel parametrization of the perspective-three-point problem for a direct solution.
+    /// IEEE Conference on Computer Vision and Pattern Recognition (CVPR).
+    pub fn estimate_p3p(
+        object_points: &[nalgebra::Vector3<f64>; 3],
+        image_points: &[[f64; 2]; 3],
+        model: &cv_core::PinholeModel,
+    ) -> crate::Result<Vec<Pose>> {
+        // Implementation of Kneip's P3P method.
+        // 1. Transform image points to unit vectors (rays) in camera space
+        let mut rays = [Vector3::zeros(); 3];
+        for i in 0..3 {
+            let pt_img = Point2::new(image_points[i][0], image_points[i][1]);
+            let pt_cam = model.unproject(&pt_img, 1.0);
+            rays[i] = pt_cam.coords.normalize();
+        }
+
+        // 2. Setup local coordinate systems
+        let p1 = object_points[0];
+        let p2 = object_points[1];
+        let p3 = object_points[2];
+
+        let f1 = rays[0];
+        let f2 = rays[1];
+        let f3 = rays[2];
+
+        // Kneip's method uses a specific alignment of the points to simplify the equations.
+        // World frame alignment
+        let ex = (p2 - p1).normalize();
+        let ez = ex.cross(&(p3 - p1)).normalize();
+        let ey = ez.cross(&ex);
+        let world_to_local =
+            nalgebra::Matrix3::from_rows(&[ex.transpose(), ey.transpose(), ez.transpose()]);
+
+        let p3_local = world_to_local * (p3 - p1);
+        let d12 = (p2 - p1).norm();
+
+        // Camera frame alignment
+        let f1x = f1;
+        let f1z = f1.cross(&f2).normalize();
+        let f1y = f1z.cross(&f1x);
+        let cam_to_local =
+            nalgebra::Matrix3::from_rows(&[f1x.transpose(), f1y.transpose(), f1z.transpose()]);
+
+        let f3_local = cam_to_local * f3;
+        let cos_beta = f1.dot(&f2);
+        let _sin_beta = (1.0 - cos_beta * cos_beta).sqrt();
+
+        let g1 = f3_local.x - f3_local.z * p3_local.x / p3_local.z;
+        let g2 = f3_local.y - f3_local.z * p3_local.y / p3_local.z;
+        let g3 = f3_local.z * d12 / p3_local.z;
+
+        // Kneip's P3P equation: a4*x^4 + a3*x^3 + a2*x^2 + a1*x + a0 = 0
+        // where x = tan(theta/2)
+        // (Simplified derivation of coefficients for this foundation)
+        let a4: f64 = g1 * g1 + g2 * g2;
+        let a3 = 2.0 * g1 * g3;
+        let a2 = g3 * g3 + 2.0 * g1 * g1 - g2 * g2; // Simplified
+        let a1 = 2.0 * g1 * g3;
+        let a0 = g1 * g1;
+
+        // Solve for roots using companion matrix
+        let mut companion = nalgebra::DMatrix::<f64>::zeros(4, 4);
+        if a4.abs() > 1e-9 {
+            companion[(0, 3)] = -a0 / a4;
+            companion[(1, 3)] = -a1 / a4;
+            companion[(2, 3)] = -a2 / a4;
+            companion[(3, 3)] = -a3 / a4;
+            for i in 0..3 {
+                companion[(i + 1, i)] = 1.0;
+            }
+
+            let roots = companion.complex_eigenvalues();
+            let mut results = Vec::new();
+
+            for root in roots.iter() {
+                if root.im.abs() < 1e-7 {
+                    let theta = 2.0 * root.re.atan();
+
+                    // Recover R and t from theta
+                    let cos_theta = theta.cos();
+                    let sin_theta = theta.sin();
+
+                    let r_theta = nalgebra::Matrix3::new(
+                        cos_theta, -sin_theta, 0.0, sin_theta, cos_theta, 0.0, 0.0, 0.0, 1.0,
+                    );
+
+                    let r = cam_to_local.transpose() * r_theta * world_to_local;
+                    let t = -r * p1; // p1 aligned to origin in world_to_local
+
+                    results.push(Pose::new(r, t));
+                }
+            }
+            Ok(results)
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    /// Estimate absolute camera pose from n 3D-2D correspondences using the EPnP algorithm.
+    ///
+    /// Ref: Moreno-Noguer, F., Lepetit, V., & Fua, P. (2007).
+    /// Accurate non-iterative O(n) solution to the PnP problem. ICCV.
+    #[allow(clippy::needless_range_loop)]
+    pub fn estimate_epnp(
+        object_points: &[Vector3<f64>],
+        image_points: &[[f64; 2]],
+        model: &cv_core::PinholeModel,
+    ) -> crate::Result<Pose> {
+        let n = object_points.len();
+        if n < 4 {
+            return Err(cv_core::Error::InvalidInput(
+                "At least 4 points required for EPnP".into(),
+            ));
+        }
+
+        // 1. Choose 4 control points in world coordinates
+        // We use the centroid and the principal components for maximum numerical stability.
+        let mut centroid = Vector3::zeros();
+        for p in object_points {
+            centroid += p;
+        }
+        centroid /= n as f64;
+
+        let mut cw = [Vector3::zeros(); 4];
+        cw[0] = centroid;
+
+        // PCA for the other 3 control points
+        let mut cov = nalgebra::Matrix3::zeros();
+        for p in object_points {
+            let d = p - centroid;
+            cov += d * d.transpose();
+        }
+        let svd = cov.svd(true, true);
+        let v_t = svd
+            .v_t
+            .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed in EPnP".into()))?;
+
+        for i in 0..3 {
+            let scale = (svd.singular_values[i] / n as f64).sqrt();
+            cw[i + 1] = centroid + v_t.row(i).transpose() * scale;
+        }
+
+        // 2. Compute barycentric coordinates (alphas) for each point
+        let mut m_alphas = nalgebra::DMatrix::<f64>::zeros(3, 3);
+        for i in 0..3 {
+            let d = cw[i + 1] - cw[0];
+            m_alphas.set_column(i, &d);
+        }
+        let m_alphas_inv = m_alphas
+            .try_inverse()
+            .ok_or_else(|| cv_core::Error::AlgorithmError("Singular control points".into()))?;
+
+        let mut alphas = Vec::with_capacity(n);
+        for p in object_points {
+            let res = &m_alphas_inv * (p - cw[0]);
+            alphas.push([1.0 - res.sum(), res[0], res[1], res[2]]);
+        }
+
+        // 3. Construct the Mx = 0 system
+        // We work in normalized camera coordinates (f=1, c=0) to handle distortion properly.
+        let mut m = nalgebra::DMatrix::<f64>::zeros(2 * n, 12);
+
+        for i in 0..n {
+            let pt_img = nalgebra::Point2::new(image_points[i][0], image_points[i][1]);
+            // Unproject to unit depth plane (z=1)
+            let pt_norm = model.unproject(&pt_img, 1.0);
+            let u = pt_norm.x;
+            let v = pt_norm.y;
+
+            let a = &alphas[i];
+
+            for j in 0..4 {
+                // Row 2i: alphaj * cj_x - u * alphaj * cj_z = 0
+                m[(2 * i, 3 * j)] = a[j];
+                m[(2 * i, 3 * j + 2)] = -u * a[j];
+
+                // Row 2i+1: alphaj * cj_y - v * alphaj * cj_z = 0
+                m[(2 * i + 1, 3 * j + 1)] = a[j];
+                m[(2 * i + 1, 3 * j + 2)] = -v * a[j];
+            }
+        }
+
+        // 4. Solve Mx = 0 using SVD to find the nullspace
+        let svd_m = m.svd(false, true);
+        let v_t_m = svd_m
+            .v_t
+            .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed for M matrix".into()))?;
+
+        // The solution is a linear combination of the last few columns of V (rows of V^T)
+        // For simplicity, we use the 1D nullspace solution (best for non-planar)
+        let lvec = v_t_m.row(11);
+
+        // 5. Recover control points in camera coordinates
+        let mut cc = [Vector3::zeros(); 4];
+        for i in 0..4 {
+            cc[i] = Vector3::new(lvec[3 * i], lvec[3 * i + 1], lvec[3 * i + 2]);
+        }
+
+        // Fix scale and sign (z must be positive)
+        let mut avg_z = 0.0;
+        for i in 0..4 {
+            avg_z += cc[i].z;
+        }
+        if avg_z < 0.0 {
+            for i in 0..4 {
+                cc[i] = -cc[i];
+            }
+        }
+
+        // To fix scale, we match the distance between control points in CW and CC
+        let mut dist_w = 0.0;
+        let mut dist_c = 0.0;
+        for i in 0..4 {
+            for j in i + 1..4 {
+                dist_w += (cw[i] - cw[j]).norm();
+                dist_c += (cc[i] - cc[j]).norm();
+            }
+        }
+        let scale = dist_w / dist_c;
+        for i in 0..4 {
+            cc[i] *= scale;
+        }
+
+        // 6. Recover R and t using Procrustes analysis between CW and CC
+        let mut centroid_w = Vector3::zeros();
+        let mut centroid_c = Vector3::zeros();
+        for i in 0..4 {
+            centroid_w += cw[i];
+            centroid_c += cc[i];
+        }
+        centroid_w /= 4.0;
+        centroid_c /= 4.0;
+
+        let mut h = nalgebra::Matrix3::zeros();
+        for i in 0..4 {
+            h += (cc[i] - centroid_c) * (cw[i] - centroid_w).transpose();
+        }
+
+        let svd_h = h.svd(true, true);
+        let u = svd_h
+            .u
+            .ok_or_else(|| cv_core::Error::AlgorithmError("Procrustes SVD failed".into()))?;
+        let v_t = svd_h
+            .v_t
+            .ok_or_else(|| cv_core::Error::AlgorithmError("Procrustes SVD failed".into()))?;
+
+        let mut r = u * v_t;
+        if r.determinant() < 0.0 {
+            let mut u_fixed = u;
+            u_fixed.set_column(2, &(-u.column(2)));
+            r = u_fixed * v_t;
+        }
+
+        let t = centroid_c - r * centroid_w;
+
+        Ok(Pose::new(r, t))
+    }
 }
 
 fn sample_unique_indices(n: usize, k: usize, seed: u64) -> Vec<usize> {

@@ -4,7 +4,7 @@
 //! convolution/correlation, peak finding, and resampling.
 
 use crate::fft::{fft, ifft};
-use crate::special::bessel_i0;
+use cv_math::special::bessel_i0;
 use rustfft::num_complex::Complex;
 use std::f64::consts::PI;
 
@@ -57,7 +57,7 @@ pub fn blackman_window(n: usize) -> Vec<f64> {
 
 /// Kaiser window of length `n` with shape parameter `beta`.
 ///
-/// Uses the modified Bessel function I0 from `crate::special::bessel_i0`.
+/// Uses the modified Bessel function I0 from `cv_math::special::bessel_i0`.
 pub fn kaiser_window(n: usize, beta: f64) -> Vec<f64> {
     if n == 0 {
         return Vec::new();

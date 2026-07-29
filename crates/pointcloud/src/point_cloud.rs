@@ -635,7 +635,7 @@ pub fn remove_statistical_outliers(
         .collect();
 
     let mean_dist =
-        crate::mean(&distances.iter().map(|&d| d as f64).collect::<Vec<_>>()).unwrap_or(0.0) as f32;
+        cv_math::mean(&distances.iter().map(|&d| d as f64).collect::<Vec<_>>()).unwrap_or(0.0) as f32;
     // std dev
     let variance = distances
         .iter()

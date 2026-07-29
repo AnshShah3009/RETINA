@@ -27,6 +27,7 @@ pollster = { workspace = true }
 
 [features]
 default = []
+tracing = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

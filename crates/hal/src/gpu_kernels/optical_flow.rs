@@ -525,10 +525,6 @@ pub fn farneback(
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: flow_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
                         resource: flow_params_buf.as_entire_binding(),
                     },
                 ],

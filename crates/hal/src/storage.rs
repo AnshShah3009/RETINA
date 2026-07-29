@@ -18,6 +18,7 @@ pub struct WgpuGpuStorage<T> {
     pub buffer: Option<Arc<wgpu::Buffer>>,
     pub len: usize,
     pub usage: wgpu::BufferUsages,
+    shape: Vec<usize>,
     _phantom: PhantomData<T>,
 }
 
@@ -41,6 +42,7 @@ impl<T> WgpuGpuStorage<T> {
             buffer: Some(buffer),
             len,
             usage,
+            shape: Vec::new(),
             _phantom: PhantomData,
         }
     }
@@ -85,6 +87,7 @@ impl<T> WgpuGpuStorage<T> {
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
+            shape: Vec::new(),
             _phantom: PhantomData,
         })
     }
@@ -117,7 +120,7 @@ impl<T: bytemuck::Pod + fmt::Debug + Any + 'static> Storage<T> for WgpuGpuStorag
     }
 
     fn shape(&self) -> &[usize] {
-        &[]
+        &self.shape
     }
 
     fn len(&self) -> usize {
@@ -167,6 +170,7 @@ impl<T: bytemuck::Pod + fmt::Debug + Any + 'static> cv_core::storage::StorageFac
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
+            shape: Vec::new(),
             _phantom: PhantomData,
         })
     }

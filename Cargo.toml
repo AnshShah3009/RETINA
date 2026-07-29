@@ -87,6 +87,10 @@ members = [
     "crates/registration",
     "crates/plot",
     "crates/examples",
+    "crates/geometry2d",
+    "crates/math",
+    "crates/signal_proc",
+    "crates/pointcloud",
 ]
 
 [workspace.dependencies]
@@ -146,7 +150,7 @@ cv-3d = { path = "./crates/3d" }
 cv-calib3d = { path = "./crates/calib3d" }
 cv-sfm = { path = "./crates/sfm" }
 cv-slam = { path = "./crates/slam" }
-cv-runtime = { path = "./crates/runtime" }
+cv-runtime = { path = "./crates/runtime", features = ["tracing"] }
 cv-optimize = { path = "./crates/optimize" }
 cv-scientific = { path = "./crates/scientific" }
 cv-videoio = { path = "./crates/videoio" }
@@ -157,6 +161,10 @@ cv-rendering = { path = "./crates/rendering" }
 cv-registration = { path = "./crates/registration" }
 cv-plot = { path = "./crates/plot" }
 cv-viewer = { path = "./crates/viewer" }
+cv-math = { path = "./crates/math" }
+cv-geometry2d = { path = "./crates/geometry2d" }
+cv-signal = { path = "./crates/signal_proc" }
+cv-pointcloud = { path = "./crates/pointcloud" }
 
 [profile.release]
 opt-level = 3

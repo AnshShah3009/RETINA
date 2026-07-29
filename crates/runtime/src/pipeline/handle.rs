@@ -1,6 +1,7 @@
 use super::{BufferId, ExecutionGraph, PipelineNode, TransientBufferPool};
 use crate::Error;
 use crate::Result;
+use cv_core::Tensor;
 use cv_hal::context::ComputeContext;
 use cv_hal::DeviceId;
 use cv_hal::SubmissionIndex;
@@ -205,9 +206,14 @@ async fn execute_pipeline(
                     }
                 }
 
-                for &output_id in outputs {
-                    if let Some(&size) = buffers.get(&output_id) {
-                        allocator.allocate(output_id, size)?;
+                let output_sizes: Vec<_> = outputs
+                    .iter()
+                    .filter_map(|&id| buffers.get(&id).copied())
+                    .collect();
+
+                for (i, &output_id) in outputs.iter().enumerate() {
+                    if i < output_sizes.len() {
+                        allocator.allocate_or_update(output_id, output_sizes[i], &[])?;
                     }
                 }
 
@@ -217,7 +223,37 @@ async fn execute_pipeline(
                 #[cfg(feature = "tracing")]
                 tracing::debug!("Executing kernel '{}' on device {:?}", name, device_id);
 
-                let _ = (name, inputs, outputs, params);
+                // Execute kernel via cv-hal dispatch (mirrors synchronous path)
+                if let crate::device_registry::BackendContext::Gpu(gpu_ctx) =
+                    device_runtime.context()
+                {
+                    let mut all_tensors: Vec<
+                        Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>,
+                    > = Vec::new();
+
+                    for &input_id in inputs {
+                        if let Some(tensor) = allocator.create_tensor(input_id) {
+                            all_tensors.push(tensor);
+                        }
+                    }
+                    for &output_id in outputs {
+                        if let Some(tensor) = allocator.create_tensor(output_id) {
+                            all_tensors.push(tensor);
+                        }
+                    }
+
+                    let all_refs: Vec<&Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> =
+                        all_tensors.iter().collect();
+
+                    let max_size = output_sizes.iter().copied().max().unwrap_or(1);
+                    let workgroups = (((max_size as f64 / 64.0).ceil() as u32).max(1), 1, 1);
+
+                    gpu_ctx.dispatch(name, &all_refs, params, workgroups)?;
+                } else {
+                    return Err(Error::NotSupported(
+                        "Kernel execution only supported on GPU".into(),
+                    ));
+                }
 
                 let _ = event_tx.send(ExecutionEvent::NodeCompleted {
                     node_index: node_id.0,

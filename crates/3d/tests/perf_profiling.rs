@@ -32,13 +32,19 @@ fn profile_3d_algorithms() {
         println!("Unified Memory: {}", gpu.is_unified_memory());
     }
 
-    // Create mock point cloud (500k points)
+    // Create mock point cloud (500k points, spread in 3D for valid kNN)
+    // Deterministic pseudo-random distribution avoids O(n²) worst case
     let mut points = Vec::with_capacity(num_points);
+    let scale = 100.0;
+    let prime_x: f32 = 0.75487766;
+    let prime_y: f32 = 0.56984029;
+    let prime_z: f32 = 0.31876543;
     for i in 0..num_points {
+        let fi = i as f32;
         points.push(Point3::new(
-            (i as f32) * 0.001,
-            (i as f32) * 0.002,
-            (i as f32) * 0.003,
+            scale * ((fi * prime_x).sin() + (fi * 0.001).cos()),
+            scale * ((fi * prime_y).sin() + (fi * 0.003).cos()),
+            scale * ((fi * prime_z).sin() + (fi * 0.007).cos()),
         ));
     }
 
@@ -72,15 +78,19 @@ fn profile_3d_algorithms() {
     let elapsed_hybrid = start.elapsed();
     println!("3. Hybrid Normal Estimation (500k):   {:?}", elapsed_hybrid);
 
-    // 4. Large Scale Benchmark (1M points)
+    // 4. Large Scale Benchmark (1M points, spread in 3D)
     println!("--- Large Scale Benchmark (1,000,000 points) ---");
     let num_points_large = 1_000_000;
     let mut points_large = Vec::with_capacity(num_points_large);
+    let prime2_x: f32 = 0.35715926;
+    let prime2_y: f32 = 0.95141372;
+    let prime2_z: f32 = 0.62831853;
     for i in 0..num_points_large {
+        let fi = i as f32;
         points_large.push(Point3::new(
-            (i as f32) * 0.0005,
-            (i as f32) * 0.001,
-            (i as f32) * 0.0015,
+            scale * ((fi * prime2_x).sin() + (fi * 0.0007).cos()),
+            scale * ((fi * prime2_y).sin() + (fi * 0.0013).cos()),
+            scale * ((fi * prime2_z).sin() + (fi * 0.0031).cos()),
         ));
     }
 

@@ -1,0 +1,13 @@
+[package]
+name = "cv-math"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nalgebra = { workspace = true }
+cv-core = { workspace = true }
+ndarray = { workspace = true }
+geo = { workspace = true }
+rstar = { workspace = true }
+geo-buffer = { workspace = true }
+rayon = { workspace = true }
