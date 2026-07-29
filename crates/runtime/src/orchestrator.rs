@@ -1,5 +1,5 @@
 use crate::device_registry::{registry, DeviceRuntime};
-use crate::distributed::{FileCoordinator, LoadCoordinator, ShmCoordinator, SHM_SIZE};
+use cv_distributed::distributed::{FileCoordinator, LoadCoordinator, ShmCoordinator, SHM_SIZE};
 use crate::executor::{Executor, ExecutorConfig};
 use crate::Result;
 use cv_hal::{BackendType, DeviceId};

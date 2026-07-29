@@ -9,7 +9,7 @@ description = "Feature detection and description algorithms"
 cv-core = { workspace = true }
 cv-imgproc = { workspace = true }
 cv-hal = { workspace = true }
-cv-runtime = { workspace = true }
+cv-runtime = { workspace = true, optional = true }
 nalgebra = { workspace = true }
 rayon = { workspace = true }
 image = { workspace = true }
@@ -22,7 +22,8 @@ wgpu = { workspace = true, optional = true }
 pollster = { workspace = true, optional = true }
 
 [features]
-default = []
+default = ["runtime"]
+runtime = ["dep:cv-runtime"]
 gpu = ["dep:wgpu", "dep:pollster"]
 
 [dev-dependencies]

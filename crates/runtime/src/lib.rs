@@ -1,5 +1,4 @@
 pub mod device_registry;
-pub mod distributed;
 pub mod error;
 pub mod executor;
 pub mod memory;
@@ -7,6 +6,8 @@ pub mod memory_manager;
 pub mod observe;
 pub mod orchestrator;
 pub mod pipeline;
+
+pub use cv_distributed::distributed;
 
 pub use device_registry::{registry, DeviceRegistry, DeviceRuntime, SubmissionIndex};
 pub use error::ErrorContext;

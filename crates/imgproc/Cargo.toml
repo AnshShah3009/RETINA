@@ -8,7 +8,7 @@ description = "Image processing algorithms with hardware acceleration"
 [dependencies]
 cv-core = { workspace = true }
 cv-hal = { workspace = true }
-cv-runtime = { workspace = true }
+cv-runtime = { workspace = true, optional = true }
 image = { workspace = true }
 rayon = { workspace = true }
 nalgebra = { workspace = true }
@@ -20,4 +20,5 @@ tracing = { workspace = true }
 criterion = { workspace = true }
 
 [features]
-default = []
+default = ["runtime"]
+runtime = ["dep:cv-runtime"]

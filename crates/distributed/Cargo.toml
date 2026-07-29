@@ -1,0 +1,10 @@
+[package]
+name = "cv-distributed"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cv-hal = { workspace = true }
+atomic-wait = { workspace = true }
+memmap2 = { workspace = true }
+libc = { workspace = true }
