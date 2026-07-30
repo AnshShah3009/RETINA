@@ -69,6 +69,8 @@ pub mod orb;
 pub mod ransac;
 /// SIFT (Scale-Invariant Feature Transform) detector and descriptor
 pub mod sift;
+/// USAC/NAPSAC/MAGSAC — enhanced RANSAC sampling and scoring strategies
+pub mod usac;
 
 pub use akaze::*;
 pub use assignment::*;
@@ -88,6 +90,7 @@ pub use matcher::*;
 pub use orb::*;
 pub use ransac::*;
 pub use sift::*;
+pub use usac::*;
 
 pub use cv_core::{Error, KeyPoint, KeyPoints, Result};
 

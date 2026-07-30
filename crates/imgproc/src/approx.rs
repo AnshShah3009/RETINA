@@ -20,8 +20,8 @@ pub fn approx_poly_dp(curve: &[Point2<f64>], epsilon: f64, closed: bool) -> Vec<
     let mut result = Vec::new();
 
     // Find point with max distance
-    let start = curve[0];
-    let end = if closed { curve[0] } else { *curve.last().unwrap() };
+    let _start = curve[0];
+    let _end = if closed { curve[0] } else { *curve.last().unwrap() };
 
     // Recursive Douglas-Peucker
     let mut mask = vec![true; n];

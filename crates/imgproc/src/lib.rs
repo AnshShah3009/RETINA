@@ -7,6 +7,7 @@ pub mod convolve;
 pub mod distance_transform;
 pub mod drawing;
 pub mod edges;
+pub mod fit_ellipse;
 pub mod geometry;
 pub mod histogram;
 pub mod hough;
