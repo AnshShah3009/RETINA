@@ -54,3 +54,6 @@ pub use stereo::{
 pub mod stereo_matching;
 pub use stereo_matching::*;
 
+pub mod hand_eye;
+pub use hand_eye::{calibrate_hand_eye, calibrate_robot_world_hand_eye, HandEyeMethod, RobotWorldHandEyeMethod};
+

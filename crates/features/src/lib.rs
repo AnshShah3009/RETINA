@@ -39,6 +39,8 @@ pub mod aruco;
 pub mod assignment;
 /// BRIEF (Binary Robust Independent Elementary Features) descriptor
 pub mod brief;
+/// ChArUco board detection — fiducial marker board with chessboard corners
+pub mod charuco;
 /// Feature descriptor types and trait implementations
 pub mod descriptor;
 /// FAST (Features from Accelerated Segment Test) corner detection
@@ -71,6 +73,7 @@ pub mod sift;
 pub use akaze::*;
 pub use assignment::*;
 pub use brief::*;
+pub use charuco::*;
 pub use descriptor::*;
 pub use fast::*;
 pub use flann::*;

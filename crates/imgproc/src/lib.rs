@@ -1,3 +1,4 @@
+pub mod approx;
 pub mod bilateral;
 pub mod color;
 pub mod connected_components;
