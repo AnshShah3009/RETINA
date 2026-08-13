@@ -92,13 +92,12 @@ impl<T> WgpuGpuStorage<T> {
 
 impl<T> Drop for WgpuGpuStorage<T> {
     fn drop(&mut self) {
-        if let Some(arc_buf) = self.buffer.take() {
-            if let Ok(buffer) = Arc::try_unwrap(arc_buf) {
-                if let Ok(ctx) = GpuContext::global() {
-                    ctx.return_buffer(buffer, self.usage);
-                }
-            }
-        }
+        // Do not return buffers to the global pool here.
+        // Tensor buffers are typically created with `create_buffer_init` (not pooled),
+        // and returning via `GpuContext::global()` can recycle a buffer onto the wrong
+        // device in multi-GPU setups. Explicit `GpuContext::return_buffer` remains the
+        // pooling path for intentionally pooled staging/compute buffers.
+        let _ = self.buffer.take();
     }
 }
 

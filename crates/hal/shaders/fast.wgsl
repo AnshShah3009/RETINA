@@ -37,7 +37,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
 
         let p = get_u8(x, y);
-        let high = p + params.threshold;
+        let high = min(255u, p + params.threshold);
         let low = select(0u, p - params.threshold, p >= params.threshold);
 
         let v0 = get_u8(x, y - 3);

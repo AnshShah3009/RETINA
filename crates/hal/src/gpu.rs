@@ -6,11 +6,13 @@ use crate::{BackendType, DeviceId, SubmissionIndex};
 use cv_core::{storage::Storage, Tensor};
 use futures::executor::block_on;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use wgpu::util::DeviceExt;
 use wgpu::{Backends, Device, Instance, PowerPreference, Queue, RequestAdapterOptions};
 
 static GLOBAL_CONTEXT: OnceLock<crate::Result<GpuContext>> = OnceLock::new();
+/// Serializes first-time global init without holding a lock across `.await`.
+static GLOBAL_INIT_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_GPU_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Shared GPU Context containing Device and Queue.
@@ -2811,10 +2813,36 @@ impl GpuContext {
     }
 
     /// Initialize the global GPU context asynchronously.
+    ///
+    /// Safe to call from a Tokio runtime: creation is awaited (no nested `block_on`),
+    /// then published into `OnceLock` under a short sync lock.
     pub async fn init_global() -> crate::Result<&'static GpuContext> {
-        let res = GLOBAL_CONTEXT.get_or_init(|| block_on(Self::new_async()));
+        if let Some(res) = GLOBAL_CONTEXT.get() {
+            return res
+                .as_ref()
+                .map_err(|e| crate::Error::InitError(e.to_string()));
+        }
 
-        res.as_ref()
+        // Create without holding GLOBAL_INIT_LOCK across the await point.
+        let created = Self::new_async().await;
+
+        let _guard = GLOBAL_INIT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let Some(res) = GLOBAL_CONTEXT.get() {
+            // Another task won the race; drop our spare context.
+            drop(created);
+            return res
+                .as_ref()
+                .map_err(|e| crate::Error::InitError(e.to_string()));
+        }
+
+        let _ = GLOBAL_CONTEXT.set(created);
+        GLOBAL_CONTEXT
+            .get()
+            .expect("GLOBAL_CONTEXT set above")
+            .as_ref()
             .map_err(|e| crate::Error::InitError(e.to_string()))
     }
 
