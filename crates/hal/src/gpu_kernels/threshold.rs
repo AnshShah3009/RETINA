@@ -15,6 +15,8 @@ struct ThresholdParams<T: bytemuck::Pod + bytemuck::Zeroable> {
     max_value: T,
     thresh_type: u32,
     len: u32,
+    _pad0: u32,
+    _pad1: u32, // pad to 32 bytes for WGSL uniform alignment
 }
 
 unsafe impl<T: bytemuck::Pod + bytemuck::Zeroable> bytemuck::Pod for ThresholdParams<T> {}
@@ -46,6 +48,8 @@ pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
         max_value,
         thresh_type: thresh_type as u32,
         len: len as u32,
+        _pad0: 0,
+        _pad1: 0,
     };
 
     let params_buffer = ctx

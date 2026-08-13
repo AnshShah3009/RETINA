@@ -10,6 +10,7 @@ struct ICPParams {
     num_src: u32,
     num_tgt: u32,
     max_dist_sq: f32,
+    _pad: u32, // pad to 16 bytes for WGSL uniform alignment
 }
 
 pub fn icp_correspondences(
@@ -37,6 +38,7 @@ pub fn icp_correspondences(
         num_src: num_src as u32,
         num_tgt: num_tgt as u32,
         max_dist_sq: max_dist * max_dist,
+        _pad: 0,
     };
 
     let params_buffer = ctx

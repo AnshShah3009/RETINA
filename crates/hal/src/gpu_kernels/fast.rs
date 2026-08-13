@@ -11,6 +11,7 @@ struct FastParams {
     width: u32,
     height: u32,
     threshold: u32,
+    nonmax: u32, // pad to 16 bytes; matches upload layout
 }
 
 pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(

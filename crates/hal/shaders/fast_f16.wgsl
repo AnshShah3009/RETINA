@@ -3,6 +3,7 @@ struct Params {
     width: u32,
     height: u32,
     threshold: u32,
+    nonmax: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_data: array<f16>;

@@ -195,6 +195,9 @@ impl GpuStereoMatcher {
             min_disparity: min_disparity as u32,
             max_disparity: max_disparity as u32,
             block_size: self.block_size(),
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
         };
 
         let params_buffer = self
@@ -263,8 +266,10 @@ impl GpuStereoMatcher {
             compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
 
-        // Copy result to buffer
-        let output_buffer_size = (width * height * 4) as wgpu::BufferAddress;
+        // R32Float rows must be padded to COPY_BYTES_PER_ROW_ALIGNMENT (256).
+        let unpadded_bpr = width * 4;
+        let padded_bpr = align_copy_bytes_per_row(unpadded_bpr);
+        let output_buffer_size = padded_bpr as wgpu::BufferAddress * height as wgpu::BufferAddress;
         let output_buffer = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Buffer"),
             size: output_buffer_size,
@@ -283,7 +288,7 @@ impl GpuStereoMatcher {
                 buffer: &output_buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(width * 4),
+                    bytes_per_row: Some(padded_bpr),
                     rows_per_image: Some(height),
                 },
             },
@@ -292,16 +297,44 @@ impl GpuStereoMatcher {
 
         let index = self.ctx.queue.submit(std::iter::once(encoder.finish()));
 
-        // Read back results
+        // Read back results — wait for map completion (do not ignore map_async).
         let buffer_slice = output_buffer.slice(..);
-        buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.ctx.device.poll(wgpu::PollType::Wait {
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = self.ctx.device.poll(wgpu::PollType::Wait {
             submission_index: Some(index),
             timeout: None,
         });
+        // Mapping callback should have fired after Wait; poll briefly if not.
+        let map_result = loop {
+            match rx.try_recv() {
+                Ok(res) => break res,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    let _ = self.ctx.device.poll(wgpu::PollType::Poll);
+                    std::thread::yield_now();
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    return Err(Error::AlgorithmError(
+                        "Stereo GPU readback channel failed".into(),
+                    ));
+                }
+            }
+        };
+        map_result.map_err(|e| {
+            Error::AlgorithmError(format!("Stereo GPU buffer map failed: {:?}", e))
+        })?;
 
         let data = buffer_slice.get_mapped_range();
-        let disparity_data: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        let mut disparity_data = Vec::with_capacity((width * height) as usize);
+        let row_floats = width as usize;
+        let padded_floats = (padded_bpr / 4) as usize;
+        let floats: &[f32] = bytemuck::cast_slice(&data);
+        for y in 0..height as usize {
+            let start = y * padded_floats;
+            disparity_data.extend_from_slice(&floats[start..start + row_floats]);
+        }
         drop(data);
         output_buffer.unmap();
 
@@ -390,7 +423,24 @@ impl GpuStereoMatcher {
             view_formats: &[],
         });
 
-        // Upload image data
+        let width = image.width();
+        let height = image.height();
+        let unpadded_bpr = width;
+        let padded_bpr = align_copy_bytes_per_row(unpadded_bpr);
+        let raw = image.as_raw();
+        let upload: std::borrow::Cow<'_, [u8]> = if padded_bpr == unpadded_bpr {
+            std::borrow::Cow::Borrowed(raw)
+        } else {
+            let mut padded = vec![0u8; (padded_bpr * height) as usize];
+            for y in 0..height {
+                let src_start = (y * width) as usize;
+                let dst_start = (y * padded_bpr) as usize;
+                padded[dst_start..dst_start + width as usize]
+                    .copy_from_slice(&raw[src_start..src_start + width as usize]);
+            }
+            std::borrow::Cow::Owned(padded)
+        };
+
         self.ctx.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -398,11 +448,11 @@ impl GpuStereoMatcher {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            image.as_raw(),
+            &upload,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(image.width()),
-                rows_per_image: Some(image.height()),
+                bytes_per_row: Some(padded_bpr),
+                rows_per_image: Some(height),
             },
             size,
         );
@@ -441,6 +491,12 @@ fn extract_rows(image: &GrayImage, start_row: u32, end_row: u32) -> Result<GrayI
         .ok_or_else(|| Error::InvalidInput("Failed to build temporary image tile".to_string()))
 }
 
+/// Align texture↔buffer row pitch to wgpu's COPY_BYTES_PER_ROW_ALIGNMENT (256).
+fn align_copy_bytes_per_row(bytes: u32) -> u32 {
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    bytes.div_ceil(align) * align
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct StereoParamsGPU {
@@ -449,6 +505,9 @@ struct StereoParamsGPU {
     min_disparity: u32,
     max_disparity: u32,
     block_size: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32, // pad to 32 bytes for WGSL uniform alignment
 }
 
 /// Check if GPU acceleration is available
@@ -535,6 +594,41 @@ mod tests {
         // Center should have disparity approx 5 (from create_test_stereo_pair)
         let d = disparity.get(32, 32);
         println!("GPU Disparity at center: {}", d);
+        assert!((d - 5.0).abs() < 1.0);
+    }
+
+    /// Width 100 → R8 upload row 100 and R32Float row 400 are not 256-aligned.
+    #[tokio::test]
+    async fn test_gpu_block_matching_unaligned_pitch() {
+        if !is_gpu_available().await {
+            println!("Skipping GPU unaligned-pitch test (no GPU available)");
+            return;
+        }
+
+        let _ = cv_hal::gpu::GpuContext::init_global().await;
+
+        let width = 100u32;
+        let height = 64u32;
+        let mut left = GrayImage::new(width, height);
+        let mut right = GrayImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let pattern = ((x / 8) % 2) * 200;
+                left.put_pixel(x, y, Luma([pattern as u8]));
+                let sx = (x + 5).min(width - 1);
+                let right_pattern = ((sx / 8) % 2) * 200;
+                right.put_pixel(x, y, Luma([right_pattern as u8]));
+            }
+        }
+
+        let matcher = GpuStereoMatcher::new(GpuStereoAlgorithm::BlockMatching { block_size: 7 })
+            .await
+            .unwrap();
+        let disparity = matcher.compute_disparity(&left, &right, 0, 10).unwrap();
+        assert_eq!(disparity.width, width);
+        assert_eq!(disparity.height, height);
+        let d = disparity.get(50, 32);
+        println!("Unaligned-pitch GPU disparity at center: {}", d);
         assert!((d - 5.0).abs() < 1.0);
     }
 }
