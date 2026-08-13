@@ -1,15 +1,17 @@
-use cv_core::{DataType, Tensor, TensorShape};
+use cv_core::{Tensor, TensorShape};
 use cv_hal::context::ComputeContext;
 use cv_hal::gpu::GpuContext;
-use cv_hal::storage::GpuStorage;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
-use std::sync::Arc;
+
+fn try_gpu_ctx() -> Option<&'static GpuContext> {
+    pollster::block_on(GpuContext::init_global()).ok()
+}
 
 #[test]
 fn test_gpu_nms_pixel() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => return,
+    let Some(ctx) = try_gpu_ctx() else {
+        println!("Skipping GPU NMS test (GPU unavailable)");
+        return;
     };
 
     let shape = TensorShape::new(1, 100, 100);
@@ -32,9 +34,9 @@ fn test_gpu_nms_pixel() {
 
 #[test]
 fn test_gpu_tsdf_pipeline() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => return,
+    let Some(ctx) = try_gpu_ctx() else {
+        println!("Skipping GPU TSDF test (GPU unavailable)");
+        return;
     };
 
     let vx = 64;
@@ -104,9 +106,9 @@ fn test_gpu_tsdf_pipeline() {
 
 #[test]
 fn test_gpu_dense_icp() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => return,
+    let Some(ctx) = try_gpu_ctx() else {
+        println!("Skipping GPU dense ICP test (GPU unavailable)");
+        return;
     };
 
     let w = 160;
@@ -213,9 +215,9 @@ fn test_gpu_dense_icp() {
 
 #[test]
 fn test_gpu_optical_flow_multi_level() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => return,
+    let Some(ctx) = try_gpu_ctx() else {
+        println!("Skipping GPU optical flow test (GPU unavailable)");
+        return;
     };
 
     let shape = TensorShape::new(1, 128, 128);

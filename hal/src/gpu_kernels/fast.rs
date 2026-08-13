@@ -12,6 +12,7 @@ struct FastParams {
     width: u32,
     height: u32,
     threshold: u32,
+    _pad: u32, // WGSL uniform structs must be 16-byte aligned
 }
 
 pub fn fast_detect(
@@ -42,6 +43,7 @@ pub fn fast_detect(
         width: w as u32,
         height: h as u32,
         threshold: threshold as u32,
+        _pad: 0,
     };
 
     let params_buffer = ctx

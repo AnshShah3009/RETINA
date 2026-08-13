@@ -14,6 +14,9 @@ struct ResizeParams {
     dst_w: u32,
     dst_h: u32,
     channels: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32, // pad to 32 bytes for WGSL uniform alignment
 }
 
 pub fn resize(
@@ -46,6 +49,9 @@ pub fn resize(
         dst_w: dst_w as u32,
         dst_h: dst_h as u32,
         channels: c as u32,
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
     };
 
     let params_buffer = ctx

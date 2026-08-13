@@ -15,6 +15,9 @@ struct MatchParams {
     templ_w: u32,
     templ_h: u32,
     method: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32, // pad to 32 bytes for WGSL uniform alignment
 }
 
 pub fn match_template(
@@ -47,6 +50,9 @@ pub fn match_template(
             TemplateMatchMethod::Ccoeff => 4,
             TemplateMatchMethod::CcoeffNormed => 5,
         },
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
     };
 
     let params_buffer = ctx

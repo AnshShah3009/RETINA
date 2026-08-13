@@ -1,6 +1,8 @@
 struct Params {
     num_boxes: u32,
     threshold: f32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 @group(0) @binding(0) var<storage, read> boxes: array<f32>; // [x1, y1, x2, y2, score] * num_boxes

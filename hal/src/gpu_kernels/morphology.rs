@@ -17,6 +17,8 @@ struct MorphParams {
     kh: u32,
     typ: u32,
     iterations: u32,
+    _pad0: u32,
+    _pad1: u32, // pad to 32 bytes for WGSL uniform alignment
 }
 
 pub fn morphology(
@@ -78,6 +80,8 @@ pub fn morphology(
         kh: kh as u32,
         typ: if typ == MorphologyType::Erode { 0 } else { 1 },
         iterations: 1,
+        _pad0: 0,
+        _pad1: 0,
     };
 
     let params_buffer = ctx

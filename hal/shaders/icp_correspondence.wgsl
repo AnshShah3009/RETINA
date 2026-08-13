@@ -2,6 +2,7 @@ struct Params {
     num_src: u32,
     num_tgt: u32,
     max_dist_sq: f32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<storage, read> src_points: array<vec4<f32>>;

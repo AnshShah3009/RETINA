@@ -5,13 +5,14 @@ use crate::context::{
 use crate::{BackendType, DeviceId, SubmissionIndex};
 use cv_core::{storage::Storage, Tensor};
 use futures::executor::block_on;
-use futures::FutureExt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use wgpu::util::DeviceExt;
 use wgpu::{Backends, Device, Instance, PowerPreference, Queue, RequestAdapterOptions};
 
 static GLOBAL_CONTEXT: OnceLock<crate::Result<GpuContext>> = OnceLock::new();
+/// Serializes first-time global init without holding a lock across `.await`.
+static GLOBAL_INIT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Shared GPU Context containing Device and Queue.
 #[derive(Debug, Clone)]
@@ -1690,23 +1691,36 @@ impl GpuContext {
     }
 
     /// Initialize the global GPU context asynchronously.
+    ///
+    /// Safe to call from a Tokio runtime: creation is awaited (no nested `block_on`),
+    /// then published into `OnceLock` under a short sync lock.
     pub async fn init_global() -> crate::Result<&'static GpuContext> {
-        let res = GLOBAL_CONTEXT.get_or_init(|| {
-            // We still need a sync way to call the async new_async if we are in init_global
-            // But init_global is itself async, so we can await it.
-            // Wait, get_or_init doesn't support async closures.
-            // We use a different pattern: initialize outside and then set.
-            Box::pin(Self::new_async())
-                .now_or_never()
-                .unwrap_or_else(|| {
-                    // If it wasn't ready immediately, we have a problem with get_or_init.
-                    // Modern OnceCell/OnceLock don't easily support async.
-                    // For now, we'll keep the block_on inside the init_global ONLY if called from a non-async thread,
-                    // or use a mutex to guard the async init.
-                    block_on(Self::new_async())
-                })
-        });
-        res.as_ref()
+        if let Some(res) = GLOBAL_CONTEXT.get() {
+            return res
+                .as_ref()
+                .map_err(|e| crate::Error::InitError(e.to_string()));
+        }
+
+        // Create without holding GLOBAL_INIT_LOCK across the await point.
+        let created = Self::new_async().await;
+
+        let _guard = GLOBAL_INIT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let Some(res) = GLOBAL_CONTEXT.get() {
+            // Another task won the race; drop our spare context.
+            drop(created);
+            return res
+                .as_ref()
+                .map_err(|e| crate::Error::InitError(e.to_string()));
+        }
+
+        let _ = GLOBAL_CONTEXT.set(created);
+        GLOBAL_CONTEXT
+            .get()
+            .expect("GLOBAL_CONTEXT set above")
+            .as_ref()
             .map_err(|e| crate::Error::InitError(e.to_string()))
     }
 
