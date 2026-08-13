@@ -435,14 +435,17 @@ impl Default for BundleAdjustmentConfig {
 pub fn bundle_adjust(state: &mut SfMState, config: &BundleAdjustmentConfig) {
     if let Ok(s) = scheduler() {
         if let Ok(group) = s.get_default_group() {
-            bundle_adjust_ctx(state, config, &group);
-            return;
+            if bundle_adjust_ctx(state, config, &group) {
+                return;
+            }
+            // Device unavailable / solver failed — fall through to CPU LM.
         }
     }
 
-    // Fallback: Use a temporary dummy group or implement a sequential version of bundle_adjust_ctx.
-    // For now, since bundle_adjust_ctx doesn't use the group for much other than calling numerical_jacobian_ctx,
-    // we can implement a basic loop.
+    bundle_adjust_cpu(state, config);
+}
+
+fn bundle_adjust_cpu(state: &mut SfMState, config: &BundleAdjustmentConfig) {
     let mut current_params = state.to_parameters();
     let mut current_residuals = state.residuals();
     let mut current_err = current_residuals.norm_squared();
@@ -494,14 +497,16 @@ pub fn bundle_adjust(state: &mut SfMState, config: &BundleAdjustmentConfig) {
     }
 }
 
+/// Run BA via the scheduler device path. Returns `false` if optimization could not run
+/// (caller should fall back to CPU).
 pub fn bundle_adjust_ctx(
     state: &mut SfMState,
     config: &BundleAdjustmentConfig,
     group: &ResourceGroup,
-) {
+) -> bool {
     let device = match group.device() {
         Ok(dev) => dev,
-        Err(_) => return, // Skip optimization on device error, use CPU fallback
+        Err(_) => return false,
     };
     let solver = SparseLMSolver {
         ctx: &device,
@@ -513,8 +518,12 @@ pub fn bundle_adjust_ctx(
     };
 
     let initial_params = state.to_parameters();
-    if let Ok(final_params) = solver.minimize(state, initial_params) {
-        state.from_parameters(&final_params);
+    match solver.minimize(state, initial_params) {
+        Ok(final_params) => {
+            state.from_parameters(&final_params);
+            true
+        }
+        Err(_) => false,
     }
 }
 

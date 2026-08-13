@@ -616,9 +616,27 @@ impl ShmCoordinator {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn wait_on_address(addr: &AtomicU32, expected: u32, _timeout: Option<Duration>) {
-        // Fallback to blocking wait or simple sleep if timeout is not supported via atomic-wait
-        atomic_wait::wait(addr, expected);
+    fn wait_on_address(addr: &AtomicU32, expected: u32, timeout: Option<Duration>) {
+        // atomic_wait has no timeout; poll so wait_for_device_memory can expire on macOS/BSD.
+        let deadline = timeout.map(|d| std::time::Instant::now() + d);
+        loop {
+            if addr.load(Ordering::Acquire) != expected {
+                return;
+            }
+            match deadline {
+                None => {
+                    atomic_wait::wait(addr, expected);
+                    return;
+                }
+                Some(dl) => {
+                    let now = std::time::Instant::now();
+                    if now >= dl {
+                        return;
+                    }
+                    std::thread::sleep((dl - now).min(Duration::from_millis(5)));
+                }
+            }
+        }
     }
 
     // --- Heartbeat & reaping ---
