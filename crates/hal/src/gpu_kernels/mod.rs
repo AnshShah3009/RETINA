@@ -1045,7 +1045,7 @@ pub mod spatial_gpu {
             min_bound.z = min_bound.z.min(p.z);
             max_bound.x = max_bound.x.max(p.x);
             max_bound.y = max_bound.y.max(p.y);
-            max_bound.z = max_bound.x.max(p.z);
+            max_bound.z = max_bound.z.max(p.z);
         }
 
         // Compute scale for morton encoding
@@ -1068,10 +1068,18 @@ pub mod spatial_gpu {
             })
             .collect();
 
-        // Store points and morton codes
+        // Store points and morton codes (COPY_SRC required for readback in queries)
         let points_data: Vec<[f32; 4]> = points.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
-        let points_buf = create_buffer(&device, &points_data, BufferUsages::STORAGE);
-        let morton_buf = create_buffer(&device, &morton_codes, BufferUsages::STORAGE);
+        let points_buf = create_buffer(
+            &device,
+            &points_data,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
+        let morton_buf = create_buffer(
+            &device,
+            &morton_codes,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
 
         Ok(GpuKDTree {
             nodes_buffer: points_buf,
@@ -1203,13 +1211,21 @@ pub mod spatial_gpu {
             }
         }
 
-        // Create buffers
-        let voxel_buf = create_buffer(&device, &voxel_accum, BufferUsages::STORAGE);
+        // Create buffers (COPY_SRC required for voxel_grid_downsample readback)
+        let voxel_buf = create_buffer(
+            &device,
+            &voxel_accum,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
         let occupied: Vec<u32> = voxel_accum
             .iter()
             .map(|v| if v[3] > 0.5 { 1u32 } else { 0u32 })
             .collect();
-        let occupied_buf = create_buffer(&device, &occupied, BufferUsages::STORAGE);
+        let occupied_buf = create_buffer(
+            &device,
+            &occupied,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
 
         Ok(GpuVoxelGrid {
             voxel_buffer: voxel_buf,
@@ -1226,6 +1242,10 @@ pub mod spatial_gpu {
         points: &[Vector3<f32>],
         voxel_size: f32,
     ) -> crate::Result<Vec<Vector3<f32>>> {
+        if points.is_empty() {
+            return Ok(vec![]);
+        }
+
         let grid = build_voxel_grid(gpu, points, voxel_size)?;
 
         // Read back the voxel centroids
