@@ -125,10 +125,10 @@ impl GpuTimer {
         });
         let _ = device.poll(wgpu::PollType::Wait {
             submission_index: None,
-            timeout: Some(std::time::Duration::from_secs(30)),
+            timeout: Some(std::time::Duration::from_secs(120)),
         });
         if receiver
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(std::time::Duration::from_secs(30))
             .ok()
             .and_then(|r| r.ok())
             .is_none()

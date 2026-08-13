@@ -466,12 +466,12 @@ pub mod buffer_utils {
         // Block until specifically this submission is finished (bounded wait for CI/software GPUs).
         let _ = device.poll(wgpu::PollType::Wait {
             submission_index: Some(submission_index),
-            timeout: Some(std::time::Duration::from_secs(30)),
+            timeout: Some(std::time::Duration::from_secs(120)),
         });
 
         // Mapping callback should have fired after Wait. Poll briefly if not.
         // Important: try_recv consumes the oneshot — do not await afterward.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let map_result = loop {
             match rx.try_recv() {
                 Ok(res) => break res,

@@ -140,7 +140,7 @@ impl ComputeContext for GpuContext {
     fn wait_idle(&self) -> crate::Result<()> {
         let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
-            timeout: Some(std::time::Duration::from_secs(30)),
+            timeout: Some(std::time::Duration::from_secs(120)),
         });
         Ok(())
     }

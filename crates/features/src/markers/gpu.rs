@@ -434,10 +434,10 @@ impl MarkerGpuContext {
 
         let _ = self.device.poll(wgpu::PollType::Wait {
             submission_index: Some(index),
-            timeout: Some(std::time::Duration::from_secs(30)),
+            timeout: Some(std::time::Duration::from_secs(120)),
         });
 
-        rx.recv_timeout(std::time::Duration::from_secs(5))
+        rx.recv_timeout(std::time::Duration::from_secs(30))
             .map_err(|e| Error::AlgorithmError(format!("GPU sync failed: {}", e)))?
             .map_err(|e| Error::AlgorithmError(format!("GPU buffer map failed: {:?}", e)))?;
 
