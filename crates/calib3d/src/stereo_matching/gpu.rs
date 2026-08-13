@@ -305,13 +305,19 @@ impl GpuStereoMatcher {
         });
         let _ = self.ctx.device.poll(wgpu::PollType::Wait {
             submission_index: Some(index),
-            timeout: None,
+            timeout: Some(std::time::Duration::from_secs(30)),
         });
         // Mapping callback should have fired after Wait; poll briefly if not.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let map_result = loop {
             match rx.try_recv() {
                 Ok(res) => break res,
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if std::time::Instant::now() > deadline {
+                        return Err(Error::AlgorithmError(
+                            "Stereo GPU readback map timed out".into(),
+                        ));
+                    }
                     let _ = self.ctx.device.poll(wgpu::PollType::Poll);
                     std::thread::yield_now();
                 }

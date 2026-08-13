@@ -125,9 +125,16 @@ impl GpuTimer {
         });
         let _ = device.poll(wgpu::PollType::Wait {
             submission_index: None,
-            timeout: None,
+            timeout: Some(std::time::Duration::from_secs(30)),
         });
-        receiver.recv().ok().and_then(|r| r.ok());
+        if receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .ok()
+            .and_then(|r| r.ok())
+            .is_none()
+        {
+            return Vec::new();
+        }
 
         let data = slice.get_mapped_range();
         let timestamps: &[u64] = bytemuck::cast_slice(&data[..count as usize * 2 * 8]);

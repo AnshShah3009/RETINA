@@ -463,18 +463,22 @@ pub mod buffer_utils {
             tx.send(res).ok();
         });
 
-        // Block until specifically this submission is finished
+        // Block until specifically this submission is finished (bounded wait for CI/software GPUs).
         let _ = device.poll(wgpu::PollType::Wait {
             submission_index: Some(submission_index),
-            timeout: None,
+            timeout: Some(std::time::Duration::from_secs(30)),
         });
 
         // Mapping callback should have fired after Wait. Poll briefly if not.
         // Important: try_recv consumes the oneshot — do not await afterward.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let map_result = loop {
             match rx.try_recv() {
                 Ok(res) => break res,
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() > deadline {
+                        return Err(crate::Error::DeviceError("Readback map timed out".into()));
+                    }
                     let _ = device.poll(wgpu::PollType::Poll);
                     std::thread::yield_now();
                 }

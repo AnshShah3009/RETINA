@@ -1,0 +1,4 @@
+# Prevent CI hangs from unbounded GPU wait/map loops on software adapters.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 3 }
+test-threads = "num-cpus"
