@@ -2816,6 +2816,10 @@ impl GpuContext {
     ///
     /// Safe to call from a Tokio runtime: creation is awaited (no nested `block_on`),
     /// then published into `OnceLock` under a short sync lock.
+    ///
+    /// Concurrent callers may each attempt device creation; only a successful
+    /// context is cached. Failures are not stored in `GLOBAL_CONTEXT`, so a
+    /// losing/failed attempt cannot poison a concurrent success or block retries.
     pub async fn init_global() -> crate::Result<&'static GpuContext> {
         if let Some(res) = GLOBAL_CONTEXT.get() {
             return res
@@ -2838,12 +2842,17 @@ impl GpuContext {
                 .map_err(|e| crate::Error::InitError(e.to_string()));
         }
 
-        let _ = GLOBAL_CONTEXT.set(created);
-        GLOBAL_CONTEXT
-            .get()
-            .expect("GLOBAL_CONTEXT set above")
-            .as_ref()
-            .map_err(|e| crate::Error::InitError(e.to_string()))
+        match created {
+            Ok(ctx) => {
+                let _ = GLOBAL_CONTEXT.set(Ok(ctx));
+                GLOBAL_CONTEXT
+                    .get()
+                    .expect("GLOBAL_CONTEXT set above")
+                    .as_ref()
+                    .map_err(|e| crate::Error::InitError(e.to_string()))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Initialize a new GPU context (synchronous wrapper).

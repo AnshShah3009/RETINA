@@ -27,19 +27,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let src_width_f = f16(params.src_w) - 1.0;
-    let src_height_f = f16(params.src_h) - 1.0;
-    let dst_width_f = f16(params.dst_w) - 1.0;
-    let dst_height_f = f16(params.dst_h) - 1.0;
+    let src_width_f = f16(params.src_w) - 1.0h;
+    let src_height_f = f16(params.src_h) - 1.0h;
+    let dst_width_f = f16(params.dst_w) - 1.0h;
+    let dst_height_f = f16(params.dst_h) - 1.0h;
 
-    let src_x_f = f16(x_dst) * src_width_f / dst_width_f;
-    let src_y_f = f16(y_dst) * src_height_f / dst_height_f;
-    
-    let x0 = u32(max(0.0h, floor(src_x_f)));
-    let y0 = u32(max(0.0h, floor(src_y_f)));
+    var src_x_f = f16(x_dst) * src_width_f / dst_width_f;
+    var src_y_f = f16(y_dst) * src_height_f / dst_height_f;
+    src_x_f = clamp(src_x_f, 0.0h, src_width_f);
+    src_y_f = clamp(src_y_f, 0.0h, src_height_f);
+
+    let x0 = u32(floor(src_x_f));
+    let y0 = u32(floor(src_y_f));
     let x1 = min(params.src_w - 1u, x0 + 1u);
     let y1 = min(params.src_h - 1u, y0 + 1u);
-    
+
     let dx = src_x_f - f16(x0);
     let dy = src_y_f - f16(y0);
     

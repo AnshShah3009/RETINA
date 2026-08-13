@@ -3722,15 +3722,35 @@ impl ComputeContext for CpuBackend {
 
         let src_width_f = T::from_f32(w as f32 - 1.0);
         let src_height_f = T::from_f32(h as f32 - 1.0);
-        let dst_width_f = T::from_f32(nw as f32 - 1.0);
-        let dst_height_f = T::from_f32(nh as f32 - 1.0);
+        let dst_width_f = T::from_f32((nw.max(1) - 1) as f32);
+        let dst_height_f = T::from_f32((nh.max(1) - 1) as f32);
 
         dst.par_chunks_mut(nw * c)
             .enumerate()
             .for_each(|(y, row_out)| {
                 for x in 0..nw {
-                    let fx = T::from_f32(x as f32) * src_width_f / dst_width_f;
-                    let fy = T::from_f32(y as f32) * src_height_f / dst_height_f;
+                    // Align-corners mapping; clamp before weights so dx/dy stay in [0,1]
+                    // even if the mapping produces out-of-range coords (e.g. 1px dst).
+                    let mut fx = if nw <= 1 {
+                        T::ZERO
+                    } else {
+                        T::from_f32(x as f32) * src_width_f / dst_width_f
+                    };
+                    let mut fy = if nh <= 1 {
+                        T::ZERO
+                    } else {
+                        T::from_f32(y as f32) * src_height_f / dst_height_f
+                    };
+                    if fx < T::ZERO {
+                        fx = T::ZERO;
+                    } else if fx > src_width_f {
+                        fx = src_width_f;
+                    }
+                    if fy < T::ZERO {
+                        fy = T::ZERO;
+                    } else if fy > src_height_f {
+                        fy = src_height_f;
+                    }
 
                     let x0 = fx.to_f32() as usize;
                     let y0 = fy.to_f32() as usize;
