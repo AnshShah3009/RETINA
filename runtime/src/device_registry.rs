@@ -50,9 +50,7 @@ impl DeviceRuntime {
     pub fn new(context: BackendContext) -> Self {
         let id = context.device_id();
         let memory = match &context {
-            BackendContext::Gpu(gpu) => {
-                Arc::new(MemoryManager::with_device(id, gpu.device_arc()))
-            }
+            BackendContext::Gpu(gpu) => Arc::new(MemoryManager::with_device(id, gpu.device_arc())),
             _ => Arc::new(MemoryManager::new(id)),
         };
         Self {

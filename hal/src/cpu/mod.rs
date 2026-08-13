@@ -1363,17 +1363,28 @@ impl ComputeContext for CpuBackend {
             .enumerate()
             .for_each(|(y, row_out)| {
                 for x in 0..nw {
-                    // Half-pixel aligned bilinear (matches GPU resize.wgsl)
-                    let src_x_f = (x as f32 + 0.5) * scale_x - 0.5;
-                    let src_y_f = (y as f32 + 0.5) * scale_y - 0.5;
+                    // Half-pixel aligned bilinear (matches GPU resize.wgsl).
+                    // Lower-bound clamp in float; upper-bound clamp in integer space so
+                    // f32 rounding of (w-1) cannot produce an out-of-range index.
+                    let src_x_f = ((x as f32 + 0.5) * scale_x - 0.5).max(0.0);
+                    let src_y_f = ((y as f32 + 0.5) * scale_y - 0.5).max(0.0);
 
-                    let x0 = src_x_f.floor().max(0.0) as usize;
-                    let y0 = src_y_f.floor().max(0.0) as usize;
-                    let x1 = (x0 + 1).min(w - 1);
-                    let y1 = (y0 + 1).min(h - 1);
+                    let x0 = (src_x_f.floor() as usize).min(w.saturating_sub(1));
+                    let y0 = (src_y_f.floor() as usize).min(h.saturating_sub(1));
+                    let x1 = (x0 + 1).min(w.saturating_sub(1));
+                    let y1 = (y0 + 1).min(h.saturating_sub(1));
 
-                    let dx = src_x_f - x0 as f32;
-                    let dy = src_y_f - y0 as f32;
+                    // At the last column/row, force weight 0 (no extrapolation).
+                    let dx = if x0 == x1 {
+                        0.0
+                    } else {
+                        (src_x_f - x0 as f32).clamp(0.0, 1.0)
+                    };
+                    let dy = if y0 == y1 {
+                        0.0
+                    } else {
+                        (src_y_f - y0 as f32).clamp(0.0, 1.0)
+                    };
 
                     for ch in 0..c {
                         let p00 = src[(y0 * w + x0) * c + ch] as f32;
