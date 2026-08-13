@@ -322,9 +322,8 @@ impl GpuStereoMatcher {
                 }
             }
         };
-        map_result.map_err(|e| {
-            Error::AlgorithmError(format!("Stereo GPU buffer map failed: {:?}", e))
-        })?;
+        map_result
+            .map_err(|e| Error::AlgorithmError(format!("Stereo GPU buffer map failed: {:?}", e)))?;
 
         let data = buffer_slice.get_mapped_range();
         let mut disparity_data = Vec::with_capacity((width * height) as usize);

@@ -479,9 +479,7 @@ pub mod buffer_utils {
                     std::thread::yield_now();
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    return Err(crate::Error::DeviceError(
-                        "Readback channel failed".into(),
-                    ));
+                    return Err(crate::Error::DeviceError("Readback channel failed".into()));
                 }
             }
         };
