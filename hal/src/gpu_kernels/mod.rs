@@ -299,10 +299,16 @@ pub mod buffer_utils {
     use std::sync::{Arc, Mutex, OnceLock};
     use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, MapMode};
 
-    /// A bucketed pool for reusing GPU buffers
+    type DeviceKey = usize;
+
+    fn device_key(device: &Arc<Device>) -> DeviceKey {
+        Arc::as_ptr(device) as usize
+    }
+
+    /// A bucketed pool for reusing GPU buffers (per-device).
     pub struct GpuBufferPool {
-        // Buckets: usage -> (size_bucket -> Vec<Buffer>)
-        buckets: Mutex<HashMap<BufferUsages, HashMap<u64, Vec<Buffer>>>>,
+        // Buckets: device -> usage -> (size_bucket -> Vec<Buffer>)
+        buckets: Mutex<HashMap<DeviceKey, HashMap<BufferUsages, HashMap<u64, Vec<Buffer>>>>>,
     }
 
     impl GpuBufferPool {
@@ -321,14 +327,19 @@ pub mod buffer_utils {
             }
         }
 
-        pub fn get(&self, device: &Device, size: u64, usage: BufferUsages) -> Buffer {
+        pub fn get(&self, device: &Arc<Device>, size: u64, usage: BufferUsages) -> Buffer {
             let bucket_size = Self::get_size_bucket(size);
+            let key = device_key(device);
             let mut buckets = match self.buckets.lock() {
                 Ok(b) => b,
                 Err(poisoned) => poisoned.into_inner(),
             };
 
-            let usage_map = buckets.entry(usage).or_insert_with(HashMap::new);
+            let usage_map = buckets
+                .entry(key)
+                .or_insert_with(HashMap::new)
+                .entry(usage)
+                .or_insert_with(HashMap::new);
             if let Some(pool) = usage_map.get_mut(&bucket_size) {
                 if let Some(buffer) = pool.pop() {
                     return buffer;
@@ -343,13 +354,18 @@ pub mod buffer_utils {
             })
         }
 
-        pub fn return_buffer(&self, buffer: Buffer, usage: BufferUsages) {
+        pub fn return_buffer(&self, device: &Arc<Device>, buffer: Buffer, usage: BufferUsages) {
             let size = buffer.size();
+            let key = device_key(device);
             let mut buckets = match self.buckets.lock() {
                 Ok(b) => b,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let usage_map = buckets.entry(usage).or_insert_with(HashMap::new);
+            let usage_map = buckets
+                .entry(key)
+                .or_insert_with(HashMap::new)
+                .entry(usage)
+                .or_insert_with(HashMap::new);
             let pool = usage_map.entry(size).or_insert_with(Vec::new);
             if pool.len() < 8 {
                 pool.push(buffer);
@@ -362,6 +378,16 @@ pub mod buffer_utils {
                 Err(poisoned) => poisoned.into_inner(),
             };
             buckets.clear();
+        }
+
+        /// Drop pooled buffers belonging to a specific device.
+        pub fn clear_device(&self, device: &Arc<Device>) {
+            let key = device_key(device);
+            let mut buckets = match self.buckets.lock() {
+                Ok(b) => b,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            buckets.remove(&key);
         }
     }
 
@@ -422,23 +448,32 @@ pub mod buffer_utils {
 
         let _index = queue.submit(std::iter::once(encoder.finish()));
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
 
         let slice = staging_buffer.slice(..);
         slice.map_async(MapMode::Read, move |res| {
             tx.send(res).ok();
         });
 
-        // Use async-friendly polling loop to progress mapping.
-        // This avoids blocking the OS thread, allowing Tokio to schedule other tasks.
-        let mut rx = rx;
-        while rx.try_recv().is_err() {
-            let _ = device.poll(wgpu::PollType::Poll);
-            std::thread::yield_now();
-        }
+        // Poll until the map callback fires. Important: `try_recv` consumes the
+        // oneshot value on success, so we must not `await` the same receiver
+        // afterward (that panics with tokio "called after complete").
+        let map_result = loop {
+            match rx.try_recv() {
+                Ok(res) => break res,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    let _ = device.poll(wgpu::PollType::Poll);
+                    std::thread::yield_now();
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(crate::Error::DeviceError(
+                        "Readback channel closed".to_string(),
+                    ));
+                }
+            }
+        };
 
-        rx.await
-            .map_err(|_| crate::Error::DeviceError("Readback channel closed".to_string()))?
+        map_result
             .map_err(|e| crate::Error::DeviceError(format!("Buffer mapping failed: {}", e)))?;
 
         let data = slice.get_mapped_range();
@@ -448,6 +483,7 @@ pub mod buffer_utils {
 
         // Return to pool!
         pool.return_buffer(
+            &device,
             staging_buffer,
             BufferUsages::MAP_READ | BufferUsages::COPY_DST,
         );

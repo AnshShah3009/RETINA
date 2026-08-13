@@ -49,6 +49,12 @@ pub struct DeviceRuntime {
 impl DeviceRuntime {
     pub fn new(context: BackendContext) -> Self {
         let id = context.device_id();
+        let memory = match &context {
+            BackendContext::Gpu(gpu) => {
+                Arc::new(MemoryManager::with_device(id, gpu.device_arc()))
+            }
+            _ => Arc::new(MemoryManager::new(id)),
+        };
         Self {
             id,
             backend: context.backend_type(),
@@ -56,7 +62,7 @@ impl DeviceRuntime {
             last_submitted: Mutex::new(SubmissionIndex(0)),
             last_completed: Mutex::new(SubmissionIndex(0)),
             executors: Mutex::new(ExecutorPool::new(id)),
-            memory: Arc::new(MemoryManager::new(id)),
+            memory,
         }
     }
 

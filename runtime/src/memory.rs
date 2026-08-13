@@ -193,7 +193,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                 }
 
                 let device = match runtime.context() {
-                    crate::device_registry::BackendContext::Gpu(ctx) => ctx.device(),
+                    crate::device_registry::BackendContext::Gpu(ctx) => ctx.device_arc(),
                     _ => {
                         return Err(crate::Error::NotSupported(
                             "sync_to_device only supports GPU".into(),
@@ -201,11 +201,11 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                     }
                 };
 
-                runtime.memory().get_buffer(device, size, usages)
+                runtime.memory().get_buffer(&device, size, usages)
             }
         } else {
             let device = match runtime.context() {
-                crate::device_registry::BackendContext::Gpu(ctx) => ctx.device(),
+                crate::device_registry::BackendContext::Gpu(ctx) => ctx.device_arc(),
                 _ => {
                     return Err(crate::Error::NotSupported(
                         "sync_to_device only supports GPU".into(),
@@ -213,7 +213,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                 }
             };
 
-            runtime.memory().get_buffer(device, size, usages)
+            runtime.memory().get_buffer(&device, size, usages)
         };
 
         self.device_data = Some(buffer.clone());

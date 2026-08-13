@@ -1859,7 +1859,7 @@ impl GpuContext {
 
     /// Return a buffer to the pool.
     pub fn return_buffer(&self, buffer: wgpu::Buffer, usage: wgpu::BufferUsages) {
-        crate::gpu_kernels::buffer_utils::global_pool().return_buffer(buffer, usage)
+        crate::gpu_kernels::buffer_utils::global_pool().return_buffer(&self.device, buffer, usage)
     }
 }
 

@@ -4,7 +4,6 @@ use cv_hal::cpu::CpuBackend;
 use cv_hal::gpu::GpuContext;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 use futures::executor::block_on;
-use std::sync::Arc;
 
 #[test]
 fn test_cross_device_parity() {
@@ -27,9 +26,9 @@ fn test_cross_device_parity() {
         let info = adapter.get_info();
         println!("--- Testing Adapter {}: {} ---", i, info.name);
 
-        // Skip problematic AMD Integrated GPU on Vulkan that panics in driver
-        if info.name.contains("AMD") && info.backend == wgpu::Backend::Vulkan {
-            println!("  ! Skipping AMD Integrated GPU on Vulkan to avoid driver panic");
+        // Skip GL/OpenGL backends (radeonsi) — not suitable for GPU compute testing
+        if info.backend != wgpu::Backend::Vulkan {
+            println!("  ! Skipping non-Vulkan backend ({:?})", info.backend);
             continue;
         }
 
