@@ -36,14 +36,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let x_dst = x_u32 * 4u + i;
         if (x_dst >= params.dst_w) { break; }
 
-        let src_x_f = (f32(x_dst) + 0.5) * scale_x - 0.5;
-        let src_y_f = (f32(y_dst) + 0.5) * scale_y - 0.5;
-        
-        let x0 = u32(max(0.0, floor(src_x_f)));
-        let y0 = u32(max(0.0, floor(src_y_f)));
+        var src_x_f = (f32(x_dst) + 0.5) * scale_x - 0.5;
+        var src_y_f = (f32(y_dst) + 0.5) * scale_y - 0.5;
+        src_x_f = clamp(src_x_f, 0.0, f32(params.src_w) - 1.0);
+        src_y_f = clamp(src_y_f, 0.0, f32(params.src_h) - 1.0);
+
+        let x0 = u32(floor(src_x_f));
+        let y0 = u32(floor(src_y_f));
         let x1 = min(params.src_w - 1u, x0 + 1u);
         let y1 = min(params.src_h - 1u, y0 + 1u);
-        
+
         let dx = src_x_f - f32(x0);
         let dy = src_y_f - f32(y0);
         

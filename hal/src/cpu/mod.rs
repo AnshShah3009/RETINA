@@ -1363,12 +1363,16 @@ impl ComputeContext for CpuBackend {
             .enumerate()
             .for_each(|(y, row_out)| {
                 for x in 0..nw {
-                    // Half-pixel aligned bilinear (matches GPU resize.wgsl)
-                    let src_x_f = (x as f32 + 0.5) * scale_x - 0.5;
-                    let src_y_f = (y as f32 + 0.5) * scale_y - 0.5;
+                    // Half-pixel aligned bilinear (matches GPU resize.wgsl).
+                    // Clamp sample coords before weights so dx/dy stay in [0,1]
+                    // when upscaling maps the first dst pixel to a negative source.
+                    let mut src_x_f = (x as f32 + 0.5) * scale_x - 0.5;
+                    let mut src_y_f = (y as f32 + 0.5) * scale_y - 0.5;
+                    src_x_f = src_x_f.clamp(0.0, (w - 1) as f32);
+                    src_y_f = src_y_f.clamp(0.0, (h - 1) as f32);
 
-                    let x0 = src_x_f.floor().max(0.0) as usize;
-                    let y0 = src_y_f.floor().max(0.0) as usize;
+                    let x0 = src_x_f.floor() as usize;
+                    let y0 = src_y_f.floor() as usize;
                     let x1 = (x0 + 1).min(w - 1);
                     let y1 = (y0 + 1).min(h - 1);
 
