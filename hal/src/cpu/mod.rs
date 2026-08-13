@@ -1363,15 +1363,27 @@ impl ComputeContext for CpuBackend {
             .enumerate()
             .for_each(|(y, row_out)| {
                 for x in 0..nw {
-                    let src_x = (x as f32 * scale_x).min(w as f32 - 1.0);
-                    let src_y = (y as f32 * scale_y).min(h as f32 - 1.0);
+                    // Half-pixel aligned bilinear (matches GPU resize.wgsl)
+                    let src_x_f = (x as f32 + 0.5) * scale_x - 0.5;
+                    let src_y_f = (y as f32 + 0.5) * scale_y - 0.5;
 
-                    // Nearest neighbor for now (can expand to bilinear)
-                    let sx = src_x as usize;
-                    let sy = src_y as usize;
+                    let x0 = src_x_f.floor().max(0.0) as usize;
+                    let y0 = src_y_f.floor().max(0.0) as usize;
+                    let x1 = (x0 + 1).min(w - 1);
+                    let y1 = (y0 + 1).min(h - 1);
+
+                    let dx = src_x_f - x0 as f32;
+                    let dy = src_y_f - y0 as f32;
 
                     for ch in 0..c {
-                        row_out[x * c + ch] = src[(sy * w + sx) * c + ch];
+                        let p00 = src[(y0 * w + x0) * c + ch] as f32;
+                        let p10 = src[(y0 * w + x1) * c + ch] as f32;
+                        let p01 = src[(y1 * w + x0) * c + ch] as f32;
+                        let p11 = src[(y1 * w + x1) * c + ch] as f32;
+
+                        let val = (1.0 - dy) * ((1.0 - dx) * p00 + dx * p10)
+                            + dy * ((1.0 - dx) * p01 + dx * p11);
+                        row_out[x * c + ch] = (val + 0.5).clamp(0.0, 255.0) as u8;
                     }
                 }
             });
@@ -1473,37 +1485,23 @@ impl ComputeContext for CpuBackend {
                 let high = p.saturating_add(threshold);
                 let low = p.saturating_sub(threshold);
 
-                // High-speed early exit test: check 1, 9, 5, 13
+                // High-speed test on compass points 1, 5, 9, 13:
+                // need ≥3 brighter OR ≥3 darker (same polarity), matching OpenCV / GPU.
                 let p1 = src[(y - 3) * w + x];
                 let p9 = src[(y + 3) * w + x];
-                let mut count = 0;
-                if p1 > high {
-                    count += 1;
-                } else if p1 < low {
-                    count += 1;
-                }
-                if p9 > high {
-                    count += 1;
-                } else if p9 < low {
-                    count += 1;
-                }
-                if count < 1 {
-                    continue;
-                }
-
                 let p5 = src[y * w + x + 3];
                 let p13 = src[y * w + x - 3];
-                if p5 > high {
-                    count += 1;
-                } else if p5 < low {
-                    count += 1;
+
+                let mut bright = 0u8;
+                let mut dark = 0u8;
+                for &pv in &[p1, p5, p9, p13] {
+                    if pv > high {
+                        bright += 1;
+                    } else if pv < low {
+                        dark += 1;
+                    }
                 }
-                if p13 > high {
-                    count += 1;
-                } else if p13 < low {
-                    count += 1;
-                }
-                if count < 3 {
+                if bright < 3 && dark < 3 {
                     continue;
                 }
 

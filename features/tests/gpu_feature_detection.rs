@@ -9,19 +9,23 @@ use cv_hal::context::ComputeContext;
 use cv_hal::gpu::GpuContext;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 
+fn try_gpu_ctx() -> Option<&'static GpuContext> {
+    match pollster::block_on(GpuContext::init_global()) {
+        Ok(ctx) => Some(ctx),
+        Err(e) => {
+            println!("GPU not available: {}, skipping GPU test", e);
+            None
+        }
+    }
+}
+
 /// Test SIFT feature detection on GPU with generic Storage<T>
 #[test]
 fn test_sift_gpu() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => {
-            println!("GPU available: Testing SIFT on GPU");
-            ctx
-        }
-        Err(e) => {
-            println!("GPU not available: {}, skipping GPU test", e);
-            return;
-        }
+    let Some(ctx) = try_gpu_ctx() else {
+        return;
     };
+    println!("GPU available: Testing SIFT on GPU");
 
     // Create a simple test image on GPU (100x100 pixels)
     let width = 100usize;
@@ -62,16 +66,10 @@ fn test_sift_gpu() {
 /// Test ORB feature detection on GPU with generic Storage<T>
 #[test]
 fn test_orb_gpu() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => {
-            println!("GPU available: Testing ORB on GPU");
-            ctx
-        }
-        Err(e) => {
-            println!("GPU not available: {}, skipping GPU test", e);
-            return;
-        }
+    let Some(ctx) = try_gpu_ctx() else {
+        return;
     };
+    println!("GPU available: Testing ORB on GPU");
 
     // Create test image on GPU
     let width = 100usize;
@@ -102,16 +100,10 @@ fn test_orb_gpu() {
 /// Test AKAZE feature detection on GPU with generic Storage<T>
 #[test]
 fn test_akaze_gpu() {
-    let ctx = match GpuContext::global() {
-        Ok(ctx) => {
-            println!("GPU available: Testing AKAZE on GPU");
-            ctx
-        }
-        Err(e) => {
-            println!("GPU not available: {}, skipping GPU test", e);
-            return;
-        }
+    let Some(ctx) = try_gpu_ctx() else {
+        return;
     };
+    println!("GPU available: Testing AKAZE on GPU");
 
     // Create test image on GPU
     let width = 100usize;
@@ -147,7 +139,7 @@ fn test_akaze_gpu() {
 /// Test that GPU context is available and functional
 #[test]
 fn test_gpu_context_availability() {
-    match GpuContext::global() {
+    match pollster::block_on(GpuContext::init_global()) {
         Ok(ctx) => {
             println!("✓ GPU context initialized successfully");
             println!("  Backend: {:?}", ctx.backend_type());

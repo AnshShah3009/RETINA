@@ -95,11 +95,14 @@ fn benchmark_stereo_gpu_block_matching(c: &mut Criterion) {
     #[cfg(feature = "gpu")]
     {
         let rt = Runtime::new().expect("tokio runtime for GPU benchmark");
-        let gpu_matcher = rt
-            .block_on(cv_stereo::GpuStereoMatcher::new(
-                cv_stereo::GpuStereoAlgorithm::BlockMatching { block_size: 11 },
-            ))
-            .ok();
+        let gpu_matcher = rt.block_on(async {
+            let _ = cv_hal::gpu::GpuContext::init_global().await;
+            cv_stereo::GpuStereoMatcher::new(cv_stereo::GpuStereoAlgorithm::BlockMatching {
+                block_size: 11,
+            })
+            .await
+            .ok()
+        });
 
         let mut group = c.benchmark_group("stereo_gpu_block_matching");
         group.measurement_time(Duration::from_secs(6));

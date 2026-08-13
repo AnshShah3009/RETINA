@@ -2,6 +2,7 @@ struct Params {
     width: u32,
     height: u32,
     threshold: u32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_data: array<u32>;
@@ -30,9 +31,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     for (var k = 0u; k < 4u; k++) {
         let x = i32(x_u32 * 4u + k);
         if (x >= i32(params.width)) { break; }
+
+        // Match CPU: skip 3-pixel border (no clamped ring samples)
+        if (x < 3 || x >= i32(params.width) - 3 || y < 3 || y >= i32(params.height) - 3) {
+            continue;
+        }
         
         let p = get_u8(x, y);
-        let high = p + params.threshold;
+        let high = min(255u, p + params.threshold);
         let low = select(0u, p - params.threshold, p >= params.threshold);
 
         let v0 = get_u8(x, y - 3);
@@ -51,6 +57,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let v13 = get_u8(x - 3, y - 1);
         let v14 = get_u8(x - 2, y - 2);
         let v15 = get_u8(x - 1, y - 3);
+
+        // High-speed gate on compass points (v0, v4, v8, v12): match CPU/OpenCV
+        var bright = 0u;
+        var dark = 0u;
+        if (v0 > high) { bright += 1u; } else if (v0 < low) { dark += 1u; }
+        if (v4 > high) { bright += 1u; } else if (v4 < low) { dark += 1u; }
+        if (v8 > high) { bright += 1u; } else if (v8 < low) { dark += 1u; }
+        if (v12 > high) { bright += 1u; } else if (v12 < low) { dark += 1u; }
+        if (bright < 3u && dark < 3u) {
+            continue;
+        }
 
         var b_mask = 0u;
         var d_mask = 0u;

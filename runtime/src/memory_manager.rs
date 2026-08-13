@@ -1,7 +1,7 @@
 use crate::device_registry::SubmissionIndex;
 use cv_hal::DeviceId;
-use std::sync::Mutex;
-use wgpu::{Buffer, BufferUsages};
+use std::sync::{Arc, Mutex};
+use wgpu::{Buffer, BufferUsages, Device};
 
 /// A buffer that is no longer needed but may still be in use by the GPU.
 pub struct RetiredBuffer {
@@ -12,6 +12,7 @@ pub struct RetiredBuffer {
 /// Manages memory for a specific device, including buffer pooling and deferred destruction.
 pub struct MemoryManager {
     device_id: DeviceId,
+    device: Option<Arc<Device>>,
     retirement_queue: Mutex<Vec<RetiredBuffer>>,
 }
 
@@ -19,6 +20,15 @@ impl MemoryManager {
     pub fn new(device_id: DeviceId) -> Self {
         Self {
             device_id,
+            device: None,
+            retirement_queue: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn with_device(device_id: DeviceId, device: Arc<Device>) -> Self {
+        Self {
+            device_id,
+            device: Some(device),
             retirement_queue: Mutex::new(Vec::new()),
         }
     }
@@ -39,6 +49,11 @@ impl MemoryManager {
 
     /// Reclaim retired buffers that are now safe to reuse.
     pub fn collect_garbage(&self, last_completed: SubmissionIndex) {
+        let device = match &self.device {
+            Some(d) => d,
+            None => return,
+        };
+
         let mut queue = match self.retirement_queue.lock() {
             Ok(q) => q,
             Err(_) => return,
@@ -55,8 +70,11 @@ impl MemoryManager {
                 // In the future, each MemoryManager could have its own pool.
                 let usages =
                     BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
-                cv_hal::gpu_kernels::buffer_utils::global_pool()
-                    .return_buffer(retired.buffer, usages);
+                cv_hal::gpu_kernels::buffer_utils::global_pool().return_buffer(
+                    device,
+                    retired.buffer,
+                    usages,
+                );
             } else {
                 i += 1;
             }
@@ -64,7 +82,7 @@ impl MemoryManager {
     }
 
     /// Get a buffer from the pool.
-    pub fn get_buffer(&self, device: &wgpu::Device, size: u64, usage: BufferUsages) -> Buffer {
+    pub fn get_buffer(&self, device: &Arc<Device>, size: u64, usage: BufferUsages) -> Buffer {
         cv_hal::gpu_kernels::buffer_utils::global_pool().get(device, size, usage)
     }
 }

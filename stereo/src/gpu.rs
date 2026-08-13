@@ -520,6 +520,9 @@ mod tests {
             return;
         }
 
+        // Initialize global GPU context before using it
+        let _ = cv_hal::gpu::GpuContext::init_global().await;
+
         let (left, right) = create_test_stereo_pair();
 
         let matcher = GpuStereoMatcher::new(GpuStereoAlgorithm::BlockMatching { block_size: 7 })
