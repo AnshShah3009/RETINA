@@ -458,10 +458,16 @@ pub mod buffer_utils {
         // Poll until the map callback fires. Important: `try_recv` consumes the
         // oneshot value on success, so we must not `await` the same receiver
         // afterward (that panics with tokio "called after complete").
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let map_result = loop {
             match rx.try_recv() {
                 Ok(res) => break res,
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() > deadline {
+                        return Err(crate::Error::DeviceError(
+                            "Readback map timed out".to_string(),
+                        ));
+                    }
                     let _ = device.poll(wgpu::PollType::Poll);
                     std::thread::yield_now();
                 }
