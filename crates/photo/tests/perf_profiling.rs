@@ -3,6 +3,7 @@ use cv_photo::{fast_nl_means_denoising, inpaint_telea};
 use std::time::Instant;
 
 #[test]
+#[ignore = "perf profiling — too slow for CI"]
 fn profile_photo_algorithms() {
     println!("--- Profiling cv-photo ---");
     let width = 1920;

@@ -8,13 +8,18 @@ use nalgebra::Vector3;
 use pollster::block_on;
 use std::error::Error;
 
-/// Initialize GPU context if not already initialized
-fn init_gpu() -> Result<(), Box<dyn Error>> {
-    if GpuContext::global().is_ok() {
-        return Ok(());
+/// Initialize GPU context if available. Returns None when no GPU (skip tests).
+fn require_gpu() -> Result<Option<&'static GpuContext>, Box<dyn Error>> {
+    if let Ok(ctx) = GpuContext::global() {
+        return Ok(Some(ctx));
     }
-    block_on(GpuContext::init_global()).map_err(|e| format!("GPU init failed: {}", e))?;
-    Ok(())
+    match block_on(GpuContext::init_global()) {
+        Ok(ctx) => Ok(Some(ctx)),
+        Err(e) => {
+            println!("Skipping GPU test (no adapter): {}", e);
+            Ok(None)
+        }
+    }
 }
 
 /// CPU reference for voxel grid downsampling
@@ -150,12 +155,8 @@ fn test_morton_encode_known_values() {
 
 #[test]
 fn test_voxel_grid_empty() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let points: Vec<Vector3<f32>> = vec![];
@@ -167,12 +168,8 @@ fn test_voxel_grid_empty() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_voxel_grid_single_point() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let points = vec![Vector3::new(1.0, 2.0, 3.0)];
@@ -188,12 +185,8 @@ fn test_voxel_grid_single_point() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_voxel_grid_known_voxel_size() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Two points in the same voxel should give one result
@@ -219,12 +212,8 @@ fn test_voxel_grid_known_voxel_size() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_voxel_grid_different_voxels() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Two points far apart should give two voxels
@@ -239,12 +228,8 @@ fn test_voxel_grid_different_voxels() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_voxel_grid_vs_cpu() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Grid of points
@@ -291,12 +276,8 @@ fn test_voxel_grid_vs_cpu() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_knn_empty() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let points = vec![Vector3::new(0.0, 0.0, 0.0)];
@@ -312,12 +293,8 @@ fn test_knn_empty() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_knn_single_query() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let points = vec![
@@ -347,12 +324,8 @@ fn test_knn_single_query() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_knn_vs_cpu() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Random-ish points
@@ -396,12 +369,8 @@ fn test_knn_vs_cpu() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_radius_search_empty() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let points = vec![Vector3::new(0.0, 0.0, 0.0)];
@@ -417,12 +386,8 @@ fn test_radius_search_empty() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_radius_search_all_within() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // All points within large radius
@@ -446,12 +411,8 @@ fn test_radius_search_all_within() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_radius_search_none_within() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let points = vec![
@@ -473,12 +434,8 @@ fn test_radius_search_none_within() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_radius_search_vs_cpu() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let points = vec![
@@ -520,12 +477,8 @@ fn test_radius_search_vs_cpu() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_kdtree_preserves_points() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let points = vec![Vector3::new(1.5, 2.5, 3.5), Vector3::new(10.0, 20.0, 30.0)];

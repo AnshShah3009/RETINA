@@ -2,6 +2,7 @@ use cv_optimize::general::{minimize_nelder_mead, NelderMeadConfig};
 use std::time::Instant;
 
 #[test]
+#[ignore = "perf profiling — too slow for CI"]
 fn profile_optimize_algorithms() {
     println!("--- Profiling cv-optimize ---");
 

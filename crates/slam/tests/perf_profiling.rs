@@ -5,6 +5,7 @@ use image::{GrayImage, Luma};
 use std::time::Instant;
 
 #[test]
+#[ignore = "perf profiling — too slow for CI"]
 fn profile_slam_algorithms() {
     println!("--- Profiling cv-slam ---");
     let width = 640;

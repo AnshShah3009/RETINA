@@ -8,13 +8,18 @@ use nalgebra::{Point3, Vector3};
 use pollster::block_on;
 use std::error::Error;
 
-/// Initialize GPU context if not already initialized
-fn init_gpu() -> Result<(), Box<dyn Error>> {
-    if GpuContext::global().is_ok() {
-        return Ok(());
+/// Initialize GPU context if available. Returns None when no GPU (skip tests).
+fn require_gpu() -> Result<Option<&'static GpuContext>, Box<dyn Error>> {
+    if let Ok(ctx) = GpuContext::global() {
+        return Ok(Some(ctx));
     }
-    block_on(GpuContext::init_global()).map_err(|e| format!("GPU init failed: {}", e))?;
-    Ok(())
+    match block_on(GpuContext::init_global()) {
+        Ok(ctx) => Ok(Some(ctx)),
+        Err(e) => {
+            println!("Skipping GPU test (no adapter): {}", e);
+            Ok(None)
+        }
+    }
 }
 
 /// CPU reference implementation for vertex normals
@@ -165,12 +170,8 @@ fn points_close(a: &Point3<f32>, b: &Point3<f32>, epsilon: f32) -> bool {
 #[test]
 fn test_vertex_normals_simple_triangle() -> Result<(), Box<dyn Error>> {
     // Skip if no GPU available
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Simple triangle: (0,0,0), (1,0,0), (0,1,0)
@@ -195,12 +196,8 @@ fn test_vertex_normals_simple_triangle() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_vertex_normals_cube() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Cube vertices
@@ -265,12 +262,8 @@ fn test_vertex_normals_cube() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_bounds_empty_mesh() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let vertices: Vec<Point3<f32>> = vec![];
@@ -284,12 +277,8 @@ fn test_bounds_empty_mesh() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_bounds_single_point() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let vertices = vec![Point3::new(3.0, 5.0, 7.0)];
@@ -313,12 +302,8 @@ fn test_bounds_single_point() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_bounds_cube() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let vertices = vec![
@@ -352,12 +337,8 @@ fn test_bounds_cube() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_bounds_negative_coordinates() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     let vertices = vec![Point3::new(-5.0, -3.0, -1.0), Point3::new(2.0, 4.0, 6.0)];
@@ -382,12 +363,8 @@ fn test_bounds_negative_coordinates() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_vertex_map_invalid_dimensions() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Empty depth should return empty result
@@ -406,12 +383,8 @@ fn test_vertex_map_invalid_dimensions() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_vertex_map_center_projection() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Simple 3x3 depth image with depth=1.0 at center
@@ -457,12 +430,8 @@ fn test_vertex_map_center_projection() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_vertex_map_known_values() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // 4x4 depth image
@@ -505,12 +474,8 @@ fn test_vertex_map_known_values() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_vertex_map_zero_depth() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // 2x2 with zero depth (invalid)
@@ -540,12 +505,8 @@ fn test_vertex_map_zero_depth() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_normal_map_unit_vectors() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Create flat plane: all Z=1.0
@@ -579,12 +540,8 @@ fn test_normal_map_unit_vectors() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_normal_map_vs_cpu_reference() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Create simple 3x3 vertex map with known structure
@@ -618,12 +575,8 @@ fn test_normal_map_vs_cpu_reference() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn test_normal_map_consistency() -> Result<(), Box<dyn Error>> {
-    let ctx = match cv_hal::gpu::GpuContext::global() {
-        Ok(ctx) => ctx,
-        Err(_) => {
-            init_gpu()?;
-            return Ok(());
-        }
+    let Some(ctx) = require_gpu()? else {
+        return Ok(());
     };
 
     // Create multiple vertex maps with same structure, different depths

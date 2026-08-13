@@ -7,6 +7,7 @@ use cv_core::{CameraIntrinsics, Distortion};
 use nalgebra::Matrix3;
 
 #[test]
+#[ignore = "perf profiling — too slow for CI"]
 fn profile_calib3d_algorithms() {
     println!("--- Profiling cv-calib3d ---");
     let width = 1280;

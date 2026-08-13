@@ -6,6 +6,7 @@ use nalgebra::Point3;
 use std::time::Instant;
 
 #[test]
+#[ignore = "perf profiling — too slow for CI"]
 fn profile_3d_algorithms() {
     println!("--- Profiling cv-3d (Normal Estimation) ---");
     let num_points = 500_000;
