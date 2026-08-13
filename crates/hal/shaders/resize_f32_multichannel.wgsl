@@ -27,19 +27,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dst_width_f = f32(params.dst_w) - 1.0;
     let dst_height_f = f32(params.dst_h) - 1.0;
 
-    // Clamp sample coords before weights so dx/dy stay in [0,1] (border clamp).
-    var src_x_f = f32(x_dst) * src_width_f / dst_width_f;
-    var src_y_f = f32(y_dst) * src_height_f / dst_height_f;
-    src_x_f = clamp(src_x_f, 0.0, src_width_f);
-    src_y_f = clamp(src_y_f, 0.0, src_height_f);
+    // Lower-bound in float; upper-bound index clamp in integer space.
+    var src_x_f = max(f32(x_dst) * src_width_f / dst_width_f, 0.0);
+    var src_y_f = max(f32(y_dst) * src_height_f / dst_height_f, 0.0);
 
-    let x0 = u32(floor(src_x_f));
-    let y0 = u32(floor(src_y_f));
+    let x0 = min(params.src_w - 1u, u32(floor(src_x_f)));
+    let y0 = min(params.src_h - 1u, u32(floor(src_y_f)));
     let x1 = min(params.src_w - 1u, x0 + 1u);
     let y1 = min(params.src_h - 1u, y0 + 1u);
 
-    let dx = src_x_f - f32(x0);
-    let dy = src_y_f - f32(y0);
+    let dx = select(0.0, clamp(src_x_f - f32(x0), 0.0, 1.0), x0 != x1);
+    let dy = select(0.0, clamp(src_y_f - f32(y0), 0.0, 1.0), y0 != y1);
     
     for (var ch = 0u; ch < params.channels; ch = ch + 1u) {
         let idx00 = (y0 * params.src_w + x0) * params.channels + ch;

@@ -3729,36 +3729,58 @@ impl ComputeContext for CpuBackend {
             .enumerate()
             .for_each(|(y, row_out)| {
                 for x in 0..nw {
-                    // Align-corners mapping; clamp before weights so dx/dy stay in [0,1]
-                    // even if the mapping produces out-of-range coords (e.g. 1px dst).
-                    let mut fx = if nw <= 1 {
+                    // Align-corners mapping. Lower-bound in float; upper-bound index
+                    // clamp in integer space so f32(w-1) rounding cannot OOB.
+                    let fx = if nw <= 1 {
                         T::ZERO
                     } else {
-                        T::from_f32(x as f32) * src_width_f / dst_width_f
+                        let v = T::from_f32(x as f32) * src_width_f / dst_width_f;
+                        if v < T::ZERO {
+                            T::ZERO
+                        } else {
+                            v
+                        }
                     };
-                    let mut fy = if nh <= 1 {
+                    let fy = if nh <= 1 {
                         T::ZERO
                     } else {
-                        T::from_f32(y as f32) * src_height_f / dst_height_f
+                        let v = T::from_f32(y as f32) * src_height_f / dst_height_f;
+                        if v < T::ZERO {
+                            T::ZERO
+                        } else {
+                            v
+                        }
                     };
-                    if fx < T::ZERO {
-                        fx = T::ZERO;
-                    } else if fx > src_width_f {
-                        fx = src_width_f;
-                    }
-                    if fy < T::ZERO {
-                        fy = T::ZERO;
-                    } else if fy > src_height_f {
-                        fy = src_height_f;
-                    }
 
-                    let x0 = fx.to_f32() as usize;
-                    let y0 = fy.to_f32() as usize;
-                    let x1 = (x0 + 1).min(w - 1);
-                    let y1 = (y0 + 1).min(h - 1);
+                    let x0 = (fx.to_f32() as usize).min(w.saturating_sub(1));
+                    let y0 = (fy.to_f32() as usize).min(h.saturating_sub(1));
+                    let x1 = (x0 + 1).min(w.saturating_sub(1));
+                    let y1 = (y0 + 1).min(h.saturating_sub(1));
 
-                    let dx = fx - T::from_f32(x0 as f32);
-                    let dy = fy - T::from_f32(y0 as f32);
+                    let dx = if x0 == x1 {
+                        T::ZERO
+                    } else {
+                        let d = fx - T::from_f32(x0 as f32);
+                        if d < T::ZERO {
+                            T::ZERO
+                        } else if d > T::ONE {
+                            T::ONE
+                        } else {
+                            d
+                        }
+                    };
+                    let dy = if y0 == y1 {
+                        T::ZERO
+                    } else {
+                        let d = fy - T::from_f32(y0 as f32);
+                        if d < T::ZERO {
+                            T::ZERO
+                        } else if d > T::ONE {
+                            T::ONE
+                        } else {
+                            d
+                        }
+                    };
 
                     for ch in 0..c {
                         let v00 = src[(y0 * w + x0) * c + ch];
