@@ -2,7 +2,6 @@ use cv_core::{Tensor, TensorShape};
 use cv_hal::context::ComputeContext;
 use cv_hal::gpu::GpuContext;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
-use pollster::block_on;
 
 fn get_gpu_context() -> Option<&'static GpuContext> {
     // Try to get global context first

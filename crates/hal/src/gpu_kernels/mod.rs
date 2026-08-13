@@ -469,9 +469,24 @@ pub mod buffer_utils {
             timeout: None,
         });
 
-        // Verify mapping succeeded (discard inner Ok value)
-        rx.try_recv()
-            .map_err(|_| crate::Error::DeviceError("Readback channel failed".into()))?
+        // Mapping callback should have fired after Wait. Poll briefly if not.
+        // Important: try_recv consumes the oneshot — do not await afterward.
+        let map_result = loop {
+            match rx.try_recv() {
+                Ok(res) => break res,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    let _ = device.poll(wgpu::PollType::Poll);
+                    std::thread::yield_now();
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(crate::Error::DeviceError(
+                        "Readback channel failed".into(),
+                    ));
+                }
+            }
+        };
+
+        map_result
             .map_err(|e| crate::Error::DeviceError(format!("Buffer mapping failed: {:?}", e)))?;
 
         let data = slice.get_mapped_range();

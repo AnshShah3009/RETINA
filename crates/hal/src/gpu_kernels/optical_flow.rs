@@ -339,6 +339,9 @@ pub fn farneback(
                 dst_w: level_w,
                 dst_h: level_h,
                 channels: 2,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
             };
 
             let up_params_buf = ctx
