@@ -54,7 +54,8 @@ pub fn compute_normals(
     );
     let num_points_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Num Points Uniform"),
-        contents: bytemuck::bytes_of(&num_points_u32),
+        // WebGPU/Metal require uniform bindings to be a multiple of 16 bytes.
+        contents: bytemuck::bytes_of(&[num_points_u32, 0u32, 0u32, 0u32]),
         usage: wgpu::BufferUsages::UNIFORM,
     });
 

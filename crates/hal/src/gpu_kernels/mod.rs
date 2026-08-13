@@ -407,16 +407,28 @@ pub mod buffer_utils {
         GLOBAL_GPU_POOL.get_or_init(GpuBufferPool::new)
     }
 
-    /// Create a GPU buffer from data
+    /// Create a GPU buffer from data.
+    /// Uniform buffers are padded to a 16-byte multiple (WebGPU / Metal requirement).
     pub fn create_buffer<T: bytemuck::Pod>(
         device: &Device,
         data: &[T],
         usage: BufferUsages,
     ) -> Buffer {
         use wgpu::util::DeviceExt;
+        let bytes = bytemuck::cast_slice(data);
+        let contents = if usage.contains(BufferUsages::UNIFORM) {
+            let mut padded = bytes.to_vec();
+            let rem = padded.len() % 16;
+            if rem != 0 {
+                padded.resize(padded.len() + (16 - rem), 0);
+            }
+            padded
+        } else {
+            bytes.to_vec()
+        };
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Compute Buffer"),
-            contents: bytemuck::cast_slice(data),
+            contents: &contents,
             usage,
         })
     }
@@ -842,6 +854,7 @@ pub mod tsdf_gpu {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let output_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
@@ -977,6 +990,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroups, 1, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back
         let output_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
@@ -1271,9 +1285,9 @@ pub mod mesh_gpu {
         let num_vertices = vertices.len() as u32;
         let num_faces = faces.len() as u32;
 
-        // Create buffers
+        // Create buffers — WGSL `array<vec3<u32>>` has 16-byte stride
         let vertices_data: Vec<[f32; 4]> = vertices.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
-        let faces_data: Vec<[u32; 3]> = faces.iter().map(|f| [f[0], f[1], f[2]]).collect();
+        let faces_data: Vec<[u32; 4]> = faces.iter().map(|f| [f[0], f[1], f[2], 0]).collect();
 
         let vertices_buf = create_buffer(&device, &vertices_data, BufferUsages::STORAGE);
         let faces_buf = create_buffer(&device, &faces_data, BufferUsages::STORAGE);
@@ -1324,6 +1338,7 @@ pub mod mesh_gpu {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let normals: Vec<[f32; 4]> = pollster::block_on(read_buffer(
@@ -1549,16 +1564,16 @@ pub mod mesh_gpu {
             ],
         });
 
-        // Dispatch compute shader
-        let workgroup_count = num_vertices.div_ceil(256);
+        // Shader is serial (@workgroup_size(1)) and reduces all vertices in one invocation.
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut compute_pass =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             compute_pass.set_pipeline(&pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
+            compute_pass.dispatch_workgroups(1, 1, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let bounds_data: Vec<f32> =
@@ -1704,6 +1719,25 @@ pub mod odometry_gpu {
     use nalgebra::{Matrix4, Vector3};
     use wgpu::BufferUsages;
 
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct VertexMapParams {
+        width: u32,
+        height: u32,
+        fx: f32,
+        fy: f32,
+        cx: f32,
+        cy: f32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct NormalMapParams {
+        width: u32,
+        height: u32,
+        _pad: [u32; 2],
+    }
+
     /// Compute RGBD odometry on GPU
     #[allow(clippy::too_many_arguments)]
     pub fn compute_odometry(
@@ -1754,15 +1788,15 @@ pub mod odometry_gpu {
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         );
 
-        let intrinsics_f32: [f32; 6] = [
-            width as f32,
-            height as f32,
-            intrinsics[0],
-            intrinsics[1],
-            intrinsics[2],
-            intrinsics[3],
-        ];
-        let params_buf = create_buffer(&device, &intrinsics_f32, BufferUsages::UNIFORM);
+        let intrinsics_f32 = VertexMapParams {
+            width,
+            height,
+            fx: intrinsics[0],
+            fy: intrinsics[1],
+            cx: intrinsics[2],
+            cy: intrinsics[3],
+        };
+        let params_buf = create_buffer(&device, &[intrinsics_f32], BufferUsages::UNIFORM);
 
         // Create compute pipeline
         let shader_source = include_str!("odometry_vertex_map.wgsl");
@@ -1799,6 +1833,7 @@ pub mod odometry_gpu {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let vertex_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
@@ -1831,9 +1866,18 @@ pub mod odometry_gpu {
         let device = gpu.device.clone();
         let queue = &gpu.queue;
 
-        // Create buffers
-        let vertices_data: Vec<[f32; 4]> =
-            vertex_map.iter().map(|v| [v.x, v.y, v.z, 0.0]).collect();
+        // Preserve validity in .w (shader rejects vertices with w < 0.5)
+        let vertices_data: Vec<[f32; 4]> = vertex_map
+            .iter()
+            .map(|v| {
+                let valid = if v.x != 0.0 || v.y != 0.0 || v.z != 0.0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                [v.x, v.y, v.z, valid]
+            })
+            .collect();
         let vertex_map_buf = create_buffer(&device, &vertices_data, BufferUsages::STORAGE);
 
         // Output: normal map
@@ -1844,7 +1888,15 @@ pub mod odometry_gpu {
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         );
 
-        let params_buf = create_buffer(&device, &[width, height], BufferUsages::UNIFORM);
+        let params_buf = create_buffer(
+            &device,
+            &[NormalMapParams {
+                width,
+                height,
+                _pad: [0, 0],
+            }],
+            BufferUsages::UNIFORM,
+        );
 
         // Create compute pipeline
         let shader_source = include_str!("odometry_normal_map.wgsl");
@@ -1881,6 +1933,7 @@ pub mod odometry_gpu {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let normal_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
