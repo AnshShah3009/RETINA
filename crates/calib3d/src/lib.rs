@@ -31,7 +31,8 @@ pub use calibration::{
     calibrate_camera_from_chessboard_files, calibrate_camera_from_chessboard_files_with_options,
     calibrate_camera_from_chessboard_images, calibrate_camera_from_chessboard_images_with_options,
     calibrate_camera_planar, calibrate_camera_planar_with_options,
-    generate_chessboard_object_points, refine_camera_calibration_iterative, CalibrationFileReport,
+    generate_chessboard_object_points, refine_camera_calibration_iterative,
+    refine_camera_calibration_iterative_with_options, CalibrationFileReport,
     CameraCalibrationOptions, CameraCalibrationResult,
 };
 
@@ -70,6 +71,22 @@ mod tests {
         let u = k.fx * (pc[0] / pc[2]) + k.cx;
         let v = k.fy * (pc[1] / pc[2]) + k.cy;
         Point2::new(u, v)
+    }
+
+    fn project_point_dist(
+        k: &CameraIntrinsics,
+        d: &Distortion,
+        ext: &Pose,
+        p: &Point3<f64>,
+    ) -> Point2<f64> {
+        let pc = ext.rotation * p.coords + ext.translation;
+        if pc[2].abs() < 1e-10 {
+            return Point2::new(f64::NAN, f64::NAN);
+        }
+        let xn = pc[0] / pc[2];
+        let yn = pc[1] / pc[2];
+        let (xd, yd) = d.apply(xn, yn);
+        Point2::new(k.fx * xd + k.cx, k.fy * yd + k.cy)
     }
 
     fn synthetic_checkerboard(
@@ -1084,6 +1101,102 @@ mod tests {
         assert!(result.intrinsics.fx.is_finite());
         assert!(result.intrinsics.fy.is_finite());
         assert!((result.intrinsics.fx - result.intrinsics.fy).abs() < 1.0);
+    }
+
+    #[test]
+    fn calibrate_camera_with_distortion_estimates_and_respects_fix_k1() {
+        // Project through a camera with known radial distortion, then verify
+        // (a) distortion is actually estimated by the calibration path and
+        // (b) fix_k1 freezes k1 while k2 is still optimized.
+        let pattern = (7, 6);
+        let board = generate_chessboard_object_points(pattern, 0.04);
+
+        let k = CameraIntrinsics::new(820.0, 790.0, 320.0, 240.0, 640, 480);
+        let gt_d = Distortion {
+            k1: 0.15,
+            k2: -0.06,
+            k3: 0.0,
+            p1: 0.0,
+            p2: 0.0,
+        };
+        let views = [
+            Pose::new(
+                Rotation3::from_euler_angles(0.08, -0.03, 0.02).into_inner(),
+                Vector3::new(0.05, -0.08, 0.3),
+            ),
+            Pose::new(
+                Rotation3::from_euler_angles(-0.06, 0.04, -0.05).into_inner(),
+                Vector3::new(-0.08, 0.02, 0.35),
+            ),
+            Pose::new(
+                Rotation3::from_euler_angles(0.03, 0.07, -0.02).into_inner(),
+                Vector3::new(0.02, 0.06, 0.32),
+            ),
+            Pose::new(
+                Rotation3::from_euler_angles(-0.04, -0.05, 0.04).into_inner(),
+                Vector3::new(-0.03, -0.05, 0.33),
+            ),
+            Pose::new(
+                Rotation3::from_euler_angles(0.02, 0.06, 0.01).into_inner(),
+                Vector3::new(0.04, 0.03, 0.28),
+            ),
+            Pose::new(
+                Rotation3::from_euler_angles(-0.05, 0.02, -0.03).into_inner(),
+                Vector3::new(-0.06, 0.01, 0.36),
+            ),
+        ];
+
+        let mut object_points = Vec::new();
+        let mut image_points = Vec::new();
+        for ext in &views {
+            object_points.push(board.clone());
+            image_points.push(
+                board
+                    .iter()
+                    .map(|p| project_point_dist(&k, &gt_d, ext, p))
+                    .collect(),
+            );
+        }
+
+        // Without any fix flags, distortion should be estimated close to gt.
+        let free = calibrate_camera_planar_with_options(
+            &object_points,
+            &image_points,
+            (640, 480),
+            CameraCalibrationOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            (free.distortion.k1 - gt_d.k1).abs() < 0.05,
+            "k1 not estimated: got {} expected {}",
+            free.distortion.k1,
+            gt_d.k1
+        );
+        assert!(
+            (free.distortion.k2 - gt_d.k2).abs() < 0.05,
+            "k2 not estimated: got {} expected {}",
+            free.distortion.k2,
+            gt_d.k2
+        );
+
+        // With fix_k1, k1 must stay exactly 0 while k2 is still refined.
+        let options = CameraCalibrationOptions {
+            fix_k1: true,
+            ..Default::default()
+        };
+        let fixed = calibrate_camera_planar_with_options(
+            &object_points,
+            &image_points,
+            (640, 480),
+            options,
+        )
+        .unwrap();
+        assert_eq!(fixed.distortion.k1, 0.0, "fix_k1 must freeze k1 at 0");
+        assert!(
+            fixed.distortion.k2.abs() > 0.0,
+            "k2 should still be estimated when only k1 is fixed, got {}",
+            fixed.distortion.k2
+        );
     }
 
     // ========== Test Data Utilities ==========

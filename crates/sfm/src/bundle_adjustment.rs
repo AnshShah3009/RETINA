@@ -145,15 +145,13 @@ impl SfMState {
     pub fn residuals(&self) -> DVector<f64> {
         let mut residuals = Vec::new();
         for landmark in &self.landmarks {
+            if !landmark.is_valid {
+                // Skip invalid landmarks entirely so residual rows stay aligned
+                // with `dimensions()` and `numerical_jacobian_sparse()`.
+                continue;
+            }
             for (cam_idx, obs) in &landmark.observations {
                 if *cam_idx >= self.cameras.len() {
-                    continue;
-                }
-
-                if !landmark.is_valid {
-                    // Push zeros for invalid landmarks to maintain consistent dimensions
-                    residuals.push(0.0);
-                    residuals.push(0.0);
                     continue;
                 }
 
@@ -906,6 +904,12 @@ mod tests {
 
         let residuals = state.residuals();
         // Should only have residuals for valid landmarks
-        assert_eq!(residuals.len(), 4); // Only 2nd landmark: 2 residuals
+        assert_eq!(residuals.len(), 2); // Only 2nd landmark: 2 residuals
+
+        let dims = state.dimensions();
+        assert_eq!(dims, (2, state.to_parameters().len()));
+
+        let jac = state.numerical_jacobian_sparse();
+        assert_eq!(jac.rows, 2); // rows must align with residual vector
     }
 }

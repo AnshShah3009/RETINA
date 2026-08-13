@@ -401,11 +401,18 @@ pub fn fisheye_stereo_rectify(
     // Adjust tx proportionally
     p2[(0, 3)] *= scale;
 
+    // Keep Q consistent with the scaled projection matrices so disparity-to-depth
+    // mapping stays correct: Q[(2,3)] = fx', Q[(3,2)] = -1/tx', Q[(3,3)] = (cx1-cx2)/tx'.
+    let mut q = result.q;
+    q[(2, 3)] *= scale;
+    q[(3, 2)] /= scale;
+    q[(3, 3)] /= scale;
+
     Ok(StereoRectifyMatrices {
         r1: result.r1,
         r2: result.r2,
         p1,
         p2,
-        q: result.q,
+        q,
     })
 }
