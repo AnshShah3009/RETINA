@@ -132,6 +132,24 @@ impl PoseGraph {
             return Ok(0.0);
         }
 
+        for (edge_idx, edge) in self.edges.iter().enumerate() {
+            if edge.from >= self.poses.len() || edge.to >= self.poses.len() {
+                return Err(format!(
+                    "pose graph edge {} references missing pose ({} -> {}, {} poses)",
+                    edge_idx,
+                    edge.from,
+                    edge.to,
+                    self.poses.len()
+                ));
+            }
+            if !edge.information.iter().all(|value| value.is_finite()) {
+                return Err(format!(
+                    "pose graph edge {} has non-finite information matrix",
+                    edge_idx
+                ));
+            }
+        }
+
         // Convert slam poses to cv_optimize's Isometry3 representation
         let mut opt_graph = OptimizePoseGraph::new();
         for (i, pose) in self.poses.iter().enumerate() {
@@ -411,5 +429,32 @@ mod tests {
 
         assert_eq!(graph.num_edges(), 4);
         assert_eq!(graph.num_poses(), 4);
+    }
+
+    #[test]
+    fn optimize_rejects_edges_with_missing_poses() {
+        let mut graph = PoseGraph::new();
+        graph.add_pose(create_identity_pose());
+        graph.add_edge(0, 2, create_identity_pose(), nalgebra::Matrix6::identity());
+
+        let error = graph
+            .optimize(5)
+            .expect_err("invalid edge should be rejected");
+        assert!(error.contains("references missing pose"));
+    }
+
+    #[test]
+    fn optimize_rejects_non_finite_information() {
+        let mut graph = PoseGraph::new();
+        graph.add_pose(create_identity_pose());
+        graph.add_pose(create_identity_pose());
+        let mut information = nalgebra::Matrix6::identity();
+        information[(0, 0)] = f64::NAN;
+        graph.add_edge(0, 1, create_identity_pose(), information);
+
+        let error = graph
+            .optimize(5)
+            .expect_err("non-finite information should be rejected");
+        assert!(error.contains("non-finite information"));
     }
 }
