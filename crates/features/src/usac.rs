@@ -112,7 +112,6 @@ where
     }
 
     let mut rng = rand::thread_rng();
-    let max_iters = params.max_iterations;
     let mut best_model: Option<M> = None;
     let mut best_inliers = 0;
     let mut best_score = f64::MAX;
@@ -128,11 +127,17 @@ where
         vec![Vec::new(); n]
     };
 
-    // Adaptive iteration count
+    // Adaptive iteration count: N = ln(1 - confidence) / ln(1 - eps^s).
+    // The true inlier ratio eps is unknown before scoring, so assume a
+    // conservative 50% — the bound is refined implicitly by the fixed cap.
     let max_iters = if params.max_iterations == 0 {
-        let eps = params.confidence;
-        let p = 1.0 - (1.0 - eps).powi(sample_size as i32);
-        ((1.0 - eps).ln() / (1.0 - p).ln()).ceil() as usize
+        let confidence = params.confidence.clamp(0.0, 0.999_999);
+        let p_good = 0.5f64.powi(sample_size.min(64) as i32);
+        if p_good <= 0.0 || p_good >= 1.0 {
+            1000
+        } else {
+            (((1.0 - confidence).ln() / (1.0 - p_good).ln()).ceil() as usize).max(1)
+        }
     } else {
         params.max_iterations
     };
@@ -150,7 +155,11 @@ where
             }
         };
 
-        let model = estimator(points, &sample)?;
+        // Skip degenerate samples (e.g. duplicate/collinear points); they
+        // must not abort the whole search.
+        let Some(model) = estimator(points, &sample) else {
+            continue;
+        };
         let (inliers, score, mask) = scorer(&model, points);
 
         // Local optimization
@@ -183,6 +192,9 @@ where
 /// Compute k-nearest neighbors for NAPSAC sampling
 fn compute_neighbors(points: &[Point2<f64>], k: usize) -> Vec<Vec<usize>> {
     let n = points.len();
+    if n <= 1 {
+        return vec![Vec::new(); n];
+    }
     let k = k.min(n - 1);
     let mut neighbors = Vec::with_capacity(n);
 
@@ -404,6 +416,31 @@ mod tests {
         let result = estimate_usac(&pts, &params, &line_model, &line_score, 2);
         assert!(result.is_some());
         let res = result.unwrap();
+        assert!(res.inliers >= 40);
+    }
+
+    #[test]
+    fn test_usac_auto_iterations_finds_model() {
+        // max_iterations == 0 selects the adaptive iteration count. The old
+        // formula degenerated to zero iterations and always returned None.
+        let mut pts = Vec::new();
+        for x in 0..40 {
+            pts.push(Point2::new(x as f64, 3.0 * x as f64 + 1.0));
+        }
+        for _ in 0..10 {
+            pts.push(Point2::new(100.0, 0.0));
+        }
+
+        let params = UsacParams {
+            threshold: 0.1,
+            max_iterations: 0,
+            ..Default::default()
+        };
+
+        let result = estimate_usac(&pts, &params, &line_model, &line_score, 2);
+        assert!(result.is_some(), "auto-iteration USAC must find the line");
+        let res = result.unwrap();
+        assert!(res.iterations > 0);
         assert!(res.inliers >= 40);
     }
 }
