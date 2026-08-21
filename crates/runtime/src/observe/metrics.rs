@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -7,7 +8,7 @@ pub struct Metrics {
     total_allocated: Arc<AtomicUsize>,
     peak_allocated: Arc<AtomicUsize>,
     submission_count: Arc<AtomicU64>,
-    submission_latencies: Arc<Mutex<Vec<u64>>>,
+    submission_latencies: Arc<Mutex<VecDeque<u64>>>,
 }
 
 impl Metrics {
@@ -17,7 +18,7 @@ impl Metrics {
             total_allocated: Arc::new(AtomicUsize::new(0)),
             peak_allocated: Arc::new(AtomicUsize::new(0)),
             submission_count: Arc::new(AtomicU64::new(0)),
-            submission_latencies: Arc::new(Mutex::new(Vec::with_capacity(1000))),
+            submission_latencies: Arc::new(Mutex::new(VecDeque::with_capacity(1000))),
         }
     }
 
@@ -59,7 +60,13 @@ impl Metrics {
     /// Record submission latency in milliseconds
     pub fn record_submission_latency(&self, ms: u64) {
         if let Ok(mut latencies) = self.submission_latencies.lock() {
-            latencies.push(ms);
+            // Cap the sample window so long-running pipelines don't grow the
+            // buffer without bound; the average stays representative.
+            const MAX_SAMPLES: usize = 10_000;
+            if latencies.len() >= MAX_SAMPLES {
+                latencies.pop_front();
+            }
+            latencies.push_back(ms);
         }
         self.submission_count.fetch_add(1, Ordering::SeqCst);
     }

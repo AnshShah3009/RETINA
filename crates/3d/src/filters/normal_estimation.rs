@@ -15,6 +15,11 @@ pub fn estimate_normals_knn(points: &[Point3<f64>], k: usize) -> Vec<Vector3<f64
     if points.is_empty() {
         return Vec::new();
     }
+    // A single point has no neighbours to estimate a plane from; return the
+    // default +Z orientation rather than panicking on an empty neighbour list.
+    if points.len() == 1 {
+        return vec![Vector3::new(0.0, 0.0, 1.0)];
+    }
     let k = k.min(points.len() - 1).max(1);
 
     points

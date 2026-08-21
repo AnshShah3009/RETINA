@@ -107,46 +107,52 @@ impl ShmCoordinator {
         let size = size.max(SHM_TOTAL_SIZE);
         let path = Self::get_shm_path(name);
 
-        let needs_init = if path.exists() {
-            let existing = std::fs::OpenOptions::new().read(true).open(&path);
-            match existing {
-                Ok(f) => {
-                    let meta = f.metadata()?;
-                    if meta.len() >= size as u64 {
-                        let mmap = unsafe { memmap2::MmapOptions::new().map(&f)? };
-                        if mmap.len() >= HEADER_SIZE {
-                            let hdr = unsafe { &*(mmap.as_ptr() as *const ShmHeaderV3) };
-                            let magic = hdr.magic.load(Ordering::Relaxed);
-                            let version = hdr.version.load(Ordering::Relaxed);
-                            magic != SHM_MAGIC || version != SHM_VERSION
-                        } else {
-                            true
-                        }
-                    } else {
-                        true
-                    }
-                }
-                Err(_) => true,
+        // Open (or create) WITHOUT truncating: another process may already
+        // hold a live mapping of this region. Initialization is serialized
+        // with an advisory flock so concurrent starters re-validate the
+        // header under the lock instead of truncating each other's region.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // Block until any concurrent initializer releases the lock.
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc != 0 {
+                return Err(io::Error::last_os_error());
             }
-        } else {
-            true
+        }
+
+        let needs_init = {
+            let meta = file.metadata()?;
+            if meta.len() < size as u64 {
+                true
+            } else {
+                let probe = unsafe { memmap2::MmapOptions::new().map(&file)? };
+                if probe.len() >= HEADER_SIZE {
+                    let hdr = unsafe { &*(probe.as_ptr() as *const ShmHeaderV3) };
+                    let magic = hdr.magic.load(Ordering::Relaxed);
+                    let version = hdr.version.load(Ordering::Relaxed);
+                    magic != SHM_MAGIC || version != SHM_VERSION
+                } else {
+                    true
+                }
+            }
         };
 
-        let file = if needs_init {
-            let f = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&path)?;
-            f.set_len(size as u64)?;
-            f
-        } else {
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)?
-        };
+        if needs_init {
+            file.set_len(size as u64)?;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        }
 
         let mut mmap = unsafe { memmap2::MmapOptions::new().map_mut(&file)? };
 
@@ -234,14 +240,17 @@ impl ShmCoordinator {
 
     #[cfg(target_os = "linux")]
     fn wake_all_on_address(addr: &AtomicU32) {
-        // Wake only 1 waiter to avoid thundering herd problem
-        // Multiple wakeups will happen as needed when each waiter checks the condition
+        // Wake ALL waiters: FUTEX_WAKE with val=1 wakes exactly one waiter and
+        // the kernel does not cascade. With N processes contending for VRAM on
+        // the same device, wake-one leaves N-1 waiters sleeping until timeout.
+        // The double-checked condition in wait_for_device_memory prevents any
+        // thundering-herd thrash.
         unsafe {
             libc::syscall(
                 libc::SYS_futex,
                 addr as *const AtomicU32 as *mut libc::c_int,
                 libc::FUTEX_WAKE,
-                1, // Wake only one waiter
+                i32::MAX, // Wake all waiters
                 std::ptr::null::<libc::timespec>(),
                 std::ptr::null::<libc::c_int>(),
                 0,
@@ -251,8 +260,7 @@ impl ShmCoordinator {
 
     #[cfg(not(target_os = "linux"))]
     fn wake_all_on_address(addr: &AtomicU32) {
-        // Wake only 1 waiter to avoid thundering herd problem
-        atomic_wait::wake_one(addr);
+        atomic_wait::wake_all(addr);
     }
 
     // --- Slot acquisition (lock-free CAS state machine) ---
@@ -725,6 +733,10 @@ impl ShmCoordinator {
     pub fn start_heartbeat_thread(&self, interval: Duration) {
         // Stop any existing thread first
         self.stop_heartbeat();
+        // Reset the shared stop flag BEFORE spawning: the old thread has been
+        // joined, so no one else observes this transition, and the new thread
+        // must not see a stale stop==1 on its first loop check.
+        self.heartbeat_stop.store(0, Ordering::Release);
         let stop = self.heartbeat_stop.clone();
         // We need to access the mmap from the thread. Since ShmCoordinator is !Clone,
         // we re-open the same shm file from the thread using the path + slot_index.
@@ -832,8 +844,6 @@ impl ShmCoordinator {
         if let Ok(mut guard) = self.heartbeat_thread.lock() {
             *guard = Some(thread_handle);
         }
-        // Reset stop flag for the new thread (after storing handle)
-        self.heartbeat_stop.store(0, Ordering::Release);
     }
 
     /// Signal the heartbeat thread to stop and wait for it to finish.

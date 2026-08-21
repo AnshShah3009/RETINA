@@ -80,7 +80,20 @@ impl VideoCapture for V4L2Capture {
             .format()
             .map_err(|e| VideoError::Backend(format!("Failed to get format: {}", e)))?;
 
-        // Simplified YUYV to Grayscale conversion
+        // Simplified YUYV to Grayscale conversion. The driver may have
+        // negotiated a different format or resolution than requested, so
+        // validate before indexing to avoid panics on short buffers.
+        let expected = fmt.width as usize * fmt.height as usize * 2;
+        if data.len() < expected {
+            return Err(VideoError::CaptureFailed(format!(
+                "Frame buffer too small: got {} bytes, need {} for {}x{} YUYV",
+                data.len(),
+                expected,
+                fmt.width,
+                fmt.height
+            )));
+        }
+
         let mut gray = GrayImage::new(fmt.width, fmt.height);
         for i in 0..(fmt.width * fmt.height) as usize {
             // YUYV: Y0 U0 Y1 V0 ...

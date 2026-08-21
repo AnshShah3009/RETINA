@@ -244,9 +244,16 @@ impl SfMState {
         let mut res_idx = 0;
         for (lm_idx, lm) in self.landmarks.iter().enumerate() {
             if !lm.is_valid {
+                // residuals() emits two zero rows per observation for invalid
+                // landmarks; advance the row cursor to stay aligned.
+                res_idx += 2 * lm.observations.len();
                 continue;
             }
             for (cam_idx, _obs) in &lm.observations {
+                // residuals() skips out-of-range cameras without emitting rows
+                if *cam_idx >= self.cameras.len() {
+                    continue;
+                }
                 // Camera block (6 params)
                 for k in 0..6 {
                     let mut p_perturbed = params.clone();
@@ -389,11 +396,19 @@ use cv_optimize::{CostFunction, SparseLMSolver};
 
 impl CostFunction for SfMState {
     fn dimensions(&self) -> (usize, usize) {
+        // Must match residuals(): every observation contributes two rows,
+        // including zero rows for invalid landmarks; out-of-range camera
+        // indices are skipped.
         let n_res = self
             .landmarks
             .iter()
-            .filter(|l| l.is_valid)
-            .map(|l| l.observations.len() * 2)
+            .map(|l| {
+                l.observations
+                    .iter()
+                    .filter(|(ci, _)| *ci < self.cameras.len())
+                    .count()
+                    * 2
+            })
             .sum();
         let n_params = 6 * self.cameras.len() + 3 * self.landmarks.len();
         (n_res, n_params)
@@ -435,14 +450,19 @@ impl Default for BundleAdjustmentConfig {
 pub fn bundle_adjust(state: &mut SfMState, config: &BundleAdjustmentConfig) {
     if let Ok(s) = scheduler() {
         if let Ok(group) = s.get_default_group() {
-            bundle_adjust_ctx(state, config, &group);
-            return;
+            if bundle_adjust_ctx(state, config, &group) {
+                return;
+            }
+            // Ctx path unavailable (no compute device / solver failure):
+            // fall through to the sequential CPU implementation.
         }
     }
+    bundle_adjust_sequential(state, config);
+}
 
-    // Fallback: Use a temporary dummy group or implement a sequential version of bundle_adjust_ctx.
-    // For now, since bundle_adjust_ctx doesn't use the group for much other than calling numerical_jacobian_ctx,
-    // we can implement a basic loop.
+/// Sequential CPU Levenberg-Marquardt used when the runtime ctx path is
+/// unavailable or fails.
+fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfig) {
     let mut current_params = state.to_parameters();
     let mut current_residuals = state.residuals();
     let mut current_err = current_residuals.norm_squared();
@@ -498,10 +518,10 @@ pub fn bundle_adjust_ctx(
     state: &mut SfMState,
     config: &BundleAdjustmentConfig,
     group: &ResourceGroup,
-) {
+) -> bool {
     let device = match group.device() {
         Ok(dev) => dev,
-        Err(_) => return, // Skip optimization on device error, use CPU fallback
+        Err(_) => return false, // No compute device: caller falls back to CPU
     };
     let solver = SparseLMSolver {
         ctx: &device,
@@ -513,8 +533,12 @@ pub fn bundle_adjust_ctx(
     };
 
     let initial_params = state.to_parameters();
-    if let Ok(final_params) = solver.minimize(state, initial_params) {
-        state.from_parameters(&final_params);
+    match solver.minimize(state, initial_params) {
+        Ok(final_params) => {
+            state.from_parameters(&final_params);
+            true
+        }
+        Err(_) => false, // Solver failed: caller falls back to CPU
     }
 }
 

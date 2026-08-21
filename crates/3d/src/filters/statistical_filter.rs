@@ -21,7 +21,7 @@ pub fn statistical_outlier_removal(
         return (points.to_vec(), indices);
     }
 
-    let k = nb_neighbors.min(points.len() - 1);
+    let k = nb_neighbors.max(1).min(points.len() - 1);
 
     // Compute mean distance to k nearest neighbours for every point (parallel).
     let mean_dists: Vec<f64> = points

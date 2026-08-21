@@ -18,10 +18,24 @@ impl SparseMatrix {
         cols: usize,
         triplets: &[Triplet<usize, usize, f64>],
     ) -> Self {
-        // Convert COO (triplets) to CSR
+        // Convert COO (triplets) to CSR. Sort first so that duplicate
+        // (row, col) entries are adjacent and get SUMMED — e.g. two loop
+        // closures contributing to the same Hessian block must accumulate,
+        // not overwrite.
+        let mut sorted: Vec<Triplet<usize, usize, f64>> = triplets.to_vec();
+        sorted.sort_by_key(|t| (t.row, t.col));
+
+        let mut merged: Vec<(usize, usize, f64)> = Vec::with_capacity(sorted.len());
+        for t in sorted {
+            match merged.last_mut() {
+                Some(last) if last.0 == t.row && last.1 == t.col => last.2 += t.val,
+                _ => merged.push((t.row, t.col, t.val)),
+            }
+        }
+
         let mut row_counts = vec![0; rows];
-        for t in triplets {
-            row_counts[t.row] += 1;
+        for &(r, _, _) in &merged {
+            row_counts[r] += 1;
         }
 
         let mut row_ptr = vec![0; rows + 1];
@@ -30,14 +44,14 @@ impl SparseMatrix {
         }
 
         let mut current_row_pos = vec![0; rows];
-        let mut col_indices = vec![0; triplets.len()];
-        let mut values = vec![0.0; triplets.len()];
+        let mut col_indices = vec![0u32; merged.len()];
+        let mut values = vec![0.0; merged.len()];
 
-        for t in triplets {
-            let pos = row_ptr[t.row] as usize + current_row_pos[t.row];
-            col_indices[pos] = t.col as u32;
-            values[pos] = t.val;
-            current_row_pos[t.row] += 1;
+        for (r, c, v) in merged {
+            let pos = row_ptr[r] as usize + current_row_pos[r];
+            col_indices[pos] = c as u32;
+            values[pos] = v;
+            current_row_pos[r] += 1;
         }
 
         Self {
@@ -50,18 +64,16 @@ impl SparseMatrix {
     }
 
     pub fn spmv_ctx(&self, ctx: &ComputeDevice, x: &DVector<f64>) -> Result<DVector<f64>, String> {
-        // Convert f64 to f32 for GPU SpMV
-        let x_f32: Vec<f32> = x.iter().map(|&v| v as f32).collect();
-        let values_f32: Vec<f32> = self.values.iter().map(|&v| v as f32).collect();
-
-        let x_tensor: cv_core::CpuTensor<f32> =
-            Tensor::from_vec(x_f32, cv_core::TensorShape::new(1, x.len(), 1))
-                .map_err(|e| format!("SpMV input tensor creation failed: {}", e))?;
-
-        // SpMV always returns a result tensor on the same device as input x
         match ctx {
             ComputeDevice::Gpu(gpu) => {
+                // GPU kernels operate in f32; convert once for upload.
+                let x_f32: Vec<f32> = x.iter().map(|&v| v as f32).collect();
+                let values_f32: Vec<f32> = self.values.iter().map(|&v| v as f32).collect();
+
                 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
+                let x_tensor: cv_core::CpuTensor<f32> =
+                    Tensor::from_vec(x_f32, cv_core::TensorShape::new(1, x.len(), 1))
+                        .map_err(|e| format!("SpMV input tensor creation failed: {}", e))?;
                 let x_gpu = x_tensor
                     .to_gpu_ctx(gpu)
                     .map_err(|e| format!("Upload to GPU failed: {}", e))?;
@@ -81,17 +93,20 @@ impl SparseMatrix {
                 ))
             }
             ComputeDevice::Cpu(_cpu) => {
-                let res_cpu = ctx
-                    .spmv(&self.row_ptr, &self.col_indices, &values_f32, &x_tensor)
-                    .map_err(|e| format!("CPU SpMV failed: {}", e))?;
-                Ok(DVector::from_vec(
-                    res_cpu
-                        .as_slice()
-                        .map_err(|e| format!("Data not on CPU: {}", e))?
-                        .iter()
-                        .map(|&v| v as f64)
-                        .collect(),
-                ))
+                // Native f64 SpMV: downcasting matrix and vector to f32 here
+                // loses ~7 significant digits and stalls CG convergence when
+                // solving LM normal equations.
+                let mut res = DVector::zeros(self.rows);
+                for r in 0..self.rows {
+                    let start = self.row_ptr[r] as usize;
+                    let end = self.row_ptr[r + 1] as usize;
+                    let mut sum = 0.0f64;
+                    for i in start..end {
+                        sum += self.values[i] * x[self.col_indices[i] as usize];
+                    }
+                    res[r] = sum;
+                }
+                Ok(res)
             }
             ComputeDevice::Mlx(_) => Err("MLX SpMV not implemented yet. Use CPU backend.".into()),
         }

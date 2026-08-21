@@ -194,17 +194,20 @@ impl GaussianRasterizer {
         let det = a * d - b * b;
         let discriminant = ((trace * trace / 4.0) - det).max(0.0);
         let max_eigenvalue = trace / 2.0 + discriminant.sqrt();
-        let radius = (3.0 * max_eigenvalue.sqrt()).ceil() as u32;
-        let radius = radius.max(1);
+        // Radius is in PIXELS; convert the pixel-space extent to tile bounds.
+        let radius_px = (3.0 * max_eigenvalue.sqrt()).ceil().max(1.0);
 
         let (tiles_x, tiles_y) = self.num_tiles();
-        let tile_x = (pg.center.x / self.tile_width as f32).floor().max(0.0) as u32;
-        let tile_y = (pg.center.y / self.tile_height as f32).floor().max(0.0) as u32;
 
-        let min_x = tile_x.saturating_sub(radius).min(tiles_x);
-        let min_y = tile_y.saturating_sub(radius).min(tiles_y);
-        let max_x = (tile_x + radius).min(tiles_x);
-        let max_y = (tile_y + radius).min(tiles_y);
+        let min_px = (pg.center.x - radius_px).max(0.0);
+        let min_py = (pg.center.y - radius_px).max(0.0);
+        let max_px = (pg.center.x + radius_px).min(self.camera.width as f32);
+        let max_py = (pg.center.y + radius_px).min(self.camera.height as f32);
+
+        let min_x = ((min_px / self.tile_width as f32).floor() as u32).min(tiles_x);
+        let min_y = ((min_py / self.tile_height as f32).floor() as u32).min(tiles_y);
+        let max_x = ((max_px / self.tile_width as f32).ceil() as u32).min(tiles_x);
+        let max_y = ((max_py / self.tile_height as f32).ceil() as u32).min(tiles_y);
 
         (min_x, min_y, max_x, max_y)
     }
