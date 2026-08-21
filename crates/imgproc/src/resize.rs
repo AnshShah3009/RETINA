@@ -106,8 +106,10 @@ fn resize_linear(src: &GrayImage, width: u32, height: u32) -> GrayImage {
     let mut dst = GrayImage::new(width, height);
     let src_width = src.width() as f32 - 1.0;
     let src_height = src.height() as f32 - 1.0;
-    let dst_width = (width - 1) as f32;
-    let dst_height = (height - 1) as f32;
+    // Guard against 1-pixel destinations: (n-1) would be zero and the
+    // coordinate mapping below would produce NaN (black output).
+    let dst_width = (width.max(2) - 1) as f32;
+    let dst_height = (height.max(2) - 1) as f32;
 
     if src_width <= 0.0 || src_height <= 0.0 {
         return dst;
@@ -159,8 +161,9 @@ pub fn resize_rgb(
     let mut dst = RgbImage::new(width, height);
     let src_width = src.width() as f32 - 1.0;
     let src_height = src.height() as f32 - 1.0;
-    let dst_width = (width - 1) as f32;
-    let dst_height = (height - 1) as f32;
+    // Guard against 1-pixel destinations (see resize_linear).
+    let dst_width = (width.max(2) - 1) as f32;
+    let dst_height = (height.max(2) - 1) as f32;
 
     if src_width <= 0.0 || src_height <= 0.0 {
         return dst;

@@ -25,8 +25,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let src_width_f = f32(params.src_w) - 1.0;
     let src_height_f = f32(params.src_h) - 1.0;
-    let dst_width_f = f32(params.dst_w) - 1.0;
-    let dst_height_f = f32(params.dst_h) - 1.0;
+    // Guard degenerate 1-pixel destinations: (n-1) would be zero and the
+    // coordinate mapping below would produce NaN (black output).
+    let dst_width_f = max(f32(params.dst_w) - 1.0, 1.0);
+    let dst_height_f = max(f32(params.dst_h) - 1.0, 1.0);
 
     let src_x_f = f32(x_dst) * src_width_f / dst_width_f;
     let src_y_f = f32(y_dst) * src_height_f / dst_height_f;

@@ -3497,8 +3497,10 @@ impl ComputeContext for CpuBackend {
 
         let src_width_f = T::from_f32(w as f32 - 1.0);
         let src_height_f = T::from_f32(h as f32 - 1.0);
-        let dst_width_f = T::from_f32(nw as f32 - 1.0);
-        let dst_height_f = T::from_f32(nh as f32 - 1.0);
+        // Guard degenerate 1-pixel destinations: (n-1) would be zero and the
+        // coordinate mapping below would produce NaN (black output).
+        let dst_width_f = T::from_f32((nw.max(2) - 1) as f32);
+        let dst_height_f = T::from_f32((nh.max(2) - 1) as f32);
 
         dst.par_chunks_mut(nw * c)
             .enumerate()
