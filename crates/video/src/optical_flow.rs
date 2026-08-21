@@ -8,7 +8,7 @@
 use crate::{MotionField, Result};
 use cv_core::{Error, KeyPoint};
 use image::GrayImage;
-use nalgebra::{DMatrix, DVector, Matrix2, Vector2};
+use nalgebra::{Matrix2, Vector2};
 
 /// Lucas-Kanade optical flow tracker
 ///
@@ -562,6 +562,60 @@ impl PolynomialExpansion {
     }
 }
 
+/// Solve 6x6 system A*x = b using Gaussian elimination with partial pivoting.
+/// Returns None if the matrix is singular (determinant ≈ 0).
+fn solve_6x6_gauss(a: &mut [[f32; 6]; 6], b: &mut [f32; 6]) -> Option<[f32; 6]> {
+    let n = 6;
+
+    // Forward elimination with partial pivoting
+    for col in 0..n {
+        // Find pivot
+        let mut max_row = col;
+        let mut max_val = a[col][col].abs();
+        for row in (col + 1)..n {
+            let v = a[row][col].abs();
+            if v > max_val {
+                max_val = v;
+                max_row = row;
+            }
+        }
+
+        if max_val < 1e-12 {
+            return None; // Singular matrix
+        }
+
+        // Swap rows if needed
+        if max_row != col {
+            a.swap(col, max_row);
+            b.swap(col, max_row);
+        }
+
+        let pivot = a[col][col];
+        for row in (col + 1)..n {
+            let factor = a[row][col] / pivot;
+            if factor.abs() < 1e-15 {
+                continue;
+            }
+            for j in col..n {
+                a[row][j] -= factor * a[col][j];
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+
+    // Back-substitution
+    let mut x = [0.0f32; 6];
+    for i in (0..n).rev() {
+        let mut sum = b[i];
+        for j in (i + 1)..n {
+            sum -= a[i][j] * x[j];
+        }
+        x[i] = sum / a[i][i];
+    }
+
+    Some(x)
+}
+
 /// Compute polynomial expansion of image
 fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> PolynomialExpansion {
     let width = img.width();
@@ -609,23 +663,18 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
                 }
             }
 
-            // Solve the full 6x6 system A*c = b using nalgebra matrix inverse
-            let a_mat = DMatrix::from_fn(6, 6, |i, j| a[i][j] as f64);
-            let b_vec = DVector::from_fn(6, |i, _| b[i] as f64);
-
-            let c = if let Some(a_inv) = a_mat.try_inverse() {
-                let sol = a_inv * b_vec;
+            // Solve the full 6x6 system A*c = b using Gaussian elimination with partial pivoting
+            // (avoids 614,400 heap allocations of DMatrix/DVector per VGA frame)
+            let c = solve_6x6_gauss(&mut a, &mut b).map(|sol| {
                 PolyCoeffs(
-                    sol[0] as f32, // A: x^2
-                    sol[1] as f32, // B: xy
-                    sol[2] as f32, // C: y^2
-                    sol[3] as f32, // D: x
-                    sol[4] as f32, // E: y
-                    sol[5] as f32, // F: constant
+                    sol[0], // A: x^2
+                    sol[1], // B: xy
+                    sol[2], // C: y^2
+                    sol[3], // D: x
+                    sol[4], // E: y
+                    sol[5], // F: constant
                 )
-            } else {
-                PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-            };
+            }).unwrap_or_else(|| PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
 
             coeffs.push(c);
         }
