@@ -415,8 +415,9 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
 ///
 /// After the DATA line, the format contains two little-endian u32 values
 /// (compressed_size, uncompressed_size), followed by compressed_size bytes
-/// of LZF-compressed data. The decompressed data has the same layout as
-/// binary PCD point data.
+/// of LZF-compressed data. The decompressed payload is field-major (all
+/// values of each field contiguous), which is de-interleaved into
+/// point-interleaved records before parsing.
 fn parse_pcd_binary_compressed<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointCloud> {
     // Read compressed_size and uncompressed_size (two u32 LE values)
     let mut size_buf = [0u8; 8];
@@ -454,9 +455,43 @@ fn parse_pcd_binary_compressed<R: Read>(mut reader: R, header: &PcdHeader) -> Re
         )));
     }
 
-    // Parse the decompressed data as binary PCD
-    let cursor = std::io::Cursor::new(decompressed);
+    // The decompressed payload is field-major (all values of field 0, then all
+    // of field 1, ...), unlike plain binary PCD which is point-interleaved.
+    // De-interleave into point records before parsing.
+    let data = deinterleave_field_major(&decompressed, header)?;
+    let cursor = std::io::Cursor::new(data);
     parse_pcd_binary(cursor, header)
+}
+
+/// Convert field-major binary_compressed data into point-interleaved records,
+/// matching PCL's `binary_compressed` on-disk layout.
+fn deinterleave_field_major(data: &[u8], header: &PcdHeader) -> Result<Vec<u8>> {
+    let count = header.points_count;
+    let stride = header.point_stride();
+    let expected = stride.saturating_mul(count);
+    if data.len() < expected {
+        return Err(Error::ParseError(format!(
+            "PCD binary_compressed: decompressed {} bytes but {} needed for {} points",
+            data.len(),
+            expected,
+            count
+        )));
+    }
+
+    let offsets = compute_field_offsets(header);
+    let mut out = vec![0u8; expected];
+    let mut field_start = 0usize;
+    for (f, &dst_off) in offsets.iter().enumerate() {
+        let field_size =
+            header.sizes.get(f).copied().unwrap_or(4) * header.counts.get(f).copied().unwrap_or(1);
+        for i in 0..count {
+            let src = field_start + i * field_size;
+            let dst = i * stride + dst_off;
+            out[dst..dst + field_size].copy_from_slice(&data[src..src + field_size]);
+        }
+        field_start += field_size * count;
+    }
+    Ok(out)
 }
 
 /// LZF decompression (compatible with PCL's binary_compressed PCD format).
@@ -657,27 +692,35 @@ pub fn write_pcd_binary_compressed<W: Write>(writer: &mut W, cloud: &PointCloud)
 
     write_pcd_header(writer, cloud, "binary_compressed")?;
 
-    // Build the uncompressed binary data (same format as DATA binary)
-    let mut raw_data = Vec::new();
-    for i in 0..num_points {
-        let p = cloud.points[i];
+    // Build the uncompressed payload in field-major order (all values of each
+    // field contiguous), matching PCL's binary_compressed layout.
+    let mut raw_data = Vec::with_capacity(num_points * 16);
+    for p in &cloud.points {
         raw_data.extend_from_slice(&p.x.to_le_bytes());
+    }
+    for p in &cloud.points {
         raw_data.extend_from_slice(&p.y.to_le_bytes());
+    }
+    for p in &cloud.points {
         raw_data.extend_from_slice(&p.z.to_le_bytes());
+    }
 
-        if let Some(ref normals) = cloud.normals {
-            let n = normals[i];
-            raw_data.extend_from_slice(&n.x.to_le_bytes());
-            raw_data.extend_from_slice(&n.y.to_le_bytes());
-            raw_data.extend_from_slice(&n.z.to_le_bytes());
+    if let Some(ref normals) = cloud.normals {
+        for axis in 0..3 {
+            for n in normals.iter() {
+                let v = [n.x, n.y, n.z][axis];
+                raw_data.extend_from_slice(&v.to_le_bytes());
+            }
         }
+    }
 
-        if let Some(ref colors) = cloud.colors {
-            let c = colors[i];
+    if let Some(ref colors) = cloud.colors {
+        for c in colors {
             let r = (c.x.clamp(0.0, 1.0) * 255.0) as u32;
             let g = (c.y.clamp(0.0, 1.0) * 255.0) as u32;
             let b = (c.z.clamp(0.0, 1.0) * 255.0) as u32;
             let packed: u32 = (r << 16) | (g << 8) | b;
+            // rgb is stored as a float whose bits represent the packed u32
             let float_bits = f32::from_bits(packed);
             raw_data.extend_from_slice(&float_bits.to_le_bytes());
         }
@@ -846,7 +889,11 @@ pub fn write_pcd<W: Write>(writer: &mut W, cloud: &PointCloud) -> Result<()> {
             let g = (c.y.clamp(0.0, 1.0) * 255.0) as u32;
             let b = (c.z.clamp(0.0, 1.0) * 255.0) as u32;
             let packed: u32 = (r << 16) | (g << 8) | b;
-            write!(writer, " {}", packed)?;
+            // Match PCL semantics: rgb holds a float whose bit pattern is the
+            // packed u32. Write the reinterpreted float so readers that decode
+            // via f32::to_bits recover the original colors.
+            let float_bits = f32::from_bits(packed);
+            write!(writer, " {}", float_bits)?;
         }
 
         writeln!(writer)?;
@@ -950,6 +997,58 @@ mod tests {
         let read_cloud = read_pcd(reader).expect("read failed");
 
         assert!(read_cloud.colors.is_some());
+        let colors = read_cloud.colors.unwrap();
+        // Colors go through 255-quantization, so check with tolerance
+        assert!((colors[0].x - 1.0).abs() < 0.01);
+        assert!((colors[0].y - 0.5).abs() < 0.01);
+        assert!((colors[0].z - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_pcd_binary_compressed_round_trip_with_fields() {
+        let mut cloud = PointCloud::new(vec![
+            Point3::new(1.0, 2.0, 3.0),
+            Point3::new(4.0, 5.0, 6.0),
+            Point3::new(7.0, 8.0, 9.0),
+            Point3::new(-1.5, 0.25, 100.0),
+        ]);
+        cloud.normals = Some(vec![
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.577, 0.577, 0.577),
+        ]);
+        cloud.colors = Some(vec![
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(0.5, 0.5, 0.5),
+        ]);
+
+        let mut buffer = Vec::new();
+        write_pcd_binary_compressed(&mut buffer, &cloud).expect("write failed");
+
+        let reader = BufReader::new(Cursor::new(buffer));
+        let read_cloud = read_pcd(reader).expect("read failed");
+
+        assert_eq!(read_cloud.len(), cloud.len());
+        for i in 0..cloud.len() {
+            assert_eq!(read_cloud.points[i].x, cloud.points[i].x);
+            assert_eq!(read_cloud.points[i].y, cloud.points[i].y);
+            assert_eq!(read_cloud.points[i].z, cloud.points[i].z);
+
+            let n_in = cloud.normals.as_ref().unwrap();
+            let n_out = read_cloud.normals.as_ref().expect("normals missing");
+            assert_eq!(n_out[i].x, n_in[i].x);
+            assert_eq!(n_out[i].y, n_in[i].y);
+            assert_eq!(n_out[i].z, n_in[i].z);
+
+            let c_in = cloud.colors.as_ref().unwrap();
+            let c_out = read_cloud.colors.as_ref().expect("colors missing");
+            assert!((c_out[i].x - c_in[i].x).abs() < 0.01);
+            assert!((c_out[i].y - c_in[i].y).abs() < 0.01);
+            assert!((c_out[i].z - c_in[i].z).abs() < 0.01);
+        }
     }
 
     #[test]
