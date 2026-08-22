@@ -2542,9 +2542,6 @@ impl ComputeContext for CpuBackend {
 
                 let pix = v * img_w + u;
                 if found {
-                    // Store depth
-                    out_data[pix] = T::from_f32(hit_depth);
-
                     // Compute normal via central differences of TSDF
                     let eps = vs * 0.5;
                     let gx = sample_tsdf(hit_pos[0] + eps, hit_pos[1], hit_pos[2])
@@ -2559,9 +2556,15 @@ impl ComputeContext for CpuBackend {
                     } else {
                         (0.0, 0.0, 1.0)
                     };
-                    out_data[img_h * img_w + pix] = T::from_f32(nx);
-                    out_data[2 * img_h * img_w + pix] = T::from_f32(ny);
-                    out_data[3 * img_h * img_w + pix] = T::from_f32(nz);
+                    // Interleaved layout — matches the WGSL raycast kernel and
+                    // every other multichannel op in hal: channel c of pixel
+                    // p lives at p*4 + c. A previous revision wrote CHW planes
+                    // under the same interleaved-labeled shape, scrambling
+                    // depth/normals for any consumer.
+                    out_data[pix * 4] = T::from_f32(hit_depth);
+                    out_data[pix * 4 + 1] = T::from_f32(nx);
+                    out_data[pix * 4 + 2] = T::from_f32(ny);
+                    out_data[pix * 4 + 3] = T::from_f32(nz);
                 }
                 // else: all zeros (no hit)
             }

@@ -218,8 +218,9 @@ pub fn icp_accumulate(
     }
     ctx.submit(encoder);
 
-    // 4. Read back and convert from fixed-point i32 to f32
-    let ata_raw: Vec<i32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
+    // 4. Read back raw bits and reinterpret as f32 (kernel accumulates in
+    // native f32 via compare-exchange atomics).
+    let ata_raw: Vec<u32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
         ctx.device.clone(),
         &ctx.queue,
         &ata_buffer,
@@ -227,7 +228,7 @@ pub fn icp_accumulate(
         36 * 4,
     ))?;
 
-    let atb_raw: Vec<i32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
+    let atb_raw: Vec<u32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
         ctx.device.clone(),
         &ctx.queue,
         &atb_buffer,
@@ -238,13 +239,13 @@ pub fn icp_accumulate(
     let mut ata = nalgebra::Matrix6::<f32>::zeros();
     for i in 0..6 {
         for j in 0..6 {
-            ata[(i, j)] = ata_raw[i * 6 + j] as f32 / 1000000.0;
+            ata[(i, j)] = f32::from_bits(ata_raw[i * 6 + j]);
         }
     }
 
     let mut atb = nalgebra::Vector6::<f32>::zeros();
     for i in 0..6 {
-        atb[i] = atb_raw[i] as f32 / 1000000.0;
+        atb[i] = f32::from_bits(atb_raw[i]);
     }
 
     Ok((ata, atb))

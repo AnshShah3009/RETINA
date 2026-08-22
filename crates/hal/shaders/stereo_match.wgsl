@@ -7,17 +7,19 @@ struct Params {
     method: u32, // 0: BlockMatching, 1: SGM
 }
 
-@group(0) @binding(0) var<storage, read> left_data: array<u32>;
-@group(0) @binding(1) var<storage, read> right_data: array<u32>;
+@group(0) @binding(0) var<storage, read> left_data: array<f32>;
+@group(0) @binding(1) var<storage, read> right_data: array<f32>;
 @group(0) @binding(2) var<storage, read_write> disparity_map: array<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
-fn get_pixel(data: ptr<storage, array<u32>, read>, x: i32, y: i32) -> f32 {
+// The dispatch binds f32 tensors (one f32 per pixel); a previous revision
+// declared packed-u8 u32 words here and reinterpreted f32 bits as 4 bytes,
+// producing garbage disparities.
+fn get_pixel(data: ptr<storage, array<f32>, read>, x: i32, y: i32) -> f32 {
     let ix = clamp(x, 0, i32(params.width) - 1);
     let iy = clamp(y, 0, i32(params.height) - 1);
     let idx = u32(iy) * params.width + u32(ix);
-    let combined = (*data)[idx / 4u];
-    return f32((combined >> ((idx % 4u) * 8u)) & 0xFFu);
+    return (*data)[idx];
 }
 
 @compute @workgroup_size(16, 16)
