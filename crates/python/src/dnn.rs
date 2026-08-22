@@ -25,7 +25,13 @@ impl PyDnnNet {
         Ok(Self { inner, runner })
     }
 
-    pub fn forward(&self, image: Vec<u8>, width: usize, height: usize) -> PyResult<Vec<Vec<f32>>> {
+    pub fn forward(
+        &self,
+        py: Python<'_>,
+        image: Vec<u8>,
+        width: usize,
+        height: usize,
+    ) -> PyResult<Vec<Vec<f32>>> {
         let gray =
             image::GrayImage::from_raw(width as u32, height as u32, image).ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid image dimensions")
@@ -38,9 +44,9 @@ impl PyDnnNet {
             .preprocess(&dyn_img, &self.runner)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        let outputs = self
-            .inner
-            .forward(&input_tensor)
+        // Full DNN inference — release the GIL for the compute.
+        let outputs = py
+            .allow_threads(|| self.inner.forward(&input_tensor))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let mut py_outputs = Vec::with_capacity(outputs.len());

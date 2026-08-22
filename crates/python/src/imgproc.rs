@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 /// Inpaint masked regions using the Telea Fast Marching Method.
 #[pyfunction]
 fn inpaint_telea(
+    py: Python<'_>,
     image: Vec<f32>,
     channels: usize,
     height: usize,
@@ -16,7 +17,10 @@ fn inpaint_telea(
     let mask_tensor = CpuTensor::<u8>::from_vec(mask, TensorShape::new(1, height, width))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    let result = cv_photo::inpaint_telea(&img_tensor, &mask_tensor, radius)
+    // Release the GIL across the compute-heavy section so other Python
+    // threads keep running.
+    let result = py
+        .allow_threads(|| cv_photo::inpaint_telea(&img_tensor, &mask_tensor, radius))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
     result
@@ -29,6 +33,7 @@ fn inpaint_telea(
 #[pyfunction]
 #[pyo3(signature = (image, channels, height, width, mask, radius=3.0, iterations=100))]
 fn inpaint_ns(
+    py: Python<'_>,
     image: Vec<f32>,
     channels: usize,
     height: usize,
@@ -42,7 +47,8 @@ fn inpaint_ns(
     let mask_tensor = CpuTensor::<u8>::from_vec(mask, TensorShape::new(1, height, width))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
-    let result = cv_photo::inpaint_ns(&img_tensor, &mask_tensor, radius, iterations)
+    let result = py
+        .allow_threads(|| cv_photo::inpaint_ns(&img_tensor, &mask_tensor, radius, iterations))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
     result
@@ -54,6 +60,7 @@ fn inpaint_ns(
 /// Reinhard tone mapping: maps HDR radiance to LDR [0,1].
 #[pyfunction]
 fn tonemap_reinhard(
+    py: Python<'_>,
     hdr_data: Vec<f64>,
     channels: usize,
     height: usize,
@@ -62,7 +69,8 @@ fn tonemap_reinhard(
 ) -> PyResult<Vec<f32>> {
     let tensor = CpuTensor::<f64>::from_vec(hdr_data, TensorShape::new(channels, height, width))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    let result = cv_photo::tonemap_reinhard(&tensor, gamma)
+    let result = py
+        .allow_threads(|| cv_photo::tonemap_reinhard(&tensor, gamma))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     result
         .as_slice()
@@ -73,6 +81,7 @@ fn tonemap_reinhard(
 /// Mertens exposure fusion: fuse multiple LDR images into one.
 #[pyfunction]
 fn merge_mertens(
+    py: Python<'_>,
     images: Vec<Vec<f32>>,
     channels: usize,
     height: usize,
@@ -84,7 +93,8 @@ fn merge_mertens(
         .collect();
     let tensors =
         tensors.map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    let result = cv_photo::merge_mertens(&tensors)
+    let result = py
+        .allow_threads(|| cv_photo::merge_mertens(&tensors))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     result
         .as_slice()
@@ -95,6 +105,7 @@ fn merge_mertens(
 /// Non-local means denoising for single-channel images.
 #[pyfunction]
 fn fast_nl_means_denoising(
+    py: Python<'_>,
     image: Vec<f32>,
     height: usize,
     width: usize,
@@ -104,7 +115,11 @@ fn fast_nl_means_denoising(
 ) -> PyResult<Vec<f32>> {
     let tensor = CpuTensor::<f32>::from_vec(image, TensorShape::new(1, height, width))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    let result = cv_photo::fast_nl_means_denoising(&tensor, h, template_window, search_window)
+    // O(H·W·template²·search²) — seconds per megapixel; must not hold the GIL.
+    let result = py
+        .allow_threads(|| {
+            cv_photo::fast_nl_means_denoising(&tensor, h, template_window, search_window)
+        })
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     result
         .as_slice()
@@ -115,6 +130,7 @@ fn fast_nl_means_denoising(
 /// Compute the distance transform of a binary image.
 #[pyfunction]
 fn distance_transform(
+    py: Python<'_>,
     binary: Vec<f32>,
     height: usize,
     width: usize,
@@ -133,7 +149,8 @@ fn distance_transform(
     };
     let tensor = CpuTensor::<f32>::from_vec(binary, TensorShape::new(1, height, width))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    let result = cv_imgproc::distance_transform::distance_transform(&tensor, dt)
+    let result = py
+        .allow_threads(|| cv_imgproc::distance_transform::distance_transform(&tensor, dt))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     result
         .as_slice()

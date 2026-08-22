@@ -684,23 +684,39 @@ impl TaskScheduler {
     }
 
     fn get_global_load(&self) -> Arc<HashMap<DeviceId, usize>> {
-        let mut cache = self.global_load_cache.lock();
-        if cache.1.elapsed() > self.load_cache_interval {
-            if let Some(ref coord) = self.coordinator {
-                let local_load = self.get_local_load();
-                if let Err(e) = coord.update_load(&local_load) {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!("Failed to update coordinator load: {}", e);
-                    let _ = e; // suppress unused variable warning when tracing is disabled
-                }
-
-                if let Ok(global) = coord.get_global_load() {
-                    cache.0 = Arc::new(global);
-                }
+        // Fast path: a fresh cached snapshot is just an Arc clone. The cache
+        // lock must NOT be held across coordinator I/O (file writes with
+        // fsync + directory scans) — every task dispatch passes through here
+        // and would serialize behind disk latency.
+        {
+            let cache = self.global_load_cache.lock();
+            if cache.1.elapsed() <= self.load_cache_interval {
+                return cache.0.clone();
             }
-            cache.1 = Instant::now();
         }
-        cache.0.clone() // Arc clone = atomic pointer bump, no heap alloc
+
+        // Slow path: gather local load and query the coordinator WITHOUT the
+        // cache lock held; re-lock only to publish the refreshed snapshot.
+        if let Some(ref coord) = self.coordinator {
+            let local_load = self.get_local_load();
+            if let Err(e) = coord.update_load(&local_load) {
+                #[cfg(feature = "tracing")]
+                tracing::warn!("Failed to update coordinator load: {}", e);
+                let _ = e; // suppress unused variable warning when tracing is disabled
+            }
+
+            if let Ok(global) = coord.get_global_load() {
+                let mut cache = self.global_load_cache.lock();
+                cache.0 = Arc::new(global);
+                cache.1 = Instant::now();
+                return cache.0.clone();
+            }
+        }
+
+        // Coordinator unavailable: refresh only the timestamp under the lock.
+        let mut cache = self.global_load_cache.lock();
+        cache.1 = Instant::now();
+        cache.0.clone()
     }
 
     fn get_local_load(&self) -> HashMap<DeviceId, usize> {
