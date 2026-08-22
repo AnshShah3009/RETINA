@@ -159,7 +159,9 @@ impl SgmMatcher {
         let params = StereoMatchParams {
             method: StereoMatchMethod::SemiGlobalMatching,
             min_disparity: self.min_disparity,
-            num_disparities: self.max_disparity - self.min_disparity,
+            // HAL treats num_disparities as a COUNT over the inclusive range
+            // (matching the CPU path's min..=max iteration).
+            num_disparities: self.max_disparity - self.min_disparity + 1,
             block_size: 1, // SGM is pixel-wise usually
         };
 

@@ -305,37 +305,49 @@ pub fn stereo_rectify_matrices(
     left_extrinsics: &Pose,
     right_extrinsics: &Pose,
 ) -> Result<StereoRectifyMatrices> {
-    let left_rot_mat = left_extrinsics.rotation_matrix();
-    let rel_r = left_rot_mat.transpose() * right_extrinsics.rotation_matrix();
-    let rel_t =
-        left_rot_mat.transpose() * (right_extrinsics.translation - left_extrinsics.translation);
-    let baseline = rel_t.norm();
+    let r_left = left_extrinsics.rotation_matrix();
+    let r_right = right_extrinsics.rotation_matrix();
+
+    // Relative rotation mapping left-camera coordinates to right-camera
+    // coordinates: X_right = M · X_left.
+    let m = r_right * r_left.transpose();
+
+    // Camera centers under the world→camera convention (X_c = R·X_w + t ⇒ C = −Rᵀ·t).
+    let c_left = -r_left.transpose() * &left_extrinsics.translation;
+    let c_right = -r_right.transpose() * &right_extrinsics.translation;
+
+    // Baseline direction (left → right) expressed in each camera's frame.
+    let b_left = r_left * (c_right - c_left);
+    let baseline = b_left.norm();
     if baseline <= 1e-12 {
         return Err(cv_core::Error::AlgorithmError(
             "stereo_rectify_matrices requires non-zero baseline".to_string(),
         ));
     }
 
-    let ex = rel_t / baseline;
-    let helper = if ex[2].abs() < 0.9 {
-        Vector3::<f64>::new(0.0, 0.0, 1.0)
-    } else {
-        Vector3::<f64>::new(0.0, 1.0, 0.0)
-    };
-    let ey = helper.cross(&ex).normalize();
-    let ez = ex.cross(&ey).normalize();
-    let basis = Matrix3::from_columns(&[ex, ey, ez]);
-    let r_rect = basis.transpose();
+    // Rectifying rotation for the left camera: its ROWS form the new basis so
+    // that R₁·b̂ = x̂ (epipole at infinity on the x-axis) while keeping the old
+    // optical direction as the new +z (scene stays in front).
+    let ex_l = b_left / baseline;
+    let k = Vector3::<f64>::new(0.0, 0.0, 1.0);
+    let mut ey_l = k.cross(&ex_l);
+    if ey_l.norm() < 1e-6 {
+        // Baseline nearly parallel to the optical axis; fall back to +y.
+        ey_l = Vector3::<f64>::new(0.0, 1.0, 0.0).cross(&ex_l);
+    }
+    let ey_l = ey_l.normalize();
+    let ez_l = ex_l.cross(&ey_l).normalize();
+    let r1 = Matrix3::from_columns(&[ex_l, ey_l, ez_l]).transpose();
 
-    let r1 = r_rect;
-    let r2 = r_rect * rel_r;
+    // Right camera shares the same world-frame axes expressed through M:
+    // O_right = R₂·R_right = R₁·Mᵀ·R_right = R₁·R_left = O_left ⇒ parallel axes.
+    let r2 = r1 * m.transpose();
 
     let fx = 0.5 * (left_intrinsics.fx + right_intrinsics.fx);
     let fy = 0.5 * (left_intrinsics.fy + right_intrinsics.fy);
     let cx1 = 0.5 * (left_intrinsics.cx + right_intrinsics.cx);
     let cx2 = cx1;
     let cy = 0.5 * (left_intrinsics.cy + right_intrinsics.cy);
-    let tx = -fx * baseline;
 
     let p1 = Matrix3x4::new(
         fx, 0.0, cx1, 0.0, //
@@ -343,19 +355,23 @@ pub fn stereo_rectify_matrices(
         0.0, 0.0, 1.0, 0.0,
     );
     let p2 = Matrix3x4::new(
-        fx, 0.0, cx2, tx, //
+        fx, 0.0, cx2, -fx * baseline, //
         0.0, fy, cy, 0.0, //
         0.0, 0.0, 1.0, 0.0,
     );
 
+    // Disparity-to-depth: Z = fx·baseline / d. Following OpenCV,
+    //   Tx = P2[0][3]/P2[0][0] (physical baseline, negative),
+    //   Q(3,2) = −1/Tx,  Q(3,3) = (cx1−cx2)/Tx.
+    let tx_physical = -fx * baseline / fx;
     let mut q = Matrix4::<f64>::zeros();
     q[(0, 0)] = 1.0;
     q[(0, 3)] = -cx1;
     q[(1, 1)] = 1.0;
     q[(1, 3)] = -cy;
     q[(2, 3)] = fx;
-    q[(3, 2)] = -1.0 / tx;
-    q[(3, 3)] = (cx1 - cx2) / tx;
+    q[(3, 2)] = -1.0 / tx_physical;
+    q[(3, 3)] = (cx1 - cx2) / tx_physical;
 
     Ok(StereoRectifyMatrices { r1, r2, p1, p2, q })
 }
@@ -409,3 +425,103 @@ pub fn fisheye_stereo_rectify(
         q: result.q,
     })
 }
+
+#[cfg(test)]
+mod rectify_tests {
+    use super::*;
+    use nalgebra::{Rotation3, Unit};
+
+    #[test]
+    fn test_rectify_scanline_alignment_and_q_depth() {
+        // Non-trivial poses: both cameras rotated and translated arbitrarily.
+        let intr_l = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        let intr_r = CameraIntrinsics::new(505.0, 502.0, 315.0, 242.0, 640, 480);
+
+        let r_l = Rotation3::from_axis_angle(
+            &Unit::new_normalize(Vector3::new(0.1, 0.05, 1.0)),
+            0.15,
+        )
+        .into_inner();
+        let r_r = Rotation3::from_axis_angle(
+            &Unit::new_normalize(Vector3::new(-0.07, 0.12, 1.0)),
+            -0.22,
+        )
+        .into_inner();
+        let left = Pose::new(r_l, Vector3::new(0.02, -0.01, 0.05));
+        let right = Pose::new(r_r, Vector3::new(-0.18, 0.03, 0.06));
+
+        let m = stereo_rectify_matrices(&intr_l, &intr_r, &left, &right)
+            .expect("rectification must succeed");
+
+        // World-frame orientations of the rectified cameras must be identical
+        // (parallel axes ⇒ epipolar lines horizontal on common scanlines).
+        let o_left = m.r1 * left.rotation_matrix();
+        let o_right = m.r2 * right.rotation_matrix();
+        let axis_err = rotation_vector_from_matrix(&(o_left.transpose() * o_right)).norm();
+        assert!(axis_err < 1e-9, "rectified axes differ by {}", axis_err);
+
+        // Baseline must map to +x in both rectified frames.
+        let c_l = -(left.rotation_matrix().transpose() * left.translation);
+        let c_r = -(right.rotation_matrix().transpose() * right.translation);
+        let b_w = c_r - c_l;
+        let b_l = left.rotation_matrix() * b_w;
+        let b_r = right.rotation_matrix() * b_w;
+        assert!((m.r1 * b_l)[1].abs() < 1e-9 && (m.r1 * b_l)[2].abs() < 1e-9);
+        assert!((m.r2 * b_r)[1].abs() < 1e-9 && (m.r2 * b_r)[2].abs() < 1e-9);
+        assert!((m.r1 * b_l)[0] > 0.0);
+
+        // Q must reproject a synthetic 3D point through its disparity exactly.
+        let p_world = Point3::new(0.4, 0.25, 3.0);
+        // Rectified frame coordinates. Both P1 and P2 take coordinates in
+        // the COMMON rectified frame (anchored at the left camera); P2's tx
+        // encodes the baseline.
+        let pr_l = m.r1 * left.rotation_matrix() * (p_world - c_l);
+
+        let pl = m.p1 * nalgebra::Vector4::new(pr_l.x, pr_l.y, pr_l.z, 1.0);
+        let pr = m.p2 * nalgebra::Vector4::new(pr_l.x, pr_l.y, pr_l.z, 1.0);
+        let ul = pl.x / pl.z;
+        let ur = pr.x / pr.z;
+        let vl = pl.y / pl.z;
+        let vr = pr.y / pr.z;
+        // Scanline alignment after rectification:
+        assert!(
+            (vl - vr).abs() < 1e-6,
+            "scanline misalignment: {} vs {}",
+            vl,
+            vr
+        );
+
+        let disparity = ul - ur;
+        assert!(disparity > 0.0, "left disparity must be positive");
+
+        let hq = m.q * nalgebra::Vector4::new(ul, vl, disparity, 1.0);
+        let rec = Point3::new(hq.x / hq.w, hq.y / hq.w, hq.z / hq.w);
+        // Depth via Q must equal true Z (fx·B/d), not fx²·B/d.
+        let baseline = b_w.norm();
+        let expected_z = {
+            let f = 0.5 * (intr_l.fx + intr_r.fx);
+            f * baseline / disparity
+        };
+        assert!(
+            (rec.z - expected_z).abs() / expected_z < 1e-6,
+            "Q depth {} != expected {}",
+            rec.z,
+            expected_z
+        );
+    }
+
+    fn rotation_vector_from_matrix(r: &nalgebra::Matrix3<f64>) -> nalgebra::Vector3<f64> {
+        let trace = r[(0, 0)] + r[(1, 1)] + r[(2, 2)];
+        let angle = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos();
+        let denom = 2.0 * angle.sin();
+        if denom.abs() < 1e-10 {
+            return nalgebra::Vector3::zeros();
+        }
+        nalgebra::Vector3::new(
+            (r[(2, 1)] - r[(1, 2)]) / denom * angle,
+            (r[(0, 2)] - r[(2, 0)]) / denom * angle,
+            (r[(1, 0)] - r[(0, 1)]) / denom * angle,
+        )
+    }
+}
+

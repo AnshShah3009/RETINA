@@ -42,11 +42,20 @@ pub fn triangulate_points(
         })?;
         let xh = vt.row(3);
         let w = xh[(0, 3)];
-        if w.abs() < 1e-12 {
-            out.push(Point3::new(0.0, 0.0, 0.0));
+        if !w.is_finite() || w.abs() < 1e-12 {
+            // Degenerate (point at infinity): emit NaN rather than a fake
+            // origin that would poison downstream cheirality voting.
+            out.push(Point3::new(f64::NAN, f64::NAN, f64::NAN));
             continue;
         }
-        out.push(Point3::new(xh[(0, 0)] / w, xh[(0, 1)] / w, xh[(0, 2)] / w));
+        let px = xh[(0, 0)] / w;
+        let py = xh[(0, 1)] / w;
+        let pz = xh[(0, 2)] / w;
+        if [px, py, pz].iter().any(|v| !v.is_finite()) {
+            out.push(Point3::new(f64::NAN, f64::NAN, f64::NAN));
+            continue;
+        }
+        out.push(Point3::new(px, py, pz));
     }
 
     Ok(out)
@@ -147,9 +156,16 @@ pub fn recover_pose_from_essential(
             cand.translation[2],
         );
 
-        let tri = triangulate_points(&p1, &p2, &norm1, &norm2)?;
+        // A candidate whose triangulation degenerates must be skipped, not
+        // abort the whole pose recovery.
+        let Ok(tri) = triangulate_points(&p1, &p2, &norm1, &norm2) else {
+            continue;
+        };
         let mut score = 0i32;
         for x in &tri {
+            if !x.z.is_finite() {
+                continue;
+            }
             let z1 = x.z;
             let x2 = cand.rotation * x.coords + cand.translation;
             let z2 = x2[2];
