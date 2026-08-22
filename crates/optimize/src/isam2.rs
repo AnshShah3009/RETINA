@@ -944,18 +944,23 @@ impl Isam2 {
 
     pub fn get_all_poses(&self) -> Vec<(usize, nalgebra::Vector3<f64>)> {
         let solver = self.solver.read().unwrap();
-        let mut result = Vec::new();
-        for id in 0..1_000_000u64 {
-            if let Some(var) = solver.estimate(&Key(id)) {
-                match var {
-                    Variable::Vector(v) if v.len() >= 3 => {
-                        result.push((id as usize, nalgebra::Vector3::new(v[0], v[1], v[2])))
-                    }
-                    Variable::Pose3(iso) => result.push((id as usize, iso.translation.vector)),
-                    _ => {}
+        // Plain small-u64 keys are pose ids (symbol-keyed and ≥1M keys are
+        // landmarks/other variables). Iterate the stored keys directly — a
+        // previous revision probed all 10^6 candidate ids with HashMap hits.
+        let mut result: Vec<_> = solver
+            .theta
+            .values
+            .iter()
+            .filter(|(k, _)| k.0 == k.index() && k.index() < 1_000_000)
+            .filter_map(|(k, var)| match var {
+                Variable::Vector(v) if v.len() >= 3 => {
+                    Some((k.index() as usize, nalgebra::Vector3::new(v[0], v[1], v[2])))
                 }
-            }
-        }
+                Variable::Pose3(iso) => Some((k.index() as usize, iso.translation.vector)),
+                _ => None,
+            })
+            .collect();
+        result.sort_by_key(|(id, _)| *id);
         result
     }
 

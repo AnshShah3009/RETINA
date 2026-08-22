@@ -87,6 +87,11 @@ pub fn init_undistort_rectify_map(
                 let original_norm = r_inv * rectified_norm;
 
                 if original_norm[2].abs() <= 1e-12 {
+                    // Point on/behind the plane of the rectified camera:
+                    // mark invalid (-1,-1) rather than letting remap sample
+                    // pixel (0,0).
+                    row_x[x as usize] = -1.0;
+                    row_y[x as usize] = -1.0;
                     continue;
                 }
                 let xn = original_norm[0] / original_norm[2];
@@ -139,6 +144,11 @@ pub fn fisheye_init_undistort_rectify_map(
                 let original_norm = r_inv * rectified_norm;
 
                 if original_norm[2].abs() <= 1e-12 {
+                    // Point on/behind the plane of the rectified camera:
+                    // mark invalid (-1,-1) rather than letting remap sample
+                    // pixel (0,0).
+                    row_x[x as usize] = -1.0;
+                    row_y[x as usize] = -1.0;
                     continue;
                 }
                 let xn = original_norm[0] / original_norm[2];

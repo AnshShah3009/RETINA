@@ -192,8 +192,10 @@ impl GpuStereoMatcher {
         let params = StereoParamsGPU {
             width,
             height,
-            min_disparity: min_disparity as u32,
-            max_disparity: max_disparity as u32,
+            // The WGSL shader declares these as i32; keep the Rust side
+            // signed so negative disparity ranges don't rely on wraparound.
+            min_disparity,
+            max_disparity,
             block_size: self.block_size(),
         };
 
@@ -446,8 +448,8 @@ fn extract_rows(image: &GrayImage, start_row: u32, end_row: u32) -> Result<GrayI
 struct StereoParamsGPU {
     width: u32,
     height: u32,
-    min_disparity: u32,
-    max_disparity: u32,
+    min_disparity: i32,
+    max_disparity: i32,
     block_size: u32,
 }
 

@@ -15,9 +15,11 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     // Parse header
     let mut in_header = true;
     let mut format = String::new();
-    let mut has_colors = false;
-    let mut has_normals = false;
-    let mut num_vertices = 0;
+    let mut num_vertices = 0usize;
+    // Vertex properties in declared order — PLY allows any property order,
+    // so data must be indexed by name rather than assumed position.
+    let mut props: Vec<String> = Vec::new();
+    let mut in_vertex_element = false;
 
     while in_header {
         let line = lines
@@ -32,17 +34,25 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
                 .nth(1)
                 .ok_or_else(|| Error::ParseError("Invalid format line".to_string()))?
                 .to_string();
-        } else if line.starts_with("element vertex ") {
-            num_vertices = line
+        } else if line.starts_with("element ") {
+            // A new element switches the property scope; only vertex
+            // properties are relevant here.
+            in_vertex_element = line.starts_with("element vertex");
+            if in_vertex_element {
+                num_vertices = line
+                    .split_whitespace()
+                    .nth(2)
+                    .ok_or_else(|| Error::ParseError("Invalid vertex count".to_string()))?
+                    .parse()
+                    .map_err(|_| Error::ParseError("Invalid vertex count number".to_string()))?;
+            }
+        } else if in_vertex_element && line.starts_with("property ") {
+            let name = line
                 .split_whitespace()
-                .nth(2)
-                .ok_or_else(|| Error::ParseError("Invalid vertex count".to_string()))?
-                .parse()
-                .map_err(|_| Error::ParseError("Invalid vertex count number".to_string()))?;
-        } else if line.contains("property") && line.contains("red") {
-            has_colors = true;
-        } else if line.contains("property") && line.contains("nx") {
-            has_normals = true;
+                .last()
+                .ok_or_else(|| Error::ParseError("Invalid property line".to_string()))?
+                .to_string();
+            props.push(name);
         } else if line == "end_header" {
             in_header = false;
         }
@@ -54,6 +64,27 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
             format
         )));
     }
+
+    let pos_of = |names: &[&str]| -> Option<usize> {
+        props.iter().position(|p| names.contains(&p.as_str()))
+    };
+
+    let xi = pos_of(&["x"]).ok_or_else(|| Error::ParseError("PLY: missing x property".to_string()))?;
+    let yi = pos_of(&["y"]).ok_or_else(|| Error::ParseError("PLY: missing y property".to_string()))?;
+    let zi = pos_of(&["z"]).ok_or_else(|| Error::ParseError("PLY: missing z property".to_string()))?;
+
+    let nxi = pos_of(&["nx", "normal_x"]);
+    let nyi = pos_of(&["ny", "normal_y"]);
+    let nzi = pos_of(&["nz", "normal_z"]);
+    let has_normals = nxi.is_some() && nyi.is_some() && nzi.is_some();
+
+    // Colors either as packed rgb/rgba float or as separate channels.
+    let rgb_i = pos_of(&["rgb", "rgba"]);
+    let ri = pos_of(&["r", "red"]);
+    let gi = pos_of(&["g", "green"]);
+    let bi = pos_of(&["b", "blue"]);
+    let has_colors =
+        rgb_i.is_some() || (ri.is_some() && gi.is_some() && bi.is_some());
 
     // Parse data
     let mut points = Vec::with_capacity(num_vertices);
@@ -67,6 +98,7 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     } else {
         None
     };
+    let width = props.len();
 
     for _ in 0..num_vertices {
         let line = lines
@@ -81,41 +113,56 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        if values.len() < 3 {
+        if values.len() < width.max(3) {
             return Err(Error::InvalidInput(
                 "Not enough values for vertex".to_string(),
             ));
         }
 
-        points.push(Point3::new(values[0], values[1], values[2]));
+        points.push(Point3::new(values[xi], values[yi], values[zi]));
 
-        let mut idx = 3;
-
-        if has_normals && values.len() >= idx + 3 {
+        if has_normals {
             normals.as_mut().unwrap().push(Vector3::new(
-                values[idx],
-                values[idx + 1],
-                values[idx + 2],
+                values[nxi.unwrap()],
+                values[nyi.unwrap()],
+                values[nzi.unwrap()],
             ));
-            idx += 3;
         }
 
-        if has_colors && values.len() >= idx + 3 {
-            let r = values[idx] / 255.0;
-            let g = values[idx + 1] / 255.0;
-            let b = values[idx + 2] / 255.0;
+        if let Some(packed_idx) = rgb_i {
+            // PLY rgb is stored as a float whose bit pattern packs u8 channels.
+            let packed: u32 = values[packed_idx].to_bits();
+            let r = ((packed >> 16) & 0xFF) as f32 / 255.0;
+            let g = ((packed >> 8) & 0xFF) as f32 / 255.0;
+            let b = (packed & 0xFF) as f32 / 255.0;
             colors.as_mut().unwrap().push(Point3::new(r, g, b));
+        } else if has_colors {
+            let r = values[ri.unwrap()];
+            let g = values[gi.unwrap()];
+            let b = values[bi.unwrap()];
+            // Normalize if stored as 0-255.
+            let norm = |v: f32| if v > 1.0 { v / 255.0 } else { v };
+            colors
+                .as_mut()
+                .unwrap()
+                .push(Point3::new(norm(r), norm(g), norm(b)));
         }
     }
 
     let mut pc = PointCloud::new(points);
 
+    // Attach optional attributes only when complete — an empty or partial
+    // vector would desynchronize downstream consumers that index by point.
     if let Some(c) = colors {
-        pc.colors = Some(c);
+        if c.len() == pc.len() {
+            pc.colors = Some(c);
+        }
     }
 
     if let Some(n) = normals {
-        pc.normals = Some(n);
+        if n.len() == pc.len() {
+            pc.normals = Some(n);
+        }
     }
 
     Ok(pc)
