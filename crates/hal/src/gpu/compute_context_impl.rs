@@ -1256,13 +1256,13 @@ impl ComputeContext for GpuContext {
                 }
             }
 
-            if points.len() % 2 != 0 {
-                return Err(crate::Error::InvalidInput(
-                    "Optical flow points array must have even length".into(),
-                ));
-            }
+            // Safety: T == f32 was verified by the TypeId check above, so
+            // [[T; 2]] reinterprets losslessly as [[f32; 2]] — all points are
+            // forwarded (a previous revision divided len by 2, silently
+            // dropping half the tracks).
+            debug_assert_eq!(TypeId::of::<T>(), TypeId::of::<f32>());
             let points_f32: &[[f32; 2]] = unsafe {
-                std::slice::from_raw_parts(points.as_ptr() as *const [f32; 2], points.len() / 2)
+                std::slice::from_raw_parts(points.as_ptr() as *const [f32; 2], points.len())
             };
             let results = crate::gpu_kernels::optical_flow::lucas_kanade(
                 self,

@@ -61,9 +61,13 @@ pub fn gaussian_kernel_1d<T: Float>(sigma: T, size: usize) -> Vec<T> {
     let radius = size / 2;
     let mut sum = T::ZERO;
     let two = T::from_f32(2.0);
+    // Guard degenerate sigma: sigma == 0 would produce 0/0 = NaN at the
+    // center tap and an all-NaN kernel (OpenCV derives sigma from ksize
+    // when sigma <= 0; a unit impulse is the equivalent here).
+    let sigma_eff = if sigma > T::ZERO { sigma } else { T::ONE };
     for i in 0..size {
         let x = T::from_f32(i as f32 - radius as f32);
-        kernel[i] = (-(x * x) / (two * sigma * sigma)).exp();
+        kernel[i] = (-(x * x) / (two * sigma_eff * sigma_eff)).exp();
         sum += kernel[i];
     }
     for i in 0..size {

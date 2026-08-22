@@ -25,6 +25,14 @@ pub fn bilateral_filter<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zer
     sigma_color: T,
     sigma_space: T,
 ) -> Result<crate::GpuTensor<T>> {
+    // Only the f32 WGSL shader exists; reject other dtypes instead of
+    // panicking on the downcasts below.
+    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
+        return Err(crate::Error::NotSupported(
+            "Bilateral GPU kernel only supports f32".into(),
+        ));
+    }
+
     use crate::storage::GpuStorage;
     let sigma_color_f = sigma_color.to_f32();
     let sigma_space_f = sigma_space.to_f32();

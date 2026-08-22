@@ -40,7 +40,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let voxel_y = i32(floor(p.y / params.voxel_size));
     let voxel_z = i32(floor(p.z / params.voxel_size));
     
-    let hash = u32((voxel_x * 73856093 ^ voxel_y * 19349663 ^ voxel_z * 83492791) % 16777216);
+    // Unsigned domain: negative voxel coordinates must not wrap the bucket index.
+    let hash = ((u32(voxel_x) *% 73856093u) ^ (u32(voxel_y) *% 19349663u) ^ (u32(voxel_z) *% 83492791u)) % 16777216u;
     let slot = atomicAdd(&output_count[0], 1u);
     
     voxel_indices[idx] = slot;
@@ -88,7 +89,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let count_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Voxel Count"),
         size: 4,
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
 
@@ -264,7 +265,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let cell_y = i32(floor(p.y / params.cell_size));
     let cell_z = i32(floor(p.z / params.cell_size));
     
-    let hash = u32((cell_x * 73856093 ^ cell_y * 19349663 ^ cell_z * 83492791) % i32(params.num_buckets));
+    // Hash in the unsigned domain: negative coordinates would otherwise
+    // make the signed modulo negative and u32() would wrap far past
+    // num_buckets (out-of-bounds atomicAdd / dropped correspondences).
+    let hash = ((u32(cell_x) *% 73856093u) ^ (u32(cell_y) *% 19349663u) ^ (u32(cell_z) *% 83492791u)) % params.num_buckets;
     let bucket_idx = atomicAdd(&hash_counts[hash], 1u);
     
     if (bucket_idx < params.max_per_bucket) {
@@ -348,7 +352,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
         for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
             for (var dz: i32 = -1; dz <= 1; dz = dz + 1) {
-                let hash = u32((i32((cell_x + dx) * 73856093) ^ i32((cell_y + dy) * 19349663) ^ i32((cell_z + dz) * 83492791)) % i32(params.num_buckets));
+                let cx = cell_x + dx; let cy = cell_y + dy; let cz = cell_z + dz;
+                let hash = ((u32(cx) *% 73856093u) ^ (u32(cy) *% 19349663u) ^ (u32(cz) *% 83492791u)) % params.num_buckets;
                 let count = min(get_count(hash), params.max_per_bucket);
                 
                 for (var j = 0u; j < count; j = j + 1u) {

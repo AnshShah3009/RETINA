@@ -19,6 +19,13 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
     input: &GpuTensor<T>,
     conv: ColorConversion,
 ) -> Result<GpuTensor<T>> {
+    // Only the f32 WGSL shader exists; reject other dtypes instead of
+    // panicking on the downcasts below.
+    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
+        return Err(crate::Error::NotSupported(
+            "Color convert GPU kernel only supports f32".into(),
+        ));
+    }
     use crate::storage::GpuStorage;
     let (h, w) = input.shape.hw();
     let num_pixels = h * w;

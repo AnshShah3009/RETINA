@@ -179,9 +179,23 @@ impl FisheyeDistortion {
                 + 5.0 * self.k2 * theta4
                 + 7.0 * self.k3 * theta6
                 + 9.0 * self.k4 * theta8;
-            theta -= f / df;
+            // Guard the derivative: strong distortion coefficients can drive
+            // df toward zero, producing inf/NaN steps that corrupt every
+            // subsequent unprojection.
+            if !df.is_finite() || df.abs() < 1e-12 || !f.is_finite() {
+                break;
+            }
+            let step = f / df;
+            if !step.is_finite() {
+                break;
+            }
+            theta -= step;
         }
 
+        // Non-finite theta would poison tan() and the unprojected ray.
+        if !theta.is_finite() {
+            return (x, y);
+        }
         let r = theta.tan();
         let scale = r / r_d;
         (x * scale, y * scale)

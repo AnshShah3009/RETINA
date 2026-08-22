@@ -305,6 +305,24 @@ mod tests {
             assert_eq!(result.shape.width, 1);
             assert_eq!(result.shape.height, 2);
             assert_eq!(result.shape.channels, 3);
+
+            // Pixel 0 is pure red (255,0,0); pixel 1 pure green (0,255,0).
+            // The tensor stores CHW planes: index(c, h, w).
+            assert_eq!(result.index(0, 0, 0).unwrap(), 1.0);
+            assert_eq!(result.index(1, 0, 0).unwrap(), 0.0);
+            assert_eq!(result.index(2, 0, 0).unwrap(), 0.0);
+            assert_eq!(result.index(0, 1, 0).unwrap(), 0.0);
+            assert_eq!(result.index(1, 1, 0).unwrap(), 1.0);
+            assert_eq!(result.index(2, 1, 0).unwrap(), 0.0);
+        }
+
+        #[test]
+        fn test_from_image_rgb_rejects_ragged_input() {
+            // Not divisible by 3 and wrong total length must error, not panic.
+            let data = vec![255u8, 0, 0, 0];
+            assert!(Tensor::<f32>::from_image_rgb(&data, 2, 1).is_err());
+            let data = vec![255u8; 3];
+            assert!(Tensor::<f32>::from_image_rgb(&data, 2, 1).is_err());
         }
     }
 

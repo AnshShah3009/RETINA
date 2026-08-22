@@ -300,8 +300,15 @@ impl<T: Clone + Copy + Default + fmt::Debug + 'static, S: crate::storage::Storag
             for v in s.iter_mut() {
                 *v = T::one();
             }
+            Ok(t)
+        } else {
+            // Non-CPU storage cannot be filled through the mutable-slice API;
+            // silently returning zeros masquerading as ones would poison
+            // downstream math.
+            Err(crate::Error::DeviceError(
+                "Tensor::ones is only supported for CPU-backed storage".into(),
+            ))
         }
-        Ok(t)
     }
 }
 
@@ -480,11 +487,25 @@ impl<T: Float + 'static, S: crate::storage::StorageFactory<T>> Tensor<T, S> {
     }
 
     pub fn from_image_rgb(data: &[u8], width: usize, height: usize) -> crate::Result<Self> {
-        let mut float_data = Vec::with_capacity(3 * width * height);
-        for chunk in data.chunks(3) {
-            float_data.push(T::from_f32(chunk[0] as f32 / 255.0));
-            float_data.push(T::from_f32(chunk[1] as f32 / 255.0));
-            float_data.push(T::from_f32(chunk[2] as f32 / 255.0));
+        if data.len() != 3 * width * height {
+            return Err(crate::Error::InvalidInput(format!(
+                "from_image_rgb: expected {} bytes for {}x{} RGB, got {}",
+                3 * width * height,
+                width,
+                height,
+                data.len()
+            )));
+        }
+        // Deinterleave HWC pixel data into the CHW plane layout that
+        // TensorShape::new(3, h, w) documents (index = c*(H*W) + y*W + x).
+        let mut float_data = vec![T::ZERO; 3 * width * height];
+        for (i, chunk) in data.chunks_exact(3).enumerate() {
+            let px = i % width;
+            let py = i / width;
+            let plane = width * height;
+            float_data[py * width + px] = T::from_f32(chunk[0] as f32 / 255.0);
+            float_data[plane + py * width + px] = T::from_f32(chunk[1] as f32 / 255.0);
+            float_data[2 * plane + py * width + px] = T::from_f32(chunk[2] as f32 / 255.0);
         }
         Self::from_vec(float_data, TensorShape::new(3, height, width))
     }

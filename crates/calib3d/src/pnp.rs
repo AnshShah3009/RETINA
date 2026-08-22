@@ -6,10 +6,15 @@ use crate::Result;
 use cv_core::{CameraIntrinsics, CameraModel, Pose};
 use cv_hal;
 use cv_runtime::RuntimeRunner;
-use nalgebra::{DMatrix, Matrix3, Matrix3x4, Point2, Point3, Rotation3, Vector3};
+use nalgebra::{DMatrix, Matrix3, Matrix3x4, Matrix4, Point2, Point3, Rotation3, Vector3};
 use rayon::prelude::*;
 
 /// Solves the Perspective-n-Point problem using Direct Linear Transform (DLT)
+///
+/// Object points are Hartley-normalized before assembly. Planar inputs (the
+/// typical chessboard/calibration-target case) are detected automatically and
+/// solved through a homography decomposition instead — plain DLT is rank
+/// deficient there and returns an arbitrary mixture of solutions.
 pub fn solve_pnp_dlt(
     object_points: &[Point3<f64>],
     image_points: &[Point2<f64>],
@@ -27,89 +32,319 @@ pub fn solve_pnp_dlt(
     }
 
     let k_inv = intrinsics.inverse_matrix();
-    let n = object_points.len();
-    let mut a = DMatrix::<f64>::zeros(2 * n, 12);
 
-    for (i, (obj, pix)) in object_points.iter().zip(image_points.iter()).enumerate() {
-        let x = k_inv * Vector3::new(pix.x, pix.y, 1.0);
-        let xn = x[0] / x[2];
-        let yn = x[1] / x[2];
-        let xw = obj.x;
-        let yw = obj.y;
-        let zw = obj.z;
+    // Normalized image coordinates (K^-1 applied once up front).
+    let norm_image: Vec<(f64, f64)> = image_points
+        .iter()
+        .map(|pix| {
+            let x = k_inv * Vector3::new(pix.x, pix.y, 1.0);
+            (x[0] / x[2], x[1] / x[2])
+        })
+        .collect();
 
-        let r0 = 2 * i;
-        let r1 = r0 + 1;
-
-        a[(r0, 0)] = xw;
-        a[(r0, 1)] = yw;
-        a[(r0, 2)] = zw;
-        a[(r0, 3)] = 1.0;
-        a[(r0, 8)] = -xn * xw;
-        a[(r0, 9)] = -xn * yw;
-        a[(r0, 10)] = -xn * zw;
-        a[(r0, 11)] = -xn;
-
-        a[(r1, 4)] = xw;
-        a[(r1, 5)] = yw;
-        a[(r1, 6)] = zw;
-        a[(r1, 7)] = 1.0;
-        a[(r1, 8)] = -yn * xw;
-        a[(r1, 9)] = -yn * yw;
-        a[(r1, 10)] = -yn * zw;
-        a[(r1, 11)] = -yn;
+    // ---- Planarity detection ----
+    let n_pts = object_points.len();
+    let centroid = object_points.iter().fold(Vector3::<f64>::zeros(), |acc, p| {
+        acc + p.coords
+    }) / n_pts as f64;
+    let mut cov = Matrix3::<f64>::zeros();
+    for p in object_points {
+        let d = p.coords - centroid;
+        cov += d * d.transpose();
     }
+    let cov_svd = cov.svd(true, true);
+    let svs = cov_svd.singular_values;
+    let planar = svs[0] > 1e-12 && svs[2] <= 1e-6 * svs[0];
 
-    let svd = a.svd(true, true);
-    let vt = svd
-        .v_t
-        .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed in solve_pnp_dlt".to_string()))?;
-    let p = vt.row(vt.nrows() - 1);
+    let pose = if planar {
+        // ---- Homography-based pose for planar targets ----
+        // Plane basis from the covariance eigenvectors.
+        let u_mat = cov_svd.u.ok_or_else(|| {
+            cv_core::Error::AlgorithmError("SVD failed in planarity analysis".to_string())
+        })?;
+        let u_axis = u_mat.column(0);
+        let n_axis = u_mat.column(2);
+        let v_axis = n_axis.cross(&u_axis);
 
-    let mut pmat = Matrix3x4::<f64>::zeros();
-    for r in 0..3 {
-        for c in 0..4 {
-            pmat[(r, c)] = p[(0, r * 4 + c)];
+        let src: Vec<(f64, f64)> = object_points
+            .iter()
+            .map(|p| {
+                let d = p.coords - centroid;
+                (d.dot(&u_axis), d.dot(&v_axis))
+            })
+            .collect();
+        let (t_src, src_n) = hartley_2d(&src);
+
+        // Homography DLT on normalized 2D -> normalized image.
+        let mut h_sys = DMatrix::<f64>::zeros(2 * n_pts, 9);
+        for (i, &(xw, yw)) in src_n.iter().enumerate() {
+            let (xn, yn) = norm_image[i];
+            let r0 = 2 * i;
+            let r1 = r0 + 1;
+            h_sys[(r0, 0)] = xw;
+            h_sys[(r0, 1)] = yw;
+            h_sys[(r0, 2)] = 1.0;
+            h_sys[(r0, 6)] = -xn * xw;
+            h_sys[(r0, 7)] = -xn * yw;
+            h_sys[(r0, 8)] = -xn;
+            h_sys[(r1, 3)] = xw;
+            h_sys[(r1, 4)] = yw;
+            h_sys[(r1, 5)] = 1.0;
+            h_sys[(r1, 6)] = -yn * xw;
+            h_sys[(r1, 7)] = -yn * yw;
+            h_sys[(r1, 8)] = -yn;
         }
-    }
+        let h_svd = h_sys.svd(true, true);
+        let h_vt = h_svd.v_t.ok_or_else(|| {
+            cv_core::Error::AlgorithmError("SVD failed in homography DLT".to_string())
+        })?;
+        let hv = h_vt.row(h_vt.nrows() - 1);
+        let mut h_norm = Matrix3::<f64>::zeros();
+        for r in 0..3 {
+            for c in 0..3 {
+                h_norm[(r, c)] = hv[r * 3 + c];
+            }
+        }
+        if h_norm.norm().abs() < 1e-15 {
+            return Err(cv_core::Error::AlgorithmError(
+                "Degenerate homography in solve_pnp_dlt".to_string(),
+            ));
+        }
 
-    let m = Matrix3::new(
-        pmat[(0, 0)],
-        pmat[(0, 1)],
-        pmat[(0, 2)],
-        pmat[(1, 0)],
-        pmat[(1, 1)],
-        pmat[(1, 2)],
-        pmat[(2, 0)],
-        pmat[(2, 1)],
-        pmat[(2, 2)],
-    );
-    let mut t = Vector3::new(pmat[(0, 3)], pmat[(1, 3)], pmat[(2, 3)]);
+        // Undo the source-side Hartley transform: H = H_norm · T_src.
+        let t_src_m = Matrix3::new(
+            t_src[0], t_src[1], t_src[2], t_src[3], t_src[4], t_src[5], t_src[6], t_src[7],
+            t_src[8],
+        );
+        let h = h_norm * t_src_m;
 
-    let svd_m = m.svd(true, true);
-    let u = svd_m.u.ok_or_else(|| {
-        cv_core::Error::AlgorithmError("SVD U missing in solve_pnp_dlt".to_string())
-    })?;
-    let vt_m = svd_m.v_t.ok_or_else(|| {
-        cv_core::Error::AlgorithmError("SVD V^T missing in solve_pnp_dlt".to_string())
-    })?;
+        // Malis/Vargas decomposition: H ≈ [r1 r2 t].
+        let h1 = h.column(0);
+        let h2 = h.column(1);
+        let h3 = h.column(2);
+        let norm1 = h1.norm();
+        if norm1 < 1e-12 {
+            return Err(cv_core::Error::AlgorithmError(
+                "Degenerate homography columns in solve_pnp_dlt".to_string(),
+            ));
+        }
+        let mut lambda = 1.0 / norm1;
+        let mut r1 = lambda * h1;
+        let mut r2 = lambda * h2;
+        let mut r3 = r1.cross(&r2);
+        let mut rr = Matrix3::from_columns(&[r1, r2, r3]);
+        if rr.determinant() < 0.0 {
+            lambda = -lambda;
+            r1 = lambda * h1;
+            r2 = lambda * h2;
+            r3 = r1.cross(&r2);
+            rr = Matrix3::from_columns(&[r1, r2, r3]);
+        }
+        // Orthonormalize (removes noise-induced drift from pure rotation).
+        let rr_svd = rr.svd(true, true);
+        let ru = rr_svd.u.ok_or_else(|| {
+            cv_core::Error::AlgorithmError("SVD failed in pose extraction".to_string())
+        })?;
+        let rv = rr_svd.v_t.ok_or_else(|| {
+            cv_core::Error::AlgorithmError("SVD failed in pose extraction".to_string())
+        })?;
+        let mut rot = ru * rv;
+        if rot.determinant() < 0.0 {
+            // Flip the least-significant direction and redo.
+            let u_fixed = {
+                let mut u2 = ru.clone();
+                for c in 0..3 {
+                    u2[(c, 2)] = -u2[(c, 2)];
+                }
+                u2
+            };
+            rot = u_fixed * rv;
+        }
+        let trans = lambda * h3;
 
-    let mut r = u * vt_m;
-    let scale =
-        (svd_m.singular_values[0] + svd_m.singular_values[1] + svd_m.singular_values[2]) / 3.0;
-    if scale.abs() < 1e-12 {
-        return Err(cv_core::Error::AlgorithmError(
-            "Degenerate solve_pnp_dlt scale".to_string(),
-        ));
-    }
-    t /= scale;
+        // The in-plane PCA basis sign is arbitrary; each sign combination
+        // yields a different impostor pose (a 180° rotation about some axis)
+        // that leaves depths unchanged and defeats cheirality checks.
+        // Disambiguate by direct normalized-coordinate reprojection error
+        // over all four det(+1) sign-flip variants.
+        let mut best_rot = rot;
+        let mut best_err = f64::INFINITY;
+        let signs: [[f64; 3]; 4] = [
+            [1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+        ];
+        for sg in signs {
+            let d = Matrix3::new(sg[0], 0.0, 0.0, 0.0, sg[1], 0.0, 0.0, 0.0, sg[2]);
+            let cand = rot * d;
+            let mut acc = 0.0;
+            for (obj, &(xn, yn)) in object_points.iter().zip(norm_image.iter()) {
+                let pc = cand * obj.coords + trans;
+                if !pc[2].is_finite() || pc[2].abs() < 1e-12 {
+                    acc = f64::INFINITY;
+                    break;
+                }
+                acc += (pc[0] / pc[2] - xn).powi(2) + (pc[1] / pc[2] - yn).powi(2);
+            }
+            if acc < best_err {
+                best_err = acc;
+                best_rot = cand;
+            }
+        }
 
-    if r.determinant() < 0.0 {
-        r = -r;
-        t = -t;
-    }
+        Pose::new(best_rot, trans)
+    } else {
+        // ---- General DLT with Hartley normalization of object points ----
+        let mean = centroid;
+        let rms = (object_points
+            .iter()
+            .map(|p| (p.coords - mean).norm())
+            .sum::<f64>()
+            / n_pts as f64)
+            .max(1e-12);
+        let scale = (3.0f64).sqrt() / rms;
 
-    Ok(Pose::new(r, t))
+        let mut a = DMatrix::<f64>::zeros(2 * n_pts, 12);
+        for (i, obj) in object_points.iter().enumerate() {
+            let d = obj.coords - mean;
+            let xw = d[0] * scale;
+            let yw = d[1] * scale;
+            let zw = d[2] * scale;
+            let (xn, yn) = norm_image[i];
+
+            let r0 = 2 * i;
+            let r1 = r0 + 1;
+
+            a[(r0, 0)] = xw;
+            a[(r0, 1)] = yw;
+            a[(r0, 2)] = zw;
+            a[(r0, 3)] = 1.0;
+            a[(r0, 8)] = -xn * xw;
+            a[(r0, 9)] = -xn * yw;
+            a[(r0, 10)] = -xn * zw;
+            a[(r0, 11)] = -xn;
+
+            a[(r1, 4)] = xw;
+            a[(r1, 5)] = yw;
+            a[(r1, 6)] = zw;
+            a[(r1, 7)] = 1.0;
+            a[(r1, 8)] = -yn * xw;
+            a[(r1, 9)] = -yn * yw;
+            a[(r1, 10)] = -yn * zw;
+            a[(r1, 11)] = -yn;
+        }
+
+        let svd = a.svd(true, true);
+        let vt = svd.v_t.ok_or_else(|| {
+            cv_core::Error::AlgorithmError("SVD failed in solve_pnp_dlt".to_string())
+        })?;
+        let p = vt.row(vt.nrows() - 1);
+
+        let mut pmat = Matrix3x4::<f64>::zeros();
+        for r in 0..3 {
+            for c in 0..4 {
+                pmat[(r, c)] = p[(0, r * 4 + c)];
+            }
+        }
+
+        // Undo normalization: P = P′ · T  where  x_norm = T · x_world
+        // (translate by centroid, scale by s).
+        let t_fwd = Matrix4::new(
+            scale,
+            0.0,
+            0.0,
+            -scale * mean[0],
+            0.0,
+            scale,
+            0.0,
+            -scale * mean[1],
+            0.0,
+            0.0,
+            scale,
+            -scale * mean[2],
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        let mut full = Matrix4::<f64>::zeros();
+        for r in 0..3 {
+            for c in 0..4 {
+                full[(r, c)] = pmat[(r, c)];
+            }
+        }
+        full[(3, 3)] = 1.0;
+        let p_denorm = full * t_fwd;
+        for r in 0..3 {
+            for c in 0..4 {
+                pmat[(r, c)] = p_denorm[(r, c)];
+            }
+        }
+
+        let m = Matrix3::new(
+            pmat[(0, 0)],
+            pmat[(0, 1)],
+            pmat[(0, 2)],
+            pmat[(1, 0)],
+            pmat[(1, 1)],
+            pmat[(1, 2)],
+            pmat[(2, 0)],
+            pmat[(2, 1)],
+            pmat[(2, 2)],
+        );
+        let mut t = Vector3::new(pmat[(0, 3)], pmat[(1, 3)], pmat[(2, 3)]);
+
+        let svd_m = m.svd(true, true);
+        let u = svd_m.u.ok_or_else(|| {
+            cv_core::Error::AlgorithmError("SVD U missing in solve_pnp_dlt".to_string())
+        })?;
+        let vt_m = svd_m.v_t.ok_or_else(|| {
+            cv_core::Error::AlgorithmError("SVD V^T missing in solve_pnp_dlt".to_string())
+        })?;
+
+        let mut r = u * vt_m;
+        let scale_m =
+            (svd_m.singular_values[0] + svd_m.singular_values[1] + svd_m.singular_values[2]) / 3.0;
+        if scale_m.abs() < 1e-12 {
+            return Err(cv_core::Error::AlgorithmError(
+                "Degenerate solve_pnp_dlt scale".to_string(),
+            ));
+        }
+        t /= scale_m;
+
+        if r.determinant() < 0.0 {
+            r = -r;
+            t = -t;
+        }
+        Pose::new(r, t)
+    };
+
+    Ok(pose)
+}
+
+/// Hartley 2D normalization: translate to centroid, scale so mean distance is sqrt(2).
+fn hartley_2d(pts: &[(f64, f64)]) -> ([f64; 9], Vec<(f64, f64)>) {
+    let n = pts.len().max(1) as f64;
+    let mean_x = pts.iter().map(|p| p.0).sum::<f64>() / n;
+    let mean_y = pts.iter().map(|p| p.1).sum::<f64>() / n;
+    let rms = (pts
+        .iter()
+        .map(|p| {
+            let dx = p.0 - mean_x;
+            let dy = p.1 - mean_y;
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum::<f64>()
+        / n)
+        .max(1e-12);
+    let s = (2.0f64).sqrt() / rms;
+    (
+        [s, 0.0, -s * mean_x, 0.0, s, -s * mean_y, 0.0, 0.0, 1.0],
+        pts.iter()
+            .map(|p| ((p.0 - mean_x) * s, (p.1 - mean_y) * s))
+            .collect(),
+    )
 }
 
 /// Solves the PnP problem using RANSAC
@@ -691,3 +926,95 @@ fn sample_unique_indices(n: usize, k: usize, seed: u64) -> Vec<usize> {
     }
     out
 }
+
+#[cfg(test)]
+mod dlt_planar_tests {
+    use super::*;
+
+    fn intrinsics() -> CameraIntrinsics {
+        CameraIntrinsics::new(800.0, 810.0, 320.0, 240.0, 640, 480)
+    }
+
+    #[test]
+    fn test_dlt_planar_target_low_reprojection_error() {
+        // Regression: for planar targets (z=0 chessboard-style), plain DLT is
+        // rank-deficient and previously returned poses with ~1000 px error.
+        let intr = intrinsics();
+        let r_true = Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(Vector3::new(1.0, 2.0, 3.0)), 0.09).into_inner();
+        let t_true = Vector3::new(0.1, -0.05, 2.0);
+
+        // 7x7 grid of planar object points at z = 0.
+        let object_points: Vec<Point3<f64>> = (0..49)
+            .map(|i| {
+                Point3::new(
+                    (i % 7) as f64 * 0.03 - 0.09,
+                    (i / 7) as f64 * 0.03 - 0.09,
+                    0.0,
+                )
+            })
+            .collect();
+
+        let image_points: Vec<Point2<f64>> = object_points
+            .iter()
+            .map(|p| {
+                let pc = r_true * p.coords + t_true;
+                let pr = intr.project(&Point3::from(pc));
+                Point2::new(pr.x, pr.y)
+            })
+            .collect();
+
+        let pose = solve_pnp_dlt(&object_points, &image_points, &intr).unwrap();
+        drop(t_true);
+
+        // Reprojection error with the recovered pose must be tiny.
+        let r_rec = pose.rotation_matrix();
+        let mut err_sq = 0.0;
+        for (obj, img) in object_points.iter().zip(image_points.iter()) {
+            let pc = r_rec * obj.coords + pose.translation;
+            if pc[2] <= 0.0 {
+                panic!("recovered pose places point behind camera");
+            }
+            let pr = intr.project(&Point3::from(pc));
+            err_sq += (pr.x - img.x).powi(2) + (pr.y - img.y).powi(2);
+        }
+        let rms = (err_sq / object_points.len() as f64).sqrt();
+        assert!(rms < 1e-3, "planar DLT reprojection RMS too large: {}", rms);
+    }
+
+    #[test]
+    fn test_dlt_non_planar_low_reprojection_error() {
+        let intr = intrinsics();
+        let r_true = Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(Vector3::new(-2.0, 1.0, 0.5)), 0.19).into_inner();
+        let t_true = Vector3::new(0.2, 0.1, 2.5);
+
+        // Non-planar cloud: two offset grids.
+        let mut object_points: Vec<Point3<f64>> = Vec::new();
+        for i in 0..36 {
+            let x = (i % 6) as f64 * 0.04 - 0.1;
+            let y = (i / 6) as f64 * 0.04 - 0.1;
+            let z = if i % 2 == 0 { 0.0 } else { 0.08 };
+            object_points.push(Point3::new(x, y, z));
+        }
+
+        let image_points: Vec<Point2<f64>> = object_points
+            .iter()
+            .map(|p| {
+                let pc = r_true * p.coords + t_true;
+                let pr = intr.project(&Point3::from(pc));
+                Point2::new(pr.x, pr.y)
+            })
+            .collect();
+
+        let pose = solve_pnp_dlt(&object_points, &image_points, &intr).unwrap();
+        let r_rec = pose.rotation_matrix();
+        let mut err_sq = 0.0;
+        for (obj, img) in object_points.iter().zip(image_points.iter()) {
+            let pc = r_rec * obj.coords + pose.translation;
+            let pr = intr.project(&Point3::from(pc));
+            err_sq += (pr.x - img.x).powi(2) + (pr.y - img.y).powi(2);
+        }
+        let rms = (err_sq / object_points.len() as f64).sqrt();
+        assert!(rms < 1e-3, "non-planar DLT reprojection RMS too large: {}", rms);
+    }
+}
+
