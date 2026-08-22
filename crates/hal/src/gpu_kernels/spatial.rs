@@ -20,7 +20,8 @@ pub fn voxel_downsample(
 struct VoxelParams {
     voxel_size: f32,
     num_points: u32,
-    padding: vec2<u32>,
+    table_size: u32,   // power of two, >= 2 * num_points
+    padding: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_points: array<vec3<f32>>;
@@ -28,6 +29,23 @@ struct VoxelParams {
 @group(0) @binding(2) var<storage, read_write> voxel_indices: array<u32>;
 @group(0) @binding(3) var<storage, read_write> output_points: array<vec3<f32>>;
 @group(0) @binding(4) var<storage, read_write> output_count: array<atomic<u32>>;
+@group(0) @binding(5) var<storage, read_write> claim_table: array<atomic<u32>>;
+
+const EMPTY: u32 = 0xFFFFFFFFu;
+
+fn voxel_of(p: vec3<f32>) -> vec3<i32> {
+    return vec3<i32>(
+        i32(floor(p.x / params.voxel_size)),
+        i32(floor(p.y / params.voxel_size)),
+        i32(floor(p.z / params.voxel_size)),
+    );
+}
+
+fn voxel_hash(v: vec3<i32>) -> u32 {
+    // Unsigned domain: negative coordinates must not wrap the bucket index.
+    return ((u32(v.x) *% 73856093u) ^ (u32(v.y) *% 19349663u) ^ (u32(v.z) *% 83492791u))
+        & (params.table_size - 1u);
+}
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -35,19 +53,31 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (idx >= params.num_points) { return; }
 
     let p = input_points[idx];
-    
-    let voxel_x = i32(floor(p.x / params.voxel_size));
-    let voxel_y = i32(floor(p.y / params.voxel_size));
-    let voxel_z = i32(floor(p.z / params.voxel_size));
-    
-    // Unsigned domain: negative voxel coordinates must not wrap the bucket index.
-    let hash = ((u32(voxel_x) *% 73856093u) ^ (u32(voxel_y) *% 19349663u) ^ (u32(voxel_z) *% 83492791u)) % 16777216u;
-    let slot = atomicAdd(&output_count[0], 1u);
-    
-    voxel_indices[idx] = slot;
-    
-    if (slot < params.num_points) {
-        output_points[slot] = p;
+    let my_voxel = voxel_of(p);
+
+    // Open-addressed keep-first-per-voxel claiming. The first point to claim
+    // a slot for a voxel becomes its representative and is emitted; all other
+    // points in the same voxel are dropped.
+    var slot = voxel_hash(my_voxel);
+    loop {
+        let res = atomicCompareExchangeWeak(&claim_table[slot], EMPTY, idx);
+        if (res.exchanged) {
+            // We claimed an empty slot: this point represents its voxel.
+            let out_slot = atomicAdd(&output_count[0], 1u);
+            if (out_slot < params.num_points) {
+                output_points[out_slot] = p;
+            }
+            voxel_indices[idx] = out_slot;
+            break;
+        }
+
+        // Slot held by another point: same voxel -> duplicate, else probe on.
+        let holder = atomicLoad(&claim_table[slot]);
+        if (holder != EMPTY && voxel_of(input_points[holder]) == my_voxel) {
+            voxel_indices[idx] = 0xFFFFFFFFu; // dropped duplicate
+            break;
+        }
+        slot = (slot + 1u) & (params.table_size - 1u);
     }
 }
 "#;
@@ -57,8 +87,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     struct VoxelParams {
         voxel_size: f32,
         num_points: u32,
-        padding: [u32; 2],
+        table_size: u32,
+        padding: u32,
     }
+
+    let table_size = (num_points as u32)
+        .max(2)
+        .saturating_mul(2)
+        .next_power_of_two()
+        .min(1 << 22);
 
     let params_buf = ctx
         .device
@@ -67,7 +104,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             contents: bytemuck::bytes_of(&VoxelParams {
                 voxel_size,
                 num_points: num_points as u32,
-                padding: [0; 2],
+                table_size,
+                padding: 0,
             }),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -92,6 +130,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+
+    let claim_table = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Voxel Claim Table"),
+        size: 4 * table_size as u64,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    // Initialize every slot to the EMPTY sentinel (0xFFFFFFFF); freshly
+    // created buffers contain arbitrary bits.
+    let empty_fill = vec![0xFFu8; 4 * table_size as usize];
+    ctx.queue.write_buffer(&claim_table, 0, &empty_fill);
 
     let pipeline = ctx.create_compute_pipeline(voxel_shader, "main");
 
@@ -118,6 +167,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             wgpu::BindGroupEntry {
                 binding: 4,
                 resource: count_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: claim_table.as_entire_binding(),
             },
         ],
     });
