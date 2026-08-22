@@ -270,8 +270,19 @@ async fn execute_pipeline(
                     .filter_map(|&id| allocator.get_buffer_data(id))
                     .collect();
 
-                let input_slices: Vec<&[u8]> = input_data.iter().map(|v| v.as_slice()).collect();
-                let results = op(&input_slices);
+                // Arbitrary user closures can take seconds; run them on the
+                // blocking pool so async worker threads (timers, I/O) are not
+                // starved.
+                let op = op.clone();
+                let results = tokio::task::spawn_blocking(move || {
+                    let input_slices: Vec<&[u8]> =
+                        input_data.iter().map(|v| v.as_slice()).collect();
+                    op(&input_slices)
+                })
+                .await
+                .map_err(|e| {
+                    Error::RuntimeError(format!("CPU op task panicked or was cancelled: {}", e))
+                })?;
 
                 for (i, &output_id) in outputs.iter().enumerate() {
                     if i < results.len() {
@@ -290,7 +301,13 @@ async fn execute_pipeline(
                 if let crate::device_registry::BackendContext::Gpu(gpu_ctx) =
                     device_runtime.context()
                 {
-                    gpu_ctx.wait_idle()?;
+                    // Blocking device poll — keep it off the async workers.
+                    let ctx_clone = gpu_ctx.clone();
+                    tokio::task::spawn_blocking(move || ctx_clone.wait_idle())
+                        .await
+                        .map_err(|e| {
+                            Error::RuntimeError(format!("wait_idle task failed: {}", e))
+                        })??;
                 }
 
                 let _ = event_tx.send(ExecutionEvent::NodeCompleted {
