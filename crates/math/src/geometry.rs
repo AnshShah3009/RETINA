@@ -119,6 +119,9 @@ pub fn buffer(polygon: &Polygon<f64>, distance: f64) -> geo::MultiPolygon<f64> {
 pub fn vectorized_iou(boxes1: &[Rect], boxes2: &[Rect]) -> Array2<f32> {
     let mut ious = Array2::zeros((boxes1.len(), boxes2.len()));
     let n2 = boxes2.len();
+    if n2 == 0 || boxes1.is_empty() {
+        return ious;
+    }
 
     // Use raw data pointer or simple indexing if Array2 is not being cooperative with par_iter
     let ious_raw = ious.as_slice_mut().expect("ndarray should be contiguous");
@@ -159,6 +162,9 @@ pub fn polygon_iou(p1: &Polygon<f64>, p2: &Polygon<f64>) -> f64 {
 pub fn vectorized_polygon_iou(polys1: &[Polygon<f64>], polys2: &[Polygon<f64>]) -> Array2<f64> {
     let mut ious = Array2::zeros((polys1.len(), polys2.len()));
     let n2 = polys2.len();
+    if n2 == 0 || polys1.is_empty() {
+        return ious;
+    }
 
     let ious_raw = ious.as_slice_mut().expect("ndarray should be contiguous");
 

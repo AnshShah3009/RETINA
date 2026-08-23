@@ -18,6 +18,11 @@ pub fn median(data: &[f64]) -> f64 {
     if data.is_empty() {
         return f64::NAN;
     }
+    // NaN previously panicked the sort; NaN propagates instead (matches f64
+    // semantics elsewhere in this crate).
+    if data.iter().any(|v| v.is_nan()) {
+        return f64::NAN;
+    }
     let mut sorted = data.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = sorted.len();
@@ -44,7 +49,10 @@ pub fn std_dev(data: &[f64]) -> f64 {
 
 /// Percentile (p in [0, 100]). Uses linear interpolation between nearest ranks.
 pub fn percentile(data: &[f64], p: f64) -> f64 {
-    if data.is_empty() {
+    if data.is_empty() || p.is_nan() {
+        return f64::NAN;
+    }
+    if data.iter().any(|v| v.is_nan()) {
         return f64::NAN;
     }
     let mut sorted = data.to_vec();

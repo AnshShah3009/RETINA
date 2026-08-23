@@ -66,7 +66,7 @@ impl Default for CharucoParameters {
         Self {
             camera_matrix: None,
             dist_coeffs: None,
-            min_markers: 2,
+            min_markers: 1,
             try_refine_markers: false,
             check_markers: true,
         }

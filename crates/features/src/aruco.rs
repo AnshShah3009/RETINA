@@ -198,7 +198,21 @@ impl ArucoDetector {
         // 4-5. Decode each candidate
         let mut detections = Vec::new();
         for c in &candidates {
-            let bits = sample_grid_bits(gray, w, c.min_x, c.min_y, c.max_x, c.max_y, grid);
+            // Decode from raw grayscale using a per-candidate threshold
+            // (min..max midpoint of the bounding box): robust to overall
+            // illumination shifts, unlike both a fixed <128 cutoff and the
+            // adaptive map (whose interior cells classify as white when the
+            // window sits entirely inside a black region).
+            let bits = sample_grid_bits(
+                gray,
+                w,
+                c.min_x,
+                c.min_y,
+                c.max_x,
+                c.max_y,
+                grid,
+                Some((c.min_x, c.min_y, c.max_x, c.max_y)),
+            );
             if !border_is_black(&bits, grid) {
                 continue;
             }
@@ -468,7 +482,22 @@ fn sample_grid_bits(
     max_x: usize,
     max_y: usize,
     grid: usize,
+    norm_box: Option<(usize, usize, usize, usize)>,
 ) -> Vec<u8> {
+    // Per-candidate normalization threshold: midpoint of the min/max gray
+    // level over the given box (defaults to the sampling box itself).
+    let (nx0, ny0, nx1, ny1) = norm_box.unwrap_or((min_x, min_y, max_x, max_y));
+    let mut lo = 255u8;
+    let mut hi = 0u8;
+    for y in ny0..=ny1.min(stride.saturating_sub(1)) {
+        for x in nx0..=nx1 {
+            if let Some(&v) = gray.get(y * stride + x) {
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+    }
+    let thresh = ((lo as u32 + hi as u32) / 2) as u8;
     let bw = (max_x - min_x + 1) as f64;
     let bh = (max_y - min_y + 1) as f64;
     let mut bits = vec![0u8; grid * grid];
@@ -486,7 +515,7 @@ fn sample_grid_bits(
             for y in sy0..sy1 {
                 for x in sx0..sx1 {
                     total += 1;
-                    if gray[y * stride + x] < 128 {
+                    if gray.get(y * stride + x).copied().unwrap_or(255) < thresh {
                         black += 1;
                     }
                 }
@@ -990,3 +1019,5 @@ mod tests {
         assert_eq!(codes_6.len(), 250);
     }
 }
+
+
