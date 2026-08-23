@@ -77,8 +77,13 @@ fn trace_boundary(data: &[u8], w: i32, h: i32, sx: i32, sy: i32) -> Vec<(i32, i3
     let mut current = (sx, sy);
     let mut prev_dir = 4usize; // Start as if we came from W.
     let start = current;
-    let start_prev_dir = prev_dir;
     let max_steps = (w as usize * h as usize).saturating_mul(8).max(32);
+    // Terminate on the SECOND arrival at the start pixel regardless of entry
+    // direction. The previous criterion (same entry direction required) never
+    // fired for structures whose trace immediately doubles back — e.g. two
+    // adjacent pixels alternate A→B→A forever, producing a multi-million
+    // point garbage contour.
+    let mut returned_to_start = 0usize;
 
     for _ in 0..max_steps {
         contour.push(current);
@@ -96,10 +101,16 @@ fn trace_boundary(data: &[u8], w: i32, h: i32, sx: i32, sy: i32) -> Vec<(i32, i3
             }
         }
 
-        let Some(next) = found else { break };
-
-        if next == start && prev_dir == start_prev_dir && contour.len() > 1 {
+        let Some(next) = found else {
             break;
+        };
+
+        if next == start && contour.len() > 1 {
+            returned_to_start += 1;
+            if returned_to_start >= 1 {
+                // Loop closed: the start pixel is already the first element.
+                break;
+            }
         }
         current = next;
     }
@@ -481,9 +492,14 @@ where
             let idx = (y * w + x) as usize;
             let fxy = img[idx];
 
-            // Determine border type
+            // Determine border type.
+            // Hole borders may only START on UNLABELED foreground (fxy == 1):
+            // after an outer border is traced its pixels carry nbd >= 2, and
+            // every row's rightmost such pixel would otherwise re-trigger a
+            // full "hole" re-trace of that same outer boundary, emitting ~H
+            // phantom hole contours per solid rectangle.
             let is_outer = fxy == 1 && (x == 0 || img[idx - 1] == 0);
-            let is_hole = fxy >= 1 && (x == w - 1 || img[idx + 1] == 0);
+            let is_hole = fxy == 1 && (x == w - 1 || img[idx + 1] == 0);
 
             if !is_outer && !is_hole {
                 if fxy != 0 && fxy != 1 {
@@ -882,5 +898,72 @@ mod tests {
         assert!(contours.len() >= 2); // outer border + hole
         let holes: Vec<_> = contours.iter().filter(|c| c.is_hole).collect();
         assert!(!holes.is_empty(), "Should detect at least one hole contour");
+    }
+}
+
+#[cfg(test)]
+mod contour_regression_tests {
+    use super::*;
+    use image::{GrayImage, Luma};
+
+    #[test]
+    fn test_solid_rectangle_yields_single_outer_no_phantom_holes() {
+        use cv_core::TensorShape;
+        // Regression: every row's rightmost border pixel previously started a
+        // phantom "hole" re-trace of the outer boundary.
+        let mut data = vec![0.0f32; 20 * 20];
+        for y in 5..15 {
+            for x in 5..15 {
+                data[y * 20 + x] = 1.0;
+            }
+        }
+        let img = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, 20, 20)).unwrap();
+        let contours = find_contours(&img).expect("find_contours");
+        let outer: Vec<_> = contours.iter().filter(|c| !c.is_hole).collect();
+        let holes: Vec<_> = contours.iter().filter(|c| c.is_hole).collect();
+        assert_eq!(outer.len(), 1, "expected exactly one outer contour");
+        assert!(holes.is_empty(), "solid rectangle must have no holes");
+    }
+
+    #[test]
+    fn test_rectangle_with_hole_detected() {
+        use cv_core::TensorShape;
+        let mut data = vec![0.0f32; 21 * 21];
+        for y in 3..18 {
+            for x in 3..18 {
+                data[y * 21 + x] = 1.0;
+            }
+        }
+        for y in 7..13 {
+            for x in 7..13 {
+                data[y * 21 + x] = 0.0;
+            }
+        }
+        let img = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, 21, 21)).unwrap();
+        let contours = find_contours(&img).expect("find_contours");
+        assert!(
+            contours.iter().any(|c| c.is_hole),
+            "inner hole border must be detected"
+        );
+    }
+
+    #[test]
+    fn test_two_adjacent_pixels_terminate_immediately() {
+        use cv_core::TensorShape;
+        // Regression: A->B->A ping-pong never met the old termination
+        // condition and ran to max_steps producing a giant garbage contour.
+        let mut data = vec![0.0f32; 8 * 8];
+        data[3 * 8 + 3] = 1.0;
+        data[3 * 8 + 4] = 1.0;
+        let img = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, 8, 8)).unwrap();
+        let contours = find_contours(&img).unwrap();
+        let total_points: usize = contours.iter().map(|c| c.points.len()).sum();
+        // A 2-pixel blob's border is tiny; the old bug produced millions of
+        // alternating A/B points.
+        assert!(
+            total_points <= 6,
+            "2-pixel blob boundary must be tiny, got {}",
+            total_points
+        );
     }
 }

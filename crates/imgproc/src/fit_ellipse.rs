@@ -27,6 +27,62 @@ impl EllipseResult {
     }
 }
 
+
+/// Conic vector <-> symmetric quad-form matrix (packed halves: xy, xz, yz
+/// entries carry factor 2 in the polynomial).
+fn conic_to_mat(conic: &[f64; 6]) -> Matrix3<f64> {
+    Matrix3::new(
+        conic[0], conic[1] / 2.0, conic[3] / 2.0,
+        conic[1] / 2.0, conic[2], conic[4] / 2.0,
+        conic[3] / 2.0, conic[4] / 2.0, conic[5],
+    )
+}
+
+fn mat_to_conic(m: &Matrix3<f64>) -> [f64; 6] {
+    [
+        m[(0, 0)],
+        2.0 * m[(0, 1)],
+        m[(1, 1)],
+        2.0 * m[(0, 2)],
+        2.0 * m[(1, 2)],
+        m[(2, 2)],
+    ]
+}
+
+/// Denormalize a conic fitted on Hartley-normalized points back to the
+/// original coordinate system.
+fn denormalize_conic(t_norm: &Matrix3<f64>, conic_norm: &[f64; 6]) -> [f64; 6] {
+    let mn = conic_to_mat(conic_norm);
+    let mo = t_norm.transpose() * mn * t_norm;
+    mat_to_conic(&mo)
+}
+
+/// Hartley point normalization: returns (T, normalized_points) with
+/// centroid at origin and mean radius sqrt(2). T maps ORIGINAL -> normalized.
+fn hartley_normalize(points: &[Point2<f64>]) -> (Matrix3<f64>, Vec<Point2<f64>>) {
+    let n = points.len() as f64;
+    let mx = points.iter().map(|p| p.x).sum::<f64>() / n;
+    let my = points.iter().map(|p| p.y).sum::<f64>() / n;
+    let rms = (points
+        .iter()
+        .map(|p| {
+            let dx = p.x - mx;
+            let dy = p.y - my;
+            (dx * dx + dy * dy).sqrt()
+        })
+        .sum::<f64>()
+        / n)
+        .max(1e-12);
+    let sc = std::f64::consts::SQRT_2 / rms;
+
+    let t = Matrix3::new(sc, 0.0, -sc * mx, 0.0, sc, -sc * my, 0.0, 0.0, 1.0);
+    let out = points
+        .iter()
+        .map(|p| Point2::new((p.x - mx) * sc, (p.y - my) * sc))
+        .collect();
+    (t, out)
+}
+
 /// Standard ellipse fitting — tries Direct first, falls back to AMS
 pub fn fit_ellipse(points: &[Point2<f64>]) -> Option<EllipseResult> {
     fit_ellipse_direct(points).or_else(|| fit_ellipse_ams(points))
@@ -42,6 +98,9 @@ pub fn fit_ellipse_ams(points: &[Point2<f64>]) -> Option<EllipseResult> {
         return fit_least_squares_circle(points);
     }
 
+    let (t_norm, pts_norm) = hartley_normalize(points);
+    let points = &pts_norm;
+
     let mut dtd = DMatrix::zeros(6, 6);
     let mut dxtdx_plus_dytdy = DMatrix::zeros(6, 6);
 
@@ -56,7 +115,8 @@ pub fn fit_ellipse_ams(points: &[Point2<f64>]) -> Option<EllipseResult> {
         dxtdx_plus_dytdy += &dx * dx.transpose() + &dy * dy.transpose();
     }
 
-    let conic = solve_ams_eigen(&dtd, &dxtdx_plus_dytdy)?;
+    let conic_norm = solve_ams_eigen(&dtd, &dxtdx_plus_dytdy)?;
+    let conic = denormalize_conic(&t_norm, &conic_norm);
     conic_to_ellipse_result(&conic)
 }
 
@@ -68,6 +128,12 @@ pub fn fit_ellipse_direct(points: &[Point2<f64>]) -> Option<EllipseResult> {
     if n < 6 {
         return fit_least_squares_circle(points);
     }
+
+    // Hartley normalization: centroid at origin, RMS distance sqrt(2).
+    // Pixel-scale coordinates make S entries ~1e8+ and destroy the small
+    // positive eigenvalue the method depends on.
+    let (t_norm, pts_norm) = hartley_normalize(points);
+    let points = &pts_norm;
 
     // Build design matrix D (n x 6)
     let mut d = DMatrix::zeros(n, 6);
@@ -93,26 +159,51 @@ pub fn fit_ellipse_direct(points: &[Point2<f64>]) -> Option<EllipseResult> {
     c[(1, 1)] = -1.0;
 
     // Solve for conic via eigenvalue decomposition
-    let conic = solve_direct_eigen(&s, &c)?;
+    let conic_norm = solve_direct_eigen(&s, &c)?;
+    let conic = denormalize_conic(&t_norm, &conic_norm);
     conic_to_ellipse_result(&conic)
 }
 
 /// Solve the AMS generalized eigenvalue problem
 fn solve_ams_eigen(a: &DMatrix<f64>, b: &DMatrix<f64>) -> Option<[f64; 6]> {
-    // Solve the generalized eigenvalue problem A*u = λ*B*u
-    // Find the smallest positive eigenvalue
-    let inv_b = b.clone().try_inverse()?;
-    let m = inv_b * a;
-    let eig = m.symmetric_eigen();
-    let mut eigenvalues: Vec<(f64, usize)> = eig.eigenvalues.iter().enumerate()
-        .filter(|(_, &e)| e > 1e-10)
-        .map(|(i, &e)| (e, i))
-        .collect();
-    eigenvalues.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let b = b.clone();
+    // Solve the generalized eigenvalue problem A*u = λ*B*u.
+    // A and B are both symmetric and B is SPD (a sum of outer products), so
+    // reduce to an ordinary SYMMETRIC problem via Cholesky: with B = L·Lᵀ,
+    // C = L⁻¹AL⁻ᵀ shares the eigenvalues and u = L⁻ᵀz recovers vectors.
+    // (B⁻¹A itself is NOT symmetric — symmetric_eigen on it solves the wrong
+    // problem.)
+    let n_dim = b.nrows();
+    let chol_b = b.cholesky()?;
+    // Column j of L⁻ᵀ is the solution of B x = e_j (since B = L·Lᵀ ⇒
+    // B⁻¹ = L⁻ᵀL⁻¹ is symmetric, so B⁻¹'s columns are L⁻ᵀ's columns).
+    let mut linv_t = nalgebra::DMatrix::<f64>::zeros(n_dim, n_dim);
+    for j in 0..n_dim {
+        let mut e = nalgebra::DVector::<f64>::zeros(n_dim);
+        e[j] = 1.0;
+        let col = chol_b.solve(&e);
+        linv_t.set_column(j, &col);
+    }
 
-    for &(_, best_idx) in &eigenvalues {
-        let v = eig.eigenvectors.column(best_idx);
-        let conic: [f64; 6] = [v[0], v[1], v[2], v[3], v[4], v[5]];
+    let c_sym = {
+        let tmp = &linv_t.transpose() * a;
+        &tmp * &linv_t
+    };
+    // Symmetrize away rounding drift.
+    let c_sym = (&c_sym + c_sym.transpose()) * 0.5;
+
+    let eig = c_sym.symmetric_eigen();
+    let mut order: Vec<usize> = (0..eig.eigenvalues.len()).collect();
+    order.sort_by(|&i, &j| {
+        eig.eigenvalues[j]
+            .partial_cmp(&eig.eigenvalues[i])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for &idx in &order {
+        let z = eig.eigenvectors.column(idx);
+        let u = &linv_t * z; // u = L⁻ᵀ z
+        let conic: [f64; 6] = [u[0], u[1], u[2], u[3], u[4], u[5]];
         if 4.0 * conic[0] * conic[2] - conic[1] * conic[1] > 0.0 {
             return Some(conic);
         }
@@ -132,15 +223,22 @@ fn solve_direct_eigen(s: &Matrix6<f64>, c: &Matrix6<f64>) -> Option<[f64; 6]> {
     let s22_inv = s22.try_inverse()?;
     let s12t = s12.transpose();
     let tmp = s11 - &s12 * &s22_inv * s12t;
-    let eig = (c1.try_inverse()? * tmp).symmetric_eigen();
+    // C1⁻¹·S' is NOT symmetric; symmetric_eigen previously solved the wrong
+    // problem. Solve the 3x3 eigenproblem exactly via its characteristic
+    // cubic (trigonometric form) and pick the LARGEST positive eigenvalue.
+    let m_red = c1.try_inverse()? * tmp;
 
-    // Find the eigenvector with the largest positive eigenvalue that gives a valid ellipse
+    let pairs = eigenpairs_3x3(&m_red);
+
     let mut found = None;
-    for i in 0..3 {
-        let eval = eig.eigenvalues[i];
-        if eval > 1e-6 {
-            let a1 = eig.eigenvectors.column(i);
-            let a2 = -&s22_inv * s12t * &a1;
+    // No sign gate: for circle-like data every reduced eigenvalue can be
+    // negative while the largest still carries the valid ellipse conic.
+    // The 4ac−b²>0 condition below is the real filter.
+    for &(_eval, ref evec) in pairs.iter() {
+        let a1 = evec;
+        {
+            let a1 = a1;
+            let a2 = -&s22_inv * s12t * a1;
 
             let mut conic = [0.0f64; 6];
             for j in 0..3 {
@@ -162,30 +260,111 @@ fn solve_direct_eigen(s: &Matrix6<f64>, c: &Matrix6<f64>) -> Option<[f64; 6]> {
     found
 }
 
+/// Real eigen-decomposition of a general 3x3 matrix: closed-form cubic roots
+/// plus cross-product null-space eigenvectors. Returns pairs sorted by
+/// descending eigenvalue; complex-conjugate pairs are skipped.
+fn eigenpairs_3x3(m: &Matrix3<f64>) -> Vec<(f64, nalgebra::Vector3<f64>)> {
+    use std::f64::consts::PI;
+
+    let tr = m.trace();
+    // Sum of principal 2x2 minors:
+    let b = m[(1, 1)] * m[(2, 2)] + m[(0, 0)] * m[(2, 2)] + m[(0, 0)] * m[(1, 1)]
+        - m[(1, 2)] * m[(2, 1)]
+        - m[(0, 2)] * m[(2, 0)]
+        - m[(0, 1)] * m[(1, 0)];
+    let det = m.determinant();
+
+    // Depressed cubic t³ + P t + Q = 0 for λ = t + tr/3.
+    let p = b - tr * tr / 3.0;
+    let q = -tr * tr * tr / 13.5 + tr * b / 3.0 - det;
+
+    let disc = -4.0 * p * p * p - 27.0 * q * q;
+    let mut out = Vec::with_capacity(3);
+
+    // Near-zero discriminant (relative to the term magnitudes) sits at the
+    // repeated-root boundary where rounding flips its sign; clamp into the
+    // trig branch there instead of dropping to the single-root Cardano path
+    // and losing the coincident real roots.
+    let disc_tol = 1e-9_f64
+        * (4.0 * p.abs().powi(3) + 27.0 * q.abs()).max(1.0);
+    if disc >= -disc_tol && p.abs() > 1e-15 {
+        // Three real roots (trigonometric form).
+        let mm = 2.0 * (-p / 3.0).sqrt();
+        let theta = (3.0 * q / (p * mm))
+            .clamp(-1.0, 1.0)
+            .acos()
+            / 3.0;
+        for k in 0..3usize {
+            let lam = mm * (theta - 2.0 * PI * k as f64 / 3.0).cos() + tr / 3.0;
+            if let Some(v) = eigvec_for_lambda(m, lam) {
+                out.push((lam, v));
+            }
+        }
+    } else {
+        // One real root (Cardano).
+        let sq = (q * q / 4.0 + p * p * p / 27.0).max(0.0).sqrt();
+        let lam = (-q / 2.0 + sq).cbrt() + (-q / 2.0 - sq).cbrt() + tr / 3.0;
+        if let Some(v) = eigvec_for_lambda(m, lam) {
+            out.push((lam, v));
+        }
+    }
+
+    out.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+/// Null-space vector of (M − λI) via the largest-magnitude row cross product.
+fn eigvec_for_lambda(m: &Matrix3<f64>, lam: f64) -> Option<nalgebra::Vector3<f64>> {
+    let d = m - Matrix3::identity() * lam;
+    let r0 = nalgebra::Vector3::new(d[(0, 0)], d[(0, 1)], d[(0, 2)]);
+    let r1 = nalgebra::Vector3::new(d[(1, 0)], d[(1, 1)], d[(1, 2)]);
+    let r2 = nalgebra::Vector3::new(d[(2, 0)], d[(2, 1)], d[(2, 2)]);
+
+    let c01 = r0.cross(&r1);
+    let c02 = r0.cross(&r2);
+    let c12 = r1.cross(&r2);
+
+    let n01 = c01.norm();
+    let n02 = c02.norm();
+    let n12 = c12.norm();
+
+    let best = [(n01, c01), (n02, c02), (n12, c12)]
+        .into_iter()
+        .fold(None::<(f64, nalgebra::Vector3<f64>)>, |acc, (n, v)| {
+            match acc {
+                Some((bn, _)) if bn >= n => acc,
+                _ => Some((n, v)),
+            }
+        })?;
+
+    let (_, v) = best;
+    let n = v.norm();
+    if !n.is_finite() || n < 1e-14 {
+        return None;
+    }
+    Some(v / n)
+}
+
 /// Convert conic coefficients [A, B, C, D, E, F] to ellipse parameters
 /// Conic: A*x² + B*x*y + C*y² + D*x + E*y + F = 0
 fn conic_to_ellipse_result(conic: &[f64; 6]) -> Option<EllipseResult> {
     let (a, b, c, d, e, f) = (conic[0], conic[1], conic[2], conic[3], conic[4], conic[5]);
-
     let det = b * b - 4.0 * a * c;
     if det >= 0.0 {
         return None; // not an ellipse
     }
 
-    // Center
-    let denom = det;
-    if denom.abs() < 1e-12 {
+    // Center for UNPACKED coefficients (poly = Ax²+Bxy+Cy²+Dx+Ey+F):
+    // solve [2A B; B 2C]·[x,y]ᵀ = [−D,−E]ᵀ.
+    let denom = 4.0 * a * c - b * b;
+    if !denom.is_finite() || denom.abs() < 1e-15 {
         return None;
     }
-    let cx = (2.0 * c * d - b * e) / denom;
-    let cy = (2.0 * a * e - b * d) / denom;
+    let cx = (b * e - 2.0 * c * d) / denom;
+    let cy = (b * d - 2.0 * a * e) / denom;
 
-    // Rotation angle
-    let angle = if (a - c).abs() < 1e-12 {
-        0.0
-    } else {
-        0.5 * (b / (a - c)).atan()
-    };
+    // Rotation angle: tan(2θ) = b/(a−c); atan2 resolves a≈c (θ=45° when b≠0).
+    let angle = 0.5 * b.atan2(a - c);
 
     let cos_t = angle.cos();
     let sin_t = angle.sin();
@@ -203,12 +382,15 @@ fn conic_to_ellipse_result(conic: &[f64; 6]) -> Option<EllipseResult> {
     let a_rot = a_n * cos_t * cos_t + b_n * cos_t * sin_t + c_n * sin_t * sin_t;
     let c_rot = a_n * sin_t * sin_t - b_n * cos_t * sin_t + c_n * cos_t * cos_t;
 
-    if a_rot <= 0.0 || c_rot <= 0.0 {
+    // Definiteness (guaranteed for a real ellipse by the det<0 check above)
+    // means a_rot/c_rot share one sign; its direction depends on the
+    // arbitrary eigenvector sign, so take magnitudes.
+    if !(a_rot.abs() > 1e-15 && c_rot.abs() > 1e-15) {
         return None;
     }
 
-    let a_len = (1.0 / a_rot).sqrt();
-    let b_len = (1.0 / c_rot).sqrt();
+    let a_len = (1.0 / a_rot.abs()).sqrt();
+    let b_len = (1.0 / c_rot.abs()).sqrt();
 
     let (major, minor, rot) = if a_len > b_len {
         (a_len, b_len, angle)

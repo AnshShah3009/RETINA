@@ -87,6 +87,15 @@ pub fn threshold_otsu(src: &GrayImage, max_value: u8, typ: ThresholdType) -> (u8
     let mut best_between = -1.0f64;
     let mut best_threshold = 0u8;
 
+    // Mode of the histogram: fallback threshold for uniform images (a
+    // previous revision returned 0, inverting the output vs. OpenCV).
+    let mode_level = hist
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &c)| c)
+        .map(|(i, _)| i as u8)
+        .unwrap_or(0);
+
     for t in 0u16..=255 {
         let idx = t as usize;
         weight_background += hist[idx] as f64;
@@ -96,7 +105,7 @@ pub fn threshold_otsu(src: &GrayImage, max_value: u8, typ: ThresholdType) -> (u8
 
         let weight_foreground = total - weight_background;
         if weight_foreground <= f64::EPSILON {
-            break;
+            break; // all mass at or below t — no valid split remains
         }
 
         sum_background += (t as f64) * (hist[idx] as f64);
@@ -109,6 +118,12 @@ pub fn threshold_otsu(src: &GrayImage, max_value: u8, typ: ThresholdType) -> (u8
             best_between = between;
             best_threshold = t as u8;
         }
+    }
+
+    // Uniform image: between-variance never became positive; fall back to
+    // the histogram mode instead of 0.
+    if best_between <= 0.0 {
+        best_threshold = mode_level;
     }
 
     let dst = threshold_cpu(src, best_threshold, max_value, typ);
@@ -249,12 +264,13 @@ fn local_mean_image(src: &GrayImage, block_size: u32) -> GrayImage {
     let stride = width + 1;
 
     let integral_size = (width + 1) * (height + 1);
-    let mut integral: Vec<u32> = vec![0u32; integral_size];
+    // u64: 255·W·H overflows u32 beyond ~16.9 Mpixel.
+        let mut integral: Vec<u64> = vec![0u64; integral_size];
 
     for y in 0..height {
-        let mut row_sum = 0u32;
+        let mut row_sum = 0u64;
         for x in 0..width {
-            row_sum += src.as_raw()[y * width + x] as u32;
+            row_sum += src.as_raw()[y * width + x] as u64;
             let idx = (y + 1) * stride + (x + 1);
             integral[idx] = integral[idx - stride] + row_sum;
         }
@@ -272,7 +288,7 @@ fn local_mean_image(src: &GrayImage, block_size: u32) -> GrayImage {
                 - integral[y0 * stride + x1]
                 - integral[y1 * stride + x0];
             let area = ((x1 - x0) * (y1 - y0)) as u32;
-            out.as_mut()[y * width + x] = (sum / area).min(255) as u8;
+            out.as_mut()[y * width + x] = (sum / area as u64).min(255) as u8;
         }
     }
 
