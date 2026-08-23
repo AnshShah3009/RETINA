@@ -254,25 +254,11 @@ fn ln_beta(a: f64, b: f64) -> f64 {
 }
 
 fn ln_gamma(x: f64) -> f64 {
-    // Lanczos approximation
-    let coeffs = [
-        76.18009172947146,
-        -86.50532032941677,
-        24.01409824083091,
-        -1.231739572450155,
-        0.1208650973866179e-2,
-        -0.5395239384953e-5,
-    ];
-    let x = x - 1.0;
-    let mut y = x;
-    let tmp = x + 5.5;
-    let tmp = tmp - (x + 0.5) * tmp.ln();
-    let mut ser = 1.000000000190015;
-    for c in &coeffs {
-        y += 1.0;
-        ser += c / y;
-    }
-    -tmp + (2.5066282746310005 * ser / (x + 1.0)).ln()
+    // Delegate to the corrected Numerical Recipes implementation. The
+    // previous local copy shifted x by -1 AND divided by (x+1), double-
+    // shifting the Lanczos denominators and biasing every downstream
+    // t-test p-value (e.g. t_cdf(2, df=4): 0.977 vs correct 0.942).
+    crate::special::log_gamma(x)
 }
 
 /// Normal distribution.
