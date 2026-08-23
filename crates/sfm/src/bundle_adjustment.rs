@@ -471,6 +471,8 @@ fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfi
     let mut current_residuals = state.residuals();
     let mut current_err = current_residuals.norm_squared();
     let mut lambda = config.lambda;
+    // Stall detection: see SparseLMSolver::minimize.
+    let mut rejections = 0u32;
 
     for iteration in 0..config.max_iterations {
         // Use the sequential version of numerical_jacobian() which handles its own fallback
@@ -504,12 +506,17 @@ fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfi
             current_residuals = next_residuals;
             current_err = next_err;
             lambda /= 10.0;
+            rejections = 0;
             if delta.norm() < config.convergence_threshold {
                 break;
             }
         } else {
             lambda *= 10.0;
+            rejections += 1;
             state.from_parameters(&current_params);
+            if rejections >= 12 || !lambda.is_finite() {
+                break; // stalled: keep best parameters
+            }
         }
 
         if config.robust_kernel && iteration % 5 == 0 {

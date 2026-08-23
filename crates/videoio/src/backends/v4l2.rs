@@ -47,6 +47,19 @@ impl V4L2Capture {
             .set_format(&fmt)
             .map_err(|e| VideoError::Backend(format!("Failed to set format: {}", e)))?;
 
+        // set_format is a request: drivers may substitute a different FourCC.
+        // Verify before relying on YUYV layout in retrieve().
+        let negotiated = self
+            .device
+            .format()
+            .map_err(|e| VideoError::Backend(format!("Failed to get format: {}", e)))?;
+        if negotiated.fourcc != FourCC::new(b"YUYV") {
+            return Err(VideoError::Backend(format!(
+                "Driver negotiated {:?} instead of YUYV; unsupported",
+                &negotiated.fourcc
+            )));
+        }
+
         let stream = MmapStream::with_buffers(&self.device, Type::VideoCapture, 4)
             .map_err(|e| VideoError::Backend(format!("Failed to create stream: {}", e)))?;
 

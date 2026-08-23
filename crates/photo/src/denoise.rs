@@ -422,6 +422,17 @@ pub fn bm3d<T: Float + Default + 'static>(
     let sigma_f64 = sigma.to_f64();
     let threshold = 2.7 * sigma_f64; // hard threshold = lambda * sigma
 
+    // Orthonormal DCT-II basis and reusable scratch (allocated once — a
+    // previous revision heap-allocated per candidate block inside the
+    // quadruple-nested search loops).
+    let dct_b = dct_basis(bs);
+    let mut scratch_a = vec![0.0f64; bs * bs];
+    let mut scratch_b = vec![0.0f64; bs * bs];
+    let mut coefs = vec![0.0f64; bs * bs];
+    let mut noisy_coefs = vec![0.0f64; bs * bs];
+    let mut pilot_coefs = vec![0.0f64; bs * bs];
+    let mut filtered = vec![0.0f64; bs * bs];
+
     // ── Stage 1: Hard thresholding ──────────────────────────────────────
 
     let mut estimate = vec![0.0f64; height * width];
@@ -467,27 +478,24 @@ pub fn bm3d<T: Float + Default + 'static>(
                 group.extend_from_slice(&blk);
             }
 
-            // Apply 2D DCT on each block (simplified: subtract mean per block)
-            // Then hard threshold the coefficients
+            // Apply 2D DCT to each block, hard-threshold coefficients,
+            // inverse-transform back (real transform-domain hard thresholding;
+            // a previous revision only subtracted the block mean).
             for b in 0..n_matches {
                 let offset = b * bs * bs;
-                let mean: f64 =
-                    group[offset..offset + bs * bs].iter().sum::<f64>() / (bs * bs) as f64;
+                dct_2d(&group[offset..offset + bs * bs], bs, &dct_b, &mut scratch_a, &mut coefs);
+
                 let mut nonzero = 0usize;
-                for k in 0..bs * bs {
-                    let coeff = group[offset + k] - mean;
-                    if coeff.abs() > threshold {
-                        group[offset + k] = coeff;
+                for c in coefs.iter_mut() {
+                    if c.abs() > threshold {
                         nonzero += 1;
                     } else {
-                        group[offset + k] = 0.0;
+                        *c = 0.0;
                     }
                 }
-                // Inverse: add mean back
-                for k in 0..bs * bs {
-                    group[offset + k] += mean;
-                }
-                // Weight based on number of nonzero coefficients
+                idct_2d(&coefs, bs, &dct_b, &mut scratch_a, &mut scratch_b);
+                group[offset..offset + bs * bs].copy_from_slice(&scratch_b);
+                // Weight based on number of surviving coefficients
                 let w = if nonzero > 0 {
                     1.0 / nonzero as f64
                 } else {
@@ -548,24 +556,27 @@ pub fn bm3d<T: Float + Default + 'static>(
 
             let n_matches = matches.len();
 
-            // Wiener filter: weight = pilot_var / (pilot_var + sigma^2)
+            // Empirical Wiener filtering in the DCT domain: shrink each noisy
+            // coefficient by pilot-energy/(pilot-energy + sigma^2).
             for &(mx, my, _) in &matches {
                 let noisy_blk = extract_block_f64(src, width, mx, my, bs);
                 let pilot_blk = extract_block_f64_raw(&estimate, width, mx, my, bs);
 
-                let pilot_var: f64 = pilot_blk.iter().map(|&v| v * v).sum::<f64>()
-                    / (bs * bs) as f64
-                    - (pilot_blk.iter().sum::<f64>() / (bs * bs) as f64).powi(2);
-                let pilot_var = pilot_var.max(0.0);
-                let wiener_w = pilot_var / (pilot_var + sigma_f64 * sigma_f64);
-                let w = 1.0 / (1.0 + 1.0 / (n_matches as f64));
+                dct_2d(&noisy_blk, bs, &dct_b, &mut scratch_a, &mut noisy_coefs);
+                dct_2d(&pilot_blk, bs, &dct_b, &mut scratch_a, &mut pilot_coefs);
 
+                for k in 0..bs * bs {
+                    let energy = pilot_coefs[k] * pilot_coefs[k];
+                    let w_shrink = energy / (energy + sigma_f64 * sigma_f64);
+                    coefs[k] = noisy_coefs[k] * w_shrink;
+                }
+                idct_2d(&coefs, bs, &dct_b, &mut scratch_a, &mut filtered);
+
+                let w = 1.0 / (1.0 + 1.0 / (n_matches as f64));
                 for by in 0..bs {
                     for bx in 0..bs {
                         let idx = (my + by) * width + (mx + bx);
-                        let mean_pilot = pilot_blk[by * bs + bx];
-                        let val = mean_pilot + wiener_w * (noisy_blk[by * bs + bx] - mean_pilot);
-                        final_est[idx] += val * w;
+                        final_est[idx] += filtered[by * bs + bx] * w;
                         final_w[idx] += w;
                     }
                 }
@@ -595,6 +606,77 @@ fn extract_block_f64<T: Float>(src: &[T], width: usize, x: usize, y: usize, bs: 
         }
     }
     block
+}
+
+/// Orthonormal DCT-II basis rows: row k holds basis_k(x) for x in 0..bs.
+fn dct_basis(bs: usize) -> Vec<f64> {
+    let mut b = vec![0.0f64; bs * bs];
+    let nf = bs as f64;
+    for (k, row) in b.chunks_mut(bs).enumerate() {
+        let ck = if k == 0 {
+            (1.0 / nf).sqrt()
+        } else {
+            (2.0 / nf).sqrt()
+        };
+        for (x, v) in row.iter_mut().enumerate() {
+            *v = ck
+                * ((k as f64)
+                    * std::f64::consts::PI
+                    * (2.0 * x as f64 + 1.0)
+                    / (2.0 * nf))
+                    .cos();
+        }
+    }
+    b
+}
+
+/// Forward 2D DCT via separable passes: out = B · block · Bᵀ.
+/// `tmp` and `out` must be at least bs*bs long.
+fn dct_2d(block: &[f64], bs: usize, basis: &[f64], tmp: &mut [f64], out: &mut [f64]) {
+    // Pass 1 over rows: tmp[r][c] = Σ_x block[r][x] · B[c][x]
+    for r in 0..bs {
+        for c in 0..bs {
+            let mut s = 0.0;
+            for x in 0..bs {
+                s += block[r * bs + x] * basis[c * bs + x];
+            }
+            tmp[r * bs + c] = s;
+        }
+    }
+    // Pass 2 over columns: out[r][c] = Σ_y B[r][y] · tmp[y][c]
+    for r in 0..bs {
+        for c in 0..bs {
+            let mut s = 0.0;
+            for y in 0..bs {
+                s += basis[r * bs + y] * tmp[y * bs + c];
+            }
+            out[r * bs + c] = s;
+        }
+    }
+}
+
+/// Inverse 2D DCT: out = Bᵀ · coef · B.
+fn idct_2d(coef: &[f64], bs: usize, basis: &[f64], tmp: &mut [f64], out: &mut [f64]) {
+    // Pass 1 over rows of coef: tmp[y][x] = Σ_c coef[y][c] · B[c][x]
+    for y in 0..bs {
+        for x in 0..bs {
+            let mut s = 0.0;
+            for c in 0..bs {
+                s += coef[y * bs + c] * basis[c * bs + x];
+            }
+            tmp[y * bs + x] = s;
+        }
+    }
+    // Pass 2 over columns: out[r][x] = Σ_v Bᵀ[r][v] · tmp[v][x]
+    for r in 0..bs {
+        for x in 0..bs {
+            let mut s = 0.0;
+            for v in 0..bs {
+                s += basis[v * bs + r] * tmp[v * bs + x];
+            }
+            out[r * bs + x] = s;
+        }
+    }
 }
 
 fn extract_block_f64_raw(src: &[f64], width: usize, x: usize, y: usize, bs: usize) -> Vec<f64> {
@@ -881,6 +963,101 @@ mod tests {
             "PSNR should improve: noisy={:.2}dB, denoised={:.2}dB",
             psnr_noisy,
             psnr_denoised
+        );
+    }
+}
+
+#[cfg(test)]
+mod bm3d_dct_tests {
+    use super::*;
+
+    #[test]
+    fn test_dct_round_trip() {
+        // Random-ish block must survive dct→idct exactly (orthonormal).
+        let bs = 8;
+        let basis = dct_basis(bs);
+        let mut block = vec![0.0; bs * bs];
+        for i in 0..bs * bs {
+            block[i] = ((i * 37) % 100) as f64 / 100.0 - 0.5;
+        }
+        let mut tmp = vec![0.0; bs * bs];
+        let mut coefs = vec![0.0; bs * bs];
+        let mut rec = vec![0.0; bs * bs];
+        dct_2d(&block, bs, &basis, &mut tmp, &mut coefs);
+        idct_2d(&coefs, bs, &basis, &mut tmp, &mut rec);
+        for i in 0..bs * bs {
+            assert!(
+                (block[i] - rec[i]).abs() < 1e-10,
+                "DCT round trip failed at {}: {} vs {}",
+                i,
+                block[i],
+                rec[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_dct_dc_and_flat_block() {
+        // A flat block of value v transforms to a single DC coefficient
+        // sqrt(N)·v with all AC coefficients zero.
+        let bs = 8;
+        let basis = dct_basis(bs);
+        let v = 0.5;
+        let block = vec![v; bs * bs];
+        let mut tmp = vec![0.0; bs * bs];
+        let mut coefs = vec![0.0; bs * bs];
+        dct_2d(&block, bs, &basis, &mut tmp, &mut coefs);
+
+        // Each 1D DCT DC basis row sums to sqrt(bs), so the 2D DC
+        // coefficient of a flat block is v * bs.
+        let expected_dc = v * bs as f64;
+        assert!((coefs[0] - expected_dc).abs() < 1e-10, "DC {}", coefs[0]);
+        for (i, &c) in coefs.iter().enumerate().skip(1) {
+            assert!(c.abs() < 1e-10, "AC coefficient {} non-zero: {}", i, c);
+        }
+    }
+
+    #[test]
+    fn test_bm3d_reduces_noise() {
+        // Noisy step edge: denoised output must be closer to the clean
+        // signal than the noisy input.
+        let (h, w) = (32usize, 32usize);
+        let clean: Vec<f32> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| if x < w / 2 { 0.3 } else { 0.7 }))
+            .collect();
+
+        // Deterministic pseudo-noise.
+        let mut seed = 12345u64;
+        let mut noisy = vec![0.0f32; h * w];
+        for i in 0..h * w {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let noise = ((seed >> 33) % 200) as f32 / 100.0 - 1.0; // [-1, 1]
+            noisy[i] = (clean[i] + 0.15 * noise).clamp(0.0, 1.0);
+        }
+
+        let mse = |img: &[f32]| -> f64 {
+            img.iter()
+                .zip(clean.iter())
+                .map(|(&a, &b)| {
+                    let d = (a - b) as f64;
+                    d * d
+                })
+                .sum::<f64>()
+                / img.len() as f64
+        };
+
+        let noisy_mse = mse(&noisy);
+
+        let tensor =
+            CpuTensor::<f32>::from_vec(noisy.clone(), TensorShape::new(1, h, w)).unwrap();
+        let denoised = bm3d(&tensor, 0.15, 8, 16, 15).unwrap();
+        let den_mse = mse(denoised.as_slice().unwrap());
+
+        assert!(
+            den_mse < noisy_mse * 0.9,
+            "BM3D did not reduce noise: noisy {} vs denoised {}",
+            noisy_mse,
+            den_mse
         );
     }
 }

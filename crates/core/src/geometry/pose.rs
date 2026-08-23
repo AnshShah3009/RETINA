@@ -16,6 +16,11 @@ pub struct Pose {
 impl Pose {
     /// Create a new Pose from a rotation matrix and translation vector
     /// Converts the rotation matrix to a quaternion internally
+    ///
+    /// # Panics
+    /// The rotation matrix is assumed orthonormal (det = +1). A matrix with
+    /// scale, shear, or reflection is silently misconverted by
+    /// `from_matrix_unchecked`. Use [`Pose::try_new`] to validate.
     pub fn new(rotation: Matrix3<f64>, translation: Vector3<f64>) -> Self {
         let quat =
             UnitQuaternion::from_rotation_matrix(&Rotation3::from_matrix_unchecked(rotation));
@@ -23,6 +28,29 @@ impl Pose {
             rotation: quat,
             translation,
         }
+    }
+
+    /// Validated constructor: rejects matrices that are not proper rotations
+    /// (orthonormal with det = +1), e.g. those carrying scale, shear, or a
+    /// reflection. Such inputs silently produce wrong transforms through
+    /// [`Pose::new`].
+    pub fn try_new(rotation: Matrix3<f64>, translation: Vector3<f64>) -> Result<Self, String> {
+        let det = rotation.determinant();
+        if !det.is_finite() || (det - 1.0).abs() > 1e-6 {
+            return Err(format!(
+                "rotation matrix determinant is {}, expected +1 (scale/shear/reflection?)",
+                det
+            ));
+        }
+        let ortho_err = (&rotation * rotation.transpose()) - Matrix3::identity();
+        let max_err = ortho_err.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        if max_err > 1e-6 {
+            return Err(format!(
+                "rotation matrix is not orthonormal (max deviation {:.2e})",
+                max_err
+            ));
+        }
+        Ok(Self::new(rotation, translation))
     }
 
     /// Create a Pose from a rotation matrix (reference) and translation vector

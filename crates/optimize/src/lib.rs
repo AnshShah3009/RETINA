@@ -61,6 +61,10 @@ impl<'a> SparseLMSolver<'a> {
 
         let mut r = cost_fn.residuals(&x);
         let mut current_err = r.norm_squared();
+        // Consecutive step rejections; a long streak means the damping has
+        // exploded and no progress is possible — bail instead of spinning
+        // to max_iters.
+        let mut rejections = 0u32;
 
         for _ in 0..self.config.max_iters {
             let j = cost_fn.jacobian(&x);
@@ -85,11 +89,16 @@ impl<'a> SparseLMSolver<'a> {
                 x = next_x;
                 r = next_r;
                 lambda /= 10.0;
+                rejections = 0;
                 if delta.norm() < self.config.tolerance {
                     break;
                 }
             } else {
                 lambda *= 10.0;
+                rejections += 1;
+                if rejections >= 12 || !lambda.is_finite() {
+                    break; // stalled: damping exhausted, keep best x
+                }
             }
         }
 

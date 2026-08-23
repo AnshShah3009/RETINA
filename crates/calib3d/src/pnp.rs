@@ -649,106 +649,243 @@ fn project_point_dist(
 pub struct PnpSolver;
 
 impl PnpSolver {
-    /// Estimate absolute camera pose from 3 3D-2D correspondences using the P3P algorithm.
-    /// Returns up to 4 possible Poses.
+    /// Estimate absolute camera pose from 3 3D-2D correspondences using the
+    /// P3P algorithm (Grunert's distance parametrization).
     ///
-    /// Ref: Kneip, L., Scaramuzza, D., & Siegwart, R. (2011).
-    /// A novel parametrization of the perspective-three-point problem for a direct solution.
-    /// IEEE Conference on Computer Vision and Pattern Recognition (CVPR).
+    /// Eliminating two of the three unknown camera-to-point distances yields
+    /// a quartic in the ratio q = v/w; each real positive root reconstructs
+    /// candidate distances, and the rigid transform mapping object points to
+    /// their ray-scaled camera points is recovered by Kabsch/Umeyama.
+    /// Returns up to 4 candidate poses; callers must disambiguate by
+    /// cheirality or reprojection.
     pub fn estimate_p3p(
         object_points: &[nalgebra::Vector3<f64>; 3],
         image_points: &[[f64; 2]; 3],
         model: &cv_core::PinholeModel,
     ) -> crate::Result<Vec<Pose>> {
-        // Implementation of Kneip's P3P method.
-        // 1. Transform image points to unit vectors (rays) in camera space
+        // Unit rays through each image point.
         let mut rays = [Vector3::zeros(); 3];
         for i in 0..3 {
             let pt_img = Point2::new(image_points[i][0], image_points[i][1]);
             let pt_cam = model.unproject(&pt_img, 1.0);
-            rays[i] = pt_cam.coords.normalize();
+            let norm = pt_cam.coords.norm();
+            if norm < 1e-12 {
+                return Err(cv_core::Error::InvalidInput(
+                    "degenerate image point at principal point".into(),
+                ));
+            }
+            rays[i] = pt_cam.coords / norm;
         }
 
-        // 2. Setup local coordinate systems
-        let p1 = object_points[0];
-        let p2 = object_points[1];
-        let p3 = object_points[2];
+        let pa = object_points[0];
+        let pb = object_points[1];
+        let pc = object_points[2];
 
-        let f1 = rays[0];
-        let f2 = rays[1];
-        let f3 = rays[2];
+        // Side lengths, each opposite the apex angle between its rays.
+        let sa = (pb - pc).norm(); // opposite angle(rB, rC)
+        let sb = (pa - pc).norm(); // opposite angle(rA, rC)
+        let sc = (pa - pb).norm(); // opposite angle(rA, rB)
+        if sa < 1e-12 || sb < 1e-12 || sc < 1e-12 {
+            return Err(cv_core::Error::InvalidInput(
+                "P3P requires non-degenerate (non-collinear, distinct) points".into(),
+            ));
+        }
+        let ca = rays[1].dot(&rays[2]);
+        let cb = rays[0].dot(&rays[2]);
+        let cg = rays[0].dot(&rays[1]);
 
-        // Kneip's method uses a specific alignment of the points to simplify the equations.
-        // World frame alignment
-        let ex = (p2 - p1).normalize();
-        let ez = ex.cross(&(p3 - p1)).normalize();
-        let ey = ez.cross(&ex);
-        let world_to_local =
-            nalgebra::Matrix3::from_rows(&[ex.transpose(), ey.transpose(), ez.transpose()]);
+        // Quartic coefficients in q = v/w, low-degree first.
+        //   p(q) = [m·d(q) + a²·(q² − 1)] / [2a²(cg·q − cb)]
+        //   w²  = a² / d(q),  d(q) = q² − 2ca·q + 1,  m = b² − c²
+        // obtained by eliminating p from the law-of-cosines system:
+        //   b²·d = a²(p² + 1 − 2p·cb),  c²·d = a²(p² + q² − 2pq·cg),
+        //   w²  = a²/d.
+        let m = sb * sb - sc * sc;
+        let dpoly = [1.0, -2.0 * ca, 1.0];
+        let npoly = [
+            m * dpoly[0] - sa * sa,
+            m * dpoly[1],
+            m * dpoly[2] + sa * sa,
+        ];
+        let dpoly_d = [-2.0 * sa * sa * cb, 2.0 * sa * sa * cg];
 
-        let p3_local = world_to_local * (p3 - p1);
-        let d12 = (p2 - p1).norm();
-
-        // Camera frame alignment
-        let f1x = f1;
-        let f1z = f1.cross(&f2).normalize();
-        let f1y = f1z.cross(&f1x);
-        let cam_to_local =
-            nalgebra::Matrix3::from_rows(&[f1x.transpose(), f1y.transpose(), f1z.transpose()]);
-
-        let f3_local = cam_to_local * f3;
-        let cos_beta = f1.dot(&f2);
-        let _sin_beta = (1.0 - cos_beta * cos_beta).sqrt();
-
-        let g1 = f3_local.x - f3_local.z * p3_local.x / p3_local.z;
-        let g2 = f3_local.y - f3_local.z * p3_local.y / p3_local.z;
-        let g3 = f3_local.z * d12 / p3_local.z;
-
-        // Kneip's P3P equation: a4*x^4 + a3*x^3 + a2*x^2 + a1*x + a0 = 0
-        // where x = tan(theta/2)
-        // (Simplified derivation of coefficients for this foundation)
-        let a4: f64 = g1 * g1 + g2 * g2;
-        let a3 = 2.0 * g1 * g3;
-        let a2 = g3 * g3 + 2.0 * g1 * g1 - g2 * g2; // Simplified
-        let a1 = 2.0 * g1 * g3;
-        let a0 = g1 * g1;
-
-        // Solve for roots using companion matrix
-        let mut companion = nalgebra::DMatrix::<f64>::zeros(4, 4);
-        if a4.abs() > 1e-9 {
-            companion[(0, 3)] = -a0 / a4;
-            companion[(1, 3)] = -a1 / a4;
-            companion[(2, 3)] = -a2 / a4;
-            companion[(3, 3)] = -a3 / a4;
-            for i in 0..3 {
-                companion[(i + 1, i)] = 1.0;
-            }
-
-            let roots = companion.complex_eigenvalues();
-            let mut results = Vec::new();
-
-            for root in roots.iter() {
-                if root.im.abs() < 1e-7 {
-                    let theta = 2.0 * root.re.atan();
-
-                    // Recover R and t from theta
-                    let cos_theta = theta.cos();
-                    let sin_theta = theta.sin();
-
-                    let r_theta = nalgebra::Matrix3::new(
-                        cos_theta, -sin_theta, 0.0, sin_theta, cos_theta, 0.0, 0.0, 0.0, 1.0,
-                    );
-
-                    let r = cam_to_local.transpose() * r_theta * world_to_local;
-                    let t = -r * p1; // p1 aligned to origin in world_to_local
-
-                    results.push(Pose::new(r, t));
+        fn pmul(a: &[f64], b: &[f64]) -> Vec<f64> {
+            let mut out = vec![0.0; a.len() + b.len() - 1];
+            for (i, &x) in a.iter().enumerate() {
+                for (j, &y) in b.iter().enumerate() {
+                    out[i + j] += x * y;
                 }
             }
-            Ok(results)
-        } else {
-            Ok(vec![])
+            out
         }
+        fn padd(mut a: Vec<f64>, b: &[f64]) -> Vec<f64> {
+            if a.len() < b.len() {
+                a.resize(b.len(), 0.0);
+            }
+            for (i, &v) in b.iter().enumerate() {
+                a[i] += v;
+            }
+            a
+        }
+
+        let t1 = pmul(&npoly, &npoly); // scaled by a² below
+        let t2 = pmul(&npoly, &dpoly_d); // scaled by −2a²cb below
+        // T3 = (a² − b²·d) · D²  where  a² appears ONLY in the constant term.
+        let t3 = {
+            let t = [sa * sa - sb * sb, 2.0 * sb * sb * ca, -sb * sb];
+            pmul(&t, &pmul(&dpoly_d, &dpoly_d))
+        };
+
+        let mut coeff = vec![0.0f64; 5];
+        for (deg, &v) in t1.iter().enumerate() {
+            coeff[deg] += sa * sa * v;
+        }
+        for (deg, &v) in t2.iter().enumerate() {
+            coeff[deg] += -2.0 * sa * sa * cb * v;
+        }
+        for (deg, &v) in t3.iter().enumerate() {
+            coeff[deg] += v;
+        }
+
+        let c4 = coeff[4];
+        if !c4.is_finite() || c4.abs() < 1e-14 {
+            return Ok(Vec::new());
+        }
+ 
+
+        let mut companion = nalgebra::DMatrix::<f64>::zeros(4, 4);
+        companion[(0, 3)] = -coeff[0] / c4;
+        companion[(1, 3)] = -coeff[1] / c4;
+        companion[(2, 3)] = -coeff[2] / c4;
+        companion[(3, 3)] = -coeff[3] / c4;
+        for i in 0..3 {
+            companion[(i + 1, i)] = 1.0;
+        }
+
+        let roots = companion.complex_eigenvalues();
+
+        let mut results = Vec::new();
+        let mut seen_q: Vec<f64> = Vec::new();
+
+        for root in roots.iter() {
+            // Companion-matrix eigenvalues of a real quartic come in
+            // conjugate pairs with tiny spurious imaginary parts; accept
+            // roots whose imaginary component is negligible RELATIVE to the
+            // real one, then polish with a Newton step on the quartic.
+            let scale = root.re.abs().max(1.0);
+            if root.im.abs() > 1e-6 * scale {
+                continue;
+            }
+            let mut q = root.re;
+
+            let poly_at = |x: f64| -> f64 {
+                coeff[4] * x.powi(4)
+                    + coeff[3] * x.powi(3)
+                    + coeff[2] * x * x
+                    + coeff[1] * x
+                    + coeff[0]
+            };
+            let poly_prime = |x: f64| -> f64 {
+                4.0 * coeff[4] * x.powi(3)
+                    + 3.0 * coeff[3] * x * x
+                    + 2.0 * coeff[2] * x
+                    + coeff[1]
+            };
+            for _ in 0..5 {
+                let f = poly_at(q);
+                let fp = poly_prime(q);
+                if !fp.is_finite() || fp.abs() < 1e-14 {
+                    break;
+                }
+                q -= f / fp;
+            }
+
+            if q <= 1e-8 || !q.is_finite() {
+                continue;
+            }
+            if seen_q.iter().any(|&prev| (prev - q).abs() < 1e-9) {
+                continue;
+            }
+            seen_q.push(q);
+
+            let d = q * q - 2.0 * ca * q + 1.0;
+            if d <= 1e-12 {
+                continue;
+            }
+            let w_sq = sa * sa / d;
+            if w_sq <= 0.0 || !w_sq.is_finite() {
+                continue;
+            }
+            let w = w_sq.sqrt();
+
+            let denom = 2.0 * sa * sa * (cg * q - cb);
+            if denom.abs() < 1e-12 {
+                continue;
+            }
+            let p = (m * d + sa * sa * (q * q - 1.0)) / denom;
+
+            let cam_a = rays[0] * (p * w);
+            let cam_b = rays[1] * (q * w);
+            let cam_c = rays[2] * w;
+
+            // Sanity: reconstructed side lengths must match.
+            let tol = 1e-6 * sa.max(sb).max(sc).max(1.0);
+            if ((cam_b - cam_c).norm() - sa).abs() > tol
+                || ((cam_a - cam_c).norm() - sb).abs() > tol
+                || ((cam_a - cam_b).norm() - sc).abs() > tol
+            {
+                continue;
+            }
+
+            // Kabsch (rigid, no scale): find R,t minimizing Σ|R·P + t − Q|²,
+            // i.e. world→camera under this crate's convention.
+            let src = [pa, pb, pc];
+            let dst = [cam_a, cam_b, cam_c];
+            let mut src_c = Vector3::zeros();
+            let mut dst_c = Vector3::zeros();
+            for i in 0..3 {
+                src_c += src[i];
+                dst_c += dst[i];
+            }
+            src_c /= 3.0;
+            dst_c /= 3.0;
+
+            let mut h_mat = Matrix3::<f64>::zeros();
+            for i in 0..3 {
+                let dp = src[i] - src_c;
+                let dq = dst[i] - dst_c;
+                h_mat += dp * dq.transpose();
+            }
+            let svd_h = h_mat.svd(true, true);
+            let u = svd_h
+                .u
+                .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed in P3P".to_string()))?;
+            let vt = svd_h
+                .v_t
+                .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed in P3P".to_string()))?;
+            let mut r_rot = vt.transpose() * u.transpose();
+            if r_rot.determinant() < 0.0 {
+                let mut vt_fix = vt.clone();
+                for rr in 0..3 {
+                    vt_fix[(rr, 2)] = -vt_fix[(rr, 2)];
+                }
+                r_rot = vt_fix.transpose() * u.transpose();
+            }
+            let t_vec = dst_c - r_rot * src_c;
+
+            // Reject mirrored solutions that fail side reconstruction again.
+            let ok = src.iter().zip(dst.iter()).all(|(sp, dq)| {
+                let pred = r_rot * sp + t_vec;
+                (pred - dq).norm() < tol.max(1e-9)
+            });
+            if !ok {
+                continue;
+            }
+
+            results.push(Pose::new(r_rot, t_vec));
+        }
+
+        Ok(results)
     }
 
     /// Estimate absolute camera pose from n 3D-2D correspondences using the EPnP algorithm.
@@ -1015,6 +1152,70 @@ mod dlt_planar_tests {
         }
         let rms = (err_sq / object_points.len() as f64).sqrt();
         assert!(rms < 1e-3, "non-planar DLT reprojection RMS too large: {}", rms);
+    }
+}
+
+
+#[cfg(test)]
+mod p3p_tests {
+    use super::*;
+
+    fn model() -> cv_core::PinholeModel {
+        cv_core::PinholeModel {
+            intrinsics: CameraIntrinsics::new(800.0, 810.0, 320.0, 240.0, 640, 480),
+            distortion: cv_core::Distortion::none(),
+        }
+    }
+
+    #[test]
+    fn test_p3p_recovers_ground_truth() {
+        let r_true = Rotation3::from_axis_angle(
+            &nalgebra::Unit::new_normalize(Vector3::new(1.0, 2.0, 3.0)),
+            0.3,
+        )
+        .into_inner();
+        let t_true = Vector3::new(0.2, -0.1, 3.0);
+
+        let obj = [
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.5, 0.0, 0.1),
+            Vector3::new(0.1, 0.6, -0.05),
+        ];
+
+        let m = model();
+        let mut img = [[0.0f64; 2]; 3];
+        for i in 0..3 {
+            let pc = r_true * obj[i] + t_true;
+            let pr = m.intrinsics.project(&Point3::from(pc));
+            img[i] = [pr.x, pr.y];
+        }
+
+        let poses =
+            PnpSolver::estimate_p3p(&obj, &img, &m).expect("P3P should not error");
+
+        assert!(!poses.is_empty(), "P3P must return at least one solution");
+        // The ground-truth pose must be among the (up to 4) candidates.
+        let matched = poses.iter().any(|pose| {
+            let rel = r_true.transpose() * pose.rotation_matrix();
+            let ang = ((rel[(0, 0)] + rel[(1, 1)] + rel[(2, 2)]) / 2.0)
+                .clamp(-1.0, 1.0)
+                .acos();
+            ang < 1e-6 && (pose.translation - t_true).norm() < 1e-9
+        });
+        assert!(matched, "ground-truth pose missing from P3P candidates");
+    }
+
+    #[test]
+    fn test_p3p_rejects_degenerate_input() {
+        let m = model();
+        // Duplicate object point -> zero-length side must be rejected.
+        let obj = [
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(1.0, 1.0, 0.0),
+        ];
+        let img = [[100.0, 100.0], [100.0, 100.0], [300.0, 250.0]];
+        assert!(PnpSolver::estimate_p3p(&obj, &img, &m).is_err());
     }
 }
 
