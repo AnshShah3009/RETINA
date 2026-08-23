@@ -3575,8 +3575,15 @@ impl ComputeContext for CpuBackend {
         } else {
             d / 2
         };
-        let color_coeff = T::from_f32(-0.5) / (sigma_color * sigma_color);
-        let space_coeff = T::from_f32(-0.5) / (sigma_space * sigma_space);
+        // Guard degenerate sigmas: sigma == 0 yields -inf coefficients and
+        // NaN weights (0 * -inf) whenever a neighbor equals the center.
+        // OpenCV derives sigma from the kernel size when sigma <= 0; use
+        // unit sigma here.
+        let one = T::ONE;
+        let sigma_color_eff = if sigma_color > T::ZERO { sigma_color } else { one };
+        let sigma_space_eff = if sigma_space > T::ZERO { sigma_space } else { one };
+        let color_coeff = T::from_f32(-0.5) / (sigma_color_eff * sigma_color_eff);
+        let space_coeff = T::from_f32(-0.5) / (sigma_space_eff * sigma_space_eff);
 
         dst.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
             for x in 0..w {

@@ -81,6 +81,10 @@ impl SfMState {
 
                 if pt_cam.z <= 0.0 {
                     total_err += 1e6;
+                    // Count penalized observations toward the mean — dividing
+                    // by valid-only counts made the metric grow without bound
+                    // as more points fell behind the camera.
+                    count += 1;
                     continue;
                 }
 

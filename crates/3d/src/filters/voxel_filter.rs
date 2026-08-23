@@ -37,6 +37,11 @@ pub fn voxel_downsample(
     let has_normals = normals.is_some();
     let has_colors = colors.is_some();
 
+    // Sort voxel keys so output ordering is deterministic across runs
+    // (HashMap iteration order is randomized per process).
+    let mut sorted_keys: Vec<(i64, i64, i64)> = voxels.keys().copied().collect();
+    sorted_keys.sort_unstable();
+
     let mut out_points = Vec::with_capacity(voxels.len());
     let mut out_normals = if has_normals {
         Some(Vec::with_capacity(voxels.len()))
@@ -49,7 +54,8 @@ pub fn voxel_downsample(
         None
     };
 
-    for indices in voxels.values() {
+    for key in &sorted_keys {
+        let indices = &voxels[key];
         let n = indices.len() as f64;
 
         // Average position.
@@ -69,7 +75,15 @@ pub fn voxel_downsample(
             if len > 1e-15 {
                 out_n.push(nsum / len);
             } else {
-                out_n.push(Vector3::new(0.0, 0.0, 1.0));
+                // Opposing normals cancelled: fall back to the first normal
+                // in the voxel rather than an arbitrary +Z.
+                let first = norms[indices[0]];
+                let fl = first.norm();
+                if fl > 1e-15 {
+                    out_n.push(first / fl);
+                } else {
+                    out_n.push(Vector3::new(0.0, 0.0, 1.0));
+                }
             }
         }
 
