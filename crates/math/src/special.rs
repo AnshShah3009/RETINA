@@ -1,4 +1,4 @@
-use std::f64::consts::{E, PI};
+use std::f64::consts::PI;
 
 pub fn erf(x: f64) -> f64 {
     let a1 = 0.254829592;

@@ -361,7 +361,8 @@ impl Akaze {
         let mut keypoints = Vec::new();
         let threshold = self.params.threshold;
 
-        for curr in evolution {
+        for (level_idx, curr) in evolution.iter().enumerate() {
+            let level_idx = level_idx as i32;
             let (h, w) = curr.ldet.shape.hw();
             let det_slice = curr
                 .ldet
@@ -402,7 +403,12 @@ impl Akaze {
                                     KeyPoint::new(x as f64, y as f64)
                                         .with_size(curr.sigma as f64 * 2.0)
                                         .with_response(val as f64)
-                                        .with_octave(curr.octave as i32),
+                                        .with_octave(curr.octave as i32)
+                                        // Remember WHICH evolution level produced
+                                        // this keypoint: deriving it from size
+                                        // later truncates log2 and collapses all
+                                        // sublevels onto one blur scale.
+                                        .with_class_id(level_idx),
                                 );
                             }
                         }
@@ -425,9 +431,14 @@ impl Akaze {
         let mut descriptors = Vec::with_capacity(keypoints.len());
 
         for kp in keypoints {
-            let level_idx = kp.octave as usize * self.params.n_sublevels
-                + (kp.size.log2() as usize % self.params.n_sublevels);
-            let level = &evolution[level_idx.min(evolution.len() - 1)];
+            // Use the level index recorded at detection time; the old
+            // size.log2() reconstruction collapsed every sublevel of an
+            // octave onto a single (wrong) blur scale.
+            let level_idx = kp
+                .class_id
+                .min(evolution.len() as i32 - 1)
+                .max(0) as usize;
+            let level = &evolution[level_idx];
 
             if let Some(desc) = self.compute_msurf_descriptor(level, kp)? {
                 descriptors.push(desc);

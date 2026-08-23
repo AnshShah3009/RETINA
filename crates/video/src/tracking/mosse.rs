@@ -84,8 +84,11 @@ impl MosseTracker {
             let fi = fft2(&patch.iter().map(|&v| (v, 0.0)).collect::<Vec<_>>(), ph, pw);
             for i in 0..n {
                 // A += G* . F_i
-                let gc = complex_conj(gf[i]);
-                let af = complex_mul(gc, fi[i]);
+                // H* accumulates G * conj(F): G is real-valued so the
+                // previous conj(G)*F computed a plain product, scrambling
+                // the phase and breaking peak localization.
+                let fc = complex_conj(fi[i]);
+                let af = complex_mul(gf[i], fc);
                 a_sum[i].0 += af.0;
                 a_sum[i].1 += af.1;
                 // B += F_i* . F_i
@@ -193,8 +196,8 @@ impl MosseTracker {
         let a_mut = self.filter_num.as_mut().unwrap();
         let b_mut = self.filter_den.as_mut().unwrap();
         for i in 0..n {
-            let gc = complex_conj(gf[i]);
-            let new_a = complex_mul(gc, new_fi[i]);
+            let fc = complex_conj(new_fi[i]);
+            let new_a = complex_mul(gf[i], fc);
             a_mut[i].0 = (1.0 - lr) * a_mut[i].0 + lr * new_a.0;
             a_mut[i].1 = (1.0 - lr) * a_mut[i].1 + lr * new_a.1;
 

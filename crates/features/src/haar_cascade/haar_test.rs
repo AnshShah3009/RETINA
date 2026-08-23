@@ -14,8 +14,8 @@ fn test_haar_integral_image() {
 
     let integral = compute_integral_image(&img).expect("Failed to compute integral image");
     // 4x4 image -> 5x5 integral image
-    assert_eq!(integral.shape.width, 5);
-    assert_eq!(integral.shape.height, 5);
+    assert_eq!(integral.width, 5);
+    assert_eq!(integral.data.len() / integral.width, 5);
 
     // Sum of 2x2 area at (1, 1)
     let sum = get_rect_sum(&integral, 1, 1, 2, 2).expect("Failed to get rect sum");
@@ -209,11 +209,11 @@ fn test_haar_integral_image_bounds() {
     let integral = compute_integral_image(&img).expect("Failed to compute integral image");
 
     // Integral image should be 257x257 (width + 1, height + 1)
-    assert_eq!(integral.shape.width, 257);
-    assert_eq!(integral.shape.height, 257);
+    assert_eq!(integral.width, 257);
+    assert_eq!(integral.data.len() / integral.width, 257);
 
     // Final value should be sum of all pixels
-    let data = integral.as_slice().expect("Failed to get integral slice");
+    let data = &integral.data;
     let total = data[data.len() - 1];
     assert_eq!(total, 256 * 256 * 200);
 }

@@ -119,6 +119,13 @@ pub fn covariance_matrix(data: &[Vec<f64>]) -> Vec<Vec<f64>> {
         return Vec::new();
     }
     let n = data[0].len();
+    // Ragged input previously indexed out of bounds and panicked.
+    if data.iter().any(|col| col.len() != n) {
+        panic!("covariance_matrix: all variables must have equal length");
+    }
+    if n < 2 {
+        panic!("covariance_matrix: need at least 2 observations");
+    }
     let means: Vec<f64> = data.iter().map(|v| mean(v)).collect();
 
     let mut cov = vec![vec![0.0; p]; p];

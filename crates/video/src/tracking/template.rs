@@ -40,6 +40,11 @@ impl TemplateTracker {
         let last_pos = self.last_position?;
 
         let (tw, th) = (template.width(), template.height());
+        // A template larger than the frame made `frame.w - tw` wrap to ~4e9,
+        // effectively hanging the search loop.
+        if tw > frame.width() || th > frame.height() {
+            return None;
+        }
         let mut best_pos = last_pos;
         let mut best_score = f32::INFINITY;
 

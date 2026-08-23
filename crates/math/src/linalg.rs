@@ -101,6 +101,13 @@ pub fn qr_solve(a: &DMatrix<f64>, b: &DVector<f64>) -> Result<DVector<f64>, Stri
 
     // Back-substitute: R x = Q^T b (use only the first n rows)
     let n = a.ncols();
+    if a.nrows() < n {
+        return Err(format!(
+            "under-determined system ({}x{}): QR least-squares path requires m >= n",
+            a.nrows(),
+            n
+        ));
+    }
     let r_top = r.rows(0, n).clone_owned();
     let qt_b_top = qt_b.rows(0, n).clone_owned();
 

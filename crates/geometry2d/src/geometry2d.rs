@@ -486,6 +486,11 @@ fn close_ring(ring: &mut Vec<Point2D>) {
 pub fn polygon_intersection(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
     let sa = open_ring(&a.exterior);
     let sb = open_ring(&b.exterior);
+    // Sutherland-Hodgman's inside test assumes CCW clip orientation; a CW
+    // wound (but otherwise identical) ring previously returned an empty
+    // intersection. Normalize both rings first.
+    let sa = if ring_signed_area(&sa) < 0.0 { sa.into_iter().rev().collect() } else { sa };
+    let sb = if ring_signed_area(&sb) < 0.0 { sb.into_iter().rev().collect() } else { sb };
     let mut result = sutherland_hodgman(&sa, &sb);
     if result.len() < 3 {
         return vec![];
@@ -1204,10 +1209,24 @@ pub fn from_wkt(wkt: &str) -> Result<Polygon, String> {
             ')' => {
                 depth -= 1;
                 if depth == 0 {
-                    let ring_str: String = chars[start..=i].iter().collect();
-                    let ring = parse_ring(&ring_str)?;
+                    // Ring content starts after the LAST '(' before this
+                    // closing paren; a previous revision kept the preceding
+                    // ", (" in the token, breaking hole-ring parsing.
+                    let open_pos = chars[start..=i]
+                        .iter()
+                        .rposition(|&c| c == '(')
+                        .map(|p| start + p)
+                        .unwrap_or(start);
+                    let ring_str: String = chars[open_pos..=i].iter().collect();
+                    let mut ring = parse_ring(&ring_str)?;
+                    // WKT rings are implicitly closed; store them closed to
+                    // satisfy the Polygon invariant first == last.
+                    if let (Some(f), Some(l)) = (ring.first().cloned(), ring.last().cloned()) {
+                        if f != l {
+                            ring.push(f);
+                        }
+                    }
                     rings.push(ring);
-                    // Skip comma and whitespace
                     start = i + 1;
                 }
             }
@@ -1675,5 +1694,44 @@ mod tests {
         let c = sq.centroid();
         assert!((c.x - 2.0).abs() < 1e-6);
         assert!((c.y - 2.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn test_polygon_intersection_clockwise_clip() {
+        // Regression: a CW-wound clip ring previously returned an empty
+        // intersection for identical overlapping squares.
+        let ccw = Polygon::new(
+            vec![
+                Point2D::new(0.0, 0.0),
+                Point2D::new(2.0, 0.0),
+                Point2D::new(2.0, 2.0),
+                Point2D::new(0.0, 2.0),
+            ],
+            vec![],
+        );
+        let cw = Polygon::new(ccw.exterior.iter().rev().cloned().collect(), vec![]);
+
+        let r_ccw = polygon_intersection(&ccw, &ccw.clone());
+        let r_cw = polygon_intersection(&ccw, &cw);
+        assert!(!r_ccw.is_empty());
+        assert!(
+            !r_cw.is_empty(),
+            "CW-wound clip must not produce an empty intersection"
+        );
+    }
+
+    #[test]
+    fn test_from_wkt_polygon_with_holes() {
+        // Regression: hole rings previously failed with "Invalid x: '(3.0'".
+        let wkt = "POLYGON((0 0,4 0,4 4,0 4),(1 1,3 1,3 3,1 3))";
+        let poly = from_wkt(wkt).expect("WKT parse");
+        assert_eq!(poly.exterior.len(), 5); // closed
+        assert_eq!(poly.holes.len(), 1);
+        assert_eq!(poly.holes[0].len(), 5);
     }
 }

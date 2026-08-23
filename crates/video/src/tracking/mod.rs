@@ -261,7 +261,7 @@ pub(crate) fn create_gaussian_target(rows: usize, cols: usize, sigma: f64) -> Ve
 }
 
 /// Gaussian kernel correlation in the frequency domain (element-wise).
-/// k = exp(-1/(sigma^2) * max(0, ||x||^2 + ||z||^2 - 2 * IFFT(conj(FFT(x)) . FFT(z))) / numel)
+/// k = exp(-max(0, ||x||^2 + ||z||^2 - 2 * <x, S_tau z>) / sigma^2)
 pub(crate) fn gaussian_correlation(
     xf: &[Complex],
     zf: &[Complex],
@@ -279,11 +279,13 @@ pub(crate) fn gaussian_correlation(
     }
     let xz = ifft2(&xzf, rows, cols);
     let sigma2 = sigma * sigma;
-    let numel = n as f64;
     let mut k = vec![0.0; n];
     for i in 0..n {
-        let val = (x_energy + z_energy - 2.0 * xz[i].0) / numel;
-        k[i] = (-val.max(0.0) / sigma2).exp();
+        // NOTE: ifft2 already carries the 1/N scale, so these are true
+        // spatial norms; an earlier revision divided by numel, silently
+        // inflating the effective kernel bandwidth by sqrt(N).
+        let val = (x_energy + z_energy - 2.0 * xz[i].0).max(0.0);
+        k[i] = (-val / sigma2).exp();
     }
     // Return FFT of k
     let kc: Vec<Complex> = k.iter().map(|&v| (v, 0.0)).collect();

@@ -92,8 +92,13 @@ pub fn compute_hog(image: &GrayImage, params: &HogParams) -> Vec<f32> {
             }
         });
 
-    // 3. Block Normalization
+    // 3. Block Normalization. Saturating math: when the block exceeds the
+    // cell grid the subtraction previously wrapped (panic in debug, huge
+    // allocation in release).
     let b_w = params.block_size;
+    if b_w > n_cells_x || b_w > n_cells_y {
+        return vec![];
+    }
     let n_blocks_x = n_cells_x - b_w + 1;
     let n_blocks_y = n_cells_y - b_w + 1;
     let block_dim = b_w * b_w * params.n_bins;

@@ -87,6 +87,9 @@ pub fn cdist(xa: &[Vec<f64>], xb: &[Vec<f64>], metric: DistanceMetric) -> DMatri
 /// `[(0,1), (0,2), ..., (0,n-1), (1,2), ..., (n-2,n-1)]`.
 pub fn pdist(x: &[Vec<f64>], metric: DistanceMetric) -> Vec<f64> {
     let n = x.len();
+    if n < 2 {
+        return Vec::new();
+    }
     let mut result = Vec::with_capacity(n * (n - 1) / 2);
     for i in 0..n {
         for j in (i + 1)..n {

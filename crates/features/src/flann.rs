@@ -100,8 +100,12 @@ impl FlannIndex {
             tree.search_knn(&tree.root, query, k, self.num_checks, &mut candidates);
         }
 
-        // Convert to sorted results (closest first)
-        let mut results: Vec<_> = candidates.into_sorted_vec();
+        // Convert to sorted results (closest first). into_sorted_vec sorts
+        // ascending by Ord, and SearchResult's Ord is distance-REVERSED
+        // (min-heap semantics) — sorting by it yields the FARTHEST points.
+        // Sort explicitly by raw distance instead.
+        let mut results: Vec<SearchResult> = candidates.into_iter().collect();
+        results.sort_by_key(|s| s.distance);
         results.truncate(k);
 
         results

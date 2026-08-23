@@ -172,7 +172,7 @@ impl HaarCascade {
     #[allow(clippy::too_many_arguments)]
     fn evaluate_window(
         &self,
-        integral: &Tensor<u32>,
+        integral: &IntegralImage,
         sq_integral: &SquaredIntegralImage,
         x: u32,
         y: u32,
@@ -194,7 +194,10 @@ impl HaarCascade {
                 let feature_sum = feature.evaluate(integral, x, y, scale)?;
                 // Normalize feature response by window variance
                 let normalized = feature_sum / std_dev as f32;
-                stage_sum += if normalized < feature.threshold * scale * scale {
+                // Viola-Jones compares the variance-normalized response
+                // against the trained threshold directly; an extra scale^2
+                // factor made every decision scale-dependent.
+                stage_sum += if normalized < feature.threshold {
                     feature.left_val
                 } else {
                     feature.right_val
@@ -209,7 +212,7 @@ impl HaarCascade {
 }
 
 impl HaarFeature {
-    fn evaluate(&self, integral: &Tensor<u32>, ox: u32, oy: u32, scale: f32) -> Result<f32> {
+    fn evaluate(&self, integral: &IntegralImage, ox: u32, oy: u32, scale: f32) -> Result<f32> {
         let mut sum = 0.0f32;
         for (r, weight) in &self.rects {
             let rx = ox + (r.x * scale) as u32;
@@ -235,32 +238,52 @@ impl HaarFeature {
 ///
 /// # Returns
 ///
-/// * `Ok(Tensor<u32>)` - Integral image with dimensions (1, h+1, w+1)
+/// * `Ok(Tensor<u64>)` - Integral image with dimensions (1, h+1, w+1)
 ///   - Extra row/column at index 0 for boundary handling
 /// * `Err(MemoryError)` - If tensor allocation fails
 ///
 /// # Algorithm
 ///
 /// Uses 2D prefix sum: `I[y][x] = I[y-1][x] + I[y][x-1] - I[y-1][x-1] + pixel[y][x]`
-fn compute_integral_image(src: &GrayImage) -> Result<Tensor<u32>> {
+fn compute_integral_image(src: &GrayImage) -> Result<IntegralImage> {
     let (w, h) = src.dimensions();
-    let mut integral = vec![0u32; (w as usize + 1) * (h as usize + 1)];
+    // u64: pixel sums reach 255*W*H, overflowing u32 past ~17 Mpx.
+    let mut integral = vec![0u64; (w as usize + 1) * (h as usize + 1)];
     let src_raw = src.as_raw();
 
     for y in 0..h as usize {
-        let mut row_sum = 0u32;
+        let mut row_sum = 0u64;
         for x in 0..w as usize {
-            row_sum += src_raw[y * w as usize + x] as u32;
+            row_sum += src_raw[y * w as usize + x] as u64;
             let idx = (y + 1) * (w as usize + 1) + (x + 1);
             integral[idx] = integral[idx - (w as usize + 1)] + row_sum;
         }
     }
 
-    Tensor::from_vec(
-        integral,
-        cv_core::TensorShape::new(1, h as usize + 1, w as usize + 1),
-    )
-    .map_err(|_| Error::MemoryError("Failed to create integral image tensor".to_string()))
+    // Plain struct: cv_core's DataType has no u64 variant, so the integral
+    // image cannot live in a Tensor (same pattern as SquaredIntegralImage).
+    Ok(IntegralImage {
+        data: integral,
+        width: w as usize + 1,
+    })
+}
+
+struct IntegralImage {
+    data: Vec<u64>,
+    width: usize, // src_width + 1
+}
+
+impl IntegralImage {
+    fn get_rect_sum(&self, x: u32, y: u32, w: u32, h: u32) -> Result<u64> {
+        let x0 = x as usize;
+        let y0 = y as usize;
+        let x1 = (x + w) as usize;
+        let y1 = (y + h) as usize;
+        let iw = self.width;
+        Ok(self.data[y1 * iw + x1] + self.data[y0 * iw + x0]
+            - self.data[y1 * iw + x0]
+            - self.data[y0 * iw + x1])
+    }
 }
 
 /// Compute squared integral image for variance normalization
@@ -310,16 +333,7 @@ impl SquaredIntegralImage {
 /// # Returns
 ///
 /// Sum of all pixel values in the specified rectangle
-fn get_rect_sum(integral: &Tensor<u32>, x: u32, y: u32, w: u32, h: u32) -> Result<u32> {
-    let iw = integral.shape.width;
-    let x0 = x as usize;
-    let y0 = y as usize;
-    let x1 = (x + w) as usize;
-    let y1 = (y + h) as usize;
-
-    let data = integral
-        .as_slice()
-        .map_err(|_| Error::MemoryError("Failed to get integral slice".to_string()))?;
-    Ok(data[y1 * iw + x1] + data[y0 * iw + x0] - data[y1 * iw + x0] - data[y0 * iw + x1])
+fn get_rect_sum(integral: &IntegralImage, x: u32, y: u32, w: u32, h: u32) -> Result<u64> {
+    integral.get_rect_sum(x, y, w, h)
 }
 mod haar_test;

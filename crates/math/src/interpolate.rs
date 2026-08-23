@@ -33,7 +33,11 @@ fn validate_inputs(x: &[f64], y: &[f64]) -> Result<(), String> {
 }
 
 fn find_interval(x: &[f64], xi: f64) -> usize {
-    match x.binary_search_by(|v| v.partial_cmp(&xi).unwrap()) {
+    // NaN queries previously panicked inside partial_cmp().unwrap().
+    if xi.is_nan() {
+        return 0; // callers propagate NaN through the arithmetic below
+    }
+    match x.binary_search_by(|v| v.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Greater)) {
         Ok(i) => i.min(x.len() - 2),
         Err(i) => {
             if i == 0 {
