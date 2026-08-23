@@ -19,22 +19,67 @@ pub fn approx_poly_dp(curve: &[Point2<f64>], epsilon: f64, closed: bool) -> Vec<
     let n = curve.len();
     let mut result = Vec::new();
 
-    // Find point with max distance
-    let _start = curve[0];
-    let _end = if closed { curve[0] } else { *curve.last().unwrap() };
+    if !closed {
+        // Open curve: anchor the simplification at both endpoints.
+        let mut mask = vec![false; n];
+        mask[0] = true;
+        mask[n - 1] = true;
+        douglas_peucker(curve, 0, n - 1, epsilon, &mut mask);
+        for (i, &m) in mask.iter().enumerate() {
+            if m {
+                result.push(curve[i]);
+            }
+        }
+        return result;
+    }
 
-    // Recursive Douglas-Peucker
-    let mut mask = vec![true; n];
-    douglas_peucker(curve, 0, n - 1, epsilon, &mut mask);
+    // Closed curve: split at the two farthest-apart contour points and
+    // simplify each arc against its chord (OpenCV semantics). Simplifying
+    // [0..n-1] as an open chain never measured deviation across the
+    // closing segment near the seam.
+    let mut far_pair = (0usize, 0usize);
+    let mut far_dist: f64 = -1.0;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let dx = curve[i].x - curve[j].x;
+            let dy = curve[i].y - curve[j].y;
+            let d2 = dx * dx + dy * dy;
+            if d2 > far_dist {
+                far_dist = d2;
+                far_pair = (i, j);
+            }
+        }
+    }
+    let (i0, i1) = far_pair;
+
+    let mut mask = vec![false; n];
+    mask[i0] = true;
+    mask[i1] = true;
+    if i0 < i1 {
+        douglas_peucker(curve, i0, i1, epsilon, &mut mask);
+        // Wrap-around arc: j..n plus 0..i — handled via a rotated copy.
+        let mut arc: Vec<Point2<f64>> = Vec::with_capacity(i0 + n - i1 + 1);
+        arc.extend_from_slice(&curve[i1..n]);
+        arc.extend_from_slice(&curve[..=i0]);
+        let mut arc_mask = vec![false; arc.len()];
+        arc_mask[0] = true;
+        arc_mask[arc.len() - 1] = true;
+        douglas_peucker(&arc, 0, arc.len() - 1, epsilon, &mut arc_mask);
+        for (k, &m) in arc_mask.iter().enumerate() {
+            if m {
+                let global = (i1 + k) % n;
+                mask[global] = true;
+            }
+        }
+    } else {
+        // Degenerate duplicate extremes; fall back to open-chain behavior.
+        douglas_peucker(curve, 0, n - 1, epsilon, &mut mask);
+    }
 
     for (i, &m) in mask.iter().enumerate() {
         if m {
             result.push(curve[i]);
         }
-    }
-
-    if closed {
-        result.push(result[0]);
     }
 
     result
