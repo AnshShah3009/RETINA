@@ -304,6 +304,50 @@ fn assign_grid_points(
             out.push(Point2::new(points[idx][0], points[idx][1]));
         }
     }
+
+    // Consistency gate: the assignment is only trustworthy when cluster
+    // centers form a roughly uniform lattice. A previous revision returned
+    // scrambled assignments (median corner error ~70 px on synthetic boards)
+    // when Harris+NMS candidates included board-silhouette responses; down-
+    // stream calibration then consumed garbage correspondences. Fail loudly
+    // instead. The 2x bound tolerates moderate perspective foreshortening.
+    let mut spacings_u: Vec<f64> = u_centers
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|s| *s > 1e-9)
+        .collect();
+    let mut spacings_v: Vec<f64> = v_centers
+        .windows(2)
+        .map(|w| w[1] - w[0])
+        .filter(|s| *s > 1e-9)
+        .collect();
+    spacings_u.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    spacings_v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let spacing = [
+        spacings_u.first().copied().unwrap_or(0.0),
+        spacings_u.last().copied().unwrap_or(0.0),
+        spacings_v.first().copied().unwrap_or(0.0),
+        spacings_v.last().copied().unwrap_or(0.0),
+    ];
+    // Non-degenerate grid: distinct clusters along both axes.
+    if spacing[1] <= 1e-9 || spacing[3] <= 1e-9 {
+        return Err(cv_core::Error::AlgorithmError(
+            "chessboard grid collapsed: corners do not form a regular lattice".to_string(),
+        ));
+    }
+    // Spacing uniformity within 35% across each axis (real boards are
+    // regular; junk candidate sets produce wildly uneven k-means centers).
+    let ru = if spacing[0] > 1e-9 { spacing[1] / spacing[0] } else { f64::INFINITY };
+    let rv = if spacing[2] > 1e-9 { spacing[3] / spacing[2] } else { f64::INFINITY };
+    if !(0.5..=2.0).contains(&ru) || !(0.5..=2.0).contains(&rv) {
+        return Err(cv_core::Error::AlgorithmError(format!(
+            "chessboard corner assignment failed spacing-uniformity check \
+             (u ratio {:.2}, v ratio {:.2}); input likely contains no usable board",
+            ru, rv
+        )));
+    }
+
     Ok(out)
 }
 

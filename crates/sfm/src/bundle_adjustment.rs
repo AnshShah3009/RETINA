@@ -452,6 +452,13 @@ impl Default for BundleAdjustmentConfig {
 }
 
 pub fn bundle_adjust(state: &mut SfMState, config: &BundleAdjustmentConfig) {
+    // use_sparsity=false requests the dense (sequential) solver explicitly;
+    // a previous revision ignored the flag entirely.
+    if !config.use_sparsity {
+        bundle_adjust_sequential(state, config);
+        return;
+    }
+
     if let Ok(s) = scheduler() {
         if let Ok(group) = s.get_default_group() {
             if bundle_adjust_ctx(state, config, &group) {
