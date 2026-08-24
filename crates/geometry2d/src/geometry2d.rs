@@ -503,44 +503,65 @@ pub fn polygon_intersection(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
 ///
 /// Simplified approach: if they don't intersect, return both as separate polygons.
 /// If they do, compute a combined convex hull as an approximation.
-pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
-    if !polygons_intersect(a, b) {
-        return vec![a.clone(), b.clone()];
-    }
-    // Approximation for overlapping polygons: combined convex hull
-    let mut all_pts: Vec<Point2D> = a.exterior.clone();
-    all_pts.extend(b.exterior.clone());
-    vec![convex_hull(&all_pts)]
-}
-
-/// Compute A - B (polygon difference).
+/// Compute the union of two polygons using exact boolean operations
+/// (via the `geo` crate's polygon clipping). A previous revision returned
+/// the convex hull of both inputs — a very lossy approximation for concave
+/// shapes.
 ///
-/// Simplified: clips A against the complement of B.  For convex B this uses
-/// Sutherland-Hodgman on the half-planes outside B edges.
-pub fn polygon_difference(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
-    if !polygons_intersect(a, b) {
-        return vec![a.clone()];
-    }
-    // Simple approach: return A with B as a hole
-    let inter = polygon_intersection(a, b);
-    if inter.is_empty() {
-        return vec![a.clone()];
-    }
-    let inter_area: f64 = inter.iter().map(|p| p.area()).sum();
-    let a_area = a.area();
-    if (inter_area - a_area).abs() < EPS {
-        // A is fully inside B
-        return vec![];
-    }
-    // Return A with the intersection ring as a hole
-    let mut holes = a.holes.clone();
-    for ip in &inter {
-        holes.push(ip.exterior.clone());
-    }
-    vec![Polygon::new(a.exterior.clone(), holes)]
-}
+/// Holes of the inputs participate in the operation. Returns every ring of
+/// the result as separate polygons (exteriors only).
+pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
+    use geo::{Coord, LineString, Polygon as GeoPolygon};
+    use geo::algorithm::bool_ops::OpType;
+    use geo::BooleanOps;
 
-// ─── Construction Algorithms ─────────────────────────────────────────────────
+    fn to_geo(p: &Polygon) -> GeoPolygon<f64> {
+        let exterior: Vec<Coord<f64>> =
+            open_ring(&p.exterior).iter().map(|pt| Coord { x: pt.x, y: pt.y }).collect();
+        let interiors: Vec<LineString<f64>> = p
+            .holes
+            .iter()
+            .map(|h| {
+                LineString::from(
+                    h.iter().map(|pt| Coord { x: pt.x, y: pt.y }).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        GeoPolygon::new(LineString::from(exterior), interiors)
+    }
+
+
+    let ga = to_geo(a);
+    let gb = to_geo(b);
+    let result = ga.boolean_op(&gb, OpType::Union);
+
+    let mut out = Vec::new();
+    for poly in result.0.iter() {
+        let mut exterior: Vec<Point2D> = poly
+            .exterior()
+            .points()
+            .map(|c| Point2D::new(c.x(), c.y()))
+            .collect();
+        close_ring(&mut exterior);
+        let mut holes: Vec<Vec<Point2D>> = poly
+            .interiors()
+            .iter()
+            .map(|ls| {
+                let mut h: Vec<Point2D> =
+                    ls.points().map(|c| Point2D::new(c.x(), c.y())).collect();
+                close_ring(&mut h);
+                h
+            })
+            .collect();
+        // Drop degenerate rings.
+        holes.retain(|h| h.len() >= 4);
+        out.push(Polygon::new(exterior, holes));
+    }
+    if out.is_empty() {
+        out.push(Polygon::new(vec![], vec![]));
+    }
+    out
+}
 
 /// Convex hull using Andrew's monotone chain algorithm.  O(n log n).
 pub fn convex_hull(points: &[Point2D]) -> Polygon {
@@ -664,7 +685,9 @@ pub fn buffer_polygon(polygon: &Polygon, distance: f64, segments: usize) -> Poly
                 ));
             }
         } else {
-            // Reflex or straight: miter
+            // Reflex or straight corner: miter join CLAMPED to
+            // distance * MITER_LIMIT — acute reflex angles previously
+            // produced arbitrarily long spikes.
             let a1 = Point2D::new(
                 pts[prev_edge].x + nx0 * distance,
                 pts[prev_edge].y + ny0 * distance,
@@ -676,12 +699,18 @@ pub fn buffer_polygon(polygon: &Polygon, distance: f64, segments: usize) -> Poly
                 pts[curr_next].y + ny1 * distance,
             );
             if let Some(miter) = line_intersection(&a1, &a2, &b1, &b2) {
-                result.push(miter);
+                let mx = miter.x - pts[i].x;
+                let my = miter.y - pts[i].y;
+                const MITER_LIMIT: f64 = 2.0;
+                if mx * mx + my * my <= (MITER_LIMIT * distance).powi(2) {
+                    result.push(miter);
+                } else {
+                    result.push(a2);
+                    result.push(b1);
+                }
             } else {
-                result.push(Point2D::new(
-                    pts[i].x + nx0 * distance,
-                    pts[i].y + ny0 * distance,
-                ));
+                result.push(a2);
+                result.push(b1);
             }
         }
     }
@@ -1305,7 +1334,80 @@ pub fn to_geojson(polygon: &Polygon) -> String {
     s
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod union_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn test_polygon_union_concave_no_hull() {
+        // Two overlapping L-shapes (concave): a hull-based "union" would fill
+        // in the concavities; a true boolean union must not.
+        let l1 = Polygon::new(
+            vec![
+                Point2D::new(0.0, 0.0),
+                Point2D::new(4.0, 0.0),
+                Point2D::new(4.0, 1.0),
+                Point2D::new(1.0, 1.0),
+                Point2D::new(1.0, 4.0),
+                Point2D::new(0.0, 4.0),
+            ],
+            vec![],
+        );
+        let l2 = Polygon::new(
+            vec![
+                Point2D::new(3.0, 3.0),
+                Point2D::new(6.0, 3.0),
+                Point2D::new(6.0, 6.0),
+                Point2D::new(3.0, 6.0),
+            ],
+            vec![],
+        );
+        let u = polygon_union(&l1, &l2);
+        assert!(!u.is_empty() && !u[0].exterior.is_empty());
+        // True union area = 7 + 9 = 16 (the shapes only touch diagonally).
+        // A convex-hull "union" would report ~36.
+        let total: f64 = u.iter().map(|poly| ring_area_of(&poly.exterior)).sum();
+        assert!(
+            (total - 16.0).abs() < 1e-6,
+            "union area {} != expected 16",
+            total
+        );
+    }
+
+    fn ring_area_of(ring: &[Point2D]) -> f64 {
+        let r = open_ring(ring);
+        let n = r.len();
+        let mut s = 0.0;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            s += r[i].x * r[j].y - r[j].x * r[i].y;
+        }
+        (s / 2.0).abs()
+    }
+
+    #[test]
+    fn test_buffer_polygon_acute_reflex_no_spike() {
+        // Acute reflex corner previously produced an unbounded miter spike.
+        let poly = Polygon::new(
+            vec![
+                Point2D::new(0.0, 0.0),
+                Point2D::new(10.0, 0.0),
+                Point2D::new(10.0, 10.0),
+                Point2D::new(5.0 + 0.01, 5.0), // sharp reflex notch vertex
+                Point2D::new(0.0, 10.0),
+            ],
+            vec![],
+        );
+        let buffered = buffer_polygon(&poly, 1.0, 8);
+        for p in &buffered.exterior {
+            // Every output vertex must stay within ~2x distance of the input
+            // hull region — no runaway spikes.
+            let d = (p.x.powi(2) + p.y.powi(2)).sqrt();
+            assert!(d < 30.0, "miter spike at {:?}", p);
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

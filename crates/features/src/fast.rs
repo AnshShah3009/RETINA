@@ -110,9 +110,15 @@ fn has_n_contiguous(
     false
 }
 
-/// Compute corner score using the sum of absolute differences
-pub fn corner_score(image: &GrayImage, x: i32, y: i32, _threshold: u8) -> u8 {
-    let circle_offsets: [(i32, i32); 16] = [
+/// FAST corner score (OpenCV `FASTScore`): the maximum, over the two
+/// candidate 9-pixel arcs, of the summed intensity deviation from the
+/// center minus the threshold.
+///
+/// A previous revision returned the MINIMUM ring difference — nearly zero
+/// for genuine corners (half the ring sits on each side), so NMS ranked
+/// corners arbitrarily.
+pub fn corner_score(image: &GrayImage, x: i32, y: i32, threshold: u8) -> u8 {
+    const CIRCLE_OFFSETS: [(i32, i32); 16] = [
         (0, -3),
         (1, -3),
         (2, -2),
@@ -132,17 +138,74 @@ pub fn corner_score(image: &GrayImage, x: i32, y: i32, _threshold: u8) -> u8 {
     ];
 
     let p = image.get_pixel(x as u32, y as u32)[0];
-    let mut min_diff = 255u8;
+    let t = threshold as i32;
+    let pi = p as i32;
 
-    for (dx, dy) in &circle_offsets {
-        let px = (x + dx) as u32;
-        let py = (y + dy) as u32;
-        let val = image.get_pixel(px, py)[0];
-        let diff = val.abs_diff(p);
-        min_diff = min_diff.min(diff);
+    let mut diffs = [0i32; 16];
+    let mut state = [0u8; 16]; // 1 brighter, 2 darker
+    for (i, &(dx, dy)) in CIRCLE_OFFSETS.iter().enumerate() {
+        let val = image.get_pixel((x + dx) as u32, (y + dy) as u32)[0] as i32;
+        let d = val - pi;
+        diffs[i] = d.abs();
+        if d > t {
+            state[i] = 1;
+        } else if d < -t {
+            state[i] = 2;
+        }
     }
 
-    min_diff
+    let mut best: i32 = 0;
+    for want in [1u8, 2u8] {
+        // Longest contiguous arc of `want` pixels; track its summed |diff|.
+        let mut arc_sum = 0i32;
+        let mut arc_len = 0usize;
+        let mut best_arc_sum = 0i32;
+        let mut best_arc_len = 0usize;
+        for i in 0..(16 + 9) {
+            let idx = i % 16;
+            if state[idx] == want {
+                arc_sum += diffs[idx];
+                arc_len += 1;
+                if arc_len > best_arc_len || (arc_len == best_arc_len && arc_sum > best_arc_sum) {
+                    best_arc_len = arc_len;
+                    best_arc_sum = arc_sum;
+                }
+            } else {
+                arc_sum = 0;
+                arc_len = 0;
+            }
+        }
+        if best_arc_len >= 9 {
+            best = best.max(sliding_max9(&diffs, &state, want));
+        }
+    }
+
+    // Score relative to threshold, clamped to u8 like OpenCV's V = sum - t.
+    let v = best.saturating_sub(t * 9);
+    v.clamp(0, 255) as u8
+}
+
+/// Maximum sum of |differences| over any window of exactly 9 contiguous
+/// circle positions whose state matches `want` throughout.
+fn sliding_max9(diffs: &[i32; 16], state: &[u8; 16], want: u8) -> i32 {
+    let mut best = 0i32;
+    // windows wrap the ring: start anywhere, length 9
+    for start in 0..16 {
+        let mut ok = true;
+        let mut s = 0i32;
+        for k in 0..9 {
+            let idx = (start + k) % 16;
+            if state[idx] != want {
+                ok = false;
+                break;
+            }
+            s += diffs[idx];
+        }
+        if ok && s > best {
+            best = s;
+        }
+    }
+    best
 }
 
 /// Non-maximum suppression for FAST keypoints

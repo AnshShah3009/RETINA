@@ -35,6 +35,7 @@
 pub mod akaze;
 /// ArUco marker detection, generation, and pose estimation (tensor-based API)
 pub mod aruco;
+pub mod aruco_tables;
 /// Optimal assignment / bipartite matching (Hungarian algorithm)
 pub mod assignment;
 /// BRIEF (Binary Robust Independent Elementary Features) descriptor

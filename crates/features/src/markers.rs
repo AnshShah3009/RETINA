@@ -19,6 +19,20 @@ pub enum ArucoDictionary {
     Dict4x4_50,
 }
 
+impl ArucoDictionary {
+    pub fn marker_size(&self) -> usize {
+        match self {
+            ArucoDictionary::Dict4x4_50 => 4,
+        }
+    }
+
+    pub fn dict_size(&self) -> usize {
+        match self {
+            ArucoDictionary::Dict4x4_50 => 50,
+        }
+    }
+}
+
 /// Result of detecting a single ArUco marker in an image.
 #[derive(Debug, Clone, Copy)]
 pub struct ArucoDetection {
@@ -763,9 +777,29 @@ fn rotate_code_90(code: u64, side: usize) -> u64 {
 }
 
 fn aruco_dictionary_codes(dict: ArucoDictionary) -> Vec<u64> {
-    match dict {
-        ArucoDictionary::Dict4x4_50 => generate_dictionary_codes(16, 50, 0xA53A_9E37_5D1Cu64),
+    // Delegate to the embedded OpenCV-compatible tables so rendered markers
+    // are byte-identical to published cv::aruco dictionaries. (Previously an
+    // LCG generated incompatible codes.)
+    let side = dict.marker_size();
+    let bits = side * side;
+    let nb = (bits + 7) / 8;
+    let count = dict.dict_size();
+    let (table, stride): (&[u8], usize) = match side {
+        4 => (&crate::aruco_tables::DICT_4X4_BYTES, 4 * nb),
+        5 => (&crate::aruco_tables::DICT_5X5_BYTES, 4 * nb),
+        _ => (&crate::aruco_tables::DICT_6X6_BYTES, 4 * nb),
+    };
+    let mut out = Vec::with_capacity(count);
+    for id in 0..count {
+        let base = id * stride;
+        let mut code = 0u64;
+        for b in 0..bits {
+            let byte = table[base + b / 8];
+            code = (code << 1) | ((byte >> (7 - (b % 8))) & 1) as u64;
+        }
+        out.push(code);
     }
+    out
 }
 
 fn apriltag_family_codes(family: AprilTagFamily) -> (usize, Vec<u64>) {

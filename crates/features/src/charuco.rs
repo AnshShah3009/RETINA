@@ -35,14 +35,20 @@ impl CharucoBoard {
         }
     }
 
-    /// Chessboard corner world coordinates (z=0 plane)
+    /// Chessboard corner world coordinates (z=0 plane).
+    ///
+    /// Corners lie at the interior grid INTERSECTIONS: (col*L, row*L) with
+    /// col in 1..squares_x-1, row in 1..squares_y-1, ordered row-major so
+    /// that index i corresponds to corner id i from `interpolate_corners`.
+    /// A previous revision used square CENTERS ((col+0.5)*L), offsetting
+    /// every calibration observation by half a square.
     pub fn chessboard_corners(&self) -> Vec<Point3<f64>> {
         let mut pts = Vec::new();
-        for row in 0..self.squares_y.saturating_sub(1) {
-            for col in 0..self.squares_x.saturating_sub(1) {
+        for row in 1..self.squares_y.saturating_sub(1) {
+            for col in 1..self.squares_x.saturating_sub(1) {
                 pts.push(Point3::new(
-                    (col as f64 + 0.5) * self.square_length,
-                    (row as f64 + 0.5) * self.square_length,
+                    col as f64 * self.square_length,
+                    row as f64 * self.square_length,
                     0.0,
                 ));
             }
@@ -111,41 +117,75 @@ impl CharucoDetector {
     }
 
     fn interpolate_corners(&self, markers: &[DetectedMarker]) -> Result<CharucoCorners> {
+        // Marker placement follows the OpenCV ChArUco convention: markers
+        // sit on cells where (row+col) is odd, ids assigned row-major over
+        // those cells. The previous id/(sx-1) mapping matched no board
+        // layout, and corners were paired to intersections inconsistently.
+        let sx = self.board.squares_x;
+        let sy = self.board.squares_y;
+        if sx < 2 || sy < 2 {
+            return Ok(CharucoCorners { corners: vec![], ids: vec![] });
+        }
+
+        // marker id -> cell (col, row)
+        let mut cell_of_id: HashMap<usize, (usize, usize)> = HashMap::new();
+        let mut next_id = 0usize;
+        for row in 0..sy {
+            for col in 0..sx {
+                if (row + col) % 2 == 1 {
+                    cell_of_id.insert(next_id, (col, row));
+                    next_id += 1;
+                }
+            }
+        }
+
+        // Accumulate observations per INTERSECTION (ic, ir), where
+        // ic in 0..=sx-2 indexes intersections by column.
         let mut corner_data: HashMap<(usize, usize), Vec<[f64; 2]>> = HashMap::new();
 
         for marker in markers {
-            let sx = self.board.squares_x;
-            if sx <= 1 { continue; }
-            let grid_i = marker.id / (sx - 1);
-            let grid_j = marker.id % (sx - 1);
+            let Some(&(col, row)) = cell_of_id.get(&(marker.id as usize)) else {
+                continue;
+            };
+            if col >= sx - 1 || row >= sy - 1 {
+                continue; // marker on outer ring contributes no interior corners
+            }
 
-            let corner_indices: [(usize, usize); 4] = [
-                (grid_i, grid_j),
-                (grid_i, grid_j + 1),
-                (grid_i + 1, grid_j),
-                (grid_i + 1, grid_j + 1),
-            ];
-
-            for (idx, &(ci, cj)) in corner_indices.iter().enumerate() {
-                if ci < self.board.squares_y - 1 && cj < sx - 1 {
-                    let pt = marker.corners[idx];
-                    corner_data.entry((ci, cj)).or_default().push([pt.0, pt.1]);
+            // Marker image corners are TL, TR, BR, BL; each maps to the
+            // intersection at its own grid corner:
+            //   TL -> (col,     row)
+            //   TR -> (col + 1, row)
+            //   BR -> (col + 1, row + 1)
+            //   BL -> (col,     row + 1)
+            for (ic, ir, pt) in [
+                (col, row, marker.corners[0]),
+                (col + 1, row, marker.corners[1]),
+                (col + 1, row + 1, marker.corners[2]),
+                (col, row + 1, marker.corners[3]),
+            ] {
+                if ic <= sx - 2 && ir <= sy - 2 {
+                    corner_data
+                        .entry((ic, ir))
+                        .or_default()
+                        .push([pt.0, pt.1]);
                 }
             }
         }
 
         let mut corners = Vec::new();
         let mut ids = Vec::new();
-
-        for (&(gi, gj), pts) in &corner_data {
+        // Emit row-major over intersections: id = ir*(sx-1) + ic.
+        let mut sorted_keys: Vec<(usize, usize)> = corner_data.keys().copied().collect();
+        sorted_keys.sort();
+        for (ic, ir) in sorted_keys {
+            let Some(pts) = corner_data.get(&(ic, ir)) else { continue };
             if pts.len() < self.params.min_markers {
                 continue;
             }
             let avg_x = pts.iter().map(|p| p[0]).sum::<f64>() / pts.len() as f64;
             let avg_y = pts.iter().map(|p| p[1]).sum::<f64>() / pts.len() as f64;
-            let corner_id = (gi * (self.board.squares_x - 1) + gj) as i32;
             corners.push([avg_x as f32, avg_y as f32]);
-            ids.push(corner_id);
+            ids.push((ir * (sx - 1) + ic) as i32);
         }
 
         Ok(CharucoCorners { corners, ids })

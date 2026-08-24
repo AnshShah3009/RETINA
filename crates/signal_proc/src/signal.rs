@@ -657,7 +657,10 @@ pub fn resample(x: &[f64], num: usize) -> Vec<f64> {
             new_spectrum[num - nyq] = spectrum[nyq] * Complex::new(0.5, 0.0);
         }
     } else {
-        // Truncate
+        // Truncate. The source Nyquist bin (even n) lies outside both copied
+        // windows and its energy is intentionally dropped — splitting it into
+        // two half-weight bins would require shifting one of them onto the
+        // other side of DC.
         let half = num.div_ceil(2);
         new_spectrum[..half].copy_from_slice(&spectrum[..half]);
         let neg_count = num - half;
