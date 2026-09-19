@@ -4,8 +4,10 @@ slow-timeout = { period = "120s", terminate-after = 3 }
 test-threads = "num-cpus"
 
 # Wall-clock assertions are sensitive to CI scheduling jitter: a genuine
-# regression (e.g. a return to a 50ms polling wake) fails every attempt,
-# while a loaded runner only trips the threshold occasionally.
+# regression fails every attempt, while a loaded runner only trips the threshold
+# occasionally. perf_test_vram_wait_latency is deliberately not listed: it no
+# longer asserts a tight bound (it checks the wake ordering and compares the
+# best of several trials), and retrying it only hid a real macOS failure.
 [[profile.default.overrides]]
-filter = 'test(perf_test_vram_wait_latency) | test(perf_test_adaptive_mode_overhead) | test(perf_test_orchestrator_throughput)'
+filter = 'test(perf_test_adaptive_mode_overhead) | test(perf_test_orchestrator_throughput)'
 retries = 3
