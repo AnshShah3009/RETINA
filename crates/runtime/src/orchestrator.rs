@@ -573,17 +573,23 @@ impl TaskScheduler {
             Err(_) => return,
         };
 
-        let mut device_idx: u8 = 0;
         for device in reg.all_devices() {
             if device.backend() == BackendType::Cpu {
                 continue;
             }
             let mem_mb = device.estimated_memory_mb();
-            if mem_mb > 0 && device_idx < 8 {
-                // Use the coordinator's init_device — CAS ensures only first writer wins
-                let _ = coord.init_device(device_idx, mem_mb);
-                device_idx += 1;
+            if mem_mb == 0 {
+                continue;
             }
+            // Register the budget under the device's OWN id: consumers index
+            // the coordinator by `(device.id().0 & 0xFF)` (see
+            // `best_gpu_with_wait` and `UnifiedBuffer::sync_to_device`). A
+            // dense counter would write index 0 while consumers read the
+            // device id (GPU ids start at 1), leaving the VRAM budget dead.
+            let device_idx = (device.id().0 & 0xFF) as u8;
+            // Use the coordinator's init_device — CAS ensures only first writer wins.
+            // init_device itself rejects out-of-range indices.
+            let _ = coord.init_device(device_idx, mem_mb);
         }
     }
 
@@ -671,6 +677,13 @@ impl TaskScheduler {
     pub fn remove_group(&self, name: &str) -> Result<Option<Arc<ResourceGroup>>> {
         let mut groups = self.groups.lock();
         if let Some(group) = groups.remove(name) {
+            // Unregister the group's executor from the device runtime, otherwise
+            // the rayon pool (and its threads) lives for the process lifetime.
+            if let Ok(reg) = registry() {
+                if let Some(runtime) = reg.get_device(group.device_id()) {
+                    runtime.executors().lock().remove_executor(&group.executor);
+                }
+            }
             Ok(Some(group))
         } else {
             Ok(None)
@@ -1293,6 +1306,29 @@ mod tests {
         let s = TaskScheduler::new();
         let removed = s.remove_group("nonexistent").unwrap();
         assert!(removed.is_none());
+    }
+
+    #[test]
+    fn test_remove_group_unregisters_executor() {
+        let s = TaskScheduler::new();
+        let policy = GroupPolicy::default();
+        let group = s.create_group("exec_unregister", 2, None, policy).unwrap();
+
+        // The group's executor is referenced by the group itself, by the device
+        // runtime's pool, and by this local clone.
+        let executor = group.executor.clone();
+        assert!(Arc::strong_count(&executor) >= 3);
+
+        let removed = s
+            .remove_group("exec_unregister")
+            .unwrap()
+            .expect("group must exist");
+        drop(removed);
+        drop(group);
+
+        // After removal only our local clone may remain: the device runtime must
+        // have dropped its reference so the rayon pool can be torn down.
+        assert_eq!(Arc::strong_count(&executor), 1);
     }
 
     #[test]

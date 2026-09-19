@@ -211,9 +211,12 @@ async fn execute_pipeline(
                     .filter_map(|&id| buffers.get(&id).copied())
                     .collect();
 
-                for (i, &output_id) in outputs.iter().enumerate() {
-                    if i < output_sizes.len() {
-                        allocator.allocate_or_update(output_id, output_sizes[i], &[])?;
+                for &output_id in outputs {
+                    // Look the size up per output id: `output_sizes` may be
+                    // shorter than `outputs` when a buffer is unregistered, so
+                    // indexing it positionally would shift every later size.
+                    if let Some(&size) = buffers.get(&output_id) {
+                        allocator.allocate_or_update(output_id, size, &[])?;
                     }
                 }
 

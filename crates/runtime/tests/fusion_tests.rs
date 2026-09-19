@@ -93,3 +93,48 @@ fn test_kernel_fuser_optimize() {
     let result = fuser.optimize(nodes);
     assert!(result.is_ok());
 }
+
+#[test]
+fn test_kernel_fuser_emits_fused_kernel_in_place() {
+    // conv2d + threshold fuse (indices 0..2), followed by a non-fusible node.
+    // The fused kernel must be emitted at the position of its first original
+    // node, not appended after the trailing node (which would reverse
+    // producer/consumer order).
+    let fuser = KernelFuser::new();
+
+    let nodes = vec![
+        PipelineNode::Kernel {
+            name: "conv2d".to_string(),
+            inputs: vec![BufferId(0)],
+            outputs: vec![BufferId(1)],
+            params: vec![],
+        },
+        PipelineNode::Kernel {
+            name: "threshold".to_string(),
+            inputs: vec![BufferId(1)],
+            outputs: vec![BufferId(2)],
+            params: vec![128u8],
+        },
+        PipelineNode::Kernel {
+            name: "resize".to_string(),
+            inputs: vec![BufferId(2)],
+            outputs: vec![BufferId(3)],
+            params: vec![],
+        },
+    ];
+
+    let optimized = fuser.optimize(nodes).unwrap();
+    assert_eq!(optimized.len(), 2, "expected one fused kernel + one node");
+
+    match &optimized[0] {
+        PipelineNode::Kernel { name, .. } => assert_ne!(
+            name, "resize",
+            "fused kernel must come before the trailing node, got {name}"
+        ),
+        other => panic!("expected kernel node, got {other:?}"),
+    }
+    match &optimized[1] {
+        PipelineNode::Kernel { name, .. } => assert_eq!(name, "resize"),
+        other => panic!("expected kernel node, got {other:?}"),
+    }
+}

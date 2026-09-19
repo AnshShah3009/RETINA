@@ -2,8 +2,8 @@ use super::LoadCoordinator;
 use cv_hal::DeviceId;
 use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 // --- Layout constants ---
@@ -98,6 +98,17 @@ pub struct ShmCoordinator {
 unsafe impl Send for ShmCoordinator {}
 unsafe impl Sync for ShmCoordinator {}
 
+/// Per-process reference counts keyed by `(shm path, slot_index)`.
+///
+/// `acquire_slot` shares a single slot between all coordinators of the same PID,
+/// so dropping one of them must not release VRAM the others still hold. Only the
+/// last coordinator for a slot runs `cleanup`.
+fn slot_refcounts() -> &'static Mutex<HashMap<(std::path::PathBuf, usize), Arc<AtomicUsize>>> {
+    static REFS: OnceLock<Mutex<HashMap<(std::path::PathBuf, usize), Arc<AtomicUsize>>>> =
+        OnceLock::new();
+    REFS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl ShmCoordinator {
     /// Create or attach to a shared memory region.
     ///
@@ -129,7 +140,7 @@ impl ShmCoordinator {
 
         let needs_init = {
             let meta = file.metadata()?;
-            if meta.len() < size as u64 {
+            if meta.len() < SHM_TOTAL_SIZE as u64 {
                 true
             } else {
                 let probe = unsafe { memmap2::MmapOptions::new().map(&file)? };
@@ -148,12 +159,6 @@ impl ShmCoordinator {
             file.set_len(size as u64)?;
         }
 
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        }
-
         let mut mmap = unsafe { memmap2::MmapOptions::new().map_mut(&file)? };
 
         if mmap.len() < SHM_TOTAL_SIZE {
@@ -168,7 +173,9 @@ impl ShmCoordinator {
         }
 
         if needs_init {
-            // Zero everything
+            // Zero and publish the header WHILE STILL HOLDING the init lock, so
+            // a concurrent starter cannot observe magic == 0 and re-initialize
+            // the region underneath us.
             for byte in mmap.iter_mut() {
                 *byte = 0;
             }
@@ -183,8 +190,24 @@ impl ShmCoordinator {
             header.refcount.store(0, Ordering::Release);
         }
 
+        // The header is now valid (either freshly published or validated), so
+        // the init lock can be released.
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        }
+
         let pid = std::process::id();
         let slot_index = Self::acquire_slot(&mmap, pid)?;
+
+        // Register this coordinator against its slot's per-process refcount.
+        {
+            let mut refs = slot_refcounts().lock().unwrap_or_else(|e| e.into_inner());
+            refs.entry((path.clone(), slot_index))
+                .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+                .fetch_add(1, Ordering::SeqCst);
+        }
 
         // Increment refcount atomically — protects against premature
         // file deletion in Drop when multiple processes attach concurrently
@@ -232,6 +255,20 @@ impl ShmCoordinator {
 
     fn my_slot(&self) -> &ProcessSlot {
         Self::slot_ptr(&self.mmap, self.slot_index).expect("own slot index must be valid")
+    }
+
+    /// Owner bit for `slot_index` in the 64-bit `owner_mask`.
+    ///
+    /// There are `MAX_SLOTS` (128) slots but only 64 mask bits, so slots >= 64
+    /// have no representable bit. Return 0 for them instead of shifting a `u64`
+    /// by >= 64, which panics in debug and aliases (i & 63) in release.
+    #[inline]
+    fn slot_bit(slot_index: usize) -> u64 {
+        if slot_index < 64 {
+            1u64 << slot_index
+        } else {
+            0
+        }
     }
 
     fn bump_epoch(&self) {
@@ -379,7 +416,7 @@ impl ShmCoordinator {
         }
 
         // Set owner_mask bit for our slot
-        let bit = 1u64 << self.slot_index;
+        let bit = Self::slot_bit(self.slot_index);
         dev.owner_mask.fetch_or(bit, Ordering::AcqRel);
 
         // Accumulate our slot's per-device budget
@@ -421,7 +458,7 @@ impl ShmCoordinator {
             .ok();
 
         // Clear owner bit
-        let bit = 1u64 << self.slot_index;
+        let bit = Self::slot_bit(self.slot_index);
         dev.owner_mask.fetch_and(!bit, Ordering::AcqRel);
 
         // Clear slot's per-device fields (memory_budget_mb already zeroed via swap above)
@@ -726,7 +763,7 @@ impl ShmCoordinator {
                 if budget > 0 {
                     if let Some(dev) = Self::device_ptr(&self.mmap, d) {
                         dev.used_memory_mb.fetch_sub(budget, Ordering::AcqRel);
-                        let bit = 1u64 << i;
+                        let bit = Self::slot_bit(i);
                         dev.owner_mask.fetch_and(!bit, Ordering::AcqRel);
                     }
                     slot.compute_budget_pct[d].store(0, Ordering::Release);
@@ -838,7 +875,8 @@ impl ShmCoordinator {
                             if budget > 0 {
                                 if let Some(dev) = Self::device_ptr(&mmap, d) {
                                     dev.used_memory_mb.fetch_sub(budget, Ordering::AcqRel);
-                                    dev.owner_mask.fetch_and(!(1u64 << i), Ordering::AcqRel);
+                                    dev.owner_mask
+                                        .fetch_and(!Self::slot_bit(i), Ordering::AcqRel);
                                 }
                                 slot.memory_budget_mb[d].store(0, Ordering::Release);
                                 slot.compute_budget_pct[d].store(0, Ordering::Release);
@@ -1104,7 +1142,32 @@ impl LoadCoordinator for ShmCoordinator {
 impl Drop for ShmCoordinator {
     fn drop(&mut self) {
         self.stop_heartbeat();
-        self.cleanup();
+
+        // Only the last coordinator sharing this slot may release reservations
+        // and mark the slot EMPTY. Otherwise dropping one of several coordinators
+        // with the same PID (which share a slot) would free VRAM the others
+        // still hold.
+        let last = {
+            let key = (self.path.clone(), self.slot_index);
+            let mut refs = slot_refcounts().lock().unwrap_or_else(|e| e.into_inner());
+            match refs.get(&key).map(|rc| rc.fetch_sub(1, Ordering::AcqRel)) {
+                Some(prev) => {
+                    if prev <= 1 {
+                        refs.remove(&key);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                // No tracking entry (should not happen): clean up conservatively.
+                None => true,
+            }
+        };
+
+        if last {
+            self.cleanup();
+        }
+
         // Atomically decrement refcount; only the last process removes the file
         let header = Self::header_ptr(&self.mmap);
         if header.refcount.fetch_sub(1, Ordering::AcqRel) == 1 {
@@ -1460,5 +1523,67 @@ mod tests {
         // which proves Drop ran to completion (including thread join).
         let path = ShmCoordinator::get_shm_path(&name);
         assert!(!path.exists(), "SHM file should be gone after drop");
+    }
+
+    #[test]
+    fn test_shared_slot_reservation_survives_sibling_drop() {
+        // Two coordinators in the same process share one slot (same PID).
+        // Dropping one must NOT release the reservation the other still holds.
+        let name = unique_name("shared_slot");
+        let coord1 = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        coord1.init_device(0, 2048).unwrap();
+        coord1.reserve_device(0, 512, 10).unwrap();
+
+        let coord2 = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        assert_eq!(coord1.slot_index, coord2.slot_index);
+
+        drop(coord2);
+
+        // coord1 still owns the reservation and its slot is still ACTIVE.
+        let usage = coord1.device_memory_usage();
+        assert_eq!(
+            usage[0].1, 512,
+            "reservation must survive while a sibling coordinator is alive"
+        );
+        assert_eq!(
+            coord1.my_slot().state.load(Ordering::Acquire),
+            SLOT_ACTIVE,
+            "slot must stay ACTIVE while a sibling coordinator is alive"
+        );
+
+        // Drop the last coordinator: now everything is released.
+        drop(coord1);
+    }
+
+    #[test]
+    fn test_slot_bit_does_not_shift_overflow() {
+        // Indices >= 64 must not panic (debug) or alias (release).
+        assert_eq!(ShmCoordinator::slot_bit(0), 1);
+        assert_eq!(ShmCoordinator::slot_bit(63), 1u64 << 63);
+        assert_eq!(ShmCoordinator::slot_bit(64), 0);
+        assert_eq!(ShmCoordinator::slot_bit(127), 0);
+    }
+
+    #[test]
+    fn test_larger_requested_size_does_not_reinitialize_live_region() {
+        // A caller passing a larger size must not re-zero a live region and
+        // wipe the slots/budgets of the processes already using it.
+        let name = unique_name("no_reinit");
+        let coord1 = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        coord1.init_device(0, 4096).unwrap();
+        coord1.reserve_device(0, 512, 10).unwrap();
+
+        let coord2 = ShmCoordinator::new(&name, SHM_TOTAL_SIZE * 2).unwrap();
+        assert_eq!(coord2.slot_index, coord1.slot_index);
+
+        let usage = coord1.device_memory_usage();
+        assert_eq!(
+            usage[0].1, 512,
+            "larger requested size must not reinitialize a live region"
+        );
+        assert_eq!(coord1.my_slot().state.load(Ordering::Acquire), SLOT_ACTIVE);
+
+        drop(coord2);
+        drop(coord1);
     }
 }
