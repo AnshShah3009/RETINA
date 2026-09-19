@@ -32,30 +32,33 @@ A comprehensive native Rust computer vision library with full in-house implement
 
 ```
 rust-cv-native/
-├── core/          # Core types, camera models, frame conventions, robust estimation
-├── hal/           # Hardware abstraction layer (CPU/GPU)
-├── imgproc/       # Image processing
-├── features/      # Feature detection and matching
-├── stereo/        # Stereo vision
-├── calib3d/       # Camera calibration
-├── registration/  # ICP, global registration
-├── 3d/            # Point clouds, triangulation, mesh reconstruction
-├── sfm/           # Structure from Motion
-├── slam/          # SLAM with ISAM2
-├── optimize/      # Optimization (ISAM2, rendering/     # Gaussian splatting
-├── plot sparse solvers)
-├──/          # Visualization
-├── video/         # Video processing (MOG2, optical flow)
-├── videoio/       # Video I/O (FFmpeg backend)
-├── dnn/           # Deep neural networks
-├── objdetect/     # Object detection
-├── io/            # File I/O
-├── point-cloud/   # Point cloud processing
-├── scientific/    # Scientific computing
-├── runtime/       # Async runtime
-├── viewer/        # 3D visualization
-├── python/        # Python bindings (PyO3)
-└── examples/      # Usage examples
+├── crates/core/         # Core types, camera models, frame conventions, tensors
+├── crates/hal/          # Hardware abstraction layer (CPU/GPU)
+├── crates/math/         # Math primitives and special functions
+├── crates/geometry2d/   # 2D geometry primitives
+├── crates/imgproc/      # Image processing
+├── crates/features/     # Feature detection and matching
+├── crates/photo/        # Computational photography
+├── crates/video/        # Video processing (MOG2, optical flow)
+├── crates/videoio/      # Video I/O (FFmpeg backend)
+├── crates/calib3d/      # Camera calibration and pose estimation
+├── crates/3d/           # Point clouds, triangulation, mesh reconstruction
+├── crates/registration/ # ICP, global registration
+├── crates/pointcloud/   # Point cloud processing
+├── crates/sfm/          # Structure from Motion
+├── crates/slam/         # SLAM with ISAM2
+├── crates/optimize/     # Optimization (ISAM2, sparse solvers)
+├── crates/rendering/    # 3D rendering (Gaussian splatting)
+├── crates/plot/         # Plotting and visualization
+├── crates/viewer/       # 3D visualization
+├── crates/signal_proc/  # Signal processing
+├── crates/scientific/   # Scientific computing
+├── crates/dnn/          # Deep neural network inference
+├── crates/io/           # File I/O
+├── crates/runtime/      # Async runtime and orchestration
+├── crates/distributed/  # Cross-process shared-memory / VRAM coordination
+├── crates/python/       # Python bindings (PyO3)
+└── crates/examples/     # Usage examples
 ```
 
 ## Installation
