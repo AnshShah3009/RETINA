@@ -13,12 +13,10 @@ struct FlowUpdateParams {
 @group(0) @binding(0) var<storage, read> poly1: array<f32>;
 // Estimated polynomial coefficients from second frame
 @group(0) @binding(1) var<storage, read> poly2: array<f32>;
-// Current flow estimate
-@group(0) @binding(2) var<storage, read> flow: array<f32>;
-// Output updated flow
-@group(0) @binding(3) var<storage, read_write> output_flow: array<f32>;
+// Current flow estimate (read+write to avoid aliasing hazard)
+@group(0) @binding(2) var<storage, read_write> flow: array<f32>;
 // Number of bands in polynomial expansion
-@group(0) @binding(4) var<uniform> params: FlowUpdateParams;
+@group(0) @binding(3) var<uniform> params: FlowUpdateParams;
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -110,6 +108,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     
     // Store updated flow
-    output_flow[flow_idx + 0u] = u;
-    output_flow[flow_idx + 1u] = v;
+    flow[flow_idx + 0u] = u;
+    flow[flow_idx + 1u] = v;
 }

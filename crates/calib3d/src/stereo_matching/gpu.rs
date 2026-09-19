@@ -192,8 +192,10 @@ impl GpuStereoMatcher {
         let params = StereoParamsGPU {
             width,
             height,
-            min_disparity: min_disparity as u32,
-            max_disparity: max_disparity as u32,
+            // The WGSL shader declares these as i32; keep the Rust side
+            // signed so negative disparity ranges don't rely on wraparound.
+            min_disparity,
+            max_disparity,
             block_size: self.block_size(),
             _pad0: 0,
             _pad1: 0,
@@ -507,8 +509,8 @@ fn align_copy_bytes_per_row(bytes: u32) -> u32 {
 struct StereoParamsGPU {
     width: u32,
     height: u32,
-    min_disparity: u32,
-    max_disparity: u32,
+    min_disparity: i32,
+    max_disparity: i32,
     block_size: u32,
     _pad0: u32,
     _pad1: u32,

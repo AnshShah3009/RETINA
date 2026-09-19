@@ -4,14 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nalgebra = { workspace = true }
-cv-core = { workspace = true }
-ndarray = { workspace = true }
+cv-math = { workspace = true }
+cv-geometry2d = { workspace = true }
+cv-signal = { workspace = true }
+cv-pointcloud = { workspace = true }
+
+[dev-dependencies]
 geo = { workspace = true }
-rstar = { workspace = true }
-geo-buffer = { workspace = true }
-rayon = { workspace = true }
-rustfft = { workspace = true }
+cv-core = { workspace = true }
+nalgebra = { workspace = true }
 
 [features]
 default = []

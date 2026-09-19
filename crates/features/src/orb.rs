@@ -98,7 +98,6 @@ pub struct Orb {
     first_level: i32,
     #[allow(dead_code)]
     wta_k: i32,
-    #[allow(dead_code)]
     score_type: ScoreType,
     patch_size: i32,
     fast_threshold: u8,

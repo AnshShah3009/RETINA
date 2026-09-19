@@ -18,10 +18,24 @@ pub struct WgpuGpuStorage<T> {
     pub buffer: Option<Arc<wgpu::Buffer>>,
     pub len: usize,
     pub usage: wgpu::BufferUsages,
+    shape: Vec<usize>,
     _phantom: PhantomData<T>,
 }
 
 impl<T> WgpuGpuStorage<T> {
+    /// Reinterpret this storage as holding a different element type.
+    /// The underlying GPU buffer is type-erased, so this is always safe.
+    pub fn retype<U>(mut self) -> WgpuGpuStorage<U> {
+        let buffer = self.buffer.take();
+        WgpuGpuStorage {
+            buffer,
+            len: self.len,
+            usage: self.usage,
+            shape: std::mem::take(&mut self.shape),
+            _phantom: PhantomData,
+        }
+    }
+
     pub fn from_buffer(buffer: Arc<wgpu::Buffer>, len: usize) -> Self {
         Self::from_buffer_with_usage(
             buffer,
@@ -41,6 +55,7 @@ impl<T> WgpuGpuStorage<T> {
             buffer: Some(buffer),
             len,
             usage,
+            shape: Vec::new(),
             _phantom: PhantomData,
         }
     }
@@ -85,6 +100,7 @@ impl<T> WgpuGpuStorage<T> {
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
+            shape: Vec::new(),
             _phantom: PhantomData,
         })
     }
@@ -116,7 +132,7 @@ impl<T: bytemuck::Pod + fmt::Debug + Any + 'static> Storage<T> for WgpuGpuStorag
     }
 
     fn shape(&self) -> &[usize] {
-        &[]
+        &self.shape
     }
 
     fn len(&self) -> usize {
@@ -166,6 +182,7 @@ impl<T: bytemuck::Pod + fmt::Debug + Any + 'static> cv_core::storage::StorageFac
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
+            shape: Vec::new(),
             _phantom: PhantomData,
         })
     }

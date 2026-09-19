@@ -47,6 +47,19 @@ impl V4L2Capture {
             .set_format(&fmt)
             .map_err(|e| VideoError::Backend(format!("Failed to set format: {}", e)))?;
 
+        // set_format is a request: drivers may substitute a different FourCC.
+        // Verify before relying on YUYV layout in retrieve().
+        let negotiated = self
+            .device
+            .format()
+            .map_err(|e| VideoError::Backend(format!("Failed to get format: {}", e)))?;
+        if negotiated.fourcc != FourCC::new(b"YUYV") {
+            return Err(VideoError::Backend(format!(
+                "Driver negotiated {:?} instead of YUYV; unsupported",
+                &negotiated.fourcc
+            )));
+        }
+
         let stream = MmapStream::with_buffers(&self.device, Type::VideoCapture, 4)
             .map_err(|e| VideoError::Backend(format!("Failed to create stream: {}", e)))?;
 
@@ -80,7 +93,20 @@ impl VideoCapture for V4L2Capture {
             .format()
             .map_err(|e| VideoError::Backend(format!("Failed to get format: {}", e)))?;
 
-        // Simplified YUYV to Grayscale conversion
+        // Simplified YUYV to Grayscale conversion. The driver may have
+        // negotiated a different format or resolution than requested, so
+        // validate before indexing to avoid panics on short buffers.
+        let expected = fmt.width as usize * fmt.height as usize * 2;
+        if data.len() < expected {
+            return Err(VideoError::CaptureFailed(format!(
+                "Frame buffer too small: got {} bytes, need {} for {}x{} YUYV",
+                data.len(),
+                expected,
+                fmt.width,
+                fmt.height
+            )));
+        }
+
         let mut gray = GrayImage::new(fmt.width, fmt.height);
         for i in 0..(fmt.width * fmt.height) as usize {
             // YUYV: Y0 U0 Y1 V0 ...

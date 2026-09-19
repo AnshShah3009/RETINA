@@ -92,9 +92,9 @@ impl PyMeshReconstruction {
 /// Auto-select the fastest available backend (GPU -> CPU).
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_auto(points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
+fn estimate_normals_auto(py: Python<'_>, points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
-        normals_to_py(cv_3d::estimate_normals_auto(&pts_from_py(&points), k))
+        py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_auto(&pts_from_py(&points), k)))
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
@@ -102,9 +102,9 @@ fn estimate_normals_auto(points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec
 /// CPU-only: voxel-hash kNN + analytic eigensolver.
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_cpu(points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
+fn estimate_normals_cpu(py: Python<'_>, points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
-        normals_to_py(cv_3d::estimate_normals_cpu(&pts_from_py(&points), k))
+        py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_cpu(&pts_from_py(&points), k)))
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
@@ -112,9 +112,9 @@ fn estimate_normals_cpu(points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<
 /// GPU: Morton sort (CPU) + WebGPU PCA.
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_gpu(points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
+fn estimate_normals_gpu(py: Python<'_>, points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
-        normals_to_py(cv_3d::estimate_normals_gpu(&pts_from_py(&points), k))
+        py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_gpu(&pts_from_py(&points), k)))
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
@@ -123,11 +123,12 @@ fn estimate_normals_gpu(points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
 fn estimate_normals_hybrid(
+    py: Python<'_>,
     points: Vec<(f32, f32, f32)>,
     k: usize,
 ) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
-        normals_to_py(cv_3d::estimate_normals_hybrid(&pts_from_py(&points), k))
+        py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_hybrid(&pts_from_py(&points), k)))
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }

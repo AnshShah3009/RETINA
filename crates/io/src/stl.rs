@@ -16,7 +16,26 @@ pub fn read_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
 
     // Check for ASCII STL signature
     let header_str = String::from_utf8_lossy(&header[..bytes_read]);
-    if header_str.trim_start().starts_with("solid ") {
+    let mut is_ascii = header_str.trim_start().starts_with("solid");
+
+    if is_ascii {
+        // Many binary STL exporters begin the 80-byte header with "solid"
+        // despite the spec forbidding it. Genuine ASCII files always contain
+        // "facet normal" (or at least "endsolid") shortly after, so look for
+        // those markers before committing to the text parser.
+        let marker_in_header =
+            header_str.contains("facet") || header_str.contains("endsolid");
+        let marker_in_peek = if marker_in_header {
+            false
+        } else {
+            let peek = reader.fill_buf()?;
+            let peek_str = String::from_utf8_lossy(&peek[..peek.len().min(512)]);
+            peek_str.contains("facet") || peek_str.contains("endsolid")
+        };
+        is_ascii = marker_in_header || marker_in_peek;
+    }
+
+    if is_ascii {
         // ASCII format
         // Prepend the header bytes already consumed, then read the rest
         let header_prefix = String::from_utf8_lossy(&header[..bytes_read]).into_owned();

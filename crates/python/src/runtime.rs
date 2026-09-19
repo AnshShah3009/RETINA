@@ -226,11 +226,18 @@ impl PyRuntime {
     ///     RuntimeError: If the wait times out.
     #[staticmethod]
     #[pyo3(signature = (device_idx, needed_mb, timeout_ms=None))]
-    pub fn wait_for_gpu(device_idx: u8, needed_mb: u32, timeout_ms: Option<u64>) -> PyResult<()> {
+    pub fn wait_for_gpu(
+        py: Python<'_>,
+        device_idx: u8,
+        needed_mb: u32,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<()> {
         let s = scheduler()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         let timeout = timeout_ms.map(std::time::Duration::from_millis);
-        s.wait_for_gpu_with_timeout(device_idx, needed_mb, timeout)
+        // Blocks up to the (default 30 s) timeout on a futex — must release
+        // the GIL so other Python threads keep running.
+        py.allow_threads(move || s.wait_for_gpu_with_timeout(device_idx, needed_mb, timeout))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 

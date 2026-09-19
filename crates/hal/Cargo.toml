@@ -32,6 +32,7 @@ bytemuck = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["sync"] }
 rstar = { workspace = true }
 hashbrown = { workspace = true }
+tracing = { workspace = true }
 
 [features]
 default = ["full-precision"]

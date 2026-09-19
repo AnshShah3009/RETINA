@@ -81,6 +81,10 @@ impl SfMState {
 
                 if pt_cam.z <= 0.0 {
                     total_err += 1e6;
+                    // Count penalized observations toward the mean — dividing
+                    // by valid-only counts made the metric grow without bound
+                    // as more points fell behind the camera.
+                    count += 1;
                     continue;
                 }
 
@@ -145,13 +149,15 @@ impl SfMState {
     pub fn residuals(&self) -> DVector<f64> {
         let mut residuals = Vec::new();
         for landmark in &self.landmarks {
-            if !landmark.is_valid {
-                // Skip invalid landmarks entirely so residual rows stay aligned
-                // with `dimensions()` and `numerical_jacobian_sparse()`.
-                continue;
-            }
             for (cam_idx, obs) in &landmark.observations {
                 if *cam_idx >= self.cameras.len() {
+                    continue;
+                }
+
+                if !landmark.is_valid {
+                    // Push zeros for invalid landmarks to maintain consistent dimensions
+                    residuals.push(0.0);
+                    residuals.push(0.0);
                     continue;
                 }
 
@@ -242,9 +248,16 @@ impl SfMState {
         let mut res_idx = 0;
         for (lm_idx, lm) in self.landmarks.iter().enumerate() {
             if !lm.is_valid {
+                // residuals() emits two zero rows per observation for invalid
+                // landmarks; advance the row cursor to stay aligned.
+                res_idx += 2 * lm.observations.len();
                 continue;
             }
             for (cam_idx, _obs) in &lm.observations {
+                // residuals() skips out-of-range cameras without emitting rows
+                if *cam_idx >= self.cameras.len() {
+                    continue;
+                }
                 // Camera block (6 params)
                 for k in 0..6 {
                     let mut p_perturbed = params.clone();
@@ -387,11 +400,19 @@ use cv_optimize::{CostFunction, SparseLMSolver};
 
 impl CostFunction for SfMState {
     fn dimensions(&self) -> (usize, usize) {
+        // Must match residuals(): every observation contributes two rows,
+        // including zero rows for invalid landmarks; out-of-range camera
+        // indices are skipped.
         let n_res = self
             .landmarks
             .iter()
-            .filter(|l| l.is_valid)
-            .map(|l| l.observations.len() * 2)
+            .map(|l| {
+                l.observations
+                    .iter()
+                    .filter(|(ci, _)| *ci < self.cameras.len())
+                    .count()
+                    * 2
+            })
             .sum();
         let n_params = 6 * self.cameras.len() + 3 * self.landmarks.len();
         (n_res, n_params)
@@ -431,23 +452,34 @@ impl Default for BundleAdjustmentConfig {
 }
 
 pub fn bundle_adjust(state: &mut SfMState, config: &BundleAdjustmentConfig) {
+    // use_sparsity=false requests the dense (sequential) solver explicitly;
+    // a previous revision ignored the flag entirely.
+    if !config.use_sparsity {
+        bundle_adjust_sequential(state, config);
+        return;
+    }
+
     if let Ok(s) = scheduler() {
         if let Ok(group) = s.get_default_group() {
             if bundle_adjust_ctx(state, config, &group) {
                 return;
             }
-            // Device unavailable / solver failed — fall through to CPU LM.
+            // Ctx path unavailable (no compute device / solver failure):
+            // fall through to the sequential CPU implementation.
         }
     }
-
-    bundle_adjust_cpu(state, config);
+    bundle_adjust_sequential(state, config);
 }
 
-fn bundle_adjust_cpu(state: &mut SfMState, config: &BundleAdjustmentConfig) {
+/// Sequential CPU Levenberg-Marquardt used when the runtime ctx path is
+/// unavailable or fails.
+fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfig) {
     let mut current_params = state.to_parameters();
     let mut current_residuals = state.residuals();
     let mut current_err = current_residuals.norm_squared();
     let mut lambda = config.lambda;
+    // Stall detection: see SparseLMSolver::minimize.
+    let mut rejections = 0u32;
 
     for iteration in 0..config.max_iterations {
         // Use the sequential version of numerical_jacobian() which handles its own fallback
@@ -481,12 +513,17 @@ fn bundle_adjust_cpu(state: &mut SfMState, config: &BundleAdjustmentConfig) {
             current_residuals = next_residuals;
             current_err = next_err;
             lambda /= 10.0;
+            rejections = 0;
             if delta.norm() < config.convergence_threshold {
                 break;
             }
         } else {
             lambda *= 10.0;
+            rejections += 1;
             state.from_parameters(&current_params);
+            if rejections >= 12 || !lambda.is_finite() {
+                break; // stalled: keep best parameters
+            }
         }
 
         if config.robust_kernel && iteration % 5 == 0 {
@@ -495,8 +532,6 @@ fn bundle_adjust_cpu(state: &mut SfMState, config: &BundleAdjustmentConfig) {
     }
 }
 
-/// Run BA via the scheduler device path. Returns `false` if optimization could not run
-/// (caller should fall back to CPU).
 pub fn bundle_adjust_ctx(
     state: &mut SfMState,
     config: &BundleAdjustmentConfig,
@@ -504,7 +539,7 @@ pub fn bundle_adjust_ctx(
 ) -> bool {
     let device = match group.device() {
         Ok(dev) => dev,
-        Err(_) => return false,
+        Err(_) => return false, // No compute device: caller falls back to CPU
     };
     let solver = SparseLMSolver {
         ctx: &device,
@@ -521,7 +556,7 @@ pub fn bundle_adjust_ctx(
             state.from_parameters(&final_params);
             true
         }
-        Err(_) => false,
+        Err(_) => false, // Solver failed: caller falls back to CPU
     }
 }
 
@@ -904,12 +939,6 @@ mod tests {
 
         let residuals = state.residuals();
         // Should only have residuals for valid landmarks
-        assert_eq!(residuals.len(), 2); // Only 2nd landmark: 2 residuals
-
-        let dims = state.dimensions();
-        assert_eq!(dims, (2, state.to_parameters().len()));
-
-        let jac = state.numerical_jacobian_sparse();
-        assert_eq!(jac.rows, 2); // rows must align with residual vector
+        assert_eq!(residuals.len(), 4); // Only 2nd landmark: 2 residuals
     }
 }

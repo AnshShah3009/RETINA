@@ -365,14 +365,14 @@ pub fn compute_odometry(
             idx += 1;
         }
 
-        // Compute RMSE from the diagonal sums (sum of r^2 is embedded in atb)
-        // We estimate valid_points from trace of ata vs atb magnitude
-        let sum_r2: f32 = final_data[21..27]
+        // Compute RMSE approximation from the Gauss-Newton JTr residual
+        // Note: this is |J^T r|² not the true RMSE, but it serves as a
+        // valid convergence criterion since both converge together
+        let jtr_norm_sq: f32 = final_data[21..27]
             .iter()
-            .zip(final_data[21..27].iter())
-            .map(|(a, _b)| a.abs())
+            .map(|&x| x * x)
             .sum::<f32>();
-        let rmse_approx = sum_r2.sqrt();
+        let rmse_approx = (jtr_norm_sq / num_pixels as f32).sqrt();
 
         // Convergence check
         if (prev_rmse - rmse_approx).abs() < 1e-6 {
@@ -542,18 +542,17 @@ pub fn compute_odometry(
         27 * 4,
     ))?;
 
-    // Compute fitness and RMSE from the accumulated linear system
-    // sum(r^2) can be recovered from the JTr entries and the system
-    // A simpler approach: count valid pixels from trace magnitude
+    // Compute approximate RMSE from final JTr residual norm
+    // (true RMSE would require sum(r²) which is available only in the shader)
+    let sum_jtr_sq: f32 = (0..6)
+        .map(|i| final_data[21 + i] * final_data[21 + i])
+        .sum();
     let jtj_trace = final_data[0]
         + final_data[6]
         + final_data[11]
         + final_data[15]
         + final_data[18]
         + final_data[20];
-    let sum_jtr_sq: f32 = (0..6)
-        .map(|i| final_data[21 + i] * final_data[21 + i])
-        .sum();
     let valid_approx = if jtj_trace > 0.0 {
         // Rough estimate: trace(JTJ)/average_J2 ~ num_valid
         (jtj_trace / 3.0).max(1.0)

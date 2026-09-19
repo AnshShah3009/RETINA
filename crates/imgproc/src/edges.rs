@@ -458,11 +458,16 @@ fn non_max_suppression(width: usize, height: usize, mag: &[f32], dir: &[u8]) -> 
 
             for x in 1..width - 1 {
                 let m = mag[r1_idx + x];
+                // Gradients here use image-space y-down: gy = bottom - top.
+                // A same-sign gradient (gx>0, gy>0) points right-and-DOWN,
+                // so its normal line is the "\" diagonal (x-1,y-1)..(x+1,y+1).
+                // A previous revision sampled the "/" diagonal for bin 1 and
+                // vice versa, suppressing true diagonal edges.
                 let (m1, m2) = match dir[r1_idx + x] {
                     0 => (mag[r1_idx + x - 1], mag[r1_idx + x + 1]),
-                    1 => (mag[r0_idx + x + 1], mag[r2_idx + x - 1]),
+                    1 => (mag[r0_idx + x - 1], mag[r2_idx + x + 1]),
                     2 => (mag[r0_idx + x], mag[r2_idx + x]),
-                    _ => (mag[r0_idx + x - 1], mag[r2_idx + x + 1]),
+                    _ => (mag[r0_idx + x + 1], mag[r2_idx + x - 1]),
                 };
 
                 if m >= m1 && m >= m2 {

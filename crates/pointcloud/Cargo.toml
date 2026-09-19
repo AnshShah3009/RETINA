@@ -1,0 +1,11 @@
+[package]
+name = "cv-pointcloud"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cv-core = { workspace = true }
+cv-math = { path = "../math" }
+nalgebra = { workspace = true }
+rstar = { workspace = true }
+rayon = { workspace = true }

@@ -31,30 +31,6 @@ pub struct RotatedRect {
     pub angle: f64,
 }
 
-/// Image moments up to 3rd order, including central moments.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Moments {
-    /// Spatial moment m00 (area for a filled contour).
-    pub m00: f64,
-    pub m10: f64,
-    pub m01: f64,
-    pub m20: f64,
-    pub m11: f64,
-    pub m02: f64,
-    pub m30: f64,
-    pub m21: f64,
-    pub m12: f64,
-    pub m03: f64,
-    /// Central moments.
-    pub mu20: f64,
-    pub mu11: f64,
-    pub mu02: f64,
-    pub mu30: f64,
-    pub mu21: f64,
-    pub mu12: f64,
-    pub mu03: f64,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConnectedComponentStats {
     pub label: u32,
@@ -101,8 +77,13 @@ fn trace_boundary(data: &[u8], w: i32, h: i32, sx: i32, sy: i32) -> Vec<(i32, i3
     let mut current = (sx, sy);
     let mut prev_dir = 4usize; // Start as if we came from W.
     let start = current;
-    let start_prev_dir = prev_dir;
     let max_steps = (w as usize * h as usize).saturating_mul(8).max(32);
+    // Terminate on the SECOND arrival at the start pixel regardless of entry
+    // direction. The previous criterion (same entry direction required) never
+    // fired for structures whose trace immediately doubles back — e.g. two
+    // adjacent pixels alternate A→B→A forever, producing a multi-million
+    // point garbage contour.
+    let mut returned_to_start = 0usize;
 
     for _ in 0..max_steps {
         contour.push(current);
@@ -120,10 +101,16 @@ fn trace_boundary(data: &[u8], w: i32, h: i32, sx: i32, sy: i32) -> Vec<(i32, i3
             }
         }
 
-        let Some(next) = found else { break };
-
-        if next == start && prev_dir == start_prev_dir && contour.len() > 1 {
+        let Some(next) = found else {
             break;
+        };
+
+        if next == start && contour.len() > 1 {
+            returned_to_start += 1;
+            if returned_to_start >= 1 {
+                // Loop closed: the start pixel is already the first element.
+                break;
+            }
         }
         current = next;
     }
@@ -162,38 +149,6 @@ pub fn find_external_contours(binary: &GrayImage) -> Vec<Contour> {
     }
 
     contours
-}
-
-/// Polygon area (shoelace). Contour should be ordered.
-pub fn contour_area(contour: &Contour) -> f64 {
-    let n = contour.points.len();
-    if n < 3 {
-        return 0.0;
-    }
-    let mut area = 0.0f64;
-    for i in 0..n {
-        let (x0, y0) = contour.points[i];
-        let (x1, y1) = contour.points[(i + 1) % n];
-        area += x0 as f64 * y1 as f64 - x1 as f64 * y0 as f64;
-    }
-    area.abs() * 0.5
-}
-
-/// Closed-contour perimeter.
-pub fn contour_perimeter(contour: &Contour) -> f64 {
-    let n = contour.points.len();
-    if n < 2 {
-        return 0.0;
-    }
-    let mut p = 0.0f64;
-    for i in 0..n {
-        let (x0, y0) = contour.points[i];
-        let (x1, y1) = contour.points[(i + 1) % n];
-        let dx = (x1 - x0) as f64;
-        let dy = (y1 - y0) as f64;
-        p += (dx * dx + dy * dy).sqrt();
-    }
-    p
 }
 
 /// Bounding rectangle as (x, y, width, height).
@@ -499,126 +454,6 @@ pub fn min_area_rect(contour: &Contour) -> RotatedRect {
     best_rect
 }
 
-/// Compute image moments of a contour up to 3rd order.
-///
-/// Uses the Green's theorem formulation for polygon moments.
-/// The contour is treated as a closed polygon.
-pub fn moments(contour: &Contour) -> Moments {
-    let n = contour.points.len();
-    let zero = Moments {
-        m00: 0.0,
-        m10: 0.0,
-        m01: 0.0,
-        m20: 0.0,
-        m11: 0.0,
-        m02: 0.0,
-        m30: 0.0,
-        m21: 0.0,
-        m12: 0.0,
-        m03: 0.0,
-        mu20: 0.0,
-        mu11: 0.0,
-        mu02: 0.0,
-        mu30: 0.0,
-        mu21: 0.0,
-        mu12: 0.0,
-        mu03: 0.0,
-    };
-
-    if n < 3 {
-        return zero;
-    }
-
-    // Compute raw spatial moments using Green's theorem for polygons
-    let mut m00 = 0.0f64;
-    let mut m10 = 0.0f64;
-    let mut m01 = 0.0f64;
-    let mut m20 = 0.0f64;
-    let mut m11 = 0.0f64;
-    let mut m02 = 0.0f64;
-    let mut m30 = 0.0f64;
-    let mut m21 = 0.0f64;
-    let mut m12 = 0.0f64;
-    let mut m03 = 0.0f64;
-
-    for i in 0..n {
-        let (xi, yi) = (contour.points[i].0 as f64, contour.points[i].1 as f64);
-        let j = (i + 1) % n;
-        let (xj, yj) = (contour.points[j].0 as f64, contour.points[j].1 as f64);
-        let a = xi * yj - xj * yi; // cross product term
-
-        m00 += a;
-        m10 += a * (xi + xj);
-        m01 += a * (yi + yj);
-        m20 += a * (xi * xi + xi * xj + xj * xj);
-        m11 += a * (2.0 * xi * yi + xi * yj + xj * yi + 2.0 * xj * yj);
-        m02 += a * (yi * yi + yi * yj + yj * yj);
-        m30 += a * (xi + xj) * (xi * xi + xj * xj);
-        m21 +=
-            a * (xi * xi * (3.0 * yi + yj) + 2.0 * xi * xj * (yi + yj) + xj * xj * (yi + 3.0 * yj));
-        m12 +=
-            a * (yi * yi * (3.0 * xi + xj) + 2.0 * yi * yj * (xi + xj) + yj * yj * (xi + 3.0 * xj));
-        m03 += a * (yi + yj) * (yi * yi + yj * yj);
-    }
-
-    m00 /= 2.0;
-    m10 /= 6.0;
-    m01 /= 6.0;
-    m20 /= 12.0;
-    m11 /= 24.0;
-    m02 /= 12.0;
-    m30 /= 20.0;
-    m21 /= 60.0;
-    m12 /= 60.0;
-    m03 /= 20.0;
-
-    // Make moments positive (orientation-independent)
-    if m00 < 0.0 {
-        m00 = -m00;
-        m10 = -m10;
-        m01 = -m01;
-        m20 = -m20;
-        m11 = -m11;
-        m02 = -m02;
-        m30 = -m30;
-        m21 = -m21;
-        m12 = -m12;
-        m03 = -m03;
-    }
-
-    // Central moments
-    let x_bar = if m00.abs() > 1e-12 { m10 / m00 } else { 0.0 };
-    let y_bar = if m00.abs() > 1e-12 { m01 / m00 } else { 0.0 };
-
-    let mu20 = m20 - x_bar * m10;
-    let mu11 = m11 - x_bar * m01;
-    let mu02 = m02 - y_bar * m01;
-    let mu30 = m30 - 3.0 * x_bar * m20 + 2.0 * x_bar * x_bar * m10;
-    let mu21 = m21 - 2.0 * x_bar * m11 - y_bar * m20 + 2.0 * x_bar * x_bar * m01;
-    let mu12 = m12 - 2.0 * y_bar * m11 - x_bar * m02 + 2.0 * y_bar * y_bar * m10;
-    let mu03 = m03 - 3.0 * y_bar * m02 + 2.0 * y_bar * y_bar * m01;
-
-    Moments {
-        m00,
-        m10,
-        m01,
-        m20,
-        m11,
-        m02,
-        m30,
-        m21,
-        m12,
-        m03,
-        mu20,
-        mu11,
-        mu02,
-        mu30,
-        mu21,
-        mu12,
-        mu03,
-    }
-}
-
 /// Find contours in a binary `CpuTensor` using simplified Suzuki-Abe border following.
 ///
 /// Input must be a single-channel tensor. Non-zero values are foreground.
@@ -657,9 +492,14 @@ where
             let idx = (y * w + x) as usize;
             let fxy = img[idx];
 
-            // Determine border type
+            // Determine border type.
+            // Hole borders may only START on UNLABELED foreground (fxy == 1):
+            // after an outer border is traced its pixels carry nbd >= 2, and
+            // every row's rightmost such pixel would otherwise re-trigger a
+            // full "hole" re-trace of that same outer boundary, emitting ~H
+            // phantom hole contours per solid rectangle.
             let is_outer = fxy == 1 && (x == 0 || img[idx - 1] == 0);
-            let is_hole = fxy >= 1 && (x == w - 1 || img[idx + 1] == 0);
+            let is_hole = fxy == 1 && (x == w - 1 || img[idx + 1] == 0);
 
             if !is_outer && !is_hole {
                 if fxy != 0 && fxy != 1 {
@@ -890,6 +730,7 @@ pub fn connected_components_with_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::moments::{contour_area, contour_perimeter};
     use image::Luma;
 
     #[test]
@@ -1019,38 +860,6 @@ mod tests {
     }
 
     #[test]
-    fn test_moments_rectangle() {
-        // Rectangle with vertices: (0,0), (4,0), (4,3), (0,3)
-        let c = Contour {
-            points: vec![(0, 0), (4, 0), (4, 3), (0, 3)],
-        };
-        let m = moments(&c);
-        // m00 = area = 12
-        assert!((m.m00 - 12.0).abs() < 1e-6);
-        // Centroid at (2, 1.5)
-        let cx = m.m10 / m.m00;
-        let cy = m.m01 / m.m00;
-        assert!((cx - 2.0).abs() < 1e-6);
-        assert!((cy - 1.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_moments_triangle() {
-        // Right triangle (0,0), (6,0), (0,4)
-        let c = Contour {
-            points: vec![(0, 0), (6, 0), (0, 4)],
-        };
-        let m = moments(&c);
-        // Area = 0.5 * 6 * 4 = 12
-        assert!((m.m00 - 12.0).abs() < 1e-6);
-        // Centroid at (2, 4/3)
-        let cx = m.m10 / m.m00;
-        let cy = m.m01 / m.m00;
-        assert!((cx - 2.0).abs() < 1e-6);
-        assert!((cy - 4.0 / 3.0).abs() < 1e-6);
-    }
-
-    #[test]
     fn test_find_contours_tensor_rectangle() {
         use cv_core::TensorShape;
         // 10x10 image with a filled rectangle at (2,2)-(6,6)
@@ -1089,5 +898,72 @@ mod tests {
         assert!(contours.len() >= 2); // outer border + hole
         let holes: Vec<_> = contours.iter().filter(|c| c.is_hole).collect();
         assert!(!holes.is_empty(), "Should detect at least one hole contour");
+    }
+}
+
+#[cfg(test)]
+mod contour_regression_tests {
+    use super::*;
+    use image::{GrayImage, Luma};
+
+    #[test]
+    fn test_solid_rectangle_yields_single_outer_no_phantom_holes() {
+        use cv_core::TensorShape;
+        // Regression: every row's rightmost border pixel previously started a
+        // phantom "hole" re-trace of the outer boundary.
+        let mut data = vec![0.0f32; 20 * 20];
+        for y in 5..15 {
+            for x in 5..15 {
+                data[y * 20 + x] = 1.0;
+            }
+        }
+        let img = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, 20, 20)).unwrap();
+        let contours = find_contours(&img).expect("find_contours");
+        let outer: Vec<_> = contours.iter().filter(|c| !c.is_hole).collect();
+        let holes: Vec<_> = contours.iter().filter(|c| c.is_hole).collect();
+        assert_eq!(outer.len(), 1, "expected exactly one outer contour");
+        assert!(holes.is_empty(), "solid rectangle must have no holes");
+    }
+
+    #[test]
+    fn test_rectangle_with_hole_detected() {
+        use cv_core::TensorShape;
+        let mut data = vec![0.0f32; 21 * 21];
+        for y in 3..18 {
+            for x in 3..18 {
+                data[y * 21 + x] = 1.0;
+            }
+        }
+        for y in 7..13 {
+            for x in 7..13 {
+                data[y * 21 + x] = 0.0;
+            }
+        }
+        let img = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, 21, 21)).unwrap();
+        let contours = find_contours(&img).expect("find_contours");
+        assert!(
+            contours.iter().any(|c| c.is_hole),
+            "inner hole border must be detected"
+        );
+    }
+
+    #[test]
+    fn test_two_adjacent_pixels_terminate_immediately() {
+        use cv_core::TensorShape;
+        // Regression: A->B->A ping-pong never met the old termination
+        // condition and ran to max_steps producing a giant garbage contour.
+        let mut data = vec![0.0f32; 8 * 8];
+        data[3 * 8 + 3] = 1.0;
+        data[3 * 8 + 4] = 1.0;
+        let img = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, 8, 8)).unwrap();
+        let contours = find_contours(&img).unwrap();
+        let total_points: usize = contours.iter().map(|c| c.points.len()).sum();
+        // A 2-pixel blob's border is tiny; the old bug produced millions of
+        // alternating A/B points.
+        assert!(
+            total_points <= 6,
+            "2-pixel blob boundary must be tiny, got {}",
+            total_points
+        );
     }
 }

@@ -584,7 +584,15 @@ fn evaluate_odometry_ctx(
     }
 
     let rmse = (total_error / valid_points as f32).sqrt();
-    let fitness = valid_points as f32 / (width * height) as f32;
+    // Denominator matches compute_fitness_rmse: pixels with valid SOURCE
+    // depth, not all pixels — otherwise the same scene reports materially
+    // different fitness depending on which path ran.
+    let total_source = source_depth.iter().filter(|&&d| d > 0.0).count() as f32;
+    let fitness = if total_source > 0.0 {
+        valid_points as f32 / total_source
+    } else {
+        0.0
+    };
 
     (fitness, rmse)
 }

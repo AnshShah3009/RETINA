@@ -232,9 +232,13 @@ impl Tracker {
         };
 
         // Attempt ICP refinement if we have GPU support and previous depth data
-        if let Some(ref last_depth) = self.last_depth {
+        if let (Some(ref last_depth), Some(ref last_frame)) = (&self.last_depth, &self.last_frame)
+        {
+            let prev_pose = last_frame.pose;
             // Try to refine pose using dense ICP
-            if let Err(e) = self.refine_pose_with_icp(&mut pose, last_depth, &depth_cpu) {
+            if let Err(e) =
+                self.refine_pose_with_icp(&mut pose, &prev_pose, last_depth, &depth_cpu)
+            {
                 // If ICP fails, just continue with sparse tracking result
                 eprintln!("ICP refinement failed: {}", e);
             }
@@ -249,6 +253,7 @@ impl Tracker {
     fn refine_pose_with_icp(
         &self,
         pose: &mut Pose,
+        prev_pose: &Pose,
         prev_depth: &Tensor<f32, cv_core::storage::CpuStorage<f32>>,
         curr_depth: &Tensor<f32, cv_core::storage::CpuStorage<f32>>,
     ) -> Result<(), String> {
@@ -280,10 +285,13 @@ impl Tracker {
             self.intrinsics.cy as f32,
         ];
 
-        // Convert current pose to initial guess for ICP (convert to f32)
-        let pose_matrix_f64 = pose.matrix();
+        // The shader aligns current-frame points into the previous frame, so
+        // the estimate it needs is the RELATIVE transform
+        //   T_rel = T_prev · T_curr⁻¹   (curr-cam coords -> prev-cam coords),
+        // not the absolute world->camera pose.
+        let t_rel = prev_pose.matrix() * pose.inverse().matrix();
         let pose_matrix_f32 =
-            nalgebra::Matrix4::from_iterator(pose_matrix_f64.iter().map(|&x| x as f32));
+            nalgebra::Matrix4::from_iterator(t_rel.iter().map(|&x| x as f32));
 
         // Call dense ICP
         let (ata, atb) = cv_hal::gpu_kernels::icp::dense_step(
@@ -319,9 +327,28 @@ impl Tracker {
             nalgebra::Rotation3::identity()
         };
 
-        // Update the pose
-        pose.rotation *= nalgebra::UnitQuaternion::from_rotation_matrix(&rot_update);
-        pose.translation += translation;
+        // The solver linearizes a LEFT increment on T_rel:
+        //   T_rel' = exp(ξ̂) · T_rel,  ξ = [translation(3), omega(3)]
+        // i.e. R ← ΔR·R and t ← ΔR·t + v. A previous revision applied
+        // R ← R·ΔR and dropped the ΔR·t term, so the applied update did not
+        // match the solved step.
+        let mut delta_mat = nalgebra::Matrix4::<f64>::identity();
+        delta_mat
+            .fixed_slice_mut::<3, 3>(0, 0)
+            .copy_from(&rot_update.into_inner());
+        delta_mat
+            .fixed_slice_mut::<3, 1>(0, 3)
+            .copy_from(&(rot_update * t_rel.fixed_slice::<3, 1>(0, 3) + translation));
+
+        let t_rel_new = delta_mat * t_rel;
+
+        // Write back the new absolute pose: T_curr' = (T_rel')⁻¹ · T_prev.
+        let t_prev = prev_pose.matrix();
+        let t_curr_new = t_rel_new.try_inverse().unwrap_or(t_rel) * t_prev;
+        *pose = Pose::new(
+            t_curr_new.fixed_slice::<3, 3>(0, 0).into_owned(),
+            t_curr_new.fixed_slice::<3, 1>(0, 3).into_owned(),
+        );
 
         Ok(())
     }

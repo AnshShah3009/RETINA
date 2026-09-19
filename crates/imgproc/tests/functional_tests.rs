@@ -160,3 +160,26 @@ fn test_geometry_remap() {
     // x=6, y=2 -> map_x(6,2) = 2, map_y(6,2) = 9-6 = 3. Yes.
     assert_eq!(remapped.get_pixel(6, 2)[0], 200);
 }
+
+#[test]
+fn test_resize_single_pixel_dimension() {
+    // Regression: width or height == 1 previously divided by (n-1) == 0,
+    // producing NaN coordinates and an all-black output.
+    let img = GrayImage::from_fn(32, 32, |x, y| image::Luma([((x * 7 + y * 13) % 254 + 1) as u8]));
+
+    let row = resize(&img, 16, 1, Interpolation::Linear);
+    assert_eq!(row.dimensions(), (16, 1));
+    assert!(
+        row.as_raw().iter().any(|&p| p > 0),
+        "1-pixel-high resize must not be all black"
+    );
+
+    let col = resize(&img, 1, 16, Interpolation::Linear);
+    assert_eq!(col.dimensions(), (1, 16));
+    assert!(
+        col.as_raw().iter().any(|&p| p > 0),
+        "1-pixel-wide resize must not be all black"
+    );
+}
+
+

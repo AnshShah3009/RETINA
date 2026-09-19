@@ -39,6 +39,11 @@ impl KeyPoint {
         self
     }
 
+    pub fn with_class_id(mut self, class_id: i32) -> Self {
+        self.class_id = class_id;
+        self
+    }
+
     pub fn with_octave(mut self, octave: i32) -> Self {
         self.octave = octave;
         self

@@ -205,9 +205,10 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
             {
                 if let Some(old_id) = self.target_device_id {
                     if let Ok(s) = crate::orchestrator::scheduler() {
-                        if let Err(_e) = s.release_device((old_id.0 & 0xFF) as u8) {
+                        if let Err(e) = s.release_device((old_id.0 & 0xFF) as u8) {
                             #[cfg(feature = "tracing")]
                             tracing::warn!("Failed to release device reservation: {}", e);
+                            let _ = e; // suppress unused variable warning when tracing is disabled
                         }
                     }
                     self.reserved_mb = 0;
