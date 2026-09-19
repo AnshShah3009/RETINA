@@ -45,6 +45,53 @@ pub fn recall_at_k(predictions: &[Vec<usize>], ground_truth: &[Vec<usize>], k: u
     }
 }
 
+/// Hit rate@K: the fraction of queries whose top-K contains at least one
+/// relevant item.
+///
+/// This is the convention used for place recognition / visual localization
+/// ("recall@K" in that literature): a query counts as retrieved if *any* of the
+/// top-K candidates is correct. It is not the same as [`recall_at_k`], which
+/// measures the fraction of *all* relevant items that were retrieved and
+/// therefore collapses when a query has many relevant items (for example a
+/// dense database where dozens of frames sit within the hit radius of the
+/// query). Report both when the distinction matters.
+///
+/// Queries with an empty ground-truth set are ignored. Returns 0.0 for empty
+/// input or `k == 0`.
+///
+/// ```
+/// use cv_eval::retrieval::hit_rate_at_k;
+/// let predictions = vec![vec![7, 3, 9], vec![1, 2, 3]];
+/// let ground_truth = vec![vec![3], vec![1]];
+/// // First query finds its target at rank 2, second at rank 1.
+/// assert_eq!(hit_rate_at_k(&predictions, &ground_truth, 1), 0.5);
+/// assert_eq!(hit_rate_at_k(&predictions, &ground_truth, 2), 1.0);
+/// ```
+pub fn hit_rate_at_k(predictions: &[Vec<usize>], ground_truth: &[Vec<usize>], k: usize) -> f64 {
+    let n = predictions.len().min(ground_truth.len());
+    if n == 0 || k == 0 {
+        return 0.0;
+    }
+
+    let mut hits = 0usize;
+    let mut counted = 0usize;
+    for (pred, gt) in predictions.iter().zip(ground_truth.iter()).take(n) {
+        if gt.is_empty() {
+            continue;
+        }
+        if pred.iter().take(k).any(|p| gt.contains(p)) {
+            hits += 1;
+        }
+        counted += 1;
+    }
+
+    if counted == 0 {
+        0.0
+    } else {
+        hits as f64 / counted as f64
+    }
+}
+
 /// Mean precision@K over all queries.
 ///
 /// For each query the precision is `|top-k predictions ∩ relevant| / k`;
