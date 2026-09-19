@@ -332,10 +332,15 @@ impl GpuContext {
             features |= wgpu::Features::TIMESTAMP_QUERY;
         }
 
-        // Request device with increased limits for large point clouds
+        // Request device with increased limits for large point clouds, but never
+        // request more than the adapter advertises: request_device fails outright
+        // when a requested limit exceeds the adapter's, even if the fallback
+        // default would otherwise be sufficient.
+        let adapter_limits = adapter.limits();
         let limits = wgpu::Limits {
-            max_storage_buffer_binding_size: 256 * 1024 * 1024,
-            max_buffer_size: 256 * 1024 * 1024,
+            max_storage_buffer_binding_size: (256u32 * 1024 * 1024)
+                .min(adapter_limits.max_storage_buffer_binding_size),
+            max_buffer_size: (256u64 * 1024 * 1024).min(adapter_limits.max_buffer_size),
             ..wgpu::Limits::downlevel_defaults()
         };
 

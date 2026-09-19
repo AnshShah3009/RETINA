@@ -983,14 +983,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             ],
         });
 
-        let workgroups = (vol_x * vol_y * vol_z).div_ceil(64);
+        // The shader indexes with global_id.x/y/z and bounds-checks each axis,
+        // so dispatch over the full 3D volume (64 threads per x workgroup).
+        let workgroups_x = vol_x.div_ceil(64);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut compute_pass =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             compute_pass.set_pipeline(&pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(workgroups, 1, 1);
+            compute_pass.dispatch_workgroups(workgroups_x, vol_y, vol_z);
         }
         queue.submit(Some(encoder.finish()));
 

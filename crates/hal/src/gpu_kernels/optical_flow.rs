@@ -629,8 +629,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dx = (input_img[idx_next_x] - input_img[idx_prev_x]) * 0.5;
     let dy = (input_img[idx_next_y] - input_img[idx_prev_y]) * 0.5;
     
+    // output_dx / output_dy alias the same packed (dx, dy) buffer, so write
+    // the y component into the second plane.
+    let num_pixels = params.width * params.height;
     output_dx[idx] = dx;
-    output_dy[idx] = dy;
+    output_dy[num_pixels + idx] = dy;
 }
 "#
 }
@@ -658,9 +661,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     
     let idx = y * params.width + x;
+    let num_pixels = params.width * params.height;
     
+    // input_flow_x / input_flow_y alias the same packed (u1, u2) buffer,
+    // so the y component lives in the second plane.
     let flow_x = input_flow_x[idx];
-    let flow_y = input_flow_y[idx];
+    let flow_y = input_flow_y[num_pixels + idx];
     
     let src_x = f32(x) - flow_x;
     let src_y = f32(y) - flow_y;
@@ -841,8 +847,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let mx = select(x - 1u, 0u, x == 0u);
     let my = select(y - 1u, 0u, y == 0u);
     
+    let num_pixels = params.width * params.height;
+    
+    // input_p1 / input_p2 alias the same packed (p1, p2) buffer, so the p2
+    // plane starts at num_pixels.
     let p1x = input_p1[idx];
-    let p2y = input_p2[idx];
+    let p2y = input_p2[num_pixels + idx];
     
     if (x > 0u) {
         let p1x_prev = input_p1[y * params.width + mx];
@@ -852,7 +862,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
     
     if (y > 0u) {
-        let p2y_prev = input_p2[my * params.width + x];
+        let p2y_prev = input_p2[num_pixels + my * params.width + x];
         div = div + p2y - p2y_prev;
     } else {
         div = div + p2y;

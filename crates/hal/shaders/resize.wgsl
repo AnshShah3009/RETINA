@@ -30,8 +30,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let src_width_f = f32(params.src_w) - 1.0;
     let src_height_f = f32(params.src_h) - 1.0;
-    let dst_width_f = f32(params.dst_w) - 1.0;
-    let dst_height_f = f32(params.dst_h) - 1.0;
+    let dst_width_f = max(f32(params.dst_w) - 1.0, 1.0);
+    let dst_height_f = max(f32(params.dst_h) - 1.0, 1.0);
 
     var res_combined = 0u;
     for (var i = 0u; i < 4u; i++) {

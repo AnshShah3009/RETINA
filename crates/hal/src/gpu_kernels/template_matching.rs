@@ -33,6 +33,15 @@ pub fn match_template<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     let (img_h, img_w) = image.shape.hw();
     let (templ_h, templ_w) = template.shape.hw();
 
+    // A template larger than the image would underflow the output-size
+    // subtraction below (debug panic / release over-allocation).
+    if templ_w > img_w || templ_h > img_h {
+        return Err(crate::Error::InvalidInput(format!(
+            "Template ({}x{}) is larger than the image ({}x{})",
+            templ_w, templ_h, img_w, img_h
+        )));
+    }
+
     let out_w = img_w - templ_w + 1;
     let out_h = img_h - templ_h + 1;
     let out_len = out_w * out_h;
@@ -114,4 +123,35 @@ pub fn match_template<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         dtype: image.dtype,
         _phantom: PhantomData,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::TemplateMatchMethod;
+    use crate::gpu::GpuContext;
+    use crate::tensor_ext::TensorToGpu;
+
+    #[test]
+    fn oversized_template_returns_error() {
+        let ctx = match GpuContext::new() {
+            Ok(c) => c,
+            Err(_) => return, // no adapter available
+        };
+
+        let image =
+            cv_core::CpuTensor::<f32>::from_vec(vec![0.0f32; 16], TensorShape::new(1, 4, 4))
+                .unwrap()
+                .to_gpu_ctx(&ctx)
+                .unwrap();
+        // Template (8x8) larger than the image (4x4) used to underflow.
+        let template =
+            cv_core::CpuTensor::<f32>::from_vec(vec![0.0f32; 64], TensorShape::new(1, 8, 8))
+                .unwrap()
+                .to_gpu_ctx(&ctx)
+                .unwrap();
+
+        let res = match_template(&ctx, &image, &template, TemplateMatchMethod::SqDiff);
+        assert!(matches!(res, Err(crate::Error::InvalidInput(_))));
+    }
 }
