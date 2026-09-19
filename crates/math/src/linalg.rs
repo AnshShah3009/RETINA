@@ -17,7 +17,8 @@
 //! assert!((x[1] + 6.0).abs() < 1e-10);
 //! ```
 
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
+use num_traits::Float;
 
 // ---------------------------------------------------------------------------
 // Matrix decompositions
@@ -175,6 +176,117 @@ pub fn eigh(a: &DMatrix<f64>) -> Result<(DVector<f64>, DMatrix<f64>), String> {
     let sorted_vecs = DMatrix::from_fn(m, n, |r, c| vecs[(r, indices[c])]);
 
     Ok((sorted_vals, sorted_vecs))
+}
+
+/// Smallest eigenvector of a symmetric 3x3 matrix, in closed form.
+///
+/// Matches Open3D `PointCloudImpl.h` / Geometric Tools
+/// `RobustEigenSymmetric3x3`: the eigenvalue is found with the trigonometric
+/// (Cardano) method and the eigenvector is the largest cross-product of the
+/// rows of `M - lambda_min * I`. No iteration, exact result in ~50 scalar ops.
+///
+/// Generic over the scalar type so the f32 GPU/point-cloud paths and the f64
+/// CPU normal-estimation path share one implementation.
+///
+/// Degenerate inputs (zero or isotropic matrices) return the unit vector
+/// `(0, 0, 1)` — the same fallback used by every previous copy.
+pub fn min_eigenvector_3x3<T>(m: &Matrix3<T>) -> Vector3<T>
+where
+    T: nalgebra::Scalar + Float,
+{
+    fn cross3<T: Float>(a: [T; 3], b: [T; 3]) -> [T; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+    fn dot3<T: Float>(a: [T; 3], b: [T; 3]) -> T {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+    let two = T::from(2.0f64).unwrap();
+    let three = T::from(3.0f64).unwrap();
+    let six = T::from(6.0f64).unwrap();
+    let fallback = || Vector3::new(T::zero(), T::zero(), T::one());
+
+    // Normalize to prevent numerical overflow.
+    let mut max_c = T::zero();
+    for i in 0..3 {
+        for j in 0..3 {
+            let v = m[(i, j)].abs();
+            if v > max_c {
+                max_c = v;
+            }
+        }
+    }
+    if max_c < T::from(1e-30f64).unwrap() {
+        return fallback();
+    }
+    let s = T::one() / max_c;
+    let a00 = m[(0, 0)] * s;
+    let a01 = m[(0, 1)] * s;
+    let a02 = m[(0, 2)] * s;
+    let a11 = m[(1, 1)] * s;
+    let a12 = m[(1, 2)] * s;
+    let a22 = m[(2, 2)] * s;
+
+    let norm = a01 * a01 + a02 * a02 + a12 * a12;
+    let q = (a00 + a11 + a22) / three;
+    let b00 = a00 - q;
+    let b11 = a11 - q;
+    let b22 = a22 - q;
+    let p = ((b00 * b00 + b11 * b11 + b22 * b22 + two * norm) / six).sqrt();
+    if p < T::from(1e-10f64).unwrap() {
+        return fallback();
+    }
+
+    // Determinant of (A - q*I) / p.
+    let c00 = b11 * b22 - a12 * a12;
+    let c01 = a01 * b22 - a12 * a02;
+    let c02 = a01 * a12 - b11 * a02;
+    let det = (b00 * c00 - a01 * c01 + a02 * c02) / (p * p * p);
+    let half_det = {
+        let v = det * T::from(0.5f64).unwrap();
+        if v < -T::one() {
+            -T::one()
+        } else if v > T::one() {
+            T::one()
+        } else {
+            v
+        }
+    };
+    let angle = half_det.acos() / three;
+
+    // Minimum eigenvalue: q + p * cos(angle + 2*pi/3) * 2.
+    let two_thirds_pi = T::from(2.094_395_1f64).unwrap();
+    let eval_min = q + p * (angle + two_thirds_pi).cos() * two;
+
+    // Eigenvector: best cross-product of rows of (A - eval_min * I).
+    let r0 = [a00 - eval_min, a01, a02];
+    let r1 = [a01, a11 - eval_min, a12];
+    let r2 = [a02, a12, a22 - eval_min];
+
+    let r0xr1 = cross3(r0, r1);
+    let r0xr2 = cross3(r0, r2);
+    let r1xr2 = cross3(r1, r2);
+
+    let d0 = dot3(r0xr1, r0xr1);
+    let d1 = dot3(r0xr2, r0xr2);
+    let d2 = dot3(r1xr2, r1xr2);
+
+    let best = if d0 >= d1 && d0 >= d2 {
+        r0xr1
+    } else if d1 >= d2 {
+        r0xr2
+    } else {
+        r1xr2
+    };
+
+    let len = dot3(best, best).sqrt();
+    if len < T::from(1e-10f64).unwrap() {
+        return fallback();
+    }
+    Vector3::new(best[0] / len, best[1] / len, best[2] / len)
 }
 
 /// General eigendecomposition (eigenvalues may be complex).
@@ -960,5 +1072,111 @@ mod tests {
         for (_, imag) in &eigenvalues {
             assert!(imag.abs() < 1e-10, "Unexpected imaginary part: {}", imag);
         }
+    }
+
+    /// Verbatim copy of the previous `min_eigenvector_3x3` (the Open3D /
+    /// Geometric Tools algorithm which lived in `cv-3d` and `cv-pointcloud`),
+    /// used to pin the shared helper's behaviour.
+    fn min_eigenvector_3x3_reference(m: &Matrix3<f64>) -> Vector3<f64> {
+        let max_c = m.abs().max();
+        if max_c < 1e-30 {
+            return Vector3::z();
+        }
+        let s = 1.0 / max_c;
+        let (a00, a01, a02) = (m[(0, 0)] * s, m[(0, 1)] * s, m[(0, 2)] * s);
+        let (a11, a12, a22) = (m[(1, 1)] * s, m[(1, 2)] * s, m[(2, 2)] * s);
+
+        let norm = a01 * a01 + a02 * a02 + a12 * a12;
+        let q = (a00 + a11 + a22) / 3.0;
+        let b00 = a00 - q;
+        let b11 = a11 - q;
+        let b22 = a22 - q;
+        let p = ((b00 * b00 + b11 * b11 + b22 * b22 + 2.0 * norm) / 6.0).sqrt();
+        if p < 1e-10 {
+            return Vector3::z();
+        }
+
+        let c00 = b11 * b22 - a12 * a12;
+        let c01 = a01 * b22 - a12 * a02;
+        let c02 = a01 * a12 - b11 * a02;
+        let det = (b00 * c00 - a01 * c01 + a02 * c02) / (p * p * p);
+        let half_det = (det * 0.5).clamp(-1.0, 1.0);
+        let angle = half_det.acos() / 3.0;
+
+        const TWO_THIRDS_PI: f64 = 2.094_395_1;
+        let eval_min = q + p * (angle + TWO_THIRDS_PI).cos() * 2.0;
+
+        let r0 = Vector3::new(a00 - eval_min, a01, a02);
+        let r1 = Vector3::new(a01, a11 - eval_min, a12);
+        let r2 = Vector3::new(a02, a12, a22 - eval_min);
+
+        let r0xr1 = r0.cross(&r1);
+        let r0xr2 = r0.cross(&r2);
+        let r1xr2 = r1.cross(&r2);
+        let d0 = r0xr1.norm_squared();
+        let d1 = r0xr2.norm_squared();
+        let d2 = r1xr2.norm_squared();
+        let best = if d0 >= d1 && d0 >= d2 {
+            r0xr1
+        } else if d1 >= d2 {
+            r0xr2
+        } else {
+            r1xr2
+        };
+        let len = best.norm();
+        if len < 1e-10 {
+            return Vector3::z();
+        }
+        best / len
+    }
+
+    #[test]
+    fn test_min_eigenvector_3x3_matches_previous_implementation() {
+        // Hand-built symmetric matrices: general SPD, a plane covariance,
+        // a diagonal with a zero eigenvalue, the isotropic (p == 0) case and
+        // the all-zero degenerate matrix.
+        let cases = [
+            Matrix3::new(4.0, 1.0, 2.0, 1.0, 3.0, 0.5, 2.0, 0.5, 5.0),
+            Matrix3::new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0),
+            Matrix3::from_diagonal(&Vector3::new(2.0, 1.0, 0.0)),
+            Matrix3::identity() * 3.0,
+            Matrix3::zeros(),
+        ];
+
+        for (i, m) in cases.iter().enumerate() {
+            let shared = min_eigenvector_3x3(m);
+            let reference = min_eigenvector_3x3_reference(m);
+            // Same direction (same sign convention): a close 1:1 match, or a
+            // sign flip on the degenerate/isotropic cases where any direction
+            // is an eigenvector.
+            let direct = (shared - reference).norm();
+            let flipped = (shared + reference).norm();
+            assert!(
+                direct < 1e-9 || flipped < 1e-9,
+                "case {i}: shared {:?} vs reference {:?}",
+                shared,
+                reference
+            );
+            assert!(
+                (shared.norm() - 1.0).abs() < 1e-9,
+                "case {i}: not unit length: {:?}",
+                shared
+            );
+        }
+
+        // Degenerate zero matrix must fall back to the unit +Z vector,
+        // exactly as every previous copy did.
+        let zero = min_eigenvector_3x3(&Matrix3::<f64>::zeros());
+        assert!((zero - Vector3::new(0.0, 0.0, 1.0)).norm() < 1e-12);
+    }
+
+    #[test]
+    fn test_min_eigenvector_3x3_f32() {
+        // The f32 call sites (GPU / point-cloud) must agree with the f64 path.
+        let m32 = Matrix3::new(1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0);
+        let n = min_eigenvector_3x3(&m32);
+        assert!(n.z.abs() > 0.99, "expected z-eigenvector, got {:?}", n);
+        let degenerate: Vector3<f32> = min_eigenvector_3x3(&Matrix3::<f32>::zeros());
+        assert!((degenerate - Vector3::new(0.0f32, 0.0, 1.0)).norm() < 1e-12);
     }
 }

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 //! 3D Computer Vision Algorithms
 //!
