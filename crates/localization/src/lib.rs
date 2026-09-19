@@ -46,6 +46,9 @@ mod localizer;
 #[cfg(any(test, feature = "synthetic"))]
 pub mod synthetic;
 
+#[cfg(feature = "synthetic")]
+pub mod benchmark;
+
 pub use database::{database_image_from_colmap, Database, DatabaseImage, DescriptorRef, Landmark};
 pub use evaluate::{
     evaluate_localization, rotation_error_degrees, translation_error, LocalizationStats,

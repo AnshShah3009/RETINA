@@ -11,14 +11,27 @@ cv-features = { workspace = true }
 cv-calib3d = { workspace = true }
 cv-io = { workspace = true }
 nalgebra = { workspace = true }
+# Only needed by the real-data benchmark support module (and the `tum_benchmark`
+# example): image decoding and the retrieval metrics. Optional so the default
+# build of the crate stays free of them.
+cv-eval = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 
 [features]
 default = []
 # Exposes the reproducible synthetic scene generator (always available to the
-# crate's own unit tests via `cfg(test)`). Enable it to build the bundled example
-# or to script your own runnable demo.
-synthetic = []
+# crate's own unit tests via `cfg(test)`) and the real-data benchmark support
+# module. Enable it to build the bundled examples or to script your own runnable
+# demo.
+synthetic = ["dep:cv-eval", "dep:image"]
 
 [[example]]
 name = "synthetic_localization"
+required-features = ["synthetic"]
+
+# Real-data benchmark on TUM RGB-D sequences. Gated behind `synthetic` so it is
+# skipped by the default `cargo check --workspace --all-targets` (it needs the
+# `image` decoder and the `cv-eval` retrieval metrics).
+[[example]]
+name = "tum_benchmark"
 required-features = ["synthetic"]
