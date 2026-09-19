@@ -1399,8 +1399,10 @@ version = "0.1.0"
 dependencies = [
  "cv-calib3d",
  "cv-core",
+ "cv-eval",
  "cv-features",
  "cv-io",
+ "image",
  "nalgebra",
 ]
 
