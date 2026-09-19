@@ -6,6 +6,7 @@
 //! - STL (STereoLithography)
 //! - PCD (Point Cloud Data - PCL format)
 
+pub mod datasets;
 pub mod mesh;
 pub mod obj;
 pub mod pcd;

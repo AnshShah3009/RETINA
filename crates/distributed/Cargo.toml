@@ -9,3 +9,7 @@ atomic-wait = { workspace = true }
 memmap2 = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+default = []
+tracing = []
