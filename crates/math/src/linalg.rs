@@ -8,7 +8,7 @@
 //!
 //! ```rust
 //! use nalgebra::{DMatrix, DVector};
-//! use cv_scientific::linalg;
+//! use cv_math::linalg;
 //!
 //! let a = DMatrix::from_row_slice(2, 2, &[2.0, 1.0, 5.0, 3.0]);
 //! let b = DVector::from_column_slice(&[4.0, 7.0]);
@@ -38,18 +38,24 @@ pub fn lu_decompose(a: &DMatrix<f64>) -> Result<(DMatrix<f64>, DMatrix<f64>, Vec
     let lu = a.clone().lu();
 
     // Extract L and U via the LU struct.
-    // nalgebra LU gives us P*A = L*U. We reconstruct P by comparing L*U rows to A rows.
+    // nalgebra LU gives us P*A = L*U, with the permutation available from `lu.p()`.
     let l = lu.l();
     let u = lu.u();
 
-    // Recover pivot indices: row i of P*A = row pivots[i] of A.
-    // L*U = P*A, so row i of L*U equals row pivots[i] of A.
-    let lu_product = &l * &u;
+    // Recover the permutation from nalgebra's own pivot sequence rather than
+    // matching rows of L*U against A: the previous row-matching used a fixed
+    // 1e-10 tolerance, so for large-magnitude matrices no row matched and every
+    // pivot silently stayed 0.
+    let perm = lu.p();
+    let mut perm_mat = DMatrix::<f64>::identity(m, m);
+    perm.permute_rows(&mut perm_mat);
+
+    // Row i of P*A equals row `pivots[i]` of A, i.e. the single 1 in row i of
+    // the permutation matrix sits in column `pivots[i]`.
     let mut pivots = vec![0usize; m];
     for i in 0..m {
         for j in 0..m {
-            let diff: f64 = (0..n).map(|k| (lu_product[(i, k)] - a[(j, k)]).abs()).sum();
-            if diff < 1e-10 {
+            if perm_mat[(i, j)] != 0.0 {
                 pivots[i] = j;
                 break;
             }
@@ -163,7 +169,7 @@ pub fn eigh(a: &DMatrix<f64>) -> Result<(DVector<f64>, DMatrix<f64>), String> {
 
     // Sort by ascending eigenvalue
     let mut indices: Vec<usize> = (0..vals.len()).collect();
-    indices.sort_by(|&i, &j| vals[i].partial_cmp(&vals[j]).unwrap());
+    indices.sort_by(|&i, &j| vals[i].total_cmp(&vals[j]));
 
     let sorted_vals = DVector::from_fn(vals.len(), |i, _| vals[indices[i]]);
     let sorted_vecs = DMatrix::from_fn(m, n, |r, c| vecs[(r, indices[c])]);
@@ -631,6 +637,43 @@ mod tests {
     }
 
     #[test]
+    fn test_lu_decompose_large_magnitude_pivots() {
+        // Regression: the pivot rows were recovered by matching rows of L*U
+        // against A with a fixed 1e-10 tolerance, so for a large-magnitude
+        // matrix no row matched and every pivot silently stayed 0.
+        let a = DMatrix::from_row_slice(
+            3,
+            3,
+            &[
+                2.0e8, 1.0e8, 1.0e8, //
+                8.0e8, 3.0e8, 3.0e8, //
+                2.0e8, 7.0e8, 9.0e8,
+            ],
+        );
+        let (l, u, pivots) = lu_decompose(&a).unwrap();
+
+        // pivots must be a genuine permutation of 0..3.
+        let mut sorted = pivots.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            sorted,
+            vec![0, 1, 2],
+            "pivots not a permutation: {pivots:?}"
+        );
+
+        // Verify P*A = L*U with a relative tolerance.
+        let lu = &l * &u;
+        let mut max_rel = 0.0_f64;
+        for i in 0..3 {
+            for j in 0..3 {
+                let pa = a[(pivots[i], j)];
+                max_rel = max_rel.max((pa - lu[(i, j)]).abs() / pa.abs().max(1.0));
+            }
+        }
+        assert!(max_rel < 1e-10, "P*A != L*U, max relative error {max_rel}");
+    }
+
+    #[test]
     fn test_qr_decompose() {
         let a = DMatrix::from_row_slice(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let (q, r) = qr_decompose(&a).unwrap();
@@ -720,6 +763,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_eigh_nan_does_not_panic() {
+        // Regression: the eigenvalue sort used partial_cmp(..).unwrap(), which
+        // panicked as soon as an eigenvalue was NaN.
+        let a = DMatrix::from_row_slice(2, 2, &[f64::NAN, 0.0, 0.0, 1.0]);
+        let result = eigh(&a);
+        assert!(result.is_ok());
     }
 
     #[test]

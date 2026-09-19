@@ -29,7 +29,13 @@ impl<T: Clone + Copy + fmt::Debug + 'static> CpuTensor<T> {
         h_range: std::ops::Range<usize>,
         w_range: std::ops::Range<usize>,
     ) -> crate::Result<Self> {
-        if c_range.end > self.shape.channels
+        if c_range.start > c_range.end
+            || h_range.start > h_range.end
+            || w_range.start > w_range.end
+            || c_range.start > self.shape.channels
+            || h_range.start > self.shape.height
+            || w_range.start > self.shape.width
+            || c_range.end > self.shape.channels
             || h_range.end > self.shape.height
             || w_range.end > self.shape.width
         {
