@@ -296,23 +296,30 @@ pub mod scorers {
     use super::*;
 
     /// MSAC scoring: robust M-estimator with soft threshold
+    ///
+    /// **Not implemented.** A correct score requires a per-model residual
+    /// metric (`residual(model, point)`), but this generic API only receives an
+    /// opaque `M: Clone` and no way to measure how far a point lies from the
+    /// model, so no meaningful score can be computed here. This previously
+    /// returned `(0, 0.0, vec![false; n])`, which silently reported zero
+    /// inliers for *every* model; it now fails loudly instead of lying.
+    ///
+    /// # Panics
+    ///
+    /// Always panics until a model-distance trait is introduced and threaded
+    /// through the scorer API.
     pub fn score_msac<M>(
-        model: &M,
-        points: &[Point2<f64>],
-        threshold: f64,
+        _model: &M,
+        _points: &[Point2<f64>],
+        _threshold: f64,
     ) -> (usize, f64, Vec<bool>)
     where
         M: Clone,
     {
-        let t2 = threshold * threshold;
-        let mut inliers = 0;
-        let mut score = 0.0f64;
-        let mut mask = vec![false; points.len()];
-
-        // Default: use distance metric for generic model
-        // Overridden by specific model types
-
-        (inliers, score, mask)
+        unimplemented!(
+            "score_msac: no model residual metric is available for a generic \
+             `M: Clone`; the previous stub silently returned zero inliers"
+        )
     }
 
     /// MAGSAC scoring: σ-consensus with adaptive margin
@@ -446,5 +453,14 @@ mod tests {
         let res = result.unwrap();
         assert!(res.iterations > 0);
         assert!(res.inliers >= 40);
+    }
+
+    #[test]
+    #[should_panic(expected = "score_msac")]
+    fn msac_scorer_is_not_a_silent_stub() {
+        // The generic scorer cannot compute a residual, so it must fail
+        // loudly rather than silently reporting zero inliers for every model.
+        let pts = [Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)];
+        let _ = scorers::score_ransac(&(1.0f64, 0.0f64), &pts, 1.0);
     }
 }

@@ -486,10 +486,14 @@ fn sample_grid_bits(
 ) -> Vec<u8> {
     // Per-candidate normalization threshold: midpoint of the min/max gray
     // level over the given box (defaults to the sampling box itself).
+    // `stride` is the row length (image WIDTH); the y scan must instead be
+    // clamped to the image HEIGHT, otherwise a box below y == width collapses
+    // to an empty scan and the threshold degrades to a constant.
+    let height = if stride == 0 { 0 } else { gray.len() / stride };
     let (nx0, ny0, nx1, ny1) = norm_box.unwrap_or((min_x, min_y, max_x, max_y));
     let mut lo = 255u8;
     let mut hi = 0u8;
-    for y in ny0..=ny1.min(stride.saturating_sub(1)) {
+    for y in ny0..=ny1.min(height.saturating_sub(1)) {
         for x in nx0..=nx1 {
             if let Some(&v) = gray.get(y * stride + x) {
                 lo = lo.min(v);
@@ -1000,5 +1004,23 @@ mod tests {
         assert_eq!(codes_5.len(), 50);
         let codes_6 = dictionary_codes(ArucoDictionary::Dict6x6_250);
         assert_eq!(codes_6.len(), 250);
+    }
+
+    #[test]
+    fn sample_grid_bits_clamps_norm_scan_to_height() {
+        // Tall image (width 4, height 20): a normalization box with y >= width
+        // must still be scanned. The old code clamped ny1 to `stride-1` (the
+        // WIDTH), emptying the scan and forcing a constant 127 threshold.
+        let (w, h) = (4usize, 20usize);
+        let mut gray = vec![90u8; w * h];
+        for y in 10..=14 {
+            for x in 0..w {
+                gray[y * w + x] = 100;
+            }
+        }
+        let bits = sample_grid_bits(&gray, w, 0, 10, 3, 14, 4, Some((0, 10, 3, 14)));
+        // Correct scan -> threshold is (100+100)/2 = 100, so every pixel equals
+        // it and no cell is classified black.
+        assert_eq!(bits, vec![0u8; 16]);
     }
 }

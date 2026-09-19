@@ -4,7 +4,9 @@ use rayon::prelude::*;
 
 /// Matching strategy used by [`Matcher`].
 pub enum MatchType {
-    /// Brute-force L2 distance matching (for float descriptors).
+    /// Brute-force Hamming distance matching (binary descriptors). Alias of
+    /// [`MatchType::BruteForceHamming`] — both variants run the same Hamming
+    /// matcher, since [`Descriptor`](cv_core::Descriptor) holds byte data.
     BruteForce,
     /// Brute-force Hamming distance matching (for binary descriptors).
     BruteForceHamming,
@@ -245,6 +247,27 @@ mod tests {
         let result = match_descriptors(&query, &train, None);
         assert_eq!(result.matches.len(), 2);
         assert!(result.matches.iter().all(|m| (m.distance as u32) == 0));
+    }
+
+    #[test]
+    fn brute_force_variants_use_hamming() {
+        // `BruteForce` and `BruteForceHamming` are documented aliases: both run
+        // the Hamming matcher, so their result sets must be identical.
+        let query = make_descriptors_from_bytes(&[&[0x0Fu8; 4], &[0xF0u8; 4]]);
+        let train = make_descriptors_from_bytes(&[&[0x00u8; 4], &[0xFFu8; 4]]);
+        let a = Matcher::new(MatchType::BruteForce).match_descriptors(&query, &train);
+        let b = Matcher::new(MatchType::BruteForceHamming).match_descriptors(&query, &train);
+        let av: Vec<_> = a
+            .matches
+            .iter()
+            .map(|m| (m.query_idx, m.train_idx, m.distance))
+            .collect();
+        let bv: Vec<_> = b
+            .matches
+            .iter()
+            .map(|m| (m.query_idx, m.train_idx, m.distance))
+            .collect();
+        assert_eq!(av, bv);
     }
 
     #[test]

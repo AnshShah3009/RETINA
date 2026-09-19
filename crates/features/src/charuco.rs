@@ -38,14 +38,17 @@ impl CharucoBoard {
     /// Chessboard corner world coordinates (z=0 plane).
     ///
     /// Corners lie at the interior grid INTERSECTIONS: (col*L, row*L) with
-    /// col in 1..squares_x-1, row in 1..squares_y-1, ordered row-major so
-    /// that index i corresponds to corner id i from `interpolate_corners`.
-    /// A previous revision used square CENTERS ((col+0.5)*L), offsetting
-    /// every calibration observation by half a square.
+    /// col in 1..squares_x, row in 1..squares_y, ordered row-major so
+    /// that index i corresponds to corner id i from `interpolate_corners`
+    /// (which builds `(squares_x-1) * (squares_y-1)` ids). A previous revision
+    /// iterated `1..squares_x-1` / `1..squares_y-1`, producing only
+    /// `(squares_x-2) * (squares_y-2)` points so the id contract did not hold.
+    /// Even earlier it used square CENTERS ((col+0.5)*L), offsetting every
+    /// calibration observation by half a square.
     pub fn chessboard_corners(&self) -> Vec<Point3<f64>> {
         let mut pts = Vec::new();
-        for row in 1..self.squares_y.saturating_sub(1) {
-            for col in 1..self.squares_x.saturating_sub(1) {
+        for row in 1..self.squares_y {
+            for col in 1..self.squares_x {
                 pts.push(Point3::new(
                     col as f64 * self.square_length,
                     row as f64 * self.square_length,
@@ -184,5 +187,34 @@ impl CharucoDetector {
         }
 
         Ok(CharucoCorners { corners, ids })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chessboard_corners_cover_full_id_grid() {
+        // 3x4 squares yields (3-1)*(4-1) = 6 interior corners, row-major, so
+        // the index i of each corner equals the id assigned by
+        // `interpolate_corners`.
+        let board = CharucoBoard::new(3, 4, 1.0, 0.5, ArucoDictionary::Dict4x4_50);
+        let pts = board.chessboard_corners();
+        assert_eq!(pts.len(), (3 - 1) * (4 - 1));
+
+        let expected = [
+            (1.0, 1.0),
+            (2.0, 1.0),
+            (1.0, 2.0),
+            (2.0, 2.0),
+            (1.0, 3.0),
+            (2.0, 3.0),
+        ];
+        for (i, (x, y)) in expected.iter().enumerate() {
+            assert_eq!(pts[i].x, *x, "corner {} has wrong x", i);
+            assert_eq!(pts[i].y, *y, "corner {} has wrong y", i);
+            assert_eq!(pts[i].z, 0.0);
+        }
     }
 }
