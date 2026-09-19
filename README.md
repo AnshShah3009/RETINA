@@ -58,10 +58,41 @@ rust-cv-native/
 ├── crates/runtime/      # Async runtime and orchestration
 ├── crates/distributed/  # Cross-process shared-memory / VRAM coordination
 ├── crates/eval/         # Trajectory, reconstruction and retrieval metrics
+├── crates/localization/ # Visual localization pipeline (retrieval → PnP)
 ├── crates/cli/          # cv-bench command-line evaluation tool
 ├── crates/python/       # Python bindings (PyO3)
 └── crates/examples/     # Usage examples
 ```
+
+## Visual localization
+
+`cv-localization` turns the primitives into the question users actually ask —
+given a query image, where was it taken? A `Database` of landmarks and
+database images is queried by retrieval (`cv-features` vocabulary, BoW inverted
+index and LSH), ratio-test matched, lifted to 2D-3D correspondences and solved
+with PnP + RANSAC, returning a pose with its inlier count, candidate list and
+reprojection RMSE. It returns `None` rather than a confident wrong pose.
+
+```bash
+cargo run -p cv-localization --example synthetic_localization --features synthetic
+```
+
+```rust
+let mut db = Database::new(Some(vocabulary));
+db.add_image(database_image_from_colmap(&image, &id_map));
+db.add_landmark(Landmark { position, descriptors });
+db.build();
+
+let localizer = Localizer::new(&db, LocalizerConfig::default());
+if let Some(result) = localizer.localize(&query_keypoints, &query_descriptors, &intrinsics) {
+    println!("{:?} from {} inliers", result.pose, result.inliers);
+}
+```
+
+The pipeline is verified on a deterministic synthetic scene (clean queries
+localize to machine precision, noise degrades gracefully, non-overlapping
+queries return `None`). No real-dataset result is published, because none has
+been measured — see [docs/localization.md](docs/localization.md).
 
 ## Evaluation and benchmarking
 
