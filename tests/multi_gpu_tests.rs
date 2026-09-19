@@ -22,6 +22,9 @@ fn test_cross_device_parity() {
         );
     }
 
+    let mut tested: Vec<(String, GpuContext)> = Vec::new();
+    let mut skipped = 0usize;
+
     for (i, adapter) in adapters.into_iter().enumerate() {
         let info = adapter.get_info();
         println!("--- Testing Adapter {}: {} ---", i, info.name);
@@ -29,6 +32,7 @@ fn test_cross_device_parity() {
         // Skip GL/OpenGL backends (radeonsi) — not suitable for GPU compute testing
         if info.backend != wgpu::Backend::Vulkan {
             println!("  ! Skipping non-Vulkan backend ({:?})", info.backend);
+            skipped += 1;
             continue;
         }
 
@@ -41,6 +45,7 @@ fn test_cross_device_parity() {
             || info.device_type == wgpu::DeviceType::Cpu
         {
             println!("  ! Skipping software/virtual renderer ({})", info.name);
+            skipped += 1;
             continue;
         }
 
@@ -52,6 +57,7 @@ fn test_cross_device_parity() {
                     "  ! Skipping adapter {}: GPU context creation failed: {}",
                     info.name, e
                 );
+                skipped += 1;
                 continue;
             }
         };
@@ -65,7 +71,177 @@ fn test_cross_device_parity() {
         test_fast_parity::<f32>(&cpu, &gpu, &info.name);
         test_matching_parity(&cpu, &gpu, &info.name);
         test_icp_parity(&cpu, &gpu, &info.name);
+
+        tested.push((info.name, gpu));
     }
+
+    // A run where every adapter was skipped asserts nothing, so report what
+    // actually ran instead of a green test that never touched a device. CI has no
+    // adapter at all (a legitimate skip); an environment that claims to have one
+    // can require it with CV_REQUIRE_GPU=1.
+    println!(
+        "device summary: {} adapter(s) verified, {} skipped",
+        tested.len(),
+        skipped
+    );
+    if std::env::var("CV_REQUIRE_GPU").is_ok() && tested.is_empty() {
+        panic!(
+            "CV_REQUIRE_GPU is set but no usable Vulkan adapter was verified ({} adapter(s) found, {} skipped)",
+            tested.len() + skipped,
+            skipped
+        );
+    }
+
+    // The point of a *multi*-GPU test: with two usable devices, compare their
+    // outputs with each other, not only with the CPU.
+    if tested.len() >= 2 {
+        let (name_a, gpu_a) = &tested[0];
+        let (name_b, gpu_b) = &tested[1];
+        println!("--- Device-to-device parity: {} vs {} ---", name_a, name_b);
+        test_device_to_device_parity(gpu_a, gpu_b, name_a, name_b);
+    } else {
+        println!(
+            "device-to-device parity skipped: needs 2 usable Vulkan adapters, found {}",
+            tested.len()
+        );
+    }
+}
+
+/// Run the same operations on two devices and compare their outputs directly.
+fn test_device_to_device_parity(
+    gpu_a: &GpuContext,
+    gpu_b: &GpuContext,
+    name_a: &str,
+    name_b: &str,
+) {
+    let shape = TensorShape::new(1, 128, 128);
+    let data: Vec<f32> = (0..shape.len()).map(|i| (i % 256) as f32).collect();
+    let input_cpu: CpuTensor<f32> = Tensor::from_vec(data, shape).unwrap();
+
+    // Threshold (a 0/255 mask, so equality must be exact)
+    let a = input_cpu.to_gpu_ctx(gpu_a).unwrap();
+    let b = input_cpu.to_gpu_ctx(gpu_b).unwrap();
+    let res_a = gpu_a
+        .threshold(&a, 128.0, 255.0, ThresholdType::Binary)
+        .unwrap()
+        .to_cpu_ctx(gpu_a)
+        .unwrap();
+    let res_b = gpu_b
+        .threshold(&b, 128.0, 255.0, ThresholdType::Binary)
+        .unwrap()
+        .to_cpu_ctx(gpu_b)
+        .unwrap();
+    assert_eq!(
+        res_a.storage.as_slice().unwrap(),
+        res_b.storage.as_slice().unwrap(),
+        "threshold differs between {} and {}",
+        name_a,
+        name_b
+    );
+
+    // Resize (allow one intensity step, as the CPU/GPU comparison does)
+    let res_a = gpu_a
+        .resize(&a, (64, 64))
+        .unwrap()
+        .to_cpu_ctx(gpu_a)
+        .unwrap();
+    let res_b = gpu_b
+        .resize(&b, (64, 64))
+        .unwrap()
+        .to_cpu_ctx(gpu_b)
+        .unwrap();
+    let (sa, sb) = (
+        res_a.storage.as_slice().unwrap(),
+        res_b.storage.as_slice().unwrap(),
+    );
+    for i in 0..sa.len() {
+        assert!(
+            (sa[i] - sb[i]).abs() <= 1.0,
+            "resize differs between {} and {} at {}: {} vs {}",
+            name_a,
+            name_b,
+            i,
+            sa[i],
+            sb[i]
+        );
+    }
+
+    // Color conversion
+    let rgb_shape = TensorShape::new(3, 64, 64);
+    let rgb_data: Vec<f32> = (0..rgb_shape.len()).map(|i| (i % 256) as f32).collect();
+    let rgb_cpu: CpuTensor<f32> = Tensor::from_vec(rgb_data, rgb_shape).unwrap();
+    let a = rgb_cpu.to_gpu_ctx(gpu_a).unwrap();
+    let b = rgb_cpu.to_gpu_ctx(gpu_b).unwrap();
+    let res_a = gpu_a
+        .cvt_color(&a, ColorConversion::RgbToGray)
+        .unwrap()
+        .to_cpu_ctx(gpu_a)
+        .unwrap();
+    let res_b = gpu_b
+        .cvt_color(&b, ColorConversion::RgbToGray)
+        .unwrap()
+        .to_cpu_ctx(gpu_b)
+        .unwrap();
+    let (sa, sb) = (
+        res_a.storage.as_slice().unwrap(),
+        res_b.storage.as_slice().unwrap(),
+    );
+    for i in 0..sa.len() {
+        assert!(
+            (sa[i] - sb[i]).abs() <= 1.0,
+            "color conversion differs between {} and {} at {}: {} vs {}",
+            name_a,
+            name_b,
+            i,
+            sa[i],
+            sb[i]
+        );
+    }
+
+    // Descriptor matching must agree exactly (integer indices and distances)
+    let q_len = 50;
+    let t_len = 100;
+    let d_size = 32;
+    let mut q_data = vec![0u8; q_len * d_size];
+    let mut t_data = vec![0u8; t_len * d_size];
+    for i in 0..q_len {
+        for j in 0..d_size {
+            let val = (i + j) as u8;
+            q_data[i * d_size + j] = val;
+            t_data[i * d_size + j] = val;
+        }
+    }
+    let q_cpu: CpuTensor<u8> =
+        Tensor::from_vec(q_data, TensorShape::new(1, q_len, d_size)).unwrap();
+    let t_cpu: CpuTensor<u8> =
+        Tensor::from_vec(t_data, TensorShape::new(1, t_len, d_size)).unwrap();
+    let (qa, ta) = (
+        q_cpu.to_gpu_ctx(gpu_a).unwrap(),
+        t_cpu.to_gpu_ctx(gpu_a).unwrap(),
+    );
+    let (qb, tb) = (
+        q_cpu.to_gpu_ctx(gpu_b).unwrap(),
+        t_cpu.to_gpu_ctx(gpu_b).unwrap(),
+    );
+    let res_a = gpu_a.match_descriptors(&qa, &ta, 0.8).unwrap();
+    let res_b = gpu_b.match_descriptors(&qb, &tb, 0.8).unwrap();
+    assert_eq!(
+        res_a.matches.len(),
+        res_b.matches.len(),
+        "match count differs between {} and {}",
+        name_a,
+        name_b
+    );
+    for (ma, mb) in res_a.matches.iter().zip(res_b.matches.iter()) {
+        assert_eq!(ma.query_idx, mb.query_idx);
+        assert_eq!(ma.train_idx, mb.train_idx);
+        assert_eq!(ma.distance, mb.distance);
+    }
+
+    println!(
+        "  ✓ Device-to-device parity passed: {} vs {} (threshold, resize, color cvt, matching)",
+        name_a, name_b
+    );
 }
 
 fn test_icp_parity(cpu: &CpuBackend, gpu: &GpuContext, gpu_name: &str) {
