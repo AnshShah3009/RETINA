@@ -5,6 +5,30 @@ use std::collections::BinaryHeap;
 ///
 /// For best performance, use [`KDTree::build`] for bulk construction (O(n log n),
 /// produces a balanced tree) rather than repeated [`KDTree::insert`] calls.
+///
+/// # Relation to `cv_math::spatial::KDTree`
+///
+/// A generic arbitrary-dimension `f64` KD-tree exists in
+/// [`cv_math::spatial::KDTree`] (also re-exported as
+/// `cv_scientific::spatial::KDTree`, and already used by
+/// `crate::gpu::point_cloud::compute_normals_cpu_kdtree`). This type is
+/// **deliberately not** a thin wrapper around it, because delegation would both
+/// change behaviour and regress the hot path:
+///
+/// * it carries a per-point payload `T` inline (the math tree returns bare
+///   indices) and supports incremental [`KDTree::insert`], which the math tree
+///   does not;
+/// * it returns **squared** distances (`f32`), whereas the math tree returns
+///   Euclidean `f64` distances — callers such as `cv-registration` rely on the
+///   squared convention, so wrapping would silently change results;
+/// * distances stay in `f32` and points are stored inline as `Point3<f32>`,
+///   avoiding the per-query `f32`↔`f64` conversion and `Vec<Vec<f64>>`
+///   indirection the math tree would introduce inside ICP correspondence
+///   search.
+///
+/// Prefer this tree for hot 3-D `f32` point-cloud work (ICP, normal
+/// estimation); prefer the math tree when arbitrary dimensionality, `f64`
+/// precision, `query_ball`/`query_pairs`, or distance metrics are needed.
 pub struct KDTree<T: Clone> {
     root: Option<Box<KDNode<T>>>,
     dim: usize,

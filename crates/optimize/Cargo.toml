@@ -7,6 +7,7 @@ edition = "2021"
 nalgebra = { workspace = true }
 cv-core = { workspace = true }
 cv-hal = { workspace = true }
+cv-math = { workspace = true }
 faer = { workspace = true }
 pollster = { workspace = true }
 

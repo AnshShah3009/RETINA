@@ -170,6 +170,13 @@ pub fn polygon_iou(p1: &Polygon, p2: &Polygon) -> f32 {
 }
 
 /// Calculates the intersection area of two convex polygons using Sutherland-Hodgman clipping.
+///
+/// Convex inputs only, and intentionally independent of `cv-math`: this crate is
+/// the dependency-free base, and `cv-math` (which builds on it) owns the exact
+/// `geo`-backed clipping that also handles concave polygons and holes. Use this
+/// one where the inputs are known convex (NMS boxes, projection hulls) and the
+/// allocation cost of the general path matters; use
+/// `cv_math::geometry::polygon_iou` when the shapes may be concave.
 pub fn intersection_area_polygons(p1: &Polygon, p2: &Polygon) -> f32 {
     // Sutherland-Hodgman clipping for generic convex polygons.
     // `is_inside` assumes the clip ring is counter-clockwise, so normalize both

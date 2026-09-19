@@ -74,7 +74,7 @@ pub fn solve_pnp_dlt(
                 (d.dot(&u_axis), d.dot(&v_axis))
             })
             .collect();
-        let (t_src, src_n) = hartley_2d(&src);
+        let (t_src, src_n) = hartley_2d(&src)?;
 
         // Homography DLT on normalized 2D -> normalized image.
         let mut h_sys = DMatrix::<f64>::zeros(2 * n_pts, 9);
@@ -325,27 +325,29 @@ pub fn solve_pnp_dlt(
 }
 
 /// Hartley 2D normalization: translate to centroid, scale so mean distance is sqrt(2).
-fn hartley_2d(pts: &[(f64, f64)]) -> ([f64; 9], Vec<(f64, f64)>) {
-    let n = pts.len().max(1) as f64;
-    let mean_x = pts.iter().map(|p| p.0).sum::<f64>() / n;
-    let mean_y = pts.iter().map(|p| p.1).sum::<f64>() / n;
-    let rms = (pts
-        .iter()
-        .map(|p| {
-            let dx = p.0 - mean_x;
-            let dy = p.1 - mean_y;
-            (dx * dx + dy * dy).sqrt()
-        })
-        .sum::<f64>()
-        / n)
-        .max(1e-12);
-    let s = (2.0f64).sqrt() / rms;
-    (
-        [s, 0.0, -s * mean_x, 0.0, s, -s * mean_y, 0.0, 0.0, 1.0],
-        pts.iter()
-            .map(|p| ((p.0 - mean_x) * s, (p.1 - mean_y) * s))
-            .collect(),
-    )
+///
+/// Thin adapter over [`crate::dlt::hartley_normalize`], the single Hartley
+/// normalisation implementation in the workspace. Returns the transform in
+/// row-major `[f64; 9]` form for the projection-matrix assembly below.
+fn hartley_2d(pts: &[(f64, f64)]) -> Result<([f64; 9], Vec<(f64, f64)>)> {
+    let flat: Vec<[f64; 2]> = pts.iter().map(|p| [p.0, p.1]).collect();
+    let (t, normalized) = crate::dlt::hartley_normalize(&flat).ok_or_else(|| {
+        cv_core::Error::AlgorithmError("degenerate points in solve_pnp_dlt".to_string())
+    })?;
+    Ok((
+        [
+            t[(0, 0)],
+            t[(0, 1)],
+            t[(0, 2)], //
+            t[(1, 0)],
+            t[(1, 1)],
+            t[(1, 2)], //
+            t[(2, 0)],
+            t[(2, 1)],
+            t[(2, 2)],
+        ],
+        normalized.iter().map(|p| (p[0], p[1])).collect(),
+    ))
 }
 
 /// Solves the PnP problem using RANSAC

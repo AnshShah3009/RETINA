@@ -1,4 +1,4 @@
-use nalgebra::{Matrix3, Vector3, SVD};
+use nalgebra::Matrix3;
 
 /// Fundamental Matrix solver using the Normalized 8-point Algorithm.
 ///
@@ -9,6 +9,10 @@ pub struct FundamentalSolver;
 impl FundamentalSolver {
     /// Estimate the Fundamental Matrix F from at least 8 point correspondences.
     /// Points should be in (x, y) pixel coordinates.
+    ///
+    /// Delegates to [`crate::dlt::solve_dlt_fundamental`], the single normalised
+    /// 8-point implementation in the workspace (also used by
+    /// [`crate::find_fundamental_mat`] and `cv-features`' RANSAC estimator).
     pub fn estimate(pts1: &[[f64; 2]], pts2: &[[f64; 2]]) -> crate::Result<Matrix3<f64>> {
         if pts1.len() < 8 || pts1.len() != pts2.len() {
             return Err(cv_core::Error::InvalidInput(
@@ -16,126 +20,105 @@ impl FundamentalSolver {
             ));
         }
 
-        // 1. Normalization
-        let (t1, norm_pts1) = Self::normalize_points(pts1);
-        let (t2, norm_pts2) = Self::normalize_points(pts2);
-
-        // 2. Form matrix A
-        let mut a = nalgebra::DMatrix::zeros(pts1.len(), 9);
-        for i in 0..pts1.len() {
-            let u1 = norm_pts1[i][0];
-            let v1 = norm_pts1[i][1];
-            let u2 = norm_pts2[i][0];
-            let v2 = norm_pts2[i][1];
-
-            // Row i: [u2*u1, u2*v1, u2, v2*u1, v2*v1, v2, u1, v1, 1]
-            a[(i, 0)] = u2 * u1;
-            a[(i, 1)] = u2 * v1;
-            a[(i, 2)] = u2;
-            a[(i, 3)] = v2 * u1;
-            a[(i, 4)] = v2 * v1;
-            a[(i, 5)] = v2;
-            a[(i, 6)] = u1;
-            a[(i, 7)] = v1;
-            a[(i, 8)] = 1.0;
-        }
-
-        // 3. SVD of A to find F
-        let svd = SVD::new(a, false, true);
-        let v_t = svd
-            .v_t
-            .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed to compute V_t".into()))?;
-        let f_vec = v_t.row(v_t.nrows() - 1); // Last row of V^T (singular vector for smallest singular value)
-
-        let mut f = Matrix3::new(
-            f_vec[0], f_vec[1], f_vec[2], f_vec[3], f_vec[4], f_vec[5], f_vec[6], f_vec[7],
-            f_vec[8],
-        );
-
-        // 4. Force Rank-2 Constraint
-        let mut f_svd = SVD::new(f, true, true);
-        f_svd.singular_values[2] = 0.0;
-        f = f_svd
-            .recompose()
-            .map_err(|e| cv_core::Error::AlgorithmError(e.to_string()))?;
-
-        // 5. Denormalization: F = T2^T * F_norm * T1
-        Ok(t2.transpose() * f * t1)
-    }
-
-    /// Normalizes points such that centroid is at origin and mean distance is sqrt(2).
-    fn normalize_points(pts: &[[f64; 2]]) -> (Matrix3<f64>, Vec<[f64; 2]>) {
-        let n = pts.len() as f64;
-        let mut centroid_x = 0.0;
-        let mut centroid_y = 0.0;
-        for p in pts {
-            centroid_x += p[0];
-            centroid_y += p[1];
-        }
-        centroid_x /= n;
-        centroid_y /= n;
-
-        let mut mean_dist = 0.0;
-        for p in pts {
-            let dx = p[0] - centroid_x;
-            let dy = p[1] - centroid_y;
-            mean_dist += (dx * dx + dy * dy).sqrt();
-        }
-        mean_dist /= n;
-
-        let scale = if mean_dist > 1e-9 {
-            std::f64::consts::SQRT_2 / mean_dist
-        } else {
-            1.0
-        };
-
-        // Transformation matrix T
-        let t = Matrix3::new(
-            scale,
-            0.0,
-            -scale * centroid_x,
-            0.0,
-            scale,
-            -scale * centroid_y,
-            0.0,
-            0.0,
-            1.0,
-        );
-
-        let norm_pts = pts
-            .iter()
-            .map(|p| {
-                let p_h = Vector3::new(p[0], p[1], 1.0);
-                let p_n = t * p_h;
-                [p_n.x, p_n.y]
-            })
-            .collect();
-
-        (t, norm_pts)
+        crate::dlt::solve_dlt_fundamental(pts1, pts2).ok_or_else(|| {
+            cv_core::Error::AlgorithmError("Fundamental 8-point solve failed".into())
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::{Point2, Vector3};
 
-    #[test]
-    fn test_8point_basic() {
-        // Generate 8 points
+    /// Two pinhole cameras looking at deterministic random 3D points.
+    fn synthetic_correspondences(n: usize) -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
+        let k = Matrix3::new(800.0, 0.0, 320.0, 0.0, 800.0, 240.0, 0.0, 0.0, 1.0);
+        let angle = 0.15f64;
+        let r = Matrix3::new(
+            angle.cos(),
+            0.0,
+            angle.sin(),
+            0.0,
+            1.0,
+            0.0,
+            -angle.sin(),
+            0.0,
+            angle.cos(),
+        );
+        let t = Vector3::new(-0.5, 0.0, 0.0);
+
+        let mut s = 99u64;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+        };
+
         let mut pts1 = Vec::new();
         let mut pts2 = Vec::new();
-
-        // This is a bit complex to generate perfectly consistent points without a full simulator,
-        // but we can at least check if it handles the input.
-        // For a real test, we'd project 3D points into two cameras.
-
-        // Let's just mock some data for now to ensure no panics
-        for i in 0..8 {
-            pts1.push([i as f64 * 10.0, i as f64 * 10.0]);
-            pts2.push([i as f64 * 10.0 + 5.0, i as f64 * 10.0]);
+        let mut i = 0usize;
+        while pts1.len() < n && i < 10 * n {
+            i += 1;
+            let x = Vector3::new(next() * 4.0, next() * 4.0, 5.0 + next() * 3.0);
+            let y = r * x + t;
+            let u = k * x;
+            let v = k * y;
+            pts1.push([u[0] / u[2], u[1] / u[2]]);
+            pts2.push([v[0] / v[2], v[1] / v[2]]);
         }
+        (pts1, pts2)
+    }
 
-        let f = FundamentalSolver::estimate(&pts1, &pts2);
-        assert!(f.is_ok());
+    fn worst_epipolar(f: &Matrix3<f64>, pts1: &[[f64; 2]], pts2: &[[f64; 2]]) -> f64 {
+        let mut worst = 0.0f64;
+        for (p1, p2) in pts1.iter().zip(pts2.iter()) {
+            let x1 = Vector3::new(p1[0], p1[1], 1.0);
+            let x2 = Vector3::new(p2[0], p2[1], 1.0);
+            worst = worst.max(x2.dot(&(f * x1)).abs());
+        }
+        worst
+    }
+
+    #[test]
+    fn estimate_satisfies_the_epipolar_constraint() {
+        let (pts1, pts2) = synthetic_correspondences(12);
+        let f = FundamentalSolver::estimate(&pts1, &pts2).expect("F");
+        assert!(worst_epipolar(&f, &pts1, &pts2) < 1e-6);
+
+        let sv = f.svd(false, false).singular_values;
+        assert!(sv[2] < 1e-9 * sv[0], "F is not rank 2: {sv:?}");
+    }
+
+    /// Exactly 8 correspondences (the minimal sample) used to be solved with the
+    /// wrong right singular vector, giving a visibly non-epipolar F.
+    #[test]
+    fn estimate_is_consistent_for_the_minimal_eight_point_sample() {
+        let (pts1, pts2) = synthetic_correspondences(8);
+        let f = FundamentalSolver::estimate(&pts1, &pts2).expect("F");
+        assert!(
+            worst_epipolar(&f, &pts1, &pts2) < 1e-6,
+            "minimal-sample F is not epipolar"
+        );
+    }
+
+    /// The three previously-separate solvers must agree up to sign and scale.
+    #[test]
+    fn estimate_agrees_with_find_fundamental_mat() {
+        let (pts1, pts2) = synthetic_correspondences(12);
+
+        let f1 = FundamentalSolver::estimate(&pts1, &pts2).expect("F");
+        let p1: Vec<Point2<f64>> = pts1.iter().map(|p| Point2::new(p[0], p[1])).collect();
+        let p2: Vec<Point2<f64>> = pts2.iter().map(|p| Point2::new(p[0], p[1])).collect();
+        let f2 = crate::find_fundamental_mat(&p1, &p2).expect("F");
+
+        let unit = |m: &Matrix3<f64>| m / m.norm();
+        let direct = (unit(&f1) - unit(&f2)).norm();
+        let flipped = (unit(&f1) + unit(&f2)).norm();
+        assert!(
+            direct < 1e-9 || flipped < 1e-9,
+            "solvers disagree: {direct} / {flipped}"
+        );
     }
 }

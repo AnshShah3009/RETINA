@@ -1,5 +1,7 @@
 //! Levenberg-Marquardt curve fitting.
 
+use nalgebra::{DMatrix, DVector};
+
 /// Result of a curve-fitting run.
 #[derive(Debug, Clone)]
 pub struct CurveFitResult {
@@ -166,104 +168,36 @@ pub fn curve_fit(
 
 /// Solve A * x = b via Gaussian elimination with partial pivoting.
 /// Returns None if the system is singular.
+///
+/// Thin adapter over [`cv_math::linalg::solve`]: the elimination itself (and the
+/// Gauss-Jordan inversion below) used to be implemented locally here; both are
+/// now the shared `cv-math` linear-algebra routines.
 #[allow(clippy::needless_range_loop)]
 fn solve_linear(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     let n = b.len();
-    // Augmented matrix
-    let mut aug: Vec<Vec<f64>> = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut row = a[i].clone();
-        row.push(b[i]);
-        aug.push(row);
+    if a.len() != n || a.iter().any(|row| row.len() != n) {
+        return None;
     }
-
-    for col in 0..n {
-        // Partial pivoting
-        let mut max_row = col;
-        let mut max_val = aug[col][col].abs();
-        for row in (col + 1)..n {
-            if aug[row][col].abs() > max_val {
-                max_val = aug[row][col].abs();
-                max_row = row;
-            }
-        }
-        if max_val < 1e-30 {
-            return None;
-        }
-        aug.swap(col, max_row);
-
-        let pivot = aug[col][col];
-        for row in (col + 1)..n {
-            let factor = aug[row][col] / pivot;
-            for j in col..=n {
-                let val = aug[col][j];
-                aug[row][j] -= factor * val;
-            }
-        }
-    }
-
-    // Back substitution
-    let mut x = vec![0.0; n];
-    for i in (0..n).rev() {
-        let mut s = aug[i][n];
-        for j in (i + 1)..n {
-            s -= aug[i][j] * x[j];
-        }
-        if aug[i][i].abs() < 1e-30 {
-            return None;
-        }
-        x[i] = s / aug[i][i];
-    }
-    Some(x)
+    let mat = DMatrix::from_fn(n, n, |i, j| a[i][j]);
+    let rhs = DVector::from_row_slice(b);
+    cv_math::linalg::solve(&mat, &rhs)
+        .ok()
+        .map(|x| x.iter().copied().collect())
 }
 
 /// Invert a square matrix via Gauss-Jordan elimination.
 #[allow(clippy::needless_range_loop)]
 fn invert_matrix(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let n = a.len();
-    // Augment with identity
-    let mut aug: Vec<Vec<f64>> = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut row = a[i].clone();
-        for j in 0..n {
-            row.push(if i == j { 1.0 } else { 0.0 });
-        }
-        aug.push(row);
+    if n == 0 || a.iter().any(|row| row.len() != n) {
+        return None;
     }
-
-    for col in 0..n {
-        let mut max_row = col;
-        let mut max_val = aug[col][col].abs();
-        for row in (col + 1)..n {
-            if aug[row][col].abs() > max_val {
-                max_val = aug[row][col].abs();
-                max_row = row;
-            }
-        }
-        if max_val < 1e-30 {
-            return None;
-        }
-        aug.swap(col, max_row);
-
-        let pivot = aug[col][col];
-        for j in 0..(2 * n) {
-            aug[col][j] /= pivot;
-        }
-
-        for row in 0..n {
-            if row == col {
-                continue;
-            }
-            let factor = aug[row][col];
-            for j in 0..(2 * n) {
-                let val = aug[col][j];
-                aug[row][j] -= factor * val;
-            }
-        }
-    }
-
-    let inv: Vec<Vec<f64>> = aug.iter().map(|row| row[n..].to_vec()).collect();
-    Some(inv)
+    let mat = DMatrix::from_fn(n, n, |i, j| a[i][j]);
+    cv_math::linalg::inv(&mat).ok().map(|inv| {
+        (0..n)
+            .map(|i| (0..n).map(|j| inv[(i, j)]).collect())
+            .collect()
+    })
 }
 
 #[cfg(test)]

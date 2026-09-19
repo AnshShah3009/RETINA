@@ -1233,6 +1233,7 @@ dependencies = [
  "cv-core",
  "cv-hal",
  "cv-imgproc",
+ "cv-math",
  "cv-runtime",
  "image",
  "nalgebra",
@@ -1322,6 +1323,7 @@ name = "cv-features"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cv-calib3d",
  "cv-core",
  "cv-hal",
  "cv-imgproc",
@@ -1427,6 +1429,7 @@ version = "0.1.0"
 dependencies = [
  "cv-core",
  "cv-hal",
+ "cv-math",
  "faer",
  "nalgebra",
  "pollster",

@@ -7,6 +7,13 @@ use nalgebra::{Point3, Vector3};
 /// Groups points into cubic voxels of side `voxel_size` and replaces each
 /// voxel's contents with the centroid.  Optionally averages normals (and
 /// re-normalises) and colors.
+///
+/// This is intentionally *not* routed through [`crate::spatial::VoxelGrid`]:
+/// that grid is `f32`, carries no normals/colors, and keys voxels relative to
+/// its `origin`, whereas this routine is `f64`, averages normals/colors, and
+/// keys voxels on the global grid (`floor(p / voxel_size)`). The cheaper
+/// `f32`-only reduction is the one the rest of `cv-3d` (`gpu`, `batch`,
+/// `async_ops`) delegates to via [`crate::spatial::VoxelGrid::downsample`].
 pub fn voxel_downsample(
     points: &[Point3<f64>],
     normals: Option<&[Vector3<f64>]>,
