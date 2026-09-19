@@ -52,6 +52,9 @@ OPTIONS:
     --hit-radius <D>       retrieval hit radius, metres [default: 1.0]
     --max-dt <T>           timestamp association tolerance, seconds [default: 0.02]
     --tri-reproj <P>       triangulation reprojection tolerance, pixels [default: 3.0]
+    --match-window <W>     temporal window for the track-based map: frame i is
+                           matched against i+1..=i+W before tracks are formed
+                           [default: 2]
     --vocab <K>            train a BoW vocabulary of K words on the database
                            descriptors (default: no vocabulary)
     --seed <S>             deterministic vocabulary seed [default: 0]
@@ -111,6 +114,10 @@ fn parse_args(args: &[String]) -> Result<BenchmarkConfig, String> {
     let mut hit_radius = 1.0f64;
     let mut max_dt = 0.02f64;
     let mut tri_reproj = 3.0f64;
+    // Five comes from the measured sweep recorded in docs/localization.md: a
+    // wider window builds longer tracks (better landmark geometry, better
+    // poses) but loses coverage, and cross-sequence success peaks here.
+    let mut match_window = 5usize;
     let mut vocab: Option<usize> = None;
     let mut seed = 0u64;
     let mut candidates = 10usize;
@@ -137,6 +144,9 @@ fn parse_args(args: &[String]) -> Result<BenchmarkConfig, String> {
             "--hit-radius" => hit_radius = parse_f64(&take_value(args, &mut i, flag)?, flag)?,
             "--max-dt" => max_dt = parse_f64(&take_value(args, &mut i, flag)?, flag)?,
             "--tri-reproj" => tri_reproj = parse_f64(&take_value(args, &mut i, flag)?, flag)?,
+            "--match-window" => {
+                match_window = parse_usize(&take_value(args, &mut i, flag)?, flag)?;
+            }
             "--vocab" => vocab = Some(parse_usize(&take_value(args, &mut i, flag)?, flag)?),
             "--seed" => seed = parse_u64(&take_value(args, &mut i, flag)?, flag)?,
             "--candidates" => candidates = parse_usize(&take_value(args, &mut i, flag)?, flag)?,
@@ -174,6 +184,9 @@ fn parse_args(args: &[String]) -> Result<BenchmarkConfig, String> {
     if !(tri_reproj.is_finite() && tri_reproj > 0.0) {
         return Err("--tri-reproj must be positive".to_string());
     }
+    if match_window == 0 {
+        return Err("--match-window must be at least 1".to_string());
+    }
     if vocab == Some(0) {
         return Err("--vocab must be at least 1".to_string());
     }
@@ -202,6 +215,7 @@ fn parse_args(args: &[String]) -> Result<BenchmarkConfig, String> {
         hit_radius,
         max_dt,
         tri_reproj,
+        match_window,
         vocab,
         seed,
         candidates,
@@ -286,6 +300,7 @@ fn print_report(config: &BenchmarkConfig, report: &cv_localization::benchmark::B
     println!("  hit-radius         : {:.3} m", config.hit_radius);
     println!("  max-dt             : {:.4} s", config.max_dt);
     println!("  tri-reproj         : {:.3} px", config.tri_reproj);
+    println!("  match-window       : {}", config.match_window);
     println!("  vocab              : {vocab_description}");
     println!("  candidates         : {}", config.candidates);
     println!("  seed               : {}", config.seed);
@@ -320,10 +335,15 @@ fn print_report(config: &BenchmarkConfig, report: &cv_localization::benchmark::B
         "  features per frame : {} requested; {:.1} mean extracted",
         summary.features_requested, summary.mean_features_per_frame
     );
-    println!("  landmarks in map   : {}", summary.landmarks);
     println!(
-        "  observations/land  : {:.2}",
-        summary.mean_observations_per_landmark
+        "  triangulated tracks: {}  (>= 2 observations, before reprojection filtering)",
+        summary.triangulated_tracks
+    );
+    println!("  landmarks in map   : {}", summary.landmarks);
+    println!("  rejected tracks    : {}", summary.rejected_tracks);
+    println!(
+        "  observations/land  : {:.2} mean, {:.2} median",
+        summary.mean_observations_per_landmark, summary.median_observations_per_landmark
     );
     println!();
 
