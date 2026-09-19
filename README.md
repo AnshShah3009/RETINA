@@ -57,9 +57,41 @@ rust-cv-native/
 ├── crates/io/           # File I/O
 ├── crates/runtime/      # Async runtime and orchestration
 ├── crates/distributed/  # Cross-process shared-memory / VRAM coordination
+├── crates/eval/         # Trajectory, reconstruction and retrieval metrics
+├── crates/cli/          # cv-bench command-line evaluation tool
 ├── crates/python/       # Python bindings (PyO3)
 └── crates/examples/     # Usage examples
 ```
+
+## Evaluation and benchmarking
+
+The library ships the measurement layer for localization/SfM/SLAM work, so
+results can be produced and re-checked rather than quoted:
+
+- **`cv-eval`** — trajectory metrics (ATE with SE(3)/Sim(3) alignment, RPE,
+  camera-centre RMSE, path length), reconstruction metrics (registration rate,
+  reprojection RMSE, RMSE/extent, Chamfer distance, F-score) and retrieval
+  metrics (recall@k, precision@k, mAP).
+- **`cv-io::datasets`** — loaders for EuRoC/ASL, TUM RGB-D, KITTI odometry and
+  COLMAP text models, including TUM's timestamp association.
+- **`cv-bench`** — a CLI over both.
+
+```bash
+# trajectory error against ground truth, with alignment
+cargo run -p cv-cli --bin cv-bench -- trajectory \
+  --estimate estimate.txt --ground-truth groundtruth.txt --format tum --align sim3
+
+# reconstruction quality from a COLMAP text model
+cargo run -p cv-cli --bin cv-bench -- model \
+  --images sparse/0/images.txt --points3d sparse/0/points3D.txt
+
+# place-recognition quality
+cargo run -p cv-cli --bin cv-bench -- retrieval --predictions ranked.txt --ground-truth relevant.txt --k 10
+```
+
+This repository publishes **no benchmark numbers it has not measured, with the
+command that produced them**. See [docs/evaluation.md](docs/evaluation.md) for the
+metric definitions, dataset formats and the reproducibility rules.
 
 ## Installation
 
@@ -79,7 +111,7 @@ maturin develop
 
 ## Testing
 
-**300+ tests** across all crates including:
+**1,400+ tests** across all crates, including:
 - cv-core: geometry, robust estimation, tensor operations, error handling
 - cv-features: Harris, FAST, BRIEF, GFTT, HOG, ORB
 - cv-stereo: stereo matching, triangulation
@@ -90,6 +122,12 @@ maturin develop
 - cv-registration: SE(3) transforms, robust matching
 - cv-video: background subtraction, optical flow
 - cv-imgproc: filters, morphology, color conversion
+- cv-eval: trajectory/reconstruction/retrieval metrics against analytic cases
+- cv-io: dataset loaders, including malformed-input handling
+
+GPU tests execute when a graphics adapter is available and skip cleanly when it
+is not — on a machine with a GPU they are the only coverage the shaders get, since
+hosted CI runners have no adapter.
 
 ```bash
 cargo test --workspace

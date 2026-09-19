@@ -30,12 +30,20 @@ struct PcdHeader {
 
 impl PcdHeader {
     /// Total byte size of a single point record
+    ///
+    /// Derived from the same per-field defaults used by `compute_field_offsets`
+    /// (size 4, count 1) so the stride and the field offsets can never disagree
+    /// on file-controlled headers where SIZE/COUNT have fewer entries than FIELDS.
     fn point_stride(&self) -> usize {
-        self.sizes
-            .iter()
-            .zip(self.counts.iter())
-            .map(|(s, c)| s * c)
-            .sum()
+        (0..self.fields.len())
+            .map(|i| {
+                self.sizes
+                    .get(i)
+                    .copied()
+                    .unwrap_or(4)
+                    .saturating_mul(self.counts.get(i).copied().unwrap_or(1))
+            })
+            .fold(0usize, usize::saturating_add)
     }
 }
 
@@ -266,6 +274,20 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
         ));
     }
 
+    // `stride` and `count` both come from the file. Guard against multiply
+    // overflow (which would otherwise wrap and produce a too-small buffer) and
+    // against implausibly large allocations before computing offsets or buffers.
+    const MAX_POINT_DATA_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8 GiB
+    let total_bytes = stride
+        .checked_mul(count)
+        .ok_or_else(|| Error::ParseError("PCD binary: point data size overflow".to_string()))?;
+    if total_bytes > MAX_POINT_DATA_BYTES {
+        return Err(Error::ParseError(format!(
+            "PCD binary: refusing to read {} bytes of point data",
+            total_bytes
+        )));
+    }
+
     // Compute byte offsets for each field within a point record
     let field_offsets = compute_field_offsets(header);
 
@@ -298,7 +320,6 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
     let has_colors = has_rgb || has_separate_rgb;
 
     // Read all binary data at once
-    let total_bytes = stride * count;
     let mut data = vec![0u8; total_bytes];
     reader.read_exact(&mut data).map_err(|e| {
         Error::ParseError(format!(
@@ -378,7 +399,7 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
             if let Some(idx) = rgb_field {
                 // Packed RGB stored as float (bit-reinterpreted u32)
                 let offset = field_offsets[idx];
-                let size = header.sizes[idx];
+                let size = header.sizes.get(idx).copied().unwrap_or(4);
                 if size == 4 {
                     let bytes: [u8; 4] =
                         point_data[offset..offset + 4].try_into().unwrap_or([0; 4]);
@@ -482,14 +503,18 @@ fn deinterleave_field_major(data: &[u8], header: &PcdHeader) -> Result<Vec<u8>> 
     let mut out = vec![0u8; expected];
     let mut field_start = 0usize;
     for (f, &dst_off) in offsets.iter().enumerate() {
-        let field_size =
-            header.sizes.get(f).copied().unwrap_or(4) * header.counts.get(f).copied().unwrap_or(1);
+        let field_size = header
+            .sizes
+            .get(f)
+            .copied()
+            .unwrap_or(4)
+            .saturating_mul(header.counts.get(f).copied().unwrap_or(1));
         for i in 0..count {
             let src = field_start + i * field_size;
             let dst = i * stride + dst_off;
             out[dst..dst + field_size].copy_from_slice(&data[src..src + field_size]);
         }
-        field_start += field_size * count;
+        field_start = field_start.saturating_add(field_size.saturating_mul(count));
     }
     Ok(out)
 }
@@ -747,7 +772,7 @@ fn compute_field_offsets(header: &PcdHeader) -> Vec<usize> {
         offsets.push(offset);
         let size = header.sizes.get(i).copied().unwrap_or(4);
         let count = header.counts.get(i).copied().unwrap_or(1);
-        offset += size * count;
+        offset = offset.saturating_add(size.saturating_mul(count));
     }
     offsets
 }
@@ -1373,5 +1398,62 @@ mod tests {
         assert!(read_cloud.normals.is_some());
         assert!(read_cloud.colors.is_some());
         assert!((read_cloud.points[2].x - 7.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_pcd_binary_rgb_not_in_size_list_no_panic() {
+        // `rgb` appears in FIELDS but SIZE only lists three entries. Downstream
+        // code indexes sizes by field index, so this used to panic with an
+        // index-out-of-bounds. Sizes/offsets must fall back to the default (4).
+        let mut file = Vec::new();
+        file.extend_from_slice(
+            b"# .PCD v0.7\nVERSION 0.7\nFIELDS x y z rgb\nSIZE 4 4 4\nTYPE F F F F\nCOUNT 1 1 1 1\nWIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA binary\n",
+        );
+        // One point: x=1, y=2, z=3 and a 4-byte (zero) rgb slot so the record
+        // matches the defaulted stride of 16 bytes.
+        file.extend_from_slice(&1.0f32.to_le_bytes());
+        file.extend_from_slice(&2.0f32.to_le_bytes());
+        file.extend_from_slice(&3.0f32.to_le_bytes());
+        file.extend_from_slice(&0u32.to_le_bytes());
+
+        let cloud = read_pcd(BufReader::new(Cursor::new(file))).expect("read failed");
+        assert_eq!(cloud.len(), 1);
+        assert_eq!(cloud.points[0].x, 1.0);
+        assert_eq!(cloud.points[0].y, 2.0);
+        assert_eq!(cloud.points[0].z, 3.0);
+        assert_eq!(cloud.colors.expect("colors missing").len(), 1);
+    }
+
+    #[test]
+    fn test_deinterleave_field_major_size_list_shorter_than_fields() {
+        // The stride and the field offsets must be derived from the same
+        // defaulted vectors, otherwise `out[dst..dst + field_size]` can run past
+        // the end of the buffer for a file-controlled header.
+        let header = PcdHeader {
+            fields: vec!["x".into(), "y".into(), "z".into(), "rgb".into()],
+            sizes: vec![4, 4, 4], // shorter than FIELDS
+            types: vec!['F', 'F', 'F', 'F'],
+            counts: vec![1, 1, 1, 1],
+            points_count: 2,
+            data_format: PcdData::BinaryCompressed,
+        };
+        let stride = header.point_stride();
+        let data = vec![7u8; stride * 2];
+        let out = deinterleave_field_major(&data, &header).expect("deinterleave failed");
+        assert_eq!(out.len(), stride * 2);
+    }
+
+    #[test]
+    fn test_pcd_binary_implausible_point_count_rejected() {
+        // POINTS is attacker-controlled: 12-byte stride * 4e9 points would be a
+        // multi-GB allocation, and larger values overflow usize. Both must be
+        // rejected with an error instead of panicking or allocating.
+        let overflow_header = b"# .PCD v0.7\nVERSION 0.7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nWIDTH 100\nHEIGHT 100\nPOINTS 18446744073709551615\nDATA binary\n";
+        let res = read_pcd(BufReader::new(Cursor::new(overflow_header.to_vec())));
+        assert!(res.is_err(), "overflowing POINTS must be rejected");
+
+        let huge_header = b"# .PCD v0.7\nVERSION 0.7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nWIDTH 100\nHEIGHT 100\nPOINTS 4000000000\nDATA binary\n";
+        let res = read_pcd(BufReader::new(Cursor::new(huge_header.to_vec())));
+        assert!(res.is_err(), "implausibly large POINTS must be rejected");
     }
 }

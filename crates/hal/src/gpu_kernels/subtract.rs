@@ -10,7 +10,12 @@ pub fn subtract(
     a: &Tensor<f32, GpuStorage<f32>>,
     b: &Tensor<f32, GpuStorage<f32>>,
 ) -> Result<Tensor<f32, GpuStorage<f32>>> {
-    assert_eq!(a.shape, b.shape);
+    if a.shape != b.shape {
+        return Err(crate::Error::InvalidInput(format!(
+            "subtract requires matching shapes, got {:?} and {:?}",
+            a.shape, b.shape
+        )));
+    }
     let size = a.shape.len();
     let byte_size = (size * std::mem::size_of::<f32>()) as u64;
 
@@ -64,4 +69,37 @@ pub fn subtract(
         dtype: a.dtype,
         _phantom: PhantomData,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::GpuContext;
+    use crate::tensor_ext::TensorToGpu;
+
+    #[test]
+    fn mismatched_shapes_return_error() {
+        let ctx = match GpuContext::new() {
+            Ok(c) => c,
+            Err(_) => return, // no adapter available
+        };
+
+        let a = cv_core::CpuTensor::<f32>::from_vec(
+            vec![0.0f32; 4],
+            cv_core::TensorShape::new(1, 2, 2),
+        )
+        .unwrap()
+        .to_gpu_ctx(&ctx)
+        .unwrap();
+        let b = cv_core::CpuTensor::<f32>::from_vec(
+            vec![0.0f32; 6],
+            cv_core::TensorShape::new(1, 2, 3),
+        )
+        .unwrap()
+        .to_gpu_ctx(&ctx)
+        .unwrap();
+
+        let res = subtract(&ctx, &a, &b);
+        assert!(matches!(res, Err(crate::Error::InvalidInput(_))));
+    }
 }

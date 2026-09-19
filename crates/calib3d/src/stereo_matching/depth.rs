@@ -15,8 +15,9 @@ pub fn disparity_to_depth(disparity: &DisparityMap, params: &StereoParams) -> Ve
         for x in 0..disparity.width {
             let d = disparity.get(x, y);
 
-            // Filter invalid disparities
-            let depth = if d < 0.5 || d >= (disparity.max_disparity as f32) {
+            // Filter invalid disparities. The matchers scan the inclusive range
+            // min_disparity..=max_disparity, so max_disparity is valid.
+            let depth = if d < 0.5 || d > (disparity.max_disparity as f32) {
                 None
             } else {
                 params.disparity_to_depth(d as f64)
@@ -43,8 +44,8 @@ pub fn disparity_to_pointcloud(
         for x in 0..disparity.width {
             let d = disparity.get(x, y);
 
-            // Skip invalid disparities
-            if d < 0.5 || d >= (disparity.max_disparity as f32) {
+            // Skip invalid disparities (matchers scan inclusive min..=max)
+            if d < 0.5 || d > (disparity.max_disparity as f32) {
                 continue;
             }
 
@@ -221,6 +222,18 @@ mod tests {
         // At position (5, 5), depth should be (500 * 0.1) / 50 = 1.0
         let idx = 5 * 10 + 5;
         assert_eq!(depths[idx], Some(1.0));
+    }
+
+    #[test]
+    fn test_disparity_to_depth_includes_max_disparity() {
+        let params = StereoParams::new(500.0, 0.1, 320.0, 240.0);
+        let mut disparity = DisparityMap::new(2, 1, 0, 10);
+        disparity.set(0, 0, 10.0); // == max_disparity -> valid (matchers scan ^..=)
+        disparity.set(1, 0, 11.0); // > max_disparity -> invalid
+
+        let depths = disparity_to_depth(&disparity, &params);
+        assert_eq!(depths[0], Some(500.0 * 0.1 / 10.0));
+        assert_eq!(depths[1], None);
     }
 
     #[test]

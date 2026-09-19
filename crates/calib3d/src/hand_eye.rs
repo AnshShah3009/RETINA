@@ -1,7 +1,12 @@
 //! Hand-eye calibration (AX = XB).
 //!
-//! Implements a Park–Martin style linear solution on relative motions:
-//! rotation first via the logarithm map, then translation by least squares.
+//! A single Park–Martin style estimator is implemented on relative motions:
+//! rotation via the quaternion Q-method, then translation by least squares.
+//!
+//! NOTE: the `HandEyeMethod` / `RobotWorldHandEyeMethod` selector is accepted
+//! for API compatibility only. Every variant resolves to this same estimator;
+//! the distinct Tsai/Park/Horaud/Andreff/Shah/Li solvers are NOT implemented,
+//! so the variant does not change the returned solution.
 //!
 //! Conventions follow OpenCV:
 //! - `calibrate_hand_eye` receives `gripper2base` and `target2cam` poses and
@@ -12,6 +17,11 @@
 
 use nalgebra::{Matrix3, Vector3};
 
+/// Method selector for [`calibrate_hand_eye`].
+///
+/// All variants currently resolve to the same Park–Martin-style estimator; the
+/// variant is accepted for OpenCV API compatibility and does not change the
+/// result.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HandEyeMethod {
     Tsai,
@@ -25,6 +35,11 @@ impl Default for HandEyeMethod {
     }
 }
 
+/// Method selector for [`calibrate_robot_world_hand_eye`].
+///
+/// All variants currently resolve to the same Park–Martin-style estimator; the
+/// variant is accepted for OpenCV API compatibility and does not change the
+/// result.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RobotWorldHandEyeMethod {
     Shah,
@@ -40,6 +55,9 @@ impl Default for RobotWorldHandEyeMethod {
 ///
 /// * `r/t_gripper2base` — robot flange poses in base coordinates (per view)
 /// * `r/t_target2cam` — calibration target poses in camera coordinates (per view)
+///
+/// `method` is accepted for API compatibility; all variants currently use the
+/// same single estimator (see the module documentation).
 ///
 /// Returns `(R_cam2gripper, t_cam2gripper)` or `None` if the motions do not
 /// span enough independent rotations to determine the transform.
@@ -217,6 +235,9 @@ fn quat_right(q: &[f64; 4]) -> nalgebra::Matrix4<f64> {
 /// * inputs: `world2cam` poses (A) and `base2gripper` poses (B) per view
 /// * returns `(R_base2world, t_base2world, R_gripper2cam, t_gripper2cam)`
 ///   i.e. X and Z from A_i·X = Z·B_i, or `None` when the data is degenerate.
+///
+/// `method` is accepted for API compatibility; all variants currently use the
+/// same single estimator (see the module documentation).
 pub fn calibrate_robot_world_hand_eye(
     r_world2cam: &[Matrix3<f64>],
     t_world2cam: &[Vector3<f64>],

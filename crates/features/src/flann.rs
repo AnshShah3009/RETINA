@@ -103,9 +103,14 @@ impl FlannIndex {
         // Convert to sorted results (closest first). into_sorted_vec sorts
         // ascending by Ord, and SearchResult's Ord is distance-REVERSED
         // (min-heap semantics) — sorting by it yields the FARTHEST points.
-        // Sort explicitly by raw distance instead.
+        // Sort explicitly by raw distance (then index) instead.
         let mut results: Vec<SearchResult> = candidates.into_iter().collect();
-        results.sort_by_key(|s| s.distance);
+        results.sort_by(|a, b| a.distance.cmp(&b.distance).then(a.index.cmp(&b.index)));
+        // Every KD-tree indexes the same points, so a neighbor appears once per
+        // tree in the merged heap. Collapse duplicate indices before truncating,
+        // otherwise k-NN can return the same neighbor twice and the ratio test
+        // then rejects an otherwise valid match.
+        results.dedup_by_key(|s| s.index);
         results.truncate(k);
 
         results
@@ -390,6 +395,34 @@ mod tests {
         println!("Found {} neighbors for query", results.len());
         for (idx, dist) in &results {
             println!("  Index {} with distance {}", idx, dist);
+        }
+    }
+
+    #[test]
+    fn test_search_knn_dedups_across_trees() {
+        // All KD-trees index the same points, so the merged candidate heap can
+        // contain one index per tree. Those duplicates must be collapsed before
+        // truncating to k, otherwise the same neighbor is returned more than
+        // once and the k=2 ratio test rejects valid matches.
+        let train = create_test_descriptors(64);
+        let mut index = FlannIndex::new(8, 4);
+        index.build(&train);
+
+        let query: Vec<u8> = (0..32).map(|j| ((0 * 7 + j * 3) % 256) as u8).collect();
+        let results = index.search_knn(&query, 4);
+
+        assert!(results.len() >= 2, "expected multiple neighbors");
+        let mut indices: Vec<usize> = results.iter().map(|(i, _)| *i).collect();
+        indices.sort_unstable();
+        indices.dedup();
+        assert_eq!(
+            indices.len(),
+            results.len(),
+            "duplicate neighbor indices leaked from the merged KD-tree candidates"
+        );
+        // Distances must be non-decreasing.
+        for pair in results.windows(2) {
+            assert!(pair[0].1 <= pair[1].1);
         }
     }
 

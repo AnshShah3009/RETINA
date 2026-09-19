@@ -63,7 +63,11 @@ pub struct SphericalHarmonics {
 
 impl SphericalHarmonics {
     pub fn new(degree: usize) -> Self {
-        let num_coeffs = (degree + 1) * (degree + 1);
+        // Every one of the (degree+1)² SH basis functions stores an R, G and B
+        // coefficient, so allocate 3× that many. `dc()` reads coeffs[0..3] and
+        // `eval()` (degree >= 1) reads coeffs[3..12], both of which must be in
+        // bounds.
+        let num_coeffs = 3 * (degree + 1) * (degree + 1);
         Self {
             coeffs: vec![0.0; num_coeffs],
             degree,
@@ -322,13 +326,23 @@ impl GaussianCloud {
     }
 
     pub fn remove(&mut self, idx: usize) {
+        // `swap_remove` moves the last element into slot `idx`; remember its
+        // old index so we can re-register it in `active_indices`.
+        let last = self.gaussians.len() - 1;
         self.gaussians.swap_remove(idx);
+
+        // Drop the removed element's entry from the active set.
         if let Some(pos) = self.active_indices.iter().position(|&i| i == idx) {
             self.active_indices.swap_remove(pos);
         }
-        for i in &mut self.active_indices {
-            if *i == idx {
-                *i = self.gaussians.len();
+
+        // If a different element was moved into `idx`, point its active entry
+        // at the new location.
+        if idx != last {
+            for i in &mut self.active_indices {
+                if *i == last {
+                    *i = idx;
+                }
             }
         }
     }
@@ -374,14 +388,18 @@ mod tests {
 
     #[test]
     fn test_spherical_harmonics_new() {
+        // Degree 0 stores 3 DC coefficients; `dc()` must not panic.
         let sh = SphericalHarmonics::new(0);
         assert_eq!(sh.degree, 0);
-        assert_eq!(sh.coeffs.len(), 1);
-        assert_eq!(sh.coeffs[0], 0.0);
+        assert_eq!(sh.coeffs.len(), 3);
+        assert_eq!(sh.dc(), Vector3::zeros());
 
+        // Degree 1 stores 3 * 2² = 12 coefficients; `eval()` reads up to
+        // index 11 and must not panic.
         let sh = SphericalHarmonics::new(1);
         assert_eq!(sh.degree, 1);
-        assert_eq!(sh.coeffs.len(), 4);
+        assert_eq!(sh.coeffs.len(), 12);
+        let _ = sh.eval(Vector3::new(1.0, 0.0, 0.0));
     }
 
     #[test]
@@ -523,6 +541,38 @@ mod tests {
 
         cloud.remove(0);
         assert_eq!(cloud.num_gaussians(), 1);
+    }
+
+    #[test]
+    fn test_gaussian_cloud_remove_updates_active_indices() {
+        let mut cloud = GaussianCloud::new();
+        for i in 0..3 {
+            cloud.push(Gaussian::new(
+                Point3::new(i as f32, 0.0, 0.0),
+                Vector3::new(0.1, 0.1, 0.1),
+                Vector4::new(0.0, 0.0, 0.0, 1.0),
+                Vector3::new(0.5, 0.5, 0.5),
+            ));
+        }
+        assert_eq!(cloud.active_indices, vec![0, 1, 2]);
+
+        // Removing index 0 swaps the last element into its slot; the active
+        // set must register the moved gaussian's new index (not an
+        // out-of-range one).
+        cloud.remove(0);
+        assert_eq!(cloud.num_gaussians(), 2);
+        let mut active = cloud.active_indices.clone();
+        active.sort_unstable();
+        assert_eq!(active, vec![0, 1]);
+        assert!(cloud
+            .active_indices
+            .iter()
+            .all(|&i| i < cloud.num_gaussians()));
+
+        // Removing the final index must not disturb the remaining entry.
+        cloud.remove(1);
+        assert_eq!(cloud.num_gaussians(), 1);
+        assert_eq!(cloud.active_indices, vec![0]);
     }
 
     #[test]

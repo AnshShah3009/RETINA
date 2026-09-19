@@ -88,8 +88,9 @@ mod pyramid_tests {
         let result = cpu.pyramid_down(&input);
         assert!(result.is_ok());
         let output = result.unwrap();
-        assert_eq!(output.shape.width, 2);
-        assert_eq!(output.shape.height, 2);
+        // Floor halving (3/2 == 1) to match the GPU pyramid convention.
+        assert_eq!(output.shape.width, 1);
+        assert_eq!(output.shape.height, 1);
     }
 
     #[test]

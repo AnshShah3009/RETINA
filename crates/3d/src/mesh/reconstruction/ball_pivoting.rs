@@ -156,12 +156,18 @@ fn find_ball_center(
     let b_len_sq = b_len * b_len;
     let c_len_sq = c_len * c_len;
 
-    let denom = 2.0 * normal_len * normal_len;
-    let alpha = b_len_sq * c_len_sq * (a_len_sq + b_len_sq - c_len_sq) / denom;
-    let beta = a_len_sq * c_len_sq * (a_len_sq - b_len_sq + c_len_sq) / denom;
-    let gamma = a_len_sq * b_len_sq * (-a_len_sq + b_len_sq + c_len_sq) / denom;
+    // Barycentric weights of the circumcenter:
+    //   wA = c²(a²+b²−c²), wB = b²(a²+c²−b²), wC = a²(b²+c²−a²)
+    // where a = |p2−p1|, b = |p3−p1|, c = |p3−p2|.
+    let w_a = c_len_sq * (a_len_sq + b_len_sq - c_len_sq);
+    let w_b = b_len_sq * (a_len_sq + c_len_sq - b_len_sq);
+    let w_c = a_len_sq * (b_len_sq + c_len_sq - a_len_sq);
+    let w_sum = w_a + w_b + w_c;
+    if w_sum.abs() < 1e-20 {
+        return None;
+    }
 
-    let circumcenter = p1 * alpha + p2.coords * beta + p3.coords * gamma;
+    let circumcenter = (p1 * w_a + p2.coords * w_b + p3.coords * w_c) / w_sum;
 
     let height = (radius * radius - circumradius * circumradius).sqrt();
     let center1 = circumcenter + normal * height;
@@ -387,5 +393,38 @@ fn expand_front(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::Point3;
+
+    #[test]
+    fn test_find_ball_center_is_equidistant() {
+        // Right triangle with legs 1: circumcenter is (0.5, 0.5, 0),
+        // circumradius sqrt(2)/2 ~= 0.7071.
+        let a = Point3::new(0.0, 0.0, 0.0);
+        let b = Point3::new(1.0, 0.0, 0.0);
+        let c = Point3::new(0.0, 1.0, 0.0);
+        let radius = 1.0;
+
+        let center = find_ball_center(&a, &b, &c, radius).expect("ball center exists");
+
+        // The returned center is a ball of `radius` resting on the triangle,
+        // so it must be exactly `radius` away from all three vertices.
+        assert!(((center - a).norm() - radius).abs() < 1e-4);
+        assert!(((center - b).norm() - radius).abs() < 1e-4);
+        assert!(((center - c).norm() - radius).abs() < 1e-4);
+
+        // Its in-plane projection is the circumcenter (0.5, 0.5, 0).
+        assert!((center.x - 0.5).abs() < 1e-4, "x = {}", center.x);
+        assert!((center.y - 0.5).abs() < 1e-4, "y = {}", center.y);
+        assert!(
+            center.z.abs() > 0.5,
+            "should be off-plane, z = {}",
+            center.z
+        );
     }
 }

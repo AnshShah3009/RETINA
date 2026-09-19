@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```rust
-//! use cv_scientific::sparse::{CsrMatrix, eigsh, EigWhich};
+//! use cv_math::sparse::{CsrMatrix, eigsh, EigWhich};
 //!
 //! // 3x3 diagonal matrix with eigenvalues 1, 2, 3
 //! let triplets = vec![(0, 0, 1.0), (1, 1, 2.0), (2, 2, 3.0)];

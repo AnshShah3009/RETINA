@@ -1684,6 +1684,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cv-cli"
+version = "0.1.0"
+dependencies = [
+ "cv-core",
+ "cv-eval",
+ "cv-io",
+ "nalgebra",
+]
+
+[[package]]
 name = "cv-core"
 version = "0.1.0"
 dependencies = [
@@ -1718,6 +1728,14 @@ dependencies = [
  "cv-runtime",
  "image",
  "tract-onnx",
+]
+
+[[package]]
+name = "cv-eval"
+version = "0.1.0"
+dependencies = [
+ "cv-core",
+ "nalgebra",
 ]
 
 [[package]]

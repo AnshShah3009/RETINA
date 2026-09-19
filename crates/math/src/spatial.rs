@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```rust
-//! use cv_scientific::spatial::{KDTree, cdist, DistanceMetric};
+//! use cv_math::spatial::{KDTree, cdist, DistanceMetric};
 //!
 //! let points = vec![
 //!     vec![0.0, 0.0],

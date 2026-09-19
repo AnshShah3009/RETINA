@@ -92,6 +92,8 @@ members = [
     "crates/signal_proc",
     "crates/pointcloud",
     "crates/distributed",
+    "crates/eval",
+    "crates/cli",
 ]
 
 [workspace.dependencies]
@@ -166,7 +168,9 @@ cv-math = { path = "./crates/math" }
 cv-geometry2d = { path = "./crates/geometry2d" }
 cv-signal = { path = "./crates/signal_proc" }
 cv-pointcloud = { path = "./crates/pointcloud" }
-cv-distributed = { path = "./crates/distributed" }
+cv-distributed = { path = "./crates/distributed", features = ["tracing"] }
+cv-eval = { path = "./crates/eval" }
+cv-cli = { path = "./crates/cli" }
 
 [profile.release]
 opt-level = 3

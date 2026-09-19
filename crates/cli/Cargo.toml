@@ -1,0 +1,19 @@
+[package]
+name = "cv-cli"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Command-line evaluation of trajectories, reconstructions and retrieval for the RETINA workspace"
+
+[[bin]]
+name = "cv-bench"
+path = "src/main.rs"
+
+[dependencies]
+cv-core = { workspace = true }
+cv-eval = { workspace = true }
+cv-io = { workspace = true }
+nalgebra = { workspace = true }
+
+[dev-dependencies]
+nalgebra = { workspace = true }

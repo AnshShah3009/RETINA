@@ -144,9 +144,32 @@ impl Tracker for MeanShiftTracker {
 
         self.last_position = Some((cx, cy));
 
-        let x = (cx - self.window_size.0 as f64 / 2.0) as u32;
-        let y = (cy - self.window_size.1 as f64 / 2.0) as u32;
+        // Clamp before the float-to-int cast: a centroid that drifts past the
+        // top/left edge gives a negative f64, which casts to a huge u32.
+        let x = (cx - self.window_size.0 as f64 / 2.0).max(0.0) as u32;
+        let y = (cy - self.window_size.1 as f64 / 2.0).max(0.0) as u32;
 
         Ok((x, y, self.window_size.0, self.window_size.1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::GrayImage;
+
+    #[test]
+    fn test_update_clamps_centroid_drifted_off_top_left() {
+        let mut tracker = MeanShiftTracker::new(10, 10);
+        // Non-trivial target so the mean-shift loop runs; centroid left of the
+        // window origin produces a negative position.
+        tracker.target_model = Some(vec![0.0f32; 256]);
+        tracker.last_position = Some((-4.0, -4.0));
+
+        let frame = GrayImage::new(32, 32);
+        let (x, y, w, h) = tracker.update(&frame).expect("update failed");
+
+        assert_eq!((x, y), (0, 0));
+        assert_eq!((w, h), (10, 10));
     }
 }

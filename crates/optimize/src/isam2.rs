@@ -150,6 +150,12 @@ impl Isam2Solver {
 
         let mut ordered_keys: Vec<Key> = affected.into_iter().collect();
         ordered_keys.sort_by_key(|k| k.0);
+        // A factor may legally reference a key that has no value; skip such keys
+        // so `build_ordering`/`apply_delta` cannot panic on a missing variable.
+        ordered_keys.retain(|k| self.theta.get(k).is_some());
+        if ordered_keys.is_empty() {
+            return Ok(());
+        }
 
         let (key_to_col, total_dim) = Self::build_ordering(&self.theta, &ordered_keys);
 
@@ -846,6 +852,53 @@ mod tests {
         let mut solver = Isam2Solver::default();
         solver.update(vec![], Values::new()).unwrap();
         assert_eq!(solver.num_variables(), 0);
+    }
+
+    /// Factor that references a key with no value yet never panics; used to
+    /// exercise the missing-key handling in `update`.
+    struct DanglingFactor {
+        keys: [Key; 2],
+        noise: NoiseModel,
+    }
+
+    impl Factor for DanglingFactor {
+        fn keys(&self) -> &[Key] {
+            &self.keys
+        }
+        fn dim(&self) -> usize {
+            1
+        }
+        fn error(&self, _values: &Values) -> DVector<f64> {
+            DVector::zeros(1)
+        }
+        fn noise_model(&self) -> &NoiseModel {
+            &self.noise
+        }
+        fn jacobians(&self, _values: &Values) -> Option<Vec<DMatrix<f64>>> {
+            Some(vec![DMatrix::zeros(1, 1), DMatrix::zeros(1, 1)])
+        }
+    }
+
+    #[test]
+    fn test_update_with_factor_referencing_missing_key_does_not_panic() {
+        let mut solver = Isam2Solver::new(Isam2Config::default());
+        let k0 = Key(0);
+        let missing = Key(99);
+
+        let mut init = Values::new();
+        init.insert(k0, Variable::Vector(DVector::from_element(1, 0.0)));
+
+        let res = solver.update(
+            vec![Box::new(DanglingFactor {
+                keys: [k0, missing],
+                noise: iso_noise(1, 1.0),
+            })],
+            init,
+        );
+        assert!(
+            res.is_ok(),
+            "update must not panic on a missing key: {res:?}"
+        );
     }
 }
 

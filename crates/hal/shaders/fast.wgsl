@@ -87,27 +87,28 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             if (((d_ext >> i) & 0x1FFu) == 0x1FFu) { is_corner = true; break; }
         }
 
-        // Bug 2 fix: compute min-diff score to match CPU
+        // Compute mean-diff score to match the CPU and fast_f32.wgsl:
+        // sum(abs(vi - p)) / 16
         var score = 0u;
         if (is_corner) {
-            var min_d = 255u;
-            min_d = min(min_d, u32(abs(i32(v0) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v1) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v2) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v3) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v4) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v5) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v6) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v7) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v8) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v9) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v10) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v11) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v12) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v13) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v14) - i32(p))));
-            min_d = min(min_d, u32(abs(i32(v15) - i32(p))));
-            score = min_d;
+            var sum_d = 0u;
+            sum_d = sum_d + u32(abs(i32(v0) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v1) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v2) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v3) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v4) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v5) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v6) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v7) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v8) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v9) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v10) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v11) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v12) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v13) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v14) - i32(p)));
+            sum_d = sum_d + u32(abs(i32(v15) - i32(p)));
+            score = sum_d / 16u;
         }
         res_combined = res_combined | ((score & 0xFFu) << (k * 8u));
     }

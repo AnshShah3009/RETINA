@@ -137,7 +137,6 @@ impl TransientBufferPool {
 
     pub fn release(&self, id: BufferId) {
         if let Some((_, alloc)) = self.buffers.remove(&id) {
-            let buffer = alloc.buffer.clone();
             let size = alloc.size;
 
             // Decrement total_allocated when releasing buffer
@@ -146,7 +145,13 @@ impl TransientBufferPool {
                 *total = total.saturating_sub(size);
             }
 
-            // Only return to pool if this is the last reference
+            // Only return to pool if this is the last reference. Clone the
+            // buffer out first, then drop the `BufferAlloc` (which also holds a
+            // strong reference): otherwise the refcount can never reach zero,
+            // `Arc::try_unwrap` always fails, and the buffer is dropped instead
+            // of being pooled.
+            let buffer = Arc::clone(&alloc.buffer);
+            drop(alloc);
             if let Ok(raw_buffer) = Arc::try_unwrap(buffer) {
                 let bucket = Self::size_bucket(size);
                 let mut free_lists = self.free_lists.write();

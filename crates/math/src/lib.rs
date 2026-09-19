@@ -11,7 +11,7 @@
 //! ## Example: Numerical Integration
 //!
 //! ```rust
-//! use cv_scientific::integrate::quad;
+//! use cv_math::integrate::quad;
 //!
 //! // Integrate f(x) = x^2 from 0 to 1
 //! let result = quad(|x| x * x, 0.0, 1.0);
@@ -21,7 +21,7 @@
 //! ## Example: Special Functions
 //!
 //! ```rust
-//! use cv_scientific::special::{erf, gamma, bessel_j0};
+//! use cv_math::special::{erf, gamma, bessel_j0};
 //!
 //! let e = erf(1.0);
 //! let g = gamma(5.0);  // 4! = 24

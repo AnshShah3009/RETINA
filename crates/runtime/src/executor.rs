@@ -235,11 +235,13 @@ impl Executor {
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
         let inflight = self.inflight_jobs.clone();
-        inflight.fetch_add(1, Ordering::SeqCst);
-
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
             crate::Error::RuntimeError("No Tokio runtime available for spawn_async".into())
         })?;
+        // Only count the job once we know it can actually be spawned, otherwise
+        // the counter leaks permanently and resize()/set_core_affinity() spin
+        // for 30s and then fail forever.
+        inflight.fetch_add(1, Ordering::SeqCst);
 
         handle.spawn(async move {
             struct JobGuard(Arc<AtomicUsize>);
@@ -290,6 +292,14 @@ impl ExecutorPool {
     pub fn add_executor(&mut self, executor: Arc<Executor>) {
         assert_eq!(executor.device_id(), self.device_id);
         self.executors.push(executor);
+    }
+
+    /// Remove an executor previously registered with [`add_executor`](Self::add_executor).
+    ///
+    /// Dropping the pool's reference lets the executor's rayon thread pool be
+    /// torn down instead of leaking for the process lifetime.
+    pub fn remove_executor(&mut self, executor: &Arc<Executor>) {
+        self.executors.retain(|e| !Arc::ptr_eq(e, executor));
     }
 
     pub fn best_executor(&self) -> Option<Arc<Executor>> {
@@ -353,5 +363,37 @@ mod tests {
 
         let best = pool.best_executor().unwrap();
         assert_eq!(best.load(), 0);
+    }
+
+    #[test]
+    fn test_executor_pool_remove() {
+        let mut pool = ExecutorPool::new(cv_hal::DeviceId(0));
+
+        let e1 = Arc::new(Executor::new(cv_hal::DeviceId(0), 2, "rm-1").unwrap());
+        let e2 = Arc::new(Executor::new(cv_hal::DeviceId(0), 2, "rm-2").unwrap());
+
+        pool.add_executor(e1.clone());
+        pool.add_executor(e2.clone());
+        assert_eq!(pool.executor_count(), 2);
+
+        pool.remove_executor(&e1);
+        assert_eq!(pool.executor_count(), 1);
+        let remaining = pool.best_executor().unwrap();
+        assert!(Arc::ptr_eq(&remaining, &e2));
+
+        // Removing an executor that is not registered is a no-op.
+        pool.remove_executor(&e1);
+        assert_eq!(pool.executor_count(), 1);
+    }
+
+    #[test]
+    fn test_spawn_async_without_runtime_does_not_leak_inflight() {
+        // No Tokio runtime on this test thread, so spawn_async must fail...
+        let executor = Executor::new(cv_hal::DeviceId(0), 2, "async-test").unwrap();
+        let res = executor.spawn_async(|| async {});
+        assert!(res.is_err());
+        // ...and it must not leave the in-flight counter incremented, otherwise
+        // resize()/set_core_affinity() would spin for 30s and fail forever.
+        assert_eq!(executor.load(), 0);
     }
 }

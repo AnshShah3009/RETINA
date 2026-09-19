@@ -273,10 +273,13 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
 
             match runtime.context() {
                 crate::device_registry::BackendContext::Gpu(gpu_ctx) => {
-                    // For unified memory (UMA) systems, the buffer may already be shared
-                    // between CPU/GPU, so we can skip the copy for better performance.
-                    // For discrete GPUs, we need to copy the data to VRAM.
-                    if !gpu_ctx.is_unified_memory() {
+                    // The buffer comes from the global pool (created with
+                    // `device.create_buffer`, not host-mapped), so host data
+                    // must always be uploaded — even on unified-memory systems
+                    // where CPU and GPU share physical RAM the buffer contents
+                    // are not automatically shared. Only skip the copy for a
+                    // buffer that is actually host-mapped.
+                    if !buffer.usage().contains(BufferUsages::MAP_WRITE) {
                         gpu_ctx
                             .queue
                             .write_buffer(&buffer, 0, bytemuck::cast_slice(&host_guard));

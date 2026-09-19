@@ -90,15 +90,22 @@ impl HashGrid {
     pub fn radius_search(&self, query: &Point3<f32>, radius: f32) -> Vec<(usize, f32)> {
         let radius_sq = radius * radius;
         let mut results = Vec::new();
+        // Different stencil cells can hash to the same bucket, so the same
+        // point may be visited more than once. Track what we have emitted so
+        // every point is reported exactly once.
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-        // Determine cell range to check (3×3×3 stencil)
+        // Determine the cell range to check. A fixed 3×3×3 stencil is only
+        // complete when radius <= cell_size, so derive the extent from the
+        // radius; otherwise larger radii would silently miss neighbours.
         let qx = (query.x * self.inv_cell_size).floor() as i32;
         let qy = (query.y * self.inv_cell_size).floor() as i32;
         let qz = (query.z * self.inv_cell_size).floor() as i32;
+        let r = (radius * self.inv_cell_size).ceil() as i32;
 
-        for dz in -1..=1 {
-            for dy in -1..=1 {
-                for dx in -1..=1 {
+        for dz in -r..=r {
+            for dy in -r..=r {
+                for dx in -r..=r {
                     let h = hash_cell(qx + dx, qy + dy, qz + dz, self.table_size);
                     let start = self.cell_start[h];
                     if start == u32::MAX {
@@ -112,7 +119,7 @@ impl HashGrid {
                         let dy = p.y - query.y;
                         let dz = p.z - query.z;
                         let dist_sq = dx * dx + dy * dy + dz * dz;
-                        if dist_sq <= radius_sq {
+                        if dist_sq <= radius_sq && seen.insert(self.sorted_indices[i]) {
                             results.push((self.sorted_indices[i], dist_sq));
                         }
                     }
@@ -136,10 +143,13 @@ impl HashGrid {
         let qx = (query.x * self.inv_cell_size).floor() as i32;
         let qy = (query.y * self.inv_cell_size).floor() as i32;
         let qz = (query.z * self.inv_cell_size).floor() as i32;
+        // Same as radius_search: a 3×3×3 stencil is only complete for
+        // max_radius <= cell_size.
+        let r = (max_radius * self.inv_cell_size).ceil() as i32;
 
-        for dz in -1..=1 {
-            for dy in -1..=1 {
-                for dx in -1..=1 {
+        for dz in -r..=r {
+            for dy in -r..=r {
+                for dx in -r..=r {
                     let h = hash_cell(qx + dx, qy + dy, qz + dz, self.table_size);
                     let start = self.cell_start[h];
                     if start == u32::MAX {
@@ -263,5 +273,26 @@ mod tests {
         h_idx.sort();
         b_idx.sort();
         assert_eq!(h_idx, b_idx);
+    }
+
+    #[test]
+    fn test_hash_grid_radius_larger_than_cell_size() {
+        let points = vec![Point3::new(0.0, 0.0, 0.0), Point3::new(2.5, 0.0, 0.0)];
+        let grid = HashGrid::build(&points, 1.0);
+
+        // The second point is two cells away, so a fixed 3×3×3 stencil
+        // (offset 1) would miss it; the derived extent must include it.
+        let results = grid.radius_search(&Point3::new(0.0, 0.0, 0.0), 2.6);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_hash_grid_nearest_radius_larger_than_cell_size() {
+        // Both points sit outside the 3×3×3 stencil around the query cell.
+        let points = vec![Point3::new(2.5, 0.0, 0.0), Point3::new(5.0, 0.0, 0.0)];
+        let grid = HashGrid::build(&points, 1.0);
+
+        let nearest = grid.nearest(&Point3::new(0.0, 0.0, 0.0), 6.0);
+        assert_eq!(nearest.map(|n| n.0), Some(0));
     }
 }
