@@ -76,6 +76,17 @@ impl PoseGraph {
 
         let mut error_sum = 0.0;
 
+        // Validate edges up front: `optimize` returns Result, so an edge
+        // referencing an unknown node must yield an error, not a panic.
+        for edge in &self.edges {
+            if !self.nodes.contains_key(&edge.from) || !self.nodes.contains_key(&edge.to) {
+                return Err(format!(
+                    "Edge references unknown node: {} -> {}",
+                    edge.from, edge.to
+                ));
+            }
+        }
+
         for _ in 0..iterations {
             let mut h_mat = DMatrix::zeros(system_size, system_size);
             let mut b_vec = DVector::zeros(system_size);
@@ -190,3 +201,22 @@ fn adjoint(iso: &Isometry3<f64>) -> Matrix6<f64> {
 }
 
 use std::ops::{AddAssign, SubAssign};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_optimize_with_dangling_edge_returns_error() {
+        let mut graph = PoseGraph::new();
+        graph.add_node(0, Isometry3::identity());
+        // Edge references node 5, which has no value.
+        graph.add_edge(0, 5, Isometry3::identity(), Matrix6::<f64>::identity());
+
+        let result = graph.optimize(1);
+        assert!(
+            result.is_err(),
+            "an edge referencing an unknown node must return an error, not panic"
+        );
+    }
+}

@@ -248,9 +248,11 @@ impl SfMState {
         let mut res_idx = 0;
         for (lm_idx, lm) in self.landmarks.iter().enumerate() {
             if !lm.is_valid {
-                // residuals() emits two zero rows per observation for invalid
-                // landmarks; advance the row cursor to stay aligned.
-                res_idx += 2 * lm.observations.len();
+                // residuals() emits two zero rows for invalid landmarks, but only
+                // for observations whose camera index is in range; out-of-range
+                // camera indices emit no rows at all. Match that exactly so the
+                // row cursor stays aligned with the residual vector.
+                res_idx += 2 * lm.observations.iter().filter(|(ci, _)| *ci < n_cam).count();
                 continue;
             }
             for (cam_idx, _obs) in &lm.observations {
@@ -453,8 +455,10 @@ impl Default for BundleAdjustmentConfig {
 
 pub fn bundle_adjust(state: &mut SfMState, config: &BundleAdjustmentConfig) {
     // use_sparsity=false requests the dense (sequential) solver explicitly;
-    // a previous revision ignored the flag entirely.
-    if !config.use_sparsity {
+    // a previous revision ignored the flag entirely. The ctx (sparse) path does
+    // not implement the robust-kernel outlier rejection, so a request for it
+    // must not silently fall through to that path.
+    if !config.use_sparsity || config.robust_kernel {
         bundle_adjust_sequential(state, config);
         return;
     }
@@ -915,6 +919,38 @@ mod tests {
             initial_error,
             final_error
         );
+    }
+
+    #[test]
+    fn test_sparse_jacobian_row_alignment_with_invalid_landmark() {
+        let intrinsics = create_test_intrinsics();
+        let mut state = SfMState::new(intrinsics);
+        state.add_camera(create_test_pose(Vector3::zeros()));
+
+        // Invalid landmark with one in-range and one out-of-range observation.
+        // residuals() emits rows only for the in-range camera (2 rows), so the
+        // sparse Jacobian cursor must not jump for the out-of-range one.
+        let mut lm = Landmark::new(Point3::new(0.0, 0.0, 5.0));
+        lm.add_observation(0, Point2::new(320.0, 240.0));
+        lm.add_observation(7, Point2::new(320.0, 240.0)); // camera 7 does not exist
+        lm.is_valid = false;
+        state.landmarks.push(lm);
+
+        // A valid landmark whose Jacobian rows follow the invalid one.
+        state.add_landmark(
+            Point3::new(1.0, 0.0, 5.0),
+            vec![(0, Point2::new(330.0, 240.0))],
+        );
+
+        // 2 zero rows (invalid landmark, in-range obs) + 2 rows (valid) = 4.
+        assert_eq!(state.residuals().len(), 4);
+
+        // Before the fix the cursor advanced by 2 * observations, placing the
+        // valid landmark's triplets at rows 4..6 and panicking in from_triplets.
+        let j = state.numerical_jacobian_sparse();
+        assert_eq!(j.rows, 4);
+        // The valid landmark's rows must still carry non-zero derivatives.
+        assert!(j.values.iter().any(|v| v.abs() > 0.0));
     }
 
     #[test]

@@ -418,6 +418,13 @@ impl FactorGraph {
         let mut b = DVector::zeros(total_dim);
 
         for factor in &self.factors {
+            let keys = factor.keys();
+            // A factor may legally reference a variable that has no value; skip
+            // it so the `offsets` lookups below cannot panic on a missing key.
+            if keys.iter().any(|k| !values.contains(k)) {
+                continue;
+            }
+
             let sqrt_info = factor.noise_model().sqrt_information();
             let raw_jacs = factor
                 .jacobians(values)
@@ -428,7 +435,6 @@ impl FactorGraph {
             let jacs: Vec<DMatrix<f64>> = raw_jacs.iter().map(|j| &sqrt_info * j).collect();
             let wr = &sqrt_info * &r;
 
-            let keys = factor.keys();
             for (i, ki) in keys.iter().enumerate() {
                 let oi = offsets[ki];
                 let di = jacs[i].ncols();
@@ -782,5 +788,51 @@ mod tests {
             err_before,
             err_after
         );
+    }
+
+    // A factor whose second key has no value: must be skipped, not panic.
+    struct DanglingBetween {
+        keys: [Key; 2],
+        noise: NoiseModel,
+    }
+
+    impl Factor for DanglingBetween {
+        fn keys(&self) -> &[Key] {
+            &self.keys
+        }
+        fn dim(&self) -> usize {
+            1
+        }
+        fn error(&self, _values: &Values) -> DVector<f64> {
+            DVector::zeros(1)
+        }
+        fn noise_model(&self) -> &NoiseModel {
+            &self.noise
+        }
+        fn jacobians(&self, _values: &Values) -> Option<Vec<DMatrix<f64>>> {
+            Some(vec![DMatrix::zeros(1, 6), DMatrix::zeros(1, 6)])
+        }
+    }
+
+    #[test]
+    fn test_optimize_with_factor_referencing_missing_key_does_not_panic() {
+        let mut graph = FactorGraph::new();
+        let k = Key::symbol('x', 0);
+        graph.add(TestPriorPose3 {
+            key: k,
+            prior: Isometry3::identity(),
+            noise: NoiseModel::Isotropic(0.1, 6),
+        });
+        // References a key that has no value.
+        graph.add(DanglingBetween {
+            keys: [k, Key::symbol('x', 7)],
+            noise: NoiseModel::Isotropic(1.0, 1),
+        });
+
+        let mut initial = Values::new();
+        initial.insert(k, Variable::Pose3(Isometry3::translation(0.5, 0.0, 0.0)));
+
+        let result = graph.optimize_gn(&initial, &GNConfig::default());
+        assert!(result.is_ok(), "optimize_gn must not panic: {result:?}");
     }
 }

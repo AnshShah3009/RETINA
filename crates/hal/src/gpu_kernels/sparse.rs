@@ -13,6 +13,11 @@ pub fn spmv(
     values: &[f32],
     x: &Tensor<f32, GpuStorage<f32>>,
 ) -> Result<Tensor<f32, GpuStorage<f32>>> {
+    if row_ptr.is_empty() {
+        return Err(crate::Error::InvalidInput(
+            "row_ptr must contain at least one element (CSR indptr)".into(),
+        ));
+    }
     let rows = row_ptr.len() - 1;
     let size = rows;
     let byte_size = (size * 4) as u64;
@@ -259,4 +264,31 @@ pub fn vec_add(
 ) -> Result<()> {
     // Re-use axpy logic with alpha = 1.0
     axpy(ctx, 1.0, a, b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::GpuContext;
+    use crate::tensor_ext::TensorToGpu;
+
+    #[test]
+    fn empty_row_ptr_returns_error() {
+        let ctx = match GpuContext::new() {
+            Ok(c) => c,
+            Err(_) => return, // no adapter available
+        };
+
+        let x = cv_core::CpuTensor::<f32>::from_vec(
+            vec![0.0f32; 4],
+            cv_core::TensorShape::new(1, 4, 1),
+        )
+        .unwrap()
+        .to_gpu_ctx(&ctx)
+        .unwrap();
+
+        // Empty CSR indptr used to underflow `row_ptr.len() - 1`.
+        let res = spmv(&ctx, &[], &[], &[], &x);
+        assert!(matches!(res, Err(crate::Error::InvalidInput(_))));
+    }
 }

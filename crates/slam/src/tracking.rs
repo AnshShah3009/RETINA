@@ -96,6 +96,10 @@ impl Tracker {
             if matches.len() >= 10 {
                 let mut object_pts = Vec::new();
                 let mut image_pts = Vec::new();
+                // Map-point index for each successfully read correspondence. Only
+                // these entries appear in `object_pts`, so it is the index map
+                // that keeps `inliers` (returned parallel to `object_pts`) aligned.
+                let mut point_indices = Vec::new();
 
                 for m in &matches.matches {
                     if let Ok(p) = map.points[m.train_idx as usize].read() {
@@ -106,6 +110,7 @@ impl Tracker {
                         ));
                         let kp = &frame.keypoints.keypoints[m.query_idx as usize];
                         image_pts.push(Point2::new(kp.x, kp.y));
+                        point_indices.push(m.train_idx as usize);
                     }
                 }
 
@@ -113,12 +118,14 @@ impl Tracker {
                     solve_pnp_ransac(&object_pts, &image_pts, &self.intrinsics, None, 2.0, 100)
                 {
                     frame.pose = pose;
-                    tracked_indices = matches
-                        .matches
+                    // `inliers` is parallel to `object_pts` (one flag per
+                    // successfully read point), NOT to `matches`. Zip it against
+                    // `point_indices` so a poisoned lock cannot shift the flags.
+                    tracked_indices = point_indices
                         .iter()
-                        .enumerate()
-                        .filter(|(i, _)| inliers[*i])
-                        .map(|(_, m)| m.train_idx as usize)
+                        .zip(inliers.iter())
+                        .filter(|(_, is_inlier)| **is_inlier)
+                        .map(|(&idx, _)| idx)
                         .collect();
                     tracking_success = true;
                 }
@@ -310,10 +317,12 @@ impl Tracker {
             .ok_or_else(|| "ICP AtA matrix not invertible".to_string())?
             * atb);
 
-        // Update pose with delta (parameterized as [omega (rotation), v (translation)])
+        // Update pose with delta. The GPU kernel packs the ICP Jacobian as
+        //   J = [ n (translation) , cross(p, n) (rotation) ],
+        // so the solved increment is delta = [translation(3), omega(3)].
+        let translation = nalgebra::Vector3::new(delta[0] as f64, delta[1] as f64, delta[2] as f64);
         // Small angle approximation for rotation from omega
-        let omega = nalgebra::Vector3::new(delta[0] as f64, delta[1] as f64, delta[2] as f64);
-        let translation = nalgebra::Vector3::new(delta[3] as f64, delta[4] as f64, delta[5] as f64);
+        let omega = nalgebra::Vector3::new(delta[3] as f64, delta[4] as f64, delta[5] as f64);
 
         // Create rotation matrix from axis-angle (small angle)
         let angle = omega.norm();

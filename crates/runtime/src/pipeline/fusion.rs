@@ -232,10 +232,9 @@ impl KernelFuser {
         let mut fused_iter = fused.into_iter().peekable();
 
         for (i, node) in nodes.into_iter().enumerate() {
-            if skip_indices.contains(&i) {
-                continue;
-            }
-
+            // Emit each fused kernel at the position of its first original node,
+            // then skip the original nodes it replaces. Emitting it here (rather
+            // than appending at the end) preserves producer/consumer order.
             if let Some(f) = fused_iter.peek() {
                 if f.original_nodes.first() == Some(&i) {
                     let fused_kernel = fused_iter.next().unwrap();
@@ -248,10 +247,11 @@ impl KernelFuser {
                 }
             }
 
-            let first_fused_idx = fused_iter.peek().and_then(|f| f.original_nodes.first());
-            if first_fused_idx != Some(&i) && !skip_indices.contains(&i) {
-                optimized.push(node);
+            if skip_indices.contains(&i) {
+                continue;
             }
+
+            optimized.push(node);
         }
 
         for fused_kernel in fused_iter {

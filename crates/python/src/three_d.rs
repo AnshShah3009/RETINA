@@ -186,9 +186,12 @@ fn estimate_normals_np<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<f32>,
     k: usize,
-) -> Bound<'py, PyArray2<f32>> {
-    let pts = ndarray_to_points(&points);
-    normals_to_ndarray(py, cv_3d::estimate_normals_auto(&pts, k))
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let pts = ndarray_to_points(&points)?;
+    Ok(normals_to_ndarray(
+        py,
+        cv_3d::estimate_normals_auto(&pts, k),
+    ))
 }
 
 /// CPU normals -- numpy array in/out.
@@ -198,9 +201,9 @@ fn estimate_normals_cpu_np<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<f32>,
     k: usize,
-) -> Bound<'py, PyArray2<f32>> {
-    let pts = ndarray_to_points(&points);
-    normals_to_ndarray(py, cv_3d::estimate_normals_cpu(&pts, k))
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let pts = ndarray_to_points(&points)?;
+    Ok(normals_to_ndarray(py, cv_3d::estimate_normals_cpu(&pts, k)))
 }
 
 /// GPU normals -- numpy array in/out.
@@ -210,9 +213,9 @@ fn estimate_normals_gpu_np<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<f32>,
     k: usize,
-) -> Bound<'py, PyArray2<f32>> {
-    let pts = ndarray_to_points(&points);
-    normals_to_ndarray(py, cv_3d::estimate_normals_gpu(&pts, k))
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let pts = ndarray_to_points(&points)?;
+    Ok(normals_to_ndarray(py, cv_3d::estimate_normals_gpu(&pts, k)))
 }
 
 /// Hybrid normals -- numpy array in/out.
@@ -222,9 +225,12 @@ fn estimate_normals_hybrid_np<'py>(
     py: Python<'py>,
     points: PyReadonlyArray2<f32>,
     k: usize,
-) -> Bound<'py, PyArray2<f32>> {
-    let pts = ndarray_to_points(&points);
-    normals_to_ndarray(py, cv_3d::estimate_normals_hybrid(&pts, k))
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let pts = ndarray_to_points(&points)?;
+    Ok(normals_to_ndarray(
+        py,
+        cv_3d::estimate_normals_hybrid(&pts, k),
+    ))
 }
 
 /// Depth image normals -- numpy array in/out (O(n), fastest path for RGBD).

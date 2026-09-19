@@ -449,7 +449,8 @@ pub fn compute_normals_fast_gpu(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(num_points as u32, 1, 1);
+        // Shader is @workgroup_size(256): one workgroup per 256 points.
+        pass.dispatch_workgroups((num_points as u32).div_ceil(256), 1, 1);
     }
     queue.submit(std::iter::once(encoder.finish()));
 

@@ -48,6 +48,13 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
     new_height: u32,
     mode: InterpolationMode,
 ) -> Result<GpuTensor<T>> {
+    // Only the f32 WGSL shader exists; reject other dtypes instead of
+    // panicking on the downcast below.
+    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
+        return Err(crate::Error::NotSupported(
+            "Resize GPU kernel only supports f32".into(),
+        ));
+    }
     use crate::storage::GpuStorage;
     let (src_h, src_w) = input.shape.hw();
     let (dst_w, dst_h) = (new_width as usize, new_height as usize);
@@ -164,4 +171,28 @@ pub fn resize_lanczos4<T: cv_core::float::Float + bytemuck::Pod>(
         new_height,
         InterpolationMode::Lanczos4,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::GpuContext;
+    use crate::tensor_ext::TensorToGpu;
+
+    #[test]
+    fn non_f32_input_is_rejected() {
+        let ctx = match GpuContext::new() {
+            Ok(c) => c,
+            Err(_) => return, // no adapter available
+        };
+
+        // f64 has no WGSL shader; this used to panic on the f32 downcast.
+        let input = cv_core::CpuTensor::<f64>::from_vec(vec![0.0f64; 4], TensorShape::new(1, 2, 2))
+            .unwrap()
+            .to_gpu_ctx(&ctx)
+            .unwrap();
+
+        let res = resize(&ctx, &input, 1, 1);
+        assert!(matches!(res, Err(crate::Error::NotSupported(_))));
+    }
 }

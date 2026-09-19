@@ -9,6 +9,12 @@ use cv_runtime::orchestrator::RuntimeRunner;
 use image::GrayImage;
 use rayon::prelude::*;
 
+/// Half-width of the SAD window used by the CPU SGM path. Pixels within this
+/// many rows/columns of the image border have no full matching window, so the
+/// cost volume is left at zero there and they must be reported as invalid
+/// (NaN) rather than as a bogus `min_disparity`.
+const SGM_WINDOW_HALF: usize = 1;
+
 /// SGM stereo matcher
 pub struct SgmMatcher {
     pub min_disparity: i32,
@@ -97,6 +103,18 @@ impl StereoMatcherCtx for SgmMatcher {
                 .enumerate()
                 .for_each(|(y, row)| {
                     for (x, px) in row.iter_mut().enumerate() {
+                        // Border pixels lack a full matching window: their cost
+                        // volume stays zero, so winner-take-all would report
+                        // `min_disparity` as a valid disparity. Leave them NaN
+                        // (invalid), matching DisparityMap::new's convention.
+                        if x < SGM_WINDOW_HALF
+                            || x + SGM_WINDOW_HALF >= width
+                            || y < SGM_WINDOW_HALF
+                            || y + SGM_WINDOW_HALF >= height
+                        {
+                            *px = f32::NAN;
+                            continue;
+                        }
                         let best_d = self.find_best_disparity(
                             &aggregated_costs,
                             x,
@@ -187,9 +205,8 @@ impl SgmMatcher {
 
         let mut costs = vec![0u32; width * height * num_disparities];
 
-        // Use simple SAD (Sum of Absolute Differences) over small window
-        let window_size = 3;
-        let half_window = window_size / 2;
+        // Use simple SAD (Sum of Absolute Differences) over a small window
+        let half_window = SGM_WINDOW_HALF;
 
         let row_stride = width * num_disparities;
         costs
@@ -417,6 +434,43 @@ mod tests {
             .count();
 
         assert!(valid_count > 0, "Should have valid disparities");
+    }
+
+    #[test]
+    fn test_sgm_border_pixels_are_invalid() {
+        let (left, right) = create_test_stereo_pair();
+        let matcher = SgmMatcher::new().with_disparity_range(0, 16);
+
+        // Force the CPU path explicitly: the border masking lives there.
+        let cpu_id = cv_runtime::registry()
+            .expect("device registry")
+            .default_cpu()
+            .id();
+        let runner = cv_runtime::orchestrator::RuntimeRunner::Sync(cpu_id);
+        let d = matcher.compute_ctx(&left, &right, &runner).unwrap();
+
+        let w = d.width as usize;
+        let h = d.height as usize;
+        // Border pixels lack a full matching window and must be NaN, never the
+        // bogus `min_disparity` that a zero cost volume would report.
+        for x in 0..w {
+            assert!(d.data[x].is_nan(), "top border x={} not NaN", x);
+            assert!(
+                d.data[(h - 1) * w + x].is_nan(),
+                "bottom border x={} not NaN",
+                x
+            );
+        }
+        for y in 0..h {
+            assert!(d.data[y * w].is_nan(), "left border y={} not NaN", y);
+            assert!(
+                d.data[y * w + w - 1].is_nan(),
+                "right border y={} not NaN",
+                y
+            );
+        }
+        // Interior pixels remain valid.
+        assert!(d.data[w + 1].is_finite(), "interior pixel should be valid");
     }
 
     #[test]

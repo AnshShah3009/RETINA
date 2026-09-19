@@ -72,7 +72,13 @@ pub fn log_gamma(x: f64) -> f64 {
         -0.5395239384953e-5,
     ];
     if x <= 0.0 {
-        return f64::INFINITY;
+        // Non-positive integers are poles of Gamma.
+        if x.fract() == 0.0 {
+            return f64::INFINITY;
+        }
+        // Reflection: Gamma(x)*Gamma(1-x) = pi/sin(pi*x), which also covers
+        // negative non-integers.
+        return (PI / (PI * x).sin()).ln() - log_gamma(1.0 - x);
     }
     if x < 0.5 {
         // Reflection: Gamma(x)*Gamma(1-x) = pi/sin(pi*x)
@@ -392,9 +398,18 @@ pub fn bessel_i0(x: f64) -> f64 {
                 + y * (3.0899424
                     + y * (1.2067492 + y * (0.2659732 + y * (0.360768e-1 + y * 0.45813e-2)))))
     } else {
+        // Large |x|: I0(x) ~ e^x/sqrt(x) * (0.39894228 + ...), the leading
+        // constant being 1/sqrt(2*pi). Numerical Recipes polynomial.
         let ax = x.abs();
+        let y = 3.75 / ax;
         (ax.exp() / ax.sqrt())
-            * (std::f64::consts::FRAC_2_PI / ax + 0.050001751 + 0.000548 + 0.000042 + 0.000002)
+            * (0.39894228
+                + y * (0.01328592
+                    + y * (0.00225319
+                        + y * (-0.00157565
+                            + y * (0.00916281
+                                + y * (-0.02057706
+                                    + y * (0.02635537 + y * (-0.01647633 + y * 0.00392377))))))))
     }
 }
 
@@ -404,13 +419,15 @@ pub fn bessel_k0(x: f64) -> f64 {
     }
     if x <= 2.0 {
         let y = x * x / 4.0;
-        -y.ln() * bessel_i0(x)
+        // The log singular term is -ln(x/2)*I0(x); the polynomial below is
+        // paired with ln(x/2).
+        -(x / 2.0).ln() * bessel_i0(x)
             + (-0.57721566
                 + y * (0.42278420
                     + y * (0.23069756 + y * (0.3488590e-1 + y * (0.262698e-2 + y * 0.10750e-3)))))
     } else {
         let y = 2.0 / x;
-        (x * (-x).exp()) / x.sqrt()
+        ((-x).exp() / x.sqrt())
             * (1.25331414
                 + y * (-0.7832358e-1 + y * (0.2189568e-1 + y * (-0.1062446e-1 + y * 0.587872e-2))))
     }
@@ -510,7 +527,8 @@ pub fn expn(n: i32, x: f64) -> f64 {
 
 pub fn expi(x: f64) -> f64 {
     if x < 0.0 {
-        return -expi(-x);
+        // Ei is not odd: Ei(-x) = -E1(x) = -expn(1, x).
+        return -expn(1, -x);
     }
     if x == 0.0 {
         return f64::NEG_INFINITY;
@@ -635,6 +653,34 @@ mod numeric_reference_tests {
         assert!(close(expi(5.0), 40.18527535580318, 1e-9));
         assert!(close(expi(20.0), 25615652.664056595, 1e-7));
         assert_eq!(expi(0.0), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_bessel_i0_k0_reference_values() {
+        // scipy.special.i0 / k0 — regressions: I0 large-x used the wrong
+        // leading constant (~3x too small) and K0 had an extra factor of x.
+        // Tolerances reflect the Numerical-Recipes fits' intrinsic accuracy
+        // (still far tighter than the ~3x errors being guarded against).
+        assert!(close(bessel_i0(5.0), 27.239871823604442, 1e-6));
+        assert!(close(bessel_k0(1.0), 0.42102443824070834, 1e-6));
+        assert!(close(bessel_k0(3.0), 0.034739504386279295, 1e-4));
+    }
+
+    #[test]
+    fn test_expi_negative_reference_values() {
+        // scipy.special.expi — regression: negative branch treated Ei as odd.
+        assert!(close(expi(-1.0), -0.21938393439552027, 1e-9));
+        assert!(close(expi(-5.0), -0.0011482955912753269, 1e-9));
+    }
+
+    #[test]
+    fn test_gamma_negative_reference_values() {
+        // scipy.special.gamma(-1.5) — regression: log_gamma early-returned
+        // +inf for all x <= 0, so gamma(-1.5) was +inf.
+        assert!(close(gamma(-1.5), 2.363271801207355, 1e-9));
+        // Non-positive integers remain poles.
+        assert!(gamma(-2.0).is_infinite());
+        assert!(gamma(0.0).is_infinite());
     }
 }
 #[cfg(test)]

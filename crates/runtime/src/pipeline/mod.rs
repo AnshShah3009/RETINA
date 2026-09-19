@@ -177,23 +177,21 @@ impl Pipeline {
                     outputs,
                     params: _params,
                 } => {
-                    let output_sizes: Vec<_> = outputs
-                        .iter()
-                        .filter_map(|&id| self.buffers.get(&id).copied())
-                        .collect();
-
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
                         "Executing kernel: {} ({} inputs, {} outputs)",
                         _name,
                         inputs.len(),
-                        output_sizes.len()
+                        outputs.len()
                     );
 
                     if !outputs.is_empty() {
-                        for (i, &output_id) in outputs.iter().enumerate() {
-                            if i < output_sizes.len() {
-                                allocator.allocate_or_update(output_id, output_sizes[i], &[])?;
+                        for &output_id in outputs {
+                            // Look each output size up by its own id: a
+                            // `filter_map`-compacted list indexed positionally
+                            // would shift later sizes when a buffer is missing.
+                            if let Some(&size) = self.buffers.get(&output_id) {
+                                allocator.allocate_or_update(output_id, size, &[])?;
                             }
                         }
                     }

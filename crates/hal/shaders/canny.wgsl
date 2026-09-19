@@ -103,14 +103,14 @@ fn nms(@builtin(global_invocation_id) global_id: vec3<u32>) {
         m1 = mag_in[idx - 1u];
         m2 = mag_in[idx + 1u];
     } else if (dir == 1u) {
-        m1 = mag_in[u32(y - 1) * params.width + u32(x + 1)];
-        m2 = mag_in[u32(y + 1) * params.width + u32(x - 1)];
+        m1 = mag_in[u32(y - 1) * params.width + u32(x - 1)];
+        m2 = mag_in[u32(y + 1) * params.width + u32(x + 1)];
     } else if (dir == 2u) {
         m1 = mag_in[u32(y - 1) * params.width + u32(x)];
         m2 = mag_in[u32(y + 1) * params.width + u32(x)];
     } else {
-        m1 = mag_in[u32(y - 1) * params.width + u32(x - 1)];
-        m2 = mag_in[u32(y + 1) * params.width + u32(x + 1)];
+        m1 = mag_in[u32(y - 1) * params.width + u32(x + 1)];
+        m2 = mag_in[u32(y + 1) * params.width + u32(x - 1)];
     }
 
     if (m >= m1 && m >= m2) {

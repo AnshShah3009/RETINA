@@ -20,6 +20,13 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
     threshold: T,
     nonmax_suppression: bool,
 ) -> Result<crate::GpuTensor<T>> {
+    // Only f32-backed WGSL shaders exist; reject other dtypes instead of
+    // panicking on the downcast below.
+    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
+        return Err(crate::Error::NotSupported(
+            "FAST GPU kernel only supports f32".into(),
+        ));
+    }
     use crate::storage::GpuStorage;
     let (h, w) = input.shape.hw();
     let c = input.shape.channels;

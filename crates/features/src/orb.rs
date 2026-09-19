@@ -170,7 +170,12 @@ impl Orb {
                 scale_image(image, scale)
             };
 
-            let kps = fast_detect(&scaled, self.fast_threshold, self.n_features * 2);
+            // Do not truncate in raster order before non-max suppression and
+            // response ranking: on busy images that kept only the top-row
+            // candidates. Collect every candidate and let the final
+            // `truncate(self.n_features)` after the response sort enforce the
+            // keypoint budget.
+            let kps = fast_detect(&scaled, self.fast_threshold, usize::MAX);
 
             // Bug 5 fix: apply non-maximum suppression to FAST keypoints
             let kps = fast::non_max_suppression(kps, &scaled, self.fast_threshold);
@@ -244,8 +249,12 @@ impl Orb {
                 tensor_f32
             };
 
+            // `scaled_f32` is normalized to [0, 1] (see `convert_to_f32_cpu`),
+            // so the FAST threshold must use the same units. Feeding the 0..255
+            // threshold here made every intensity comparison fail, yielding no
+            // corners.
             let score_map = ctx
-                .fast_detect(&scaled_f32, self.fast_threshold as f32, true)
+                .fast_detect(&scaled_f32, self.fast_threshold as f32 / 255.0, true)
                 .unwrap();
             let kps = extract_keypoints_from_score_map(ctx, &score_map, self.n_features * 2)
                 .expect("Failed to extract keypoints from score map");
@@ -487,7 +496,9 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
             let score_map = cv_hal::gpu_kernels::fast::fast_detect::<f32>(
                 gpu,
                 scaled_img,
-                orb.fast_threshold as f32,
+                // Pyramid tensors are normalized to [0, 1] (the u8->f32 cast
+                // divides by 255), so keep the FAST threshold in the same units.
+                orb.fast_threshold as f32 / 255.0,
                 true,
             )
             .unwrap();
@@ -953,5 +964,63 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_orb_detect_ctx_finds_keypoints() {
+        // Regression: the ctx path fed a [0,1]-normalized tensor into
+        // fast_detect with a 0..255 threshold, so it always returned zero
+        // keypoints on the default Orb.
+        use cv_core::{storage::CpuStorage, TensorShape};
+        use cv_hal::cpu::CpuBackend;
+
+        let img = create_checkerboard(128, 16);
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let tensor: Tensor<u8, CpuStorage<u8>> =
+            Tensor::from_vec(img.as_raw().clone(), TensorShape::new(1, h, w)).unwrap();
+
+        let cpu = CpuBackend::new().unwrap();
+        let device = ComputeDevice::Cpu(&cpu);
+        let orb = Orb::new().with_n_features(100);
+        let kps = orb.detect_ctx(&device, &tensor);
+        assert!(
+            !kps.keypoints.is_empty(),
+            "detect_ctx must find keypoints on a checkerboard"
+        );
+        assert!(kps.keypoints.len() <= 100);
+    }
+
+    #[test]
+    fn test_orb_detection_not_biased_to_top_rows() {
+        // Regression: fast_detect was truncated to n_features*2 in raster order
+        // BEFORE non-max suppression, so on a busy image a strong corner in the
+        // bottom half was dropped in favour of top-row candidates.
+        let (w, h) = (128usize, 256usize);
+        let mut img = GrayImage::new(w as u32, h as u32);
+        // Dense band of low-contrast corners in the top rows.
+        for y in 0..60 {
+            for x in 0..w {
+                let val = if ((x / 8) + (y / 8)) % 2 == 0 {
+                    100
+                } else {
+                    140
+                };
+                img.put_pixel(x as u32, y as u32, Luma([val]));
+            }
+        }
+        // One strong isolated corner in the bottom half.
+        for y in 200..216 {
+            for x in 40..56 {
+                img.put_pixel(x as u32, y as u32, Luma([255]));
+            }
+        }
+
+        let orb = Orb::new().with_n_features(20);
+        let kps = orb.detect(&img);
+        assert!(
+            kps.keypoints.iter().any(|k| k.y > (h / 2) as f64),
+            "detection must not be biased to the top rows; got {:?}",
+            kps.keypoints.iter().map(|k| (k.x, k.y)).collect::<Vec<_>>()
+        );
     }
 }

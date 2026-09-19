@@ -119,7 +119,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let output_points = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Voxel Output Points"),
-        size: (num_points * 12) as u64,
+        // WGSL `array<vec3<f32>>` has a 16-byte stride, not 12.
+        size: (num_points * 16) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -199,7 +200,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let actual_count = count_data[0] as usize;
 
     Ok(Tensor {
-        storage: GpuStorage::from_buffer(Arc::new(output_points), actual_count),
+        // Storage length must match the (1, actual_count, 3) shape below.
+        storage: GpuStorage::from_buffer(Arc::new(output_points), actual_count * 3),
         shape: cv_core::TensorShape::new(1, actual_count, 3),
         dtype: points.dtype,
         _phantom: std::marker::PhantomData,
@@ -280,25 +282,26 @@ pub fn spatial_hash_correspondences(
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let hash_counts = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Hash Counts"),
-        size: (num_buckets * 4) as u64,
-        usage: wgpu::BufferUsages::STORAGE,
+    // Counts and buckets live in one storage buffer: the correspondence pass
+    // already needs src, tgt, this table and its output, which is the
+    // per-stage storage-buffer limit on downlevel devices.
+    let hash_slots = num_buckets as usize * (1 + max_per_bucket as usize);
+    let hash_data = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Hash Counts + Buckets"),
+        size: (hash_slots * 4) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-
-    let hash_buckets = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Hash Buckets"),
-        size: (num_buckets as usize * max_per_bucket as usize * 4) as u64,
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
+    // Counts are bumped with atomicAdd and slots are read before being
+    // written, so the whole table must start zeroed.
+    ctx.queue
+        .write_buffer(&hash_data, 0, &vec![0u8; hash_slots * 4]);
 
     let build_shader = r#"
 @group(0) @binding(0) var<storage, read> tgt_points: array<vec3<f32>>;
 @group(0) @binding(1) var<uniform> params: BuildParams;
-@group(0) @binding(2) var<storage, read_write> hash_counts: array<atomic<u32>>;
-@group(0) @binding(3) var<storage, read_write> hash_buckets: array<u32>;
+// [0, num_buckets) holds per-bucket counts; the rest holds bucket slots.
+@group(0) @binding(2) var<storage, read_write> hash_data: array<atomic<u32>>;
 
 struct BuildParams {
     num_points: u32,
@@ -322,10 +325,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // make the signed modulo negative and u32() would wrap far past
     // num_buckets (out-of-bounds atomicAdd / dropped correspondences).
     let hash = ((u32(cell_x) * 73856093u) ^ (u32(cell_y) * 19349663u) ^ (u32(cell_z) * 83492791u)) % params.num_buckets;
-    let bucket_idx = atomicAdd(&hash_counts[hash], 1u);
+    let bucket_idx = atomicAdd(&hash_data[hash], 1u);
     
     if (bucket_idx < params.max_per_bucket) {
-        hash_buckets[hash * params.max_per_bucket + bucket_idx] = idx;
+        atomicStore(
+            &hash_data[params.num_buckets + hash * params.max_per_bucket + bucket_idx],
+            idx,
+        );
     }
 }
 "#;
@@ -346,11 +352,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: hash_counts.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: hash_buckets.as_entire_binding(),
+                resource: hash_data.as_entire_binding(),
             },
         ],
     });
@@ -380,12 +382,15 @@ struct CorrParams {
 
 @group(0) @binding(0) var<storage, read> src_points: array<vec3<f32>>;
 @group(0) @binding(1) var<storage, read> tgt_points: array<vec3<f32>>;
-@group(0) @binding(2) var<storage, read> hash_data: array<u32>;
+// [0, num_buckets) holds per-bucket counts; the rest holds bucket slots.
+@group(0) @binding(2) var<storage, read_write> hash_data: array<atomic<u32>>;
 @group(0) @binding(3) var<uniform> params: CorrParams;
 @group(0) @binding(4) var<storage, read_write> correspondences: array<vec4<f32>>;
 
-fn get_count(hash: u32) -> u32 { return hash_data[hash]; }
-fn get_bucket(hash: u32, bucket_idx: u32) -> u32 { return hash_data[16384u + hash * 32u + bucket_idx]; }
+fn get_count(hash: u32) -> u32 { return atomicLoad(&hash_data[hash]); }
+fn get_bucket(hash: u32, bucket_idx: u32) -> u32 {
+    return atomicLoad(&hash_data[params.num_buckets + hash * params.max_per_bucket + bucket_idx]);
+}
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -451,7 +456,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: hash_counts.as_entire_binding(),
+                resource: hash_data.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 3,

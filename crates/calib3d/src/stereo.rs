@@ -427,11 +427,14 @@ pub fn fisheye_stereo_rectify(
     p2[(0, 3)] *= scale;
 
     // Keep Q consistent with the scaled projection matrices so disparity-to-depth
-    // mapping stays correct: Q[(2,3)] = fx', Q[(3,2)] = -1/tx', Q[(3,3)] = (cx1-cx2)/tx'.
+    // mapping stays correct. Only the focal length in Q changes: scaling P1/P2
+    // scales fx and also scales the pixel disparities by the same factor, so the
+    // depth relation Z = fx'·B/d' is unchanged in form. The physical baseline
+    // Tx = P2[0][3]/P2[0][0] is unaffected by the scale, so Q[(3,2)] = -1/Tx and
+    // Q[(3,3)] = (cx1-cx2)/Tx must stay unscaled (dividing them by `scale` made
+    // recovered depth off by scale²).
     let mut q = result.q;
     q[(2, 3)] *= scale;
-    q[(3, 2)] /= scale;
-    q[(3, 3)] /= scale;
 
     Ok(StereoRectifyMatrices {
         r1: result.r1,
@@ -519,6 +522,61 @@ mod rectify_tests {
             "Q depth {} != expected {}",
             rec.z,
             expected_z
+        );
+    }
+
+    #[test]
+    fn test_fisheye_rectify_q_depth_uses_scaled_focal() {
+        // Same non-trivial geometry as the pinhole case, but going through
+        // `fisheye_stereo_rectify` with a FOV scale that shrinks the rectified
+        // focal length. Recovered depth must still be Z = fx'·B / d'
+        // (fx' = scale·fx), i.e. the Q entries must not be divided by `scale`.
+        let intr_l = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        let intr_r = CameraIntrinsics::new(505.0, 502.0, 315.0, 242.0, 640, 480);
+
+        let r_l =
+            Rotation3::from_axis_angle(&Unit::new_normalize(Vector3::new(0.1, 0.05, 1.0)), 0.15)
+                .into_inner();
+        let r_r =
+            Rotation3::from_axis_angle(&Unit::new_normalize(Vector3::new(-0.07, 0.12, 1.0)), -0.22)
+                .into_inner();
+        let left = Pose::new(r_l, Vector3::new(0.02, -0.01, 0.05));
+        let right = Pose::new(r_r, Vector3::new(-0.18, 0.03, 0.06));
+
+        let fish = cv_core::FisheyeDistortion::none();
+        let fov_scale = 0.5;
+        let m = fisheye_stereo_rectify(&intr_l, &intr_r, &fish, &fish, &left, &right, fov_scale)
+            .expect("fisheye rectification must succeed");
+
+        // Rectified focal must have been scaled down by exactly `fov_scale`.
+        let fx_unscaled = 0.5 * (intr_l.fx + intr_r.fx);
+        assert!((m.p1[(0, 0)] - fov_scale * fx_unscaled).abs() < 1e-9);
+
+        let c_l = -(left.rotation_matrix().transpose() * left.translation);
+        let c_r = -(right.rotation_matrix().transpose() * right.translation);
+        let baseline = (c_r - c_l).norm();
+
+        let p_world = Point3::new(0.4, 0.25, 3.0);
+        let pr_l = m.r1 * left.rotation_matrix() * (p_world - c_l);
+        let pl = m.p1 * nalgebra::Vector4::new(pr_l.x, pr_l.y, pr_l.z, 1.0);
+        let pr = m.p2 * nalgebra::Vector4::new(pr_l.x, pr_l.y, pr_l.z, 1.0);
+        let ul = pl.x / pl.z;
+        let ur = pr.x / pr.z;
+        let vl = pl.y / pl.z;
+        let disparity = ul - ur;
+        assert!(disparity > 0.0, "left disparity must be positive");
+
+        let hq = m.q * nalgebra::Vector4::new(ul, vl, disparity, 1.0);
+        let rec_z = hq.z / hq.w;
+
+        let fx_scaled = fx_unscaled * fov_scale;
+        let expected_z = fx_scaled * baseline / disparity;
+        assert!(
+            (rec_z - expected_z).abs() / expected_z < 1e-6,
+            "Q depth {} != expected {} (fov_scale={})",
+            rec_z,
+            expected_z,
+            fov_scale
         );
     }
 

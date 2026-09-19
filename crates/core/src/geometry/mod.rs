@@ -171,15 +171,25 @@ pub fn polygon_iou(p1: &Polygon, p2: &Polygon) -> f32 {
 
 /// Calculates the intersection area of two convex polygons using Sutherland-Hodgman clipping.
 pub fn intersection_area_polygons(p1: &Polygon, p2: &Polygon) -> f32 {
-    // Sutherland-Hodgman clipping for generic convex polygons
-    let pts1 = &p1.points;
-    let pts2 = &p2.points;
+    // Sutherland-Hodgman clipping for generic convex polygons.
+    // `is_inside` assumes the clip ring is counter-clockwise, so normalize both
+    // input rings to CCW (by signed area) before clipping — otherwise a
+    // clockwise polygon yields a wrong/zero intersection.
+    let mut pts1 = p1.points.clone();
+    let mut pts2 = p2.points.clone();
 
     if pts1.len() < 3 || pts2.len() < 3 {
         return 0.0;
     }
 
-    let mut poly = pts1.clone();
+    if signed_area(&pts1) < 0.0 {
+        pts1.reverse();
+    }
+    if signed_area(&pts2) < 0.0 {
+        pts2.reverse();
+    }
+
+    let mut poly = pts1;
 
     // Clip pts1 against each edge of pts2
     for i in 0..pts2.len() {
@@ -220,6 +230,17 @@ pub fn intersection_area_polygons(p1: &Polygon, p2: &Polygon) -> f32 {
         area += p1[0] * p2[1] - p2[0] * p1[1];
     }
     area.abs() * 0.5
+}
+
+/// Signed (shoelace) area of a polygon ring; positive for counter-clockwise.
+fn signed_area(pts: &[[f32; 2]]) -> f32 {
+    let mut area = 0.0;
+    for i in 0..pts.len() {
+        let p1 = pts[i];
+        let p2 = pts[(i + 1) % pts.len()];
+        area += p1[0] * p2[1] - p2[0] * p1[1];
+    }
+    area * 0.5
 }
 
 fn is_inside(p1: [f32; 2], p2: [f32; 2], p: [f32; 2]) -> bool {
@@ -555,6 +576,30 @@ mod tests {
             };
 
             assert!(polygon_iou(&poly1, &poly2).abs() < 1e-5);
+        }
+
+        #[test]
+        fn test_polygon_iou_clockwise_winding() {
+            // Regression: is_inside assumes a counter-clockwise clip ring, so a
+            // clockwise polygon produced a wrong intersection.
+            let ccw = create_square();
+            let cw = Polygon {
+                points: vec![[0.0f32, 0.0], [0.0, 10.0], [10.0, 10.0], [10.0, 0.0]],
+            };
+            assert!(cw.is_clockwise());
+
+            // Identical square, regardless of which ring is clockwise.
+            assert!((intersection_area_polygons(&ccw, &cw) - 100.0).abs() < 1e-3);
+            assert!((intersection_area_polygons(&cw, &ccw) - 100.0).abs() < 1e-3);
+            assert!((polygon_iou(&ccw, &cw) - 1.0).abs() < 1e-5);
+
+            // Half overlap: intersection 50, union 150, IoU 1/3.
+            let half = Polygon {
+                points: vec![[5.0f32, 0.0], [5.0, 10.0], [15.0, 10.0], [15.0, 0.0]],
+            };
+            assert!(half.is_clockwise());
+            assert!((intersection_area_polygons(&ccw, &half) - 50.0).abs() < 1e-3);
+            assert!((polygon_iou(&ccw, &half) - 1.0 / 3.0).abs() < 1e-4);
         }
     }
 

@@ -25,12 +25,19 @@ pub fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String
     }
 }
 
-pub fn ndarray_to_points(pts: &PyReadonlyArray2<f32>) -> Vec<Point3<f32>> {
+pub fn ndarray_to_points(pts: &PyReadonlyArray2<f32>) -> PyResult<Vec<Point3<f32>>> {
     let arr = pts.as_array();
     let n = arr.shape()[0];
-    (0..n)
+    // The callers read columns 0..=2, so a `(N, 2)` (or narrower) array would
+    // index out of bounds and panic. Reject it with a Python ValueError instead.
+    if arr.shape()[1] < 3 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "points array must have at least 3 columns (x, y, z)",
+        ));
+    }
+    Ok((0..n)
         .map(|i| Point3::new(arr[[i, 0]], arr[[i, 1]], arr[[i, 2]]))
-        .collect()
+        .collect())
 }
 
 pub fn normals_to_ndarray<'py>(

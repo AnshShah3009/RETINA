@@ -150,12 +150,19 @@ impl StereoParams {
     }
 }
 
-/// Compute disparity validity mask
-pub fn compute_validity_mask(disparity: &DisparityMap, threshold: f32) -> Vec<bool> {
+/// Compute disparity validity mask.
+///
+/// A disparity is valid when it is finite and lies inside the inclusive search
+/// range `[min_disparity, max_disparity]` that the matchers scan. The previous
+/// revision compared the lower bound against an external `threshold` and used a
+/// strict `< max_disparity`, wrongly excluding the maximum searched disparity.
+pub fn compute_validity_mask(disparity: &DisparityMap) -> Vec<bool> {
+    let min_d = disparity.min_disparity as f32;
+    let max_d = disparity.max_disparity as f32;
     disparity
         .data
         .iter()
-        .map(|&d| d.is_finite() && d >= threshold && d < (disparity.max_disparity as f32))
+        .map(|&d| d.is_finite() && d >= min_d && d <= max_d)
         .collect()
 }
 
@@ -185,5 +192,16 @@ mod tests {
 
         assert_eq!(params.disparity_to_depth(disparity), Some(expected_depth));
         assert_eq!(params.disparity_to_depth(0.0), None);
+    }
+
+    #[test]
+    fn test_compute_validity_mask_uses_inclusive_range() {
+        let mut disp = DisparityMap::new(4, 1, 2, 8);
+        disp.set(0, 0, 2.0); // == min_disparity -> valid
+        disp.set(1, 0, 8.0); // == max_disparity -> valid
+        disp.set(2, 0, 1.0); // < min_disparity  -> invalid
+        disp.set(3, 0, 9.0); // > max_disparity  -> invalid
+
+        assert_eq!(compute_validity_mask(&disp), vec![true, true, false, false]);
     }
 }

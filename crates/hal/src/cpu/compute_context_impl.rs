@@ -220,14 +220,14 @@ impl ComputeContext for CpuBackend {
                     let (n1, n2) = match direction[idx] {
                         0 => (magnitude[idx - 1], magnitude[idx + 1]), // horizontal
                         1 => (
-                            magnitude[(y - 1) * w + x + 1],
-                            magnitude[(y + 1) * w + x - 1],
-                        ), // 45
-                        2 => (magnitude[(y - 1) * w + x], magnitude[(y + 1) * w + x]), // vertical
-                        _ => (
                             magnitude[(y - 1) * w + x - 1],
                             magnitude[(y + 1) * w + x + 1],
-                        ), // 135
+                        ), // 45 (gradient (+,+): thin along the main diagonal)
+                        2 => (magnitude[(y - 1) * w + x], magnitude[(y + 1) * w + x]), // vertical
+                        _ => (
+                            magnitude[(y - 1) * w + x + 1],
+                            magnitude[(y + 1) * w + x - 1],
+                        ), // 135 (gradient (+,-): thin along the anti-diagonal)
                     };
                     if mag >= n1 && mag >= n2 {
                         row_out[x] = mag;
@@ -273,14 +273,14 @@ impl ComputeContext for CpuBackend {
             }
         }
 
-        // Build output: strong edges = ONE, rest = ZERO
+        // Build output: strong edges = 255, rest = 0 (matches canny.wgsl / OpenCV)
         let mut output_storage = S::new(len, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
         for i in 0..len {
             if edge_map[i] == 2 {
-                dst[i] = T::ONE;
+                dst[i] = T::from_f32(255.0);
             }
         }
 
@@ -2068,18 +2068,13 @@ impl ComputeContext for CpuBackend {
                 .map(|i| Vector3::new(src_f32[i * 4], src_f32[i * 4 + 1], src_f32[i * 4 + 2]))
                 .collect();
 
-            // Use a KD-tree for efficient search
+            // Use a KD-tree for efficient search. Index in 3-D only: packing the
+            // point index into a 4th component would add `i^2` to every distance
+            // and bias each neighborhood toward low indices.
             let tree = rstar::RTree::bulk_load(
                 (0..num_points)
-                    .map(|i| {
-                        [
-                            src_f32[i * 4],
-                            src_f32[i * 4 + 1],
-                            src_f32[i * 4 + 2],
-                            i as f32,
-                        ]
-                    })
-                    .collect::<Vec<[f32; 4]>>(),
+                    .map(|i| [src_f32[i * 4], src_f32[i * 4 + 1], src_f32[i * 4 + 2]])
+                    .collect::<Vec<[f32; 3]>>(),
             );
 
             dst_f32
@@ -2090,7 +2085,7 @@ impl ComputeContext for CpuBackend {
 
                     // Find neighbors
                     let neighbors = tree
-                        .nearest_neighbor_iter(&[p.x, p.y, p.z, 0.0])
+                        .nearest_neighbor_iter(&[p.x, p.y, p.z])
                         .take(k)
                         .map(|neighbor| Vector3::new(neighbor[0], neighbor[1], neighbor[2]))
                         .collect::<Vec<_>>();
@@ -2680,7 +2675,7 @@ impl ComputeContext for CpuBackend {
         let mc_edge_table: [i32; 256] = [
             0x0, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c, 0x80c, 0x905, 0xa0f, 0xb06,
             0xc0a, 0xd03, 0xe09, 0xf00, 0x190, 0x99, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c,
-            0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90, 0x230, 0x139, 0x33, 0x13a,
+            0x99c, 0x895, 0xb9f, 0xa96, 0xd9a, 0xc93, 0xf99, 0xe90, 0x230, 0x339, 0x33, 0x13a,
             0x636, 0x73f, 0x435, 0x53c, 0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30,
             0x3a0, 0x2a9, 0x1a3, 0xaa, 0x7a6, 0x6af, 0x5a5, 0x4ac, 0xbac, 0xaa5, 0x9af, 0x8a6,
             0xfaa, 0xea3, 0xda9, 0xca0, 0x460, 0x569, 0x663, 0x76a, 0x66, 0x16f, 0x265, 0x36c,
@@ -2696,7 +2691,7 @@ impl ComputeContext for CpuBackend {
             0xf66, 0xe6f, 0xd65, 0xc6c, 0x36c, 0x265, 0x16f, 0x66, 0x76a, 0x663, 0x569, 0x460,
             0xca0, 0xda9, 0xea3, 0xfaa, 0x8a6, 0x9af, 0xaa5, 0xbac, 0x4ac, 0x5a5, 0x6af, 0x7a6,
             0xaa, 0x1a3, 0x2a9, 0x3a0, 0xd30, 0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c,
-            0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33, 0x139, 0x230, 0xe90, 0xf99, 0xc93, 0xd9a,
+            0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33, 0x339, 0x230, 0xe90, 0xf99, 0xc93, 0xd9a,
             0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795, 0x49f, 0x596, 0x29a, 0x393, 0x99, 0x190,
             0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c, 0x70c, 0x605, 0x50f, 0x406,
             0x30a, 0x203, 0x109, 0x0,
@@ -3104,11 +3099,15 @@ impl ComputeContext for CpuBackend {
         use std::any::TypeId;
         if TypeId::of::<T>() == TypeId::of::<f32>() {
             let levels = prev_pyramid.len();
+            // Input points are in level-0 coordinates. The coarsest level
+            // (levels - 1) is scaled down by 2^(levels-1); each finer level then
+            // doubles the coordinates, matching the GPU path.
+            let coarsest_scale = 1.0 / (1 << (levels - 1)) as f32;
             let mut scaled_points: Vec<[f32; 2]> = points
                 .iter()
                 .map(|&pt| {
                     let pt_f: [f32; 2] = bytemuck::cast_slice(&[pt])[0];
-                    pt_f
+                    [pt_f[0] * coarsest_scale, pt_f[1] * coarsest_scale]
                 })
                 .collect();
 
@@ -3133,13 +3132,11 @@ impl ComputeContext for CpuBackend {
                 let win = window_size as i32;
                 let half_win = win / 2;
 
-                let level_scale = 1 << level;
                 let scaled: Vec<[f32; 2]> = scaled_points
                     .par_iter()
                     .map(|&pt| {
-                        let scale = level_scale as f32;
-                        let mut u = pt[0] * scale;
-                        let mut v = pt[1] * scale;
+                        let mut u = pt[0];
+                        let mut v = pt[1];
 
                         for _ in 0..max_iters {
                             let ix = u.round() as i32;
@@ -3195,7 +3192,12 @@ impl ComputeContext for CpuBackend {
                     })
                     .collect();
 
-                scaled_points = scaled;
+                scaled_points = if level > 0 {
+                    // Carry the tracked position up to the next finer level.
+                    scaled.iter().map(|&p| [p[0] * 2.0, p[1] * 2.0]).collect()
+                } else {
+                    scaled
+                };
             }
 
             let results: Vec<[T; 2]> = scaled_points
@@ -3861,8 +3863,9 @@ impl ComputeContext for CpuBackend {
                 .into(),
             ));
         }
-        let nw = (w + 1) / 2;
-        let nh = (h + 1) / 2;
+        // Floor halving to match the GPU path (gpu_kernels/pyramid.rs).
+        let nw = w / 2;
+        let nh = h / 2;
         let c = input.shape.channels;
 
         // Gaussian blur first
@@ -3909,6 +3912,14 @@ impl ComputeContext for CpuBackend {
             .storage
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("B not on CPU".into()))?;
+
+        if a.shape.len() != b.shape.len() {
+            return Err(crate::Error::InvalidInput(format!(
+                "subtract: shape mismatch (A has {} elements, B has {})",
+                a.shape.len(),
+                b.shape.len()
+            )));
+        }
 
         let mut output_storage =
             S::new(a.shape.len(), T::zeroed()).map_err(crate::Error::MemoryError)?;
@@ -4588,6 +4599,39 @@ impl ComputeContext for CpuBackend {
             .storage
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("X not on CPU".into()))?;
+
+        // Validate the CSR inputs up front so malformed data returns an error
+        // instead of panicking on the `row_ptr.len() - 1` underflow below.
+        if row_ptr.is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "spmv: row_ptr must contain at least one element".into(),
+            ));
+        }
+        if col_indices.len() != values.len() {
+            return Err(crate::Error::InvalidInput(format!(
+                "spmv: col_indices ({}) and values ({}) must have equal length",
+                col_indices.len(),
+                values.len()
+            )));
+        }
+        if row_ptr[0] != 0 || *row_ptr.last().unwrap() as usize != col_indices.len() {
+            return Err(crate::Error::InvalidInput(
+                "spmv: malformed CSR row_ptr (must start at 0 and end at nnz)".into(),
+            ));
+        }
+        if row_ptr.windows(2).any(|p| p[0] > p[1]) {
+            return Err(crate::Error::InvalidInput(
+                "spmv: row_ptr must be non-decreasing".into(),
+            ));
+        }
+        let n_cols = x_slice.len();
+        if col_indices.iter().any(|&c| c as usize >= n_cols) {
+            return Err(crate::Error::InvalidInput(format!(
+                "spmv: column index out of range (columns = {})",
+                n_cols
+            )));
+        }
+
         let rows = row_ptr.len() - 1;
         let mut y_storage = S::new(rows, T::ZERO).map_err(crate::Error::MemoryError)?;
         let y_slice = y_storage

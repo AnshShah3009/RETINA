@@ -208,6 +208,9 @@ impl<T: Clone> KDTree<T> {
     /// K nearest neighbors using a max-heap for efficient pruning.
     /// Only explores branches that could contain closer points than the current k-th best.
     pub fn k_nearest_neighbors(&self, query: &Point3<f32>, k: usize) -> Vec<(Point3<f32>, T, f32)> {
+        if k == 0 {
+            return Vec::new();
+        }
         let mut heap: BinaryHeap<KnnEntry<T>> = BinaryHeap::with_capacity(k + 1);
         if let Some(ref root) = self.root {
             Self::knn_recursive(root, query, k, &mut heap);
@@ -271,5 +274,24 @@ impl<T: Clone> KDTree<T> {
 impl<T: Clone> Default for KDTree<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_k_nearest_neighbors_zero_k_returns_empty() {
+        let mut items = vec![
+            (Point3::new(0.0, 0.0, 0.0), 0usize),
+            (Point3::new(1.0, 0.0, 0.0), 1usize),
+            (Point3::new(2.0, 0.0, 0.0), 2usize),
+        ];
+        let tree = KDTree::build(&mut items);
+        // k == 0 must not panic (previously hit `heap.peek().unwrap()`).
+        assert!(tree
+            .k_nearest_neighbors(&Point3::new(0.5, 0.0, 0.0), 0)
+            .is_empty());
     }
 }

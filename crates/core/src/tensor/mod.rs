@@ -134,6 +134,19 @@ mod tests {
         }
 
         #[test]
+        fn test_slice_reversed_or_bad_start_is_error() {
+            let tensor: Tensor<f32> = Tensor::zeros(TensorShape::new(1, 10, 10)).unwrap();
+
+            // Regression: only `.end` was validated, so a reversed range
+            // (start > end) or an out-of-range `.start` passed validation and
+            // then panicked on indexing / usize underflow.
+            assert!(tensor.slice(0..1, 5..2, 0..10).is_err());
+            assert!(tensor.slice(0..1, 0..10, 8..3).is_err());
+            assert!(tensor.slice(0..1, 12..12, 0..10).is_err());
+            assert!(tensor.slice(0..1, 0..10, 3..12).is_err());
+        }
+
+        #[test]
         fn test_slice_copy() {
             let mut tensor: Tensor<f32> = Tensor::zeros(TensorShape::new(1, 10, 10)).unwrap();
 

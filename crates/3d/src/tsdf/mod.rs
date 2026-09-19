@@ -336,7 +336,11 @@ impl TSDFVolume {
         let dz = self.get_tsdf_safe(block_coords, (x, y, z + 1))
             - self.get_tsdf_safe(block_coords, (x, y, z.saturating_sub(1)));
 
-        Vector3::new(dx, dy, dz).normalize()
+        // A locally flat region has a zero gradient; guard against dividing by
+        // zero so the normal stays finite (zeros) instead of becoming NaN.
+        Vector3::new(dx, dy, dz)
+            .try_normalize(1e-8)
+            .unwrap_or(Vector3::zeros())
     }
 
     fn get_tsdf_safe(&self, block_coords: (i32, i32, i32), local: (usize, usize, usize)) -> f32 {
@@ -919,5 +923,16 @@ mod tests {
             behind_positive,
             "Expected voxels behind z=1.0 surface to have positive TSDF (sdf = z_vox - depth > 0)"
         );
+    }
+
+    #[test]
+    fn test_estimate_normal_flat_region_is_finite() {
+        let mut volume = TSDFVolume::new(0.02, 0.06);
+        // A uniform block has a zero gradient everywhere.
+        volume.blocks.insert((0, 0, 0), VoxelBlock::new((0, 0, 0)));
+
+        let normal = volume.estimate_normal((0, 0, 0), (4, 4, 4));
+        assert_eq!(normal, Vector3::zeros());
+        assert!(normal.x.is_finite() && normal.y.is_finite() && normal.z.is_finite());
     }
 }

@@ -597,9 +597,12 @@ fn refine_point(
     n_layers: usize,
     contrast_threshold: f32,
 ) -> Option<KeyPoint> {
-    // Validate input bounds before accessing arrays
+    // Validate input bounds before accessing arrays.
+    // `s` is indexed in `1..=n_layers` by the caller and `dog_layers` holds
+    // `n_layers + 2` entries, so the top valid layer is `s == n_layers`
+    // (matching the in-loop guard below); `>=` wrongly discarded it.
     let (h, w) = dog_layers[0].shape.hw();
-    if x < 1 || x >= w - 1 || y < 1 || y >= h - 1 || s < 1 || s >= n_layers {
+    if x < 1 || x >= w - 1 || y < 1 || y >= h - 1 || s < 1 || s > n_layers {
         return None;
     }
 
@@ -866,5 +869,28 @@ mod tests {
         if !descs.descriptors.is_empty() {
             assert_eq!(descs.descriptors[0].data.len(), 128);
         }
+    }
+
+    #[test]
+    fn refine_point_accepts_top_dog_layer() {
+        // `dog_layers` holds n_layers+2 entries and the caller indexes s in
+        // 1..=n_layers, so the top layer (s == n_layers) is valid and must not
+        // be discarded by the bounds check.
+        let n_layers = 3usize;
+        let (h, w) = (8usize, 8usize);
+        let mut layers: Vec<Tensor<f32, CpuStorage<f32>>> = (0..n_layers + 2)
+            .map(|_| Tensor::from_vec(vec![0.0f32; h * w], TensorShape::new(1, h, w)).unwrap())
+            .collect();
+        // A single strong DoG spike is an extremum with an invertible Hessian.
+        let mut data = vec![0.0f32; h * w];
+        data[4 * w + 4] = 10.0;
+        layers[n_layers] = Tensor::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+
+        assert!(
+            super::refine_point(&layers, n_layers, 4, 4, n_layers, 0.01).is_some(),
+            "the top DoG layer of an octave must not be discarded"
+        );
+        // One layer above the top is out of range.
+        assert!(super::refine_point(&layers, n_layers + 1, 4, 4, n_layers, 0.01).is_none());
     }
 }

@@ -461,6 +461,13 @@ fn downsample_depth(input: &[f32], width: usize, height: usize, scale: f32) -> V
     let new_height = (height as f32 * scale) as usize;
     let mut output = vec![0.0; new_width * new_height];
 
+    // At coarse pyramid scales the downsampled frame can be empty (and the
+    // source frame can be zero-sized); return early so `par_chunks_mut(0)`
+    // cannot panic and the `- 1` clamps below cannot underflow.
+    if new_width == 0 || new_height == 0 {
+        return output;
+    }
+
     output
         .par_chunks_mut(new_width)
         .enumerate()
@@ -468,7 +475,8 @@ fn downsample_depth(input: &[f32], width: usize, height: usize, scale: f32) -> V
             for x in 0..new_width {
                 let src_x = (x as f32 / scale) as usize;
                 let src_y = (y as f32 / scale) as usize;
-                let src_idx = (src_y.min(height - 1)) * width + (src_x.min(width - 1));
+                let src_idx = (src_y.min(height.saturating_sub(1))) * width
+                    + (src_x.min(width.saturating_sub(1)));
                 row[x] = input[src_idx];
             }
         });
@@ -595,4 +603,25 @@ fn evaluate_odometry_ctx(
     };
 
     (fitness, rmse)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_downsample_depth_zero_sized_frame() {
+        // Empty and zero-sized frames must not panic (previously underflowed
+        // on `height - 1` / `par_chunks_mut(0)`).
+        assert!(downsample_depth(&[], 0, 0, 0.125).is_empty());
+        assert!(downsample_depth(&[1.0, 2.0, 3.0, 4.0], 2, 2, 0.125).is_empty());
+    }
+
+    #[test]
+    fn test_downsample_depth_basic() {
+        // 4x4 frame at scale 0.5 -> 2x2, nearest-neighbour sampling.
+        let input: Vec<f32> = (0..16).map(|i| i as f32).collect();
+        let out = downsample_depth(&input, 4, 4, 0.5);
+        assert_eq!(out, vec![0.0, 2.0, 8.0, 10.0]);
+    }
 }
