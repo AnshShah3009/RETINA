@@ -7,9 +7,22 @@ edition = "2021"
 cv-core = { workspace = true }
 cv-runtime = { workspace = true }
 cv-optimize = { workspace = true }
+cv-calib3d = { workspace = true }
+cv-features = { workspace = true }
 nalgebra = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+cv-eval = { workspace = true }
+cv-io = { workspace = true }
+image = { workspace = true }
+
 [features]
 default = []
+
+# Real-data incremental-SfM evaluation on TUM RGB-D sequences. It needs the
+# `image` decoder, the TUM loaders from `cv-io` and the trajectory metrics from
+# `cv-eval`, so it is a separate target that `cargo test` still type-checks.
+[[example]]
+name = "tum_sfm"
