@@ -10,7 +10,7 @@ impl EssentialSolver {
         pts1: &[[f64; 2]],
         pts2: &[[f64; 2]],
     ) -> crate::Result<Vec<Matrix3<f64>>> {
-        if pts1.len() < 5 || pts1.len() != pts2.len() {
+        if pts1.len() != 5 || pts2.len() != 5 {
             return Err(cv_core::Error::InvalidInput(
                 "Exactly 5 points required for 5-point algorithm".into(),
             ));
@@ -377,5 +377,22 @@ impl EssentialSolver {
         }
 
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EssentialSolver;
+
+    #[test]
+    fn test_estimate_5point_requires_exactly_five_points() {
+        // The last 4 rows of V^T only span the nullspace of a 5x9 design matrix;
+        // with more points that dimension changes and the returned matrices are
+        // wrong, so anything other than exactly 5 points must be rejected.
+        let six = vec![[0.0, 0.0]; 6];
+        assert!(EssentialSolver::estimate_5point(&six, &six).is_err());
+
+        let four = vec![[0.0, 0.0]; 4];
+        assert!(EssentialSolver::estimate_5point(&four, &four).is_err());
     }
 }
