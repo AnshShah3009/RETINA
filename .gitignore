@@ -10,7 +10,7 @@ Cargo.lock
 # IDE and editor
 .idea/
 .vscode/
-.claude/
+
 *.iml
 
 # Archives and large binaries
@@ -32,3 +32,4 @@ python/cv_native/*.egg-info/
 examples/target/
 ci_artifacts/
 reference/
+.worktrees/

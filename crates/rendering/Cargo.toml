@@ -1,0 +1,17 @@
+[package]
+name = "cv-rendering"
+version = "0.1.0"
+edition = "2021"
+description = "3D Rendering algorithms including Gaussian Splatting"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+cv-core = { workspace = true }
+nalgebra = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []

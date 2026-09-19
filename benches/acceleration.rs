@@ -1,14 +1,12 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use cv_imgproc::{threshold, threshold_ctx};
-use cv_runtime::orchestrator::{scheduler, GroupPolicy};
+use cv_runtime::orchestrator::{scheduler, GroupPolicy, TaskPriority};
 use image::GrayImage;
-use std::sync::Arc;
 
 fn bench_threading_isolation(c: &mut Criterion) {
     let size = 2048;
     let img = GrayImage::new(size, size);
 
-    let s = scheduler();
+    let s = scheduler().expect("scheduler init failed");
 
     // 1. Global pool (shared)
     let global_group = s.get_group("default").unwrap().unwrap();
@@ -22,6 +20,7 @@ fn bench_threading_isolation(c: &mut Criterion) {
             GroupPolicy {
                 allow_work_stealing: false,
                 allow_dynamic_scaling: false,
+                priority: TaskPriority::Normal,
             },
         )
         .unwrap();
@@ -29,29 +28,17 @@ fn bench_threading_isolation(c: &mut Criterion) {
     let mut group = c.benchmark_group("Threading Isolation");
 
     group.bench_function("Global Pool", |b| {
-        b.iter(|| {
-            threshold_ctx(
-                &img,
-                128,
-                255,
-                cv_imgproc::ThresholdType::Binary,
-                &global_group,
-            );
-        })
+        b.iter(|| cv_imgproc::threshold(&img, 128, 255, cv_imgproc::ThresholdType::Binary))
     });
 
     group.bench_function("Isolated Pool (4 cores)", |b| {
+        let ig = isolated_group.clone();
         b.iter(|| {
-            threshold_ctx(
-                &img,
-                128,
-                255,
-                cv_imgproc::ThresholdType::Binary,
-                &isolated_group,
-            );
+            ig.run(|| cv_imgproc::threshold(&img, 128, 255, cv_imgproc::ThresholdType::Binary))
         })
     });
 
+    let _ = global_group;
     group.finish();
 }
 
@@ -59,34 +46,25 @@ fn bench_gpu_acceleration(c: &mut Criterion) {
     let size = 2048;
     let img = GrayImage::new(size, size);
 
-    let s = scheduler();
+    let s = scheduler().expect("scheduler init failed");
     let cpu_group = s.get_group("default").unwrap().unwrap();
-    let gpu_group = s.best_gpu_or_cpu();
+    let gpu_group = s.best_gpu_or_cpu().unwrap();
 
     let mut group = c.benchmark_group("Hardware Acceleration");
 
     group.bench_function("CPU (Parallel SIMD)", |b| {
         b.iter(|| {
-            threshold_ctx(
-                &img,
-                128,
-                255,
-                cv_imgproc::ThresholdType::Binary,
-                &cpu_group,
-            );
+            cpu_group
+                .run(|| cv_imgproc::threshold(&img, 128, 255, cv_imgproc::ThresholdType::Binary))
         })
     });
 
-    if let cv_hal::compute::ComputeDevice::Gpu(_) = gpu_group.device() {
+    if let Ok(cv_hal::compute::ComputeDevice::Gpu(_)) = gpu_group.device() {
         group.bench_function("GPU (WebGPU)", |b| {
             b.iter(|| {
-                threshold_ctx(
-                    &img,
-                    128,
-                    255,
-                    cv_imgproc::ThresholdType::Binary,
-                    &gpu_group,
-                );
+                gpu_group.run(|| {
+                    cv_imgproc::threshold(&img, 128, 255, cv_imgproc::ThresholdType::Binary)
+                })
             })
         });
     }

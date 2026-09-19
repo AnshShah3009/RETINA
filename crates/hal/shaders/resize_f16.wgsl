@@ -1,0 +1,54 @@
+enable f16;
+struct Params {
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    channels: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input_data: array<f16>;
+@group(0) @binding(1) var<storage, read_write> output_data: array<f16>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn get_f16(idx: u32) -> f16 {
+    return input_data[idx];
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let x_dst = global_id.x;
+    let y_dst = global_id.y;
+    
+    if (x_dst >= params.dst_w || y_dst >= params.dst_h) {
+        return;
+    }
+
+    let src_width_f = f16(params.src_w) - 1.0h;
+    let src_height_f = f16(params.src_h) - 1.0h;
+    let dst_width_f = f16(params.dst_w) - 1.0h;
+    let dst_height_f = f16(params.dst_h) - 1.0h;
+
+    var src_x_f = max(f16(x_dst) * src_width_f / dst_width_f, 0.0h);
+    var src_y_f = max(f16(y_dst) * src_height_f / dst_height_f, 0.0h);
+
+    let x0 = min(params.src_w - 1u, u32(floor(src_x_f)));
+    let y0 = min(params.src_h - 1u, u32(floor(src_y_f)));
+    let x1 = min(params.src_w - 1u, x0 + 1u);
+    let y1 = min(params.src_h - 1u, y0 + 1u);
+
+    let dx = select(0.0h, clamp(src_x_f - f16(x0), 0.0h, 1.0h), x0 != x1);
+    let dy = select(0.0h, clamp(src_y_f - f16(y0), 0.0h, 1.0h), y0 != y1);
+    
+    let p00 = get_f16(y0 * params.src_w + x0);
+    let p10 = get_f16(y0 * params.src_w + x1);
+    let p01 = get_f16(y1 * params.src_w + x0);
+    let p11 = get_f16(y1 * params.src_w + x1);
+    
+    let val_f = mix(mix(p00, p10, dx), mix(p01, p11, dx), dy);
+    
+    output_data[y_dst * params.dst_w + x_dst] = val_f;
+}

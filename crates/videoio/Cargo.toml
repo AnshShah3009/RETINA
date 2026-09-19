@@ -1,0 +1,23 @@
+[package]
+name = "cv-videoio"
+version = "0.1.0"
+edition = "2021"
+description = "Video input/output and camera capture for Rust Computer Vision"
+
+[dependencies]
+cv-core = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }
+ffmpeg-next = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+v4l = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = ["native"]
+ffmpeg = ["dep:ffmpeg-next"]
+v4l2 = ["v4l"]
+native = []

@@ -1,0 +1,24 @@
+[package]
+name = "cv-imgproc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Image processing algorithms with hardware acceleration"
+
+[dependencies]
+cv-core = { workspace = true }
+cv-hal = { workspace = true }
+cv-runtime = { workspace = true, optional = true }
+image = { workspace = true }
+rayon = { workspace = true }
+nalgebra = { workspace = true }
+wide = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[features]
+default = ["runtime"]
+runtime = ["dep:cv-runtime"]

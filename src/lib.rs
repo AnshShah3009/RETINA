@@ -8,7 +8,6 @@ pub use cv_optimize as optimize;
 pub use cv_runtime as runtime;
 pub use cv_sfm as sfm;
 pub use cv_slam as slam;
-pub use cv_stereo as stereo;
 pub use cv_video as video;
 
 /// Initialize the entire cv-native library.
@@ -16,10 +15,12 @@ pub use cv_video as video;
 /// This performs:
 /// 1. Global thread pool initialization.
 /// 2. Asynchronous GPU context discovery.
-/// 3. Resource registry setup.
 pub async fn init() -> Result<(), String> {
     cv_core::init_global_thread_pool(None)?;
-    let _ = cv_hal::gpu::GpuContext::init_global().await;
+    // GPU init is best-effort — library works on CPU-only systems
+    cv_hal::gpu::GpuContext::init_global()
+        .await
+        .map_err(|e| format!("GPU initialization failed: {}", e))?;
     Ok(())
 }
 

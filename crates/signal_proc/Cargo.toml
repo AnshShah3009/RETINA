@@ -1,0 +1,8 @@
+[package]
+name = "cv-signal"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustfft = { workspace = true }
+cv-math = { path = "../math" }

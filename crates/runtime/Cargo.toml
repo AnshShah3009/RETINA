@@ -1,0 +1,32 @@
+[package]
+name = "cv-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rayon = { workspace = true }
+nalgebra = { workspace = true }
+thiserror = { workspace = true }
+cv-hal = { workspace = true }
+cv-core = { workspace = true }
+cv-distributed = { workspace = true }
+core_affinity = { workspace = true }
+tokio = { workspace = true, features = ["sync", "macros", "rt-multi-thread", "time", "net"] }
+num_cpus = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+parking_lot = { workspace = true }
+atomic-wait = { workspace = true }
+crossbeam-channel = { workspace = true }
+dashmap = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+pollster = { workspace = true }
+
+[features]
+default = []
+tracing = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = "1.5"

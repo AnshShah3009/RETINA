@@ -1,0 +1,28 @@
+[package]
+name = "cv-3d"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytemuck = { workspace = true }
+nalgebra = { workspace = true }
+cv-core = { workspace = true }
+cv-scientific = { workspace = true }
+cv-runtime = { workspace = true }
+cv-hal = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+rand = { workspace = true }
+rand_distr = { workspace = true }
+futures = { workspace = true }
+hashbrown = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+pollster = { workspace = true }
+
+[features]
+default = []

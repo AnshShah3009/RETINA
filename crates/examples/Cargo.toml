@@ -1,0 +1,67 @@
+[package]
+name = "cv-examples"
+version = "0.1.0"
+edition = "2021"
+description = "Examples for rust-cv-native"
+license = "MIT OR Apache-2.0"
+
+[[example]]
+name = "plot_demo"
+path = "src/plot_demo.rs"
+
+[[example]]
+name = "registration_icp"
+path = "src/registration_icp.rs"
+
+[[example]]
+name = "gaussian_splatting_basic"
+path = "src/gaussian_splatting_basic.rs"
+
+[[example]]
+name = "kalman_filter"
+path = "src/kalman_filter.rs"
+
+[[example]]
+name = "bundle_adjustment"
+path = "src/bundle_adjustment.rs"
+
+[[example]]
+name = "raycasting"
+path = "src/raycasting.rs"
+
+[[example]]
+name = "scientific"
+path = "src/scientific.rs"
+
+[[example]]
+name = "core_types"
+path = "src/core_types.rs"
+
+[[example]]
+name = "imgproc_demo"
+path = "src/imgproc_demo.rs"
+
+[[example]]
+name = "features_demo"
+path = "src/features_demo.rs"
+
+[[example]]
+name = "orb_benchmark"
+path = "src/orb_benchmark.rs"
+
+[dependencies]
+cv-plot = { workspace = true }
+cv-core = { workspace = true }
+cv-registration = { workspace = true }
+cv-rendering = { workspace = true }
+cv-scientific = { workspace = true }
+cv-3d = { workspace = true }
+cv-features = { workspace = true, features = ["gpu"] }
+cv-hal = { workspace = true }
+cv-runtime = { workspace = true }
+nalgebra = { workspace = true }
+rand = { workspace = true }
+image = { workspace = true }
+
+[features]
+default = []

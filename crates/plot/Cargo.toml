@@ -1,0 +1,15 @@
+[package]
+name = "cv-plot"
+version = "0.1.0"
+edition = "2021"
+description = "Plotting and visualization (matplotlib/plotly equivalent)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []

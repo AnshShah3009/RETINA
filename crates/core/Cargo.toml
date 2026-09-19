@@ -1,0 +1,23 @@
+[package]
+name = "cv-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Core types for computer vision"
+
+[dependencies]
+nalgebra = { workspace = true }
+image = { workspace = true }
+rayon = { workspace = true }
+wide = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+num-traits = { version = "0.2", default-features = false }
+bytemuck = { workspace = true, features = ["derive"] }
+half = { version = "2.4", features = ["num-traits", "serde"], optional = true }
+
+[features]
+default = ["full-precision"]
+full-precision = []
+half-precision = ["half"]
+all-precision = ["full-precision", "half-precision"]

@@ -1,0 +1,15 @@
+[package]
+name = "cv-video"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Video processing and optical flow algorithms"
+
+[dependencies]
+cv-core = { workspace = true }
+cv-hal = { workspace = true }
+nalgebra = { workspace = true }
+image = { workspace = true }
+
+[features]
+default = []

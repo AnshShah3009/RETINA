@@ -1,0 +1,48 @@
+[package]
+name = "cv-hal"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Hardware Abstraction Layer for multi-backend acceleration"
+
+[dev-dependencies]
+criterion = { workspace = true }
+approx = { workspace = true }
+image = { workspace = true }
+cv-core = { workspace = true }
+half = { workspace = true }
+thiserror = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+futures = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+ndarray-npy = "0.8"
+ndarray = "0.15"
+
+[dependencies]
+cv-core = { workspace = true }
+rayon = { workspace = true }
+nalgebra = { workspace = true }
+wide = { workspace = true }
+thiserror = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+futures = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["sync"] }
+rstar = { workspace = true }
+hashbrown = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = ["full-precision"]
+cpu = []
+simd = []
+cuda = []
+tensorrt = []
+directml = []
+webgpu = []
+mlx = []
+full-precision = ["cv-core/full-precision"]
+half-precision = ["cv-core/half-precision"]
+all-precision = ["full-precision", "half-precision"]

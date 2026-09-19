@@ -1,0 +1,14 @@
+[package]
+name = "cv-dnn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cv-core = { workspace = true }
+cv-runtime = { workspace = true }
+cv-imgproc = { workspace = true }
+image = { workspace = true }
+tract-onnx = { workspace = true }
+
+[features]
+default = []

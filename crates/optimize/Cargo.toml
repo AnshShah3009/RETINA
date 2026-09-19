@@ -1,0 +1,14 @@
+[package]
+name = "cv-optimize"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nalgebra = { workspace = true }
+cv-core = { workspace = true }
+cv-hal = { workspace = true }
+faer = { workspace = true }
+pollster = { workspace = true }
+
+[features]
+default = []

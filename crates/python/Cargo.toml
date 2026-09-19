@@ -1,0 +1,29 @@
+[package]
+name = "cv-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cv_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true, features = ["abi3-py37"] }
+numpy = { workspace = true }
+cv-core = { workspace = true }
+cv-features = { workspace = true }
+cv-3d = { workspace = true }
+cv-scientific = { workspace = true }
+cv-runtime = { workspace = true }
+cv-slam = { workspace = true }
+cv-videoio = { workspace = true }
+cv-dnn = { workspace = true }
+cv-optimize = { workspace = true }
+cv-photo = { workspace = true }
+cv-imgproc = { workspace = true }
+nalgebra = { workspace = true }
+rustfft = { workspace = true }
+image = { workspace = true }
+
+[features]
+default = []

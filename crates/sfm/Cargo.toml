@@ -1,0 +1,15 @@
+[package]
+name = "cv-sfm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cv-core = { workspace = true }
+cv-runtime = { workspace = true }
+cv-optimize = { workspace = true }
+nalgebra = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+default = []

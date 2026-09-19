@@ -1,0 +1,19 @@
+[package]
+name = "cv-registration"
+version = "0.1.0"
+edition = "2021"
+description = "3D point cloud registration algorithms"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+nalgebra = { workspace = true }
+cv-core = { workspace = true }
+cv-hal = { workspace = true }
+cv-3d = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[features]
+default = []
