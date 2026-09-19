@@ -187,7 +187,11 @@ fn bilateral_filter_rgb_internal(
     let kernel_size = params.kernel_size;
     let half_kernel = kernel_size / 2;
     let sigma_space_sq = 2.0 * params.sigma_space * params.sigma_space;
-    let sigma_range_sq = 2.0 * params.sigma_range * params.sigma_range;
+    // Range distances here are 0-255 per channel; scale the configured
+    // sigma into that domain (sigma_range=0.1 on raw u8 distances gave
+    // weights of e^-(1/0.02), making the filter an exact no-op).
+    let sigma_range_u8 = params.sigma_range * 255.0;
+    let sigma_range_sq = 2.0 * sigma_range_u8 * sigma_range_u8;
 
     let channels = 3;
     let stride = width as usize * channels;
@@ -307,7 +311,9 @@ fn joint_bilateral_filter_internal(
     let kernel_size = params.kernel_size;
     let half_kernel = kernel_size / 2;
     let sigma_space_sq = 2.0 * params.sigma_space * params.sigma_space;
-    let sigma_range_sq = 2.0 * params.sigma_range * params.sigma_range;
+    // Guidance is u8 (0-255); scale the range sigma accordingly.
+    let sigma_range_u8 = params.sigma_range * 255.0;
+    let sigma_range_sq = 2.0 * sigma_range_u8 * sigma_range_u8;
 
     let channels = 3;
 

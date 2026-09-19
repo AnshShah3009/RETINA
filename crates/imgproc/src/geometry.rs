@@ -568,20 +568,16 @@ pub fn get_rotation_matrix(center: Point2<f32>, angle: f32, scale: f32) -> Matri
     let cos_a = angle.cos();
     let sin_a = angle.sin();
 
-    let tx = center.x * (1.0 - scale * cos_a) + center.y * scale * sin_a;
-    let ty = center.y * (1.0 - scale * cos_a) - center.x * scale * sin_a;
+    // OpenCV getRotationMatrix2D convention (α = s·cosθ, β = s·sinθ):
+    //   tx = (1−α)·cx − β·cy,  ty = β·cx + (1−α)·cy
+    // so that the fixed point maps to itself. A previous revision had both
+    // cross terms' signs flipped, rotating about a different point entirely.
+    let alpha = scale * cos_a;
+    let beta = scale * sin_a;
+    let tx = (1.0 - alpha) * center.x - beta * center.y;
+    let ty = beta * center.x + (1.0 - alpha) * center.y;
 
-    Matrix3::new(
-        scale * cos_a,
-        scale * sin_a,
-        tx,
-        -scale * sin_a,
-        scale * cos_a,
-        ty,
-        0.0,
-        0.0,
-        1.0,
-    )
+    Matrix3::new(alpha, beta, tx, -beta, alpha, ty, 0.0, 0.0, 1.0)
 }
 
 pub fn get_translation_matrix(dx: f32, dy: f32) -> Matrix3<f32> {

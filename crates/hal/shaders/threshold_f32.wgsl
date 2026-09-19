@@ -5,6 +5,8 @@ struct Params {
     max_value: f32,
     typ: u32, // 0: Binary, 1: BinaryInv, 2: Trunc, 3: ToZero, 4: ToZeroInv
     len: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_data: array<f32>;

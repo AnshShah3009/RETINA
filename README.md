@@ -1,4 +1,4 @@
-# rust-cv-native
+# Retina
 
 [![Build and Test](https://github.com/AnshShah3009/rust-cv-native/actions/workflows/build.yml/badge.svg)](https://github.com/AnshShah3009/rust-cv-native/actions/workflows/build.yml)
 

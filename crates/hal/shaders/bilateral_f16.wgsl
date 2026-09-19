@@ -3,8 +3,11 @@ struct Params {
     width: u32,
     height: u32,
     radius: i32,
-    sigma_color_sq_inv: f16,
-    sigma_space_sq_inv: f16,
+    sigma_color_sq_inv: f32,
+    sigma_space_sq_inv: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_data: array<f16>;
@@ -39,7 +42,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let dist_sq = f16(i * i + j * j);
             let range_sq = (val - center_val) * (val - center_val);
             
-            let weight = exp(dist_sq * params.sigma_space_sq_inv + range_sq * params.sigma_color_sq_inv);
+            let weight = exp(dist_sq * f16(params.sigma_space_sq_inv) + range_sq * f16(params.sigma_color_sq_inv));
             sum += val * weight;
             norm += weight;
         }

@@ -16,6 +16,8 @@ struct StereoGpuParams {
     num_disparities: u32,
     block_size: u32,
     method: u32,
+    _pad0: u32,
+    _pad1: u32, // pad to 32 bytes for WGSL uniform alignment
 }
 
 pub fn stereo_match<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
@@ -47,6 +49,8 @@ pub fn stereo_match<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
             crate::context::StereoMatchMethod::BlockMatching => 0,
             crate::context::StereoMatchMethod::SemiGlobalMatching => 1,
         },
+        _pad0: 0,
+        _pad1: 0,
     };
 
     let params_buffer = ctx

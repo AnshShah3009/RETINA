@@ -35,10 +35,13 @@
 pub mod akaze;
 /// ArUco marker detection, generation, and pose estimation (tensor-based API)
 pub mod aruco;
+pub mod aruco_tables;
 /// Optimal assignment / bipartite matching (Hungarian algorithm)
 pub mod assignment;
 /// BRIEF (Binary Robust Independent Elementary Features) descriptor
 pub mod brief;
+/// ChArUco board detection — fiducial marker board with chessboard corners
+pub mod charuco;
 /// Feature descriptor types and trait implementations
 pub mod descriptor;
 /// FAST (Features from Accelerated Segment Test) corner detection
@@ -67,10 +70,13 @@ pub mod orb;
 pub mod ransac;
 /// SIFT (Scale-Invariant Feature Transform) detector and descriptor
 pub mod sift;
+/// USAC/NAPSAC/MAGSAC — enhanced RANSAC sampling and scoring strategies
+pub mod usac;
 
 pub use akaze::*;
 pub use assignment::*;
 pub use brief::*;
+pub use charuco::*;
 pub use descriptor::*;
 pub use fast::*;
 pub use flann::*;
@@ -85,6 +91,7 @@ pub use matcher::*;
 pub use orb::*;
 pub use ransac::*;
 pub use sift::*;
+pub use usac::*;
 
 pub use cv_core::{Error, KeyPoint, KeyPoints, Result};
 

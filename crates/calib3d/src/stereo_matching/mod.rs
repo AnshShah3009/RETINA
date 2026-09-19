@@ -68,7 +68,11 @@ impl DisparityMap {
     pub fn new(width: u32, height: u32, min_d: i32, max_d: i32) -> Self {
         let size = (width * height) as usize;
         Self {
-            data: vec![0.0; size],
+            // Initialize to NaN: unprocessed border pixels must not look like
+            // a valid disparity (negative disparities ARE legal, so a numeric
+            // sentinel would collide). NaN fails every comparison-based
+            // validity filter naturally.
+            data: vec![f32::NAN; size],
             width,
             height,
             min_disparity: min_d,
@@ -78,7 +82,7 @@ impl DisparityMap {
 
     pub fn get(&self, x: u32, y: u32) -> f32 {
         let idx = (y * self.width + x) as usize;
-        self.data.get(idx).copied().unwrap_or(0.0)
+        self.data.get(idx).copied().unwrap_or(f32::NAN)
     }
 
     pub fn set(&mut self, x: u32, y: u32, value: f32) {
@@ -138,7 +142,7 @@ impl StereoParams {
 
     /// Compute depth from disparity
     pub fn disparity_to_depth(&self, disparity: f64) -> Option<f64> {
-        if disparity.abs() < 1e-6 {
+        if !disparity.is_finite() || disparity.abs() < 1e-6 {
             None
         } else {
             Some((self.focal_length * self.baseline) / disparity)
@@ -151,7 +155,7 @@ pub fn compute_validity_mask(disparity: &DisparityMap, threshold: f32) -> Vec<bo
     disparity
         .data
         .iter()
-        .map(|&d| d >= threshold && d < (disparity.max_disparity as f32))
+        .map(|&d| d.is_finite() && d >= threshold && d < (disparity.max_disparity as f32))
         .collect()
 }
 

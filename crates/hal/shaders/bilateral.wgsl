@@ -4,6 +4,9 @@ struct Params {
     radius: i32,
     sigma_color_sq_inv: f32,
     sigma_space_sq_inv: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_data: array<u32>;

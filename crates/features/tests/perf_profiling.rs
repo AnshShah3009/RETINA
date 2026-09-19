@@ -3,6 +3,7 @@ use image::{GrayImage, Luma};
 use std::time::Instant;
 
 #[test]
+#[ignore = "perf profiling — too slow for CI"]
 fn profile_features_algorithms() {
     println!("--- Profiling cv-features ---");
     let width = 1920;

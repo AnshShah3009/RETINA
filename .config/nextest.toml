@@ -1,0 +1,11 @@
+# Prevent CI hangs from unbounded GPU wait/map loops on software adapters.
+[profile.default]
+slow-timeout = { period = "120s", terminate-after = 3 }
+test-threads = "num-cpus"
+
+# Wall-clock assertions are sensitive to CI scheduling jitter: a genuine
+# regression (e.g. a return to a 50ms polling wake) fails every attempt,
+# while a loaded runner only trips the threshold occasionally.
+[[profile.default.overrides]]
+filter = 'test(perf_test_vram_wait_latency) | test(perf_test_adaptive_mode_overhead) | test(perf_test_orchestrator_throughput)'
+retries = 3

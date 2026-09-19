@@ -3,6 +3,7 @@ use cv_scientific::spatial::KDTree;
 use std::time::Instant;
 
 #[test]
+#[ignore = "perf profiling — too slow for CI"]
 fn profile_scientific_algorithms() {
     println!("--- Profiling cv-scientific ---");
     let num_elements = 1_000_000;

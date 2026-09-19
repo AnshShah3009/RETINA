@@ -1,6 +1,8 @@
 struct Params {
     len: u32,
     code: u32, // 0: RgbToGray, 1: BgrToGray, 2: GrayToRgb
+    _pad0: u32,
+    _pad1: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_data: array<f32>;

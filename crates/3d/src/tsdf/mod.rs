@@ -8,7 +8,6 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 
 use cv_core::CameraIntrinsicsF32;
-use cv_hal::compute::ComputeDevice;
 use cv_runtime::orchestrator::RuntimeRunner;
 
 /// Re-export the canonical f32 camera intrinsics from cv-core.
@@ -121,62 +120,13 @@ impl TSDFVolume {
         height: usize,
         group: &RuntimeRunner,
     ) {
-        // GPU Path
-        if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-            // For GPU integration, we currently require a fixed-size dense volume.
-            // In a real sparse TSDF system, we'd use a Voxel Hashing approach on GPU.
-            // For now, we'll implement a dense fallback for GPU if the area is limited.
-            let vol_size = 256; // 256^3 dense volume
-            let shape = cv_core::TensorShape::new(2, vol_size, vol_size); // (TSDF, Weight) packed in channels
-
-            use cv_core::DataType;
-            use cv_hal::storage::GpuStorage;
-            use std::marker::PhantomData;
-
-            let mut gpu_vol: cv_core::Tensor<f32, GpuStorage<f32>> = cv_core::Tensor {
-                storage: GpuStorage::new_with_ctx(gpu, vol_size * vol_size * vol_size * 2, 0.0)
-                    .map_err(|_| ())
-                    .unwrap(),
-                shape,
-                dtype: DataType::F32,
-                _phantom: PhantomData,
-            };
-
-            let intrinsics_arr = [intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy];
-            let pose_arr = extrinsics.as_slice();
-            let mut pose_mat = [[0.0f32; 4]; 4];
-            for i in 0..4 {
-                for j in 0..4 {
-                    pose_mat[i][j] = pose_arr[j * 4 + i];
-                }
-            }
-
-            // Create depth tensor on GPU
-            let depth_tensor: cv_core::Tensor<f32, GpuStorage<f32>> = cv_core::Tensor {
-                storage: GpuStorage::from_slice_ctx(gpu, depth_image)
-                    .map_err(|_| ())
-                    .unwrap(),
-                shape: cv_core::TensorShape::new(1, height, width),
-                dtype: DataType::F32,
-                _phantom: PhantomData,
-            };
-
-            if cv_hal::gpu_kernels::tsdf::integrate(
-                gpu,
-                &depth_tensor,
-                &pose_mat,
-                &intrinsics_arr,
-                &mut gpu_vol,
-                self.voxel_size,
-                self.truncation_distance,
-            )
-            .is_ok()
-            {
-                // In a full implementation, we'd read back and merge into sparse blocks.
-                // For now, we just demonstrate the dispatch.
-                return;
-            }
-        }
+        // NOTE: A previous revision dispatched GPU integration into a freshly
+        // allocated 256^3 dense volume and returned early. Without a
+        // read-back/merge step into the sparse block storage, every frame was
+        // integrated into a throwaway buffer and silently dropped, leaving
+        // extract_mesh()/extract_point_cloud() empty on GPU machines. Until
+        // merge-back exists, always use the CPU path below so data is actually
+        // integrated into self.blocks.
 
         // CPU Fallback (Rayon)
         // Compute inverse extrinsics for projective distance

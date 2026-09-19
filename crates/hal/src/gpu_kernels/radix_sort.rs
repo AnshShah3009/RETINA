@@ -427,7 +427,8 @@ pub fn gpu_exclusive_scan(
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Scan NumElements"),
-            contents: bytemuck::bytes_of(&num_elements),
+            // WebGPU/Metal require uniform bindings to be a multiple of 16 bytes.
+            contents: bytemuck::bytes_of(&[num_elements, 0u32, 0u32, 0u32]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 

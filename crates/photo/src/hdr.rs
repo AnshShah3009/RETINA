@@ -65,6 +65,11 @@ pub fn merge_debevec<T: Float + Default + 'static>(
             "At least two exposures are required for Debevec merge".into(),
         ));
     }
+    if exposure_times.iter().any(|&t| !t.is_finite() || t <= 0.0) {
+        return Err(cv_core::Error::InvalidInput(
+            "Exposure times must be finite and positive".into(),
+        ));
+    }
 
     let (channels, height, width) = images[0].shape.chw();
     let n_pixels = height * width;

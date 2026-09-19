@@ -407,16 +407,28 @@ pub mod buffer_utils {
         GLOBAL_GPU_POOL.get_or_init(GpuBufferPool::new)
     }
 
-    /// Create a GPU buffer from data
+    /// Create a GPU buffer from data.
+    /// Uniform buffers are padded to a 16-byte multiple (WebGPU / Metal requirement).
     pub fn create_buffer<T: bytemuck::Pod>(
         device: &Device,
         data: &[T],
         usage: BufferUsages,
     ) -> Buffer {
         use wgpu::util::DeviceExt;
+        let bytes = bytemuck::cast_slice(data);
+        let contents = if usage.contains(BufferUsages::UNIFORM) {
+            let mut padded = bytes.to_vec();
+            let rem = padded.len() % 16;
+            if rem != 0 {
+                padded.resize(padded.len() + (16 - rem), 0);
+            }
+            padded
+        } else {
+            bytes.to_vec()
+        };
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Compute Buffer"),
-            contents: bytemuck::cast_slice(data),
+            contents: &contents,
             usage,
         })
     }
@@ -460,18 +472,37 @@ pub mod buffer_utils {
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         let slice = staging_buffer.slice(..);
         slice.map_async(MapMode::Read, move |res| {
-            tx.send(res).ok();
+            if tx.send(res).is_err() {
+                tracing::warn!("GPU readback: receiver dropped before mapping completed");
+            }
         });
 
-        // Block until specifically this submission is finished
+        // Block until specifically this submission is finished (bounded wait for CI/software GPUs).
         let _ = device.poll(wgpu::PollType::Wait {
             submission_index: Some(submission_index),
-            timeout: None,
+            timeout: Some(std::time::Duration::from_secs(120)),
         });
 
-        // Verify mapping succeeded (discard inner Ok value)
-        rx.try_recv()
-            .map_err(|_| crate::Error::DeviceError("Readback channel failed".into()))?
+        // Mapping callback should have fired after Wait. Poll briefly if not.
+        // Important: try_recv consumes the oneshot — do not await afterward.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let map_result = loop {
+            match rx.try_recv() {
+                Ok(res) => break res,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    if std::time::Instant::now() > deadline {
+                        return Err(crate::Error::DeviceError("Readback map timed out".into()));
+                    }
+                    let _ = device.poll(wgpu::PollType::Poll);
+                    std::thread::yield_now();
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(crate::Error::DeviceError("Readback channel failed".into()));
+                }
+            }
+        };
+
+        map_result
             .map_err(|e| crate::Error::DeviceError(format!("Buffer mapping failed: {:?}", e)))?;
 
         let data = slice.get_mapped_range();
@@ -825,6 +856,7 @@ pub mod tsdf_gpu {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let output_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
@@ -960,6 +992,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroups, 1, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back
         let output_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
@@ -988,10 +1021,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 /// GPU-accelerated spatial queries
 pub mod spatial_gpu {
-    use crate::gpu_kernels::buffer_utils::{create_buffer, create_buffer_uninit, read_buffer};
+    use crate::gpu_kernels::buffer_utils::{create_buffer, read_buffer};
     use nalgebra::Vector3;
     use std::sync::Arc;
-    use wgpu::util::DeviceExt;
     use wgpu::BufferUsages;
 
     /// Build KDTree on GPU (parallel construction) - simplified version
@@ -1015,7 +1047,7 @@ pub mod spatial_gpu {
             min_bound.z = min_bound.z.min(p.z);
             max_bound.x = max_bound.x.max(p.x);
             max_bound.y = max_bound.y.max(p.y);
-            max_bound.z = max_bound.x.max(p.z);
+            max_bound.z = max_bound.z.max(p.z);
         }
 
         // Compute scale for morton encoding
@@ -1038,10 +1070,18 @@ pub mod spatial_gpu {
             })
             .collect();
 
-        // Store points and morton codes
+        // Store points and morton codes (COPY_SRC required for readback in queries)
         let points_data: Vec<[f32; 4]> = points.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
-        let points_buf = create_buffer(&device, &points_data, BufferUsages::STORAGE);
-        let morton_buf = create_buffer(&device, &morton_codes, BufferUsages::STORAGE);
+        let points_buf = create_buffer(
+            &device,
+            &points_data,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
+        let morton_buf = create_buffer(
+            &device,
+            &morton_codes,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
 
         Ok(GpuKDTree {
             nodes_buffer: points_buf,
@@ -1173,13 +1213,21 @@ pub mod spatial_gpu {
             }
         }
 
-        // Create buffers
-        let voxel_buf = create_buffer(&device, &voxel_accum, BufferUsages::STORAGE);
+        // Create buffers (COPY_SRC required for voxel_grid_downsample readback)
+        let voxel_buf = create_buffer(
+            &device,
+            &voxel_accum,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
         let occupied: Vec<u32> = voxel_accum
             .iter()
             .map(|v| if v[3] > 0.5 { 1u32 } else { 0u32 })
             .collect();
-        let occupied_buf = create_buffer(&device, &occupied, BufferUsages::STORAGE);
+        let occupied_buf = create_buffer(
+            &device,
+            &occupied,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
 
         Ok(GpuVoxelGrid {
             voxel_buffer: voxel_buf,
@@ -1190,88 +1238,8 @@ pub mod spatial_gpu {
         })
     }
 
-    /// Optimized GPU voxel grid with buffer pooling
-    struct VoxelGridState {
-        points_buf: Option<wgpu::Buffer>,
-        sums_buf: Option<wgpu::Buffer>,
-        params_buf: Option<wgpu::Buffer>,
-        max_points: u32,
-    }
-
-    impl VoxelGridState {
-        fn new() -> Self {
-            Self {
-                points_buf: None,
-                sums_buf: None,
-                params_buf: None,
-                max_points: 0,
-            }
-        }
-
-        fn ensure_buffers(&mut self, device: &Arc<wgpu::Device>, num_points: u32, hash_size: u32) {
-            if num_points > self.max_points {
-                self.max_points = num_points;
-                self.points_buf = None;
-                self.sums_buf = None;
-                self.params_buf = None;
-            }
-
-            let pts_size = (num_points * 12) as u64;
-            if self.points_buf.is_none() {
-                self.points_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Voxel Points Pooled"),
-                    size: pts_size,
-                    usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-            }
-
-            let sums_size = (hash_size * 16) as u64;
-            if self.sums_buf.is_none() {
-                self.sums_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Voxel Sums Pooled"),
-                    size: sums_size,
-                    usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-            }
-
-            let params_size = 32u64; // Params struct is 8 floats = 32 bytes
-            if self.params_buf.is_none() {
-                self.params_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Voxel Params Pooled"),
-                    size: params_size,
-                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-            }
-        }
-    }
-
-    static VOXEL_GRID_STATE: std::sync::OnceLock<std::sync::Mutex<VoxelGridState>> =
-        std::sync::OnceLock::new();
-
-    fn get_voxel_grid_state() -> &'static std::sync::Mutex<VoxelGridState> {
-        VOXEL_GRID_STATE.get_or_init(|| std::sync::Mutex::new(VoxelGridState::new()))
-    }
-
-    /// Get downsampled points from voxel grid (GPU-accelerated)
+    /// Get downsampled points from voxel grid
     pub fn voxel_grid_downsample(
-        gpu: &crate::gpu::GpuContext,
-        points: &[Vector3<f32>],
-        voxel_size: f32,
-    ) -> crate::Result<Vec<Vector3<f32>>> {
-        voxel_grid_downsample_gpu_optimized(gpu, points, voxel_size)
-    }
-
-    /// Optimized GPU voxel grid using direct voxel indexing + atomic accumulation
-    /// Key optimizations:
-    /// 1. Buffer pooling to eliminate allocation overhead
-    /// 2. Direct voxel grid (no hash) when bounds are small
-    /// 3. Atomic integer operations for float accumulation (bitcast)
-    /// 4. Single-pass compute shader
-    /// 5. Pre-allocated result buffer
-    pub fn voxel_grid_downsample_gpu_optimized(
         gpu: &crate::gpu::GpuContext,
         points: &[Vector3<f32>],
         voxel_size: f32,
@@ -1280,246 +1248,24 @@ pub mod spatial_gpu {
             return Ok(vec![]);
         }
 
-        let device = gpu.device.clone();
-        let queue = &gpu.queue;
-        let num_points = points.len() as u32;
+        let grid = build_voxel_grid(gpu, points, voxel_size)?;
 
-        // Compute bounding box
-        let mut min_bound = Vector3::new(f32::MAX, f32::MAX, f32::MAX);
-        let mut max_bound = Vector3::new(f32::MIN, f32::MIN, f32::MIN);
-        for p in points {
-            min_bound.x = min_bound.x.min(p.x);
-            min_bound.y = min_bound.y.min(p.y);
-            min_bound.z = min_bound.z.min(p.z);
-            max_bound.x = max_bound.x.max(p.x);
-            max_bound.y = max_bound.y.max(p.y);
-            max_bound.z = max_bound.z.max(p.z);
-        }
-
-        // Calculate voxel grid dimensions
-        let inv_voxel = 1.0 / voxel_size;
-        let vol_x = ((max_bound.x - min_bound.x) * inv_voxel).ceil() as u32 + 1;
-        let vol_y = ((max_bound.y - min_bound.y) * inv_voxel).ceil() as u32 + 1;
-        let vol_z = ((max_bound.z - min_bound.z) * inv_voxel).ceil() as u32 + 1;
-        let voxel_count = vol_x * vol_y * vol_z;
-
-        // Use direct voxel grid if small enough, otherwise hash
-        const MAX_DIRECT_VOXELS: u32 = 256 * 256; // 65K max for direct indexing
-
-        let use_direct = voxel_count <= MAX_DIRECT_VOXELS;
-
-        let shader = if use_direct {
-            r#"
-struct Params {
-    voxel_size: f32,
-    num_points: u32,
-    min_x: f32,
-    min_y: f32,
-    min_z: f32,
-    vol_x: u32,
-    vol_y: u32,
-    vol_z: u32,
-}
-
-@group(0) @binding(0) var<storage, read> input_points: array<vec3<f32>>;
-@group(0) @binding(1) var<uniform> params: Params;
-// x_sum, y_sum, z_sum, count - 4 x u32 for atomic ops
-@group(0) @binding(2) var<storage, read_write> voxel_data: array<atomic<u32>>;
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
-    if (idx >= params.num_points) { return; }
-
-    let p = input_points[idx];
-    let vx = u32(floor((p.x - params.min_x) / params.voxel_size));
-    let vy = u32(floor((p.y - params.min_y) / params.voxel_size));
-    let vz = u32(floor((p.z - params.min_z) / params.voxel_size));
-
-    if (vx >= params.vol_x || vy >= params.vol_y || vz >= params.vol_z) { return; }
-
-    let voxel_idx = (vz * params.vol_y + vy) * params.vol_x + vx;
-    let base = voxel_idx * 4u;
-
-    // Atomic add using bitcast for float accumulation
-    let px_bits = bitcast<u32>(p.x);
-    let py_bits = bitcast<u32>(p.y);
-    let pz_bits = bitcast<u32>(p.z);
-
-    atomicAdd(&voxel_data[base + 0u], px_bits);
-    atomicAdd(&voxel_data[base + 1u], py_bits);
-    atomicAdd(&voxel_data[base + 2u], pz_bits);
-    atomicAdd(&voxel_data[base + 3u], 1u);
-}
-"#
-        } else {
-            // Hash-based for large voxel grids
-            r#"
-struct Params {
-    voxel_size: f32,
-    num_points: u32,
-    min_x: f32,
-    min_y: f32,
-    min_z: f32,
-    vol_x: u32,
-    vol_y: u32,
-    vol_z: u32,
-}
-
-@group(0) @binding(0) var<storage, read> input_points: array<vec3<f32>>;
-@group(0) @binding(1) var<uniform> params: Params;
-@group(0) @binding(2) var<storage, read_write> voxel_data: array<atomic<u32>>;
-
-fn hash_voxel(x: u32, y: u32, z: u32) -> u32 {
-    let xx = x * 73856093u;
-    let yy = y * 19349663u;
-    let zz = z * 83492791u;
-    return (xx ^ yy ^ zz) % 65536u;
-}
-
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
-    if (idx >= params.num_points) { return; }
-
-    let p = input_points[idx];
-    let vx = u32(floor((p.x - params.min_x) / params.voxel_size));
-    let vy = u32(floor((p.y - params.min_y) / params.voxel_size));
-    let vz = u32(floor((p.z - params.min_z) / params.voxel_size));
-
-    if (vx >= params.vol_x || vy >= params.vol_y || vz >= params.vol_z) { return; }
-
-    let hash = hash_voxel(vx, vy, vz);
-    let base = hash * 4u;
-
-    let px_bits = bitcast<u32>(p.x);
-    let py_bits = bitcast<u32>(p.y);
-    let pz_bits = bitcast<u32>(p.z);
-
-    atomicAdd(&voxel_data[base + 0u], px_bits);
-    atomicAdd(&voxel_data[base + 1u], py_bits);
-    atomicAdd(&voxel_data[base + 2u], pz_bits);
-    atomicAdd(&voxel_data[base + 3u], 1u);
-}
-"#
-        };
-
-        #[repr(C)]
-        #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-        struct Params {
-            voxel_size: f32,
-            num_points: u32,
-            min_x: f32,
-            min_y: f32,
-            min_z: f32,
-            vol_x: u32,
-            vol_y: u32,
-            vol_z: u32,
-        }
-
-        // Use pooled buffers
-        let hash_size = if use_direct { voxel_count } else { 65536u32 };
-
-        let (points_buf, sums_buf, params_buf) = {
-            let mut state = get_voxel_grid_state().lock().unwrap();
-            state.ensure_buffers(&device, num_points, hash_size);
-            // Clone the buffers to avoid borrow issues
-            (
-                state.points_buf.as_ref().unwrap().clone(),
-                state.sums_buf.as_ref().unwrap().clone(),
-                state.params_buf.as_ref().unwrap().clone(),
-            )
-        };
-
-        // Upload points
-        let points_data: Vec<[f32; 3]> = points.iter().map(|p| [p.x, p.y, p.z]).collect();
-
-        queue.write_buffer(&points_buf, 0, bytemuck::cast_slice(&points_data));
-        queue.write_buffer(
-            &params_buf,
+        // Read back the voxel centroids
+        let voxel_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
+            grid.device.clone(),
+            &gpu.queue,
+            &grid.voxel_buffer,
             0,
-            bytemuck::bytes_of(&Params {
-                voxel_size,
-                num_points,
-                min_x: min_bound.x,
-                min_y: min_bound.y,
-                min_z: min_bound.z,
-                vol_x: vol_x,
-                vol_y: vol_y,
-                vol_z: vol_z,
-            }),
-        );
-
-        // Zero the sums buffer
-        let zero_data = vec![0u8; (hash_size * 16) as usize];
-        queue.write_buffer(&sums_buf, 0, &zero_data);
-
-        // Create pipeline and dispatch
-        let pipeline = gpu.create_compute_pipeline(shader, "main");
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Voxel Bind Group"),
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: points_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: params_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: sums_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Voxel Compute"),
-        });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups((num_points + 255) / 256, 1, 1);
-        }
-        queue.submit([encoder.finish()]);
-
-        // Read back results
-        let voxel_raw: Vec<u32> = pollster::block_on(read_buffer(
-            device.clone(),
-            queue,
-            &sums_buf,
-            0,
-            (hash_size * 16) as usize,
+            grid.num_voxels as usize * 16,
         ))?;
 
-        // Decode centroids
-        let mut result = Vec::with_capacity(voxel_count as usize);
-
-        for i in 0..hash_size as usize {
-            let base = i * 4;
-            let count = voxel_raw[base + 3];
-            if count > 0 {
-                let x = f32::from_bits(voxel_raw[base + 0]) / count as f32;
-                let y = f32::from_bits(voxel_raw[base + 1]) / count as f32;
-                let z = f32::from_bits(voxel_raw[base + 2]) / count as f32;
-                result.push(Vector3::new(x, y, z));
-            }
-        }
+        let result: Vec<Vector3<f32>> = voxel_data
+            .iter()
+            .filter(|v| v[3] > 0.5) // occupied
+            .map(|v| Vector3::new(v[0], v[1], v[2]))
+            .collect();
 
         Ok(result)
-    }
-
-    /// Legacy function - redirects to optimized version
-    pub fn voxel_grid_downsample_gpu(
-        gpu: &crate::gpu::GpuContext,
-        points: &[Vector3<f32>],
-        voxel_size: f32,
-    ) -> crate::Result<Vec<Vector3<f32>>> {
-        voxel_grid_downsample_gpu_optimized(gpu, points, voxel_size)
     }
 
     /// GPU KDTree handle
@@ -1561,9 +1307,9 @@ pub mod mesh_gpu {
         let num_vertices = vertices.len() as u32;
         let num_faces = faces.len() as u32;
 
-        // Create buffers
+        // Create buffers — WGSL `array<vec3<u32>>` has 16-byte stride
         let vertices_data: Vec<[f32; 4]> = vertices.iter().map(|p| [p.x, p.y, p.z, 0.0]).collect();
-        let faces_data: Vec<[u32; 3]> = faces.iter().map(|f| [f[0], f[1], f[2]]).collect();
+        let faces_data: Vec<[u32; 4]> = faces.iter().map(|f| [f[0], f[1], f[2], 0]).collect();
 
         let vertices_buf = create_buffer(&device, &vertices_data, BufferUsages::STORAGE);
         let faces_buf = create_buffer(&device, &faces_data, BufferUsages::STORAGE);
@@ -1614,6 +1360,7 @@ pub mod mesh_gpu {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let normals: Vec<[f32; 4]> = pollster::block_on(read_buffer(
@@ -1839,16 +1586,16 @@ pub mod mesh_gpu {
             ],
         });
 
-        // Dispatch compute shader
-        let workgroup_count = num_vertices.div_ceil(256);
+        // Shader is serial (@workgroup_size(1)) and reduces all vertices in one invocation.
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut compute_pass =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             compute_pass.set_pipeline(&pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
+            compute_pass.dispatch_workgroups(1, 1, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let bounds_data: Vec<f32> =
@@ -1994,6 +1741,25 @@ pub mod odometry_gpu {
     use nalgebra::{Matrix4, Vector3};
     use wgpu::BufferUsages;
 
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct VertexMapParams {
+        width: u32,
+        height: u32,
+        fx: f32,
+        fy: f32,
+        cx: f32,
+        cy: f32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct NormalMapParams {
+        width: u32,
+        height: u32,
+        _pad: [u32; 2],
+    }
+
     /// Compute RGBD odometry on GPU
     #[allow(clippy::too_many_arguments)]
     pub fn compute_odometry(
@@ -2044,15 +1810,15 @@ pub mod odometry_gpu {
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         );
 
-        let intrinsics_f32: [f32; 6] = [
-            width as f32,
-            height as f32,
-            intrinsics[0],
-            intrinsics[1],
-            intrinsics[2],
-            intrinsics[3],
-        ];
-        let params_buf = create_buffer(&device, &intrinsics_f32, BufferUsages::UNIFORM);
+        let intrinsics_f32 = VertexMapParams {
+            width,
+            height,
+            fx: intrinsics[0],
+            fy: intrinsics[1],
+            cx: intrinsics[2],
+            cy: intrinsics[3],
+        };
+        let params_buf = create_buffer(&device, &[intrinsics_f32], BufferUsages::UNIFORM);
 
         // Create compute pipeline
         let shader_source = include_str!("odometry_vertex_map.wgsl");
@@ -2089,6 +1855,7 @@ pub mod odometry_gpu {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let vertex_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
@@ -2121,9 +1888,18 @@ pub mod odometry_gpu {
         let device = gpu.device.clone();
         let queue = &gpu.queue;
 
-        // Create buffers
-        let vertices_data: Vec<[f32; 4]> =
-            vertex_map.iter().map(|v| [v.x, v.y, v.z, 0.0]).collect();
+        // Preserve validity in .w (shader rejects vertices with w < 0.5)
+        let vertices_data: Vec<[f32; 4]> = vertex_map
+            .iter()
+            .map(|v| {
+                let valid = if v.x != 0.0 || v.y != 0.0 || v.z != 0.0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                [v.x, v.y, v.z, valid]
+            })
+            .collect();
         let vertex_map_buf = create_buffer(&device, &vertices_data, BufferUsages::STORAGE);
 
         // Output: normal map
@@ -2134,7 +1910,15 @@ pub mod odometry_gpu {
             BufferUsages::STORAGE | BufferUsages::COPY_SRC,
         );
 
-        let params_buf = create_buffer(&device, &[width, height], BufferUsages::UNIFORM);
+        let params_buf = create_buffer(
+            &device,
+            &[NormalMapParams {
+                width,
+                height,
+                _pad: [0, 0],
+            }],
+            BufferUsages::UNIFORM,
+        );
 
         // Create compute pipeline
         let shader_source = include_str!("odometry_normal_map.wgsl");
@@ -2171,6 +1955,7 @@ pub mod odometry_gpu {
             compute_pass.set_bind_group(0, &bind_group, &[]);
             compute_pass.dispatch_workgroups(workgroup_x, workgroup_y, 1);
         }
+        queue.submit(Some(encoder.finish()));
 
         // Read back results
         let normal_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(

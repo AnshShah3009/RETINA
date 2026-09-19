@@ -203,7 +203,8 @@ impl Pipeline {
                         device_runtime.context()
                     {
                         // Create tensors for all buffers (keep them alive for dispatch)
-                        let mut all_tensors: Vec<Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> = Vec::new();
+                        let mut all_tensors: Vec<Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> =
+                            Vec::new();
 
                         // Input tensors
                         for &input_id in inputs {
@@ -231,11 +232,7 @@ impl Pipeline {
                             .max()
                             .unwrap_or(1);
 
-                        let workgroups = (
-                            ((max_size as f64 / 64.0).ceil() as u32).max(1),
-                            1,
-                            1,
-                        );
+                        let workgroups = (((max_size as f64 / 64.0).ceil() as u32).max(1), 1, 1);
 
                         // Dispatch kernel - tensors stay alive through this call
                         gpu_ctx.dispatch(_name, &all_refs, _params, workgroups)?;

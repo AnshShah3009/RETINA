@@ -15,6 +15,9 @@ pub struct ResizeParams {
     pub dst_w: u32,
     pub dst_h: u32,
     pub channels: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32, // pad to 32 bytes for WGSL uniform alignment
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +76,9 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
         dst_w: dst_w as u32,
         dst_h: dst_h as u32,
         channels: c as u32,
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
     };
 
     let params_buffer = ctx

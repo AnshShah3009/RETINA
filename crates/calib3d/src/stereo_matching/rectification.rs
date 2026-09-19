@@ -76,18 +76,40 @@ fn compute_rectification_transforms(
     left_extrinsics: &Pose,
     right_extrinsics: &Pose,
 ) -> Result<(Matrix3<f64>, Matrix3<f64>, CameraIntrinsics)> {
-    // Compute relative pose between cameras
-    // Relative rotation: R = R_left^T * R_right
-    let left_rot_mat = left_extrinsics.rotation_matrix();
-    let relative_rotation = left_rot_mat.transpose() * right_extrinsics.rotation_matrix();
+    // Relative rotation mapping left-camera coordinates to right-camera
+    // coordinates: X_right = M · X_left.
+    let r_left = left_extrinsics.rotation_matrix();
+    let r_right = right_extrinsics.rotation_matrix();
+    let m = r_right * r_left.transpose();
 
-    // Relative translation: t = R_left^T * (t_right - t_left)
-    let relative_translation =
-        left_rot_mat.transpose() * (right_extrinsics.translation - left_extrinsics.translation);
+    // Camera centers under the world→camera convention (X_c = R·X_w + t ⇒ C = −Rᵀ·t).
+    let c_left = -r_left.transpose() * &left_extrinsics.translation;
+    let c_right = -r_right.transpose() * &right_extrinsics.translation;
 
-    // Compute rectification rotation that aligns epipolar lines
-    // This is a simplified version - full implementation requires polar decomposition
-    let rect_rotation = compute_rectification_rotation(&relative_rotation, &relative_translation);
+    // Baseline direction (left → right) in the left camera's frame.
+    let b_left = r_left * (c_right - c_left);
+    if b_left.norm() <= 1e-12 {
+        return Err(cv_core::Error::AlgorithmError(
+            "stereo rectification requires a non-zero baseline".into(),
+        ));
+    }
+    let ex_l = b_left.normalize();
+
+    // Rows of R₁ are the new basis: baseline → +x (epipole at infinity),
+    // old optical axis kept as the new +z (scene stays in front).
+    let k = Vector3::new(0.0, 0.0, 1.0);
+    let mut ey_l = k.cross(&ex_l);
+    if ey_l.norm() < 1e-6 {
+        // Baseline nearly parallel to the optical axis; fall back to +y.
+        ey_l = Vector3::new(0.0, 1.0, 0.0).cross(&ex_l);
+    }
+    let ey_l = ey_l.normalize();
+    let ez_l = ex_l.cross(&ey_l).normalize();
+    let left_rect_rotation = Matrix3::from_columns(&[ex_l, ey_l, ez_l]).transpose();
+
+    // Right camera shares the same world-frame axes expressed through M:
+    // O_right = R₂·R_right = R₁·Mᵀ·R_right = R₁·R_left = O_left ⇒ parallel axes.
+    let right_rect_rotation = left_rect_rotation * m.transpose();
 
     // New common intrinsics (average of both)
     let new_intrinsics = CameraIntrinsics::new(
@@ -99,40 +121,7 @@ fn compute_rectification_transforms(
         left_intrinsics.height,
     );
 
-    let left_rect = intrinsics_matrix(left_intrinsics) * rect_rotation;
-    let right_rect =
-        intrinsics_matrix(right_intrinsics) * rect_rotation * relative_rotation.transpose();
-
-    Ok((left_rect, right_rect, new_intrinsics))
-}
-
-/// Compute rotation matrix for rectification
-fn compute_rectification_rotation(
-    _relative_rotation: &Matrix3<f64>,
-    relative_translation: &Vector3<f64>,
-) -> Matrix3<f64> {
-    // Simplified rectification - make epipole go to infinity
-    // Full implementation would use Bouguet's algorithm
-
-    let t = relative_translation.normalize();
-
-    // New x-axis: translation direction
-    let e1 = t;
-
-    // New y-axis: orthogonal to x and old z (with fallback for degenerate case)
-    let z_axis = Vector3::new(0.0, 0.0, 1.0);
-    let y_axis = Vector3::new(0.0, 1.0, 0.0);
-    let cross = t.cross(&z_axis);
-    let e2 = if cross.norm() < 1e-10 {
-        t.cross(&y_axis).normalize()
-    } else {
-        cross.normalize()
-    };
-
-    // New z-axis: orthogonal to x and y
-    let e3 = e1.cross(&e2);
-
-    Matrix3::from_columns(&[e1, e2, e3])
+    Ok((left_rect_rotation, right_rect_rotation, new_intrinsics))
 }
 
 /// Convert intrinsics to matrix form
@@ -151,11 +140,15 @@ fn intrinsics_matrix(intrinsics: &CameraIntrinsics) -> Matrix3<f64> {
 }
 
 /// Create rectification map for remapping
+///
+/// `rect_rotation` is the pure rectifying ROTATION (orthonormal). The inverse
+/// mapping chain is: dest pixel → normalized ray via new intrinsics →
+/// un-rotate with Rᵀ → project with the ORIGINAL intrinsics.
 fn create_rectification_map(
     width: u32,
     height: u32,
     intrinsics: &CameraIntrinsics,
-    rect_matrix: &Matrix3<f64>,
+    rect_rotation: &Matrix3<f64>,
     new_intrinsics: &CameraIntrinsics,
 ) -> (Vec<f32>, Vec<f32>) {
     let size = (width * height) as usize;
@@ -166,7 +159,8 @@ fn create_rectification_map(
     let inv_new_intrinsics = new_intrinsics_mat
         .try_inverse()
         .unwrap_or(Matrix3::identity());
-    let inv_rect = rect_matrix.try_inverse().unwrap_or(Matrix3::identity());
+    // Orthonormal: inverse is the transpose.
+    let inv_rect = rect_rotation.transpose();
 
     for y in 0..height {
         for x in 0..width {
@@ -183,9 +177,14 @@ fn create_rectification_map(
             let src_pixel = intrinsics_matrix(intrinsics) * original;
 
             let idx = (y * width + x) as usize;
-            if src_pixel[2].abs() > 1e-10 {
+            if src_pixel[2] > 1e-10 {
                 map_x[idx] = (src_pixel[0] / src_pixel[2]) as f32;
                 map_y[idx] = (src_pixel[1] / src_pixel[2]) as f32;
+            } else {
+                // Point behind / on the plane of the rectified camera: mark
+                // invalid so remap does not sample pixel (0,0).
+                map_x[idx] = -1.0;
+                map_y[idx] = -1.0;
             }
         }
     }

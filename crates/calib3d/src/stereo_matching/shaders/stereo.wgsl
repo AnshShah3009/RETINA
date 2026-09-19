@@ -7,6 +7,9 @@ struct StereoParams {
     min_disparity: u32,
     max_disparity: u32,
     block_size: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0)

@@ -7,6 +7,7 @@ use image::{GrayImage, Luma};
 use std::time::Instant;
 
 #[test]
+#[ignore = "perf profiling — too slow for CI"]
 fn profile_imgproc_algorithms() {
     println!("--- Profiling cv-imgproc ---");
     let width = 1920;

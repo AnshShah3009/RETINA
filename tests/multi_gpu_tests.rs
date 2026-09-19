@@ -26,21 +26,21 @@ fn test_cross_device_parity() {
         let info = adapter.get_info();
         println!("--- Testing Adapter {}: {} ---", i, info.name);
 
-        // Skip problematic AMD Integrated GPU on Vulkan that panics in driver
-        if info.name.contains("AMD") && info.backend == wgpu::Backend::Vulkan {
-            println!("  ! Skipping AMD Integrated GPU on Vulkan to avoid driver panic");
+        // Skip GL/OpenGL backends (radeonsi) — not suitable for GPU compute testing
+        if info.backend != wgpu::Backend::Vulkan {
+            println!("  ! Skipping non-Vulkan backend ({:?})", info.backend);
             continue;
         }
 
-        // Skip llvmpipe
-        if info.name.contains("llvmpipe") {
-            println!("  ! Skipping software renderer");
-            continue;
-        }
-
-        // Skip Apple Paravirtual device (CI virtual GPU that doesn't support compute)
-        if info.name.contains("Paravirtual") || info.name.contains("paravirtual") {
-            println!("  ! Skipping paravirtual GPU (CI virtual device)");
+        // Skip software / CI virtual renderers (can hang on map/readback).
+        let name_l = info.name.to_ascii_lowercase();
+        if name_l.contains("llvmpipe")
+            || name_l.contains("lavapipe")
+            || name_l.contains("swiftshader")
+            || name_l.contains("paravirtual")
+            || info.device_type == wgpu::DeviceType::Cpu
+        {
+            println!("  ! Skipping software/virtual renderer ({})", info.name);
             continue;
         }
 

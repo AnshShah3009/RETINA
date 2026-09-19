@@ -13,6 +13,9 @@ struct BilateralParams {
     radius: i32,
     sigma_color_sq_inv: f32,
     sigma_space_sq_inv: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32, // pad to 32 bytes for WGSL uniform alignment
 }
 
 unsafe impl bytemuck::Pod for BilateralParams {}
@@ -25,6 +28,14 @@ pub fn bilateral_filter<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zer
     sigma_color: T,
     sigma_space: T,
 ) -> Result<crate::GpuTensor<T>> {
+    // Only the f32 WGSL shader exists; reject other dtypes instead of
+    // panicking on the downcasts below.
+    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
+        return Err(crate::Error::NotSupported(
+            "Bilateral GPU kernel only supports f32".into(),
+        ));
+    }
+
     use crate::storage::GpuStorage;
     let sigma_color_f = sigma_color.to_f32();
     let sigma_space_f = sigma_space.to_f32();
@@ -57,6 +68,9 @@ pub fn bilateral_filter<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zer
         radius,
         sigma_color_sq_inv: -0.5 / (sigma_color_f * sigma_color_f),
         sigma_space_sq_inv: -0.5 / (sigma_space_f * sigma_space_f),
+        _pad0: 0,
+        _pad1: 0,
+        _pad2: 0,
     };
 
     let params_buffer = ctx

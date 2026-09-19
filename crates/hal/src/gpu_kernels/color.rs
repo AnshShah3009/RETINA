@@ -12,6 +12,8 @@ use wgpu::util::DeviceExt;
 struct ColorParams {
     len: u32,
     code: u32,
+    _pad0: u32,
+    _pad1: u32, // pad to 16 bytes for WGSL uniform alignment
 }
 
 pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
@@ -19,6 +21,13 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
     input: &GpuTensor<T>,
     conv: ColorConversion,
 ) -> Result<GpuTensor<T>> {
+    // Only the f32 WGSL shader exists; reject other dtypes instead of
+    // panicking on the downcasts below.
+    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
+        return Err(crate::Error::NotSupported(
+            "Color convert GPU kernel only supports f32".into(),
+        ));
+    }
     use crate::storage::GpuStorage;
     let (h, w) = input.shape.hw();
     let num_pixels = h * w;
@@ -45,6 +54,8 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
     let params = ColorParams {
         len: num_pixels as u32,
         code: code_int,
+        _pad0: 0,
+        _pad1: 0,
     };
 
     let params_buffer = ctx

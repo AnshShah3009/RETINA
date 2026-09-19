@@ -83,7 +83,7 @@ impl<T: Clone + Copy + bytemuck::Pod + std::fmt::Debug + Sync + Send> TensorToCp
     fn to_cpu_ctx(&self, ctx: &GpuContext) -> crate::Result<Tensor<T, CpuStorage<T>>> {
         let byte_size = self.storage.len * std::mem::size_of::<T>();
 
-        // On unified memory systems (Apple Silicon, integrated GPUs), we can try 
+        // On unified memory systems (Apple Silicon, integrated GPUs), we can try
         // to use a more efficient read path. For discrete GPUs, we need the full copy.
         let data: Vec<T> = if ctx.is_unified_memory() {
             // Unified memory: try to use the read_buffer but it should be faster

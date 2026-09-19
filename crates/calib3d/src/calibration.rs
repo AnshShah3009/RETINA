@@ -3,8 +3,6 @@
 //! Provides functionality for camera calibration using planar patterns (chessboards)
 //! and refinement of calibration results through iterative optimization.
 
-use crate::project_points_with_distortion;
-use crate::solve_pnp_refine;
 use crate::Result;
 use cv_core::{CameraIntrinsics, Distortion, Pose};
 use image::GrayImage;
@@ -159,16 +157,16 @@ pub fn calibrate_camera_planar_with_options(
         extrinsics.push(extrinsics_from_homography(&k_inv, h)?);
     }
 
-    let rms = compute_rms_reprojection(&intrinsics, &extrinsics, object_points, image_points)?;
-    let mut distortion = Distortion::none();
-    if options.zero_tangent_dist {
-        distortion.p1 = 0.0;
-        distortion.p2 = 0.0;
-    }
-    // Note: Other fix_kX flags should be respected during iterative refinement,
-    // which is a planned P1 expansion. For now, we return zero distortion.
+    let rms = compute_rms_reprojection(
+        &intrinsics,
+        &extrinsics,
+        &Distortion::none(),
+        object_points,
+        image_points,
+    )?;
+    let distortion = Distortion::none();
 
-    let result = CameraCalibrationResult {
+    let mut result = CameraCalibrationResult {
         intrinsics,
         extrinsics,
         distortion,
@@ -178,6 +176,24 @@ pub fn calibrate_camera_planar_with_options(
         return Err(cv_core::Error::AlgorithmError(
             "calibrate_camera_planar produced non-finite or degenerate calibration".to_string(),
         ));
+    }
+
+    // Iteratively refine the closed-form solution. This estimates distortion
+    // coefficients (which the closed-form solver leaves at zero) and respects
+    // the fix_* flags in `options`. The refined result is only adopted when it
+    // does not degrade the reprojection error.
+    if let Ok(refined) = refine_camera_calibration_iterative_with_options(
+        &result,
+        object_points,
+        image_points,
+        80,
+        options,
+    ) {
+        if is_valid_camera_calibration(&refined)
+            && refined.rms_reprojection_error <= result.rms_reprojection_error + 1e-9
+        {
+            result = refined;
+        }
     }
     Ok(result)
 }
@@ -331,6 +347,27 @@ pub fn refine_camera_calibration_iterative(
     image_points: &[Vec<Point2<f64>>],
     max_iters: usize,
 ) -> Result<CameraCalibrationResult> {
+    refine_camera_calibration_iterative_with_options(
+        initial,
+        object_points,
+        image_points,
+        max_iters,
+        CameraCalibrationOptions::default(),
+    )
+}
+
+/// Refine camera calibration iteratively, respecting the given `CameraCalibrationOptions`.
+///
+/// Iteratively refines intrinsics, extrinsics, and distortion coefficients with a
+/// joint Levenberg-Marquardt bundle adjustment. The `fix_*` flags in `options`
+/// freeze the corresponding parameters so they are never modified during optimization.
+pub fn refine_camera_calibration_iterative_with_options(
+    initial: &CameraCalibrationResult,
+    object_points: &[Vec<Point3<f64>>],
+    image_points: &[Vec<Point2<f64>>],
+    max_iters: usize,
+    options: CameraCalibrationOptions,
+) -> Result<CameraCalibrationResult> {
     if object_points.len() != image_points.len() || object_points.len() != initial.extrinsics.len()
     {
         return Err(cv_core::Error::AlgorithmError(
@@ -338,59 +375,253 @@ pub fn refine_camera_calibration_iterative(
         ));
     }
 
-    let mut result = initial.clone();
-    let mut prev_rms = result.rms_reprojection_error;
-
-    for iter in 0..max_iters {
-        // 1. Refine intrinsics (closed-form fix)
-        result.intrinsics = estimate_intrinsics_from_extrinsics(
-            &result.extrinsics,
-            object_points,
-            image_points,
-            result.intrinsics,
-        )?;
-
-        // 2. Refine extrinsics (for each view)
-        for i in 0..result.extrinsics.len() {
-            result.extrinsics[i] = solve_pnp_refine(
-                &result.extrinsics[i],
-                &object_points[i],
-                &image_points[i],
-                &result.intrinsics,
-                Some(&result.distortion),
-                5,
-            )
-            .unwrap_or(result.extrinsics[i]);
-        }
-
-        // 3. Refine distortion (P1: Iterative LM for distortion)
-        if iter % 2 == 0 {
-            result.distortion = refine_distortion(
-                &result.intrinsics,
-                &result.extrinsics,
-                &result.distortion,
-                object_points,
-                image_points,
-                5,
-            )
-            .unwrap_or(result.distortion);
-        }
-
-        let cur_rms = compute_rms_reprojection(
-            &result.intrinsics,
-            &result.extrinsics,
-            object_points,
-            image_points,
-        )?;
-        if (prev_rms - cur_rms).abs() < 1e-8 {
-            prev_rms = cur_rms;
-            break;
-        }
-        prev_rms = cur_rms;
+    let n_views = initial.extrinsics.len();
+    let total_pts: usize = object_points.iter().map(|v| v.len()).sum();
+    if total_pts == 0 {
+        return Err(cv_core::Error::AlgorithmError(
+            "refine_camera_calibration_iterative: no points to refine".to_string(),
+        ));
     }
 
-    result.rms_reprojection_error = prev_rms;
-    Ok(result)
+    // Parameter layout:
+    // [0..4]   fx, fy, cx, cy
+    // [4..9]   k1, k2, p1, p2, k3
+    // [9 + 6i .. 9 + 6i + 3]  rotation vector (axis-angle) for view i
+    // [9 + 6i + 3 .. 9 + 6i + 6] translation for view i
+    let n_params = 9 + 6 * n_views;
+    let mut params = Vec::with_capacity(n_params);
+    params.push(initial.intrinsics.fx);
+    params.push(initial.intrinsics.fy);
+    params.push(initial.intrinsics.cx);
+    params.push(initial.intrinsics.cy);
+    params.push(initial.distortion.k1);
+    params.push(initial.distortion.k2);
+    params.push(initial.distortion.p1);
+    params.push(initial.distortion.p2);
+    params.push(initial.distortion.k3);
+    for ext in &initial.extrinsics {
+        let rv = ext.rotation.scaled_axis();
+        params.push(rv.x);
+        params.push(rv.y);
+        params.push(rv.z);
+        params.push(ext.translation.x);
+        params.push(ext.translation.y);
+        params.push(ext.translation.z);
+    }
+
+    // Fixed-parameter mask derived from options.
+    let mut fixed = vec![false; n_params];
+    if options.fix_focal_length {
+        fixed[0] = true;
+        fixed[1] = true;
+    }
+    if let Some(ratio) = options.fix_aspect_ratio {
+        if ratio.is_finite() && ratio > 0.0 {
+            // fx is derived as ratio * fy, so fx is not an independent parameter.
+            fixed[0] = true;
+        }
+    }
+    if let Some((pcx, pcy)) = options.fix_principal_point {
+        if pcx.is_finite() && pcy.is_finite() {
+            fixed[2] = true;
+            fixed[3] = true;
+        }
+    }
+    if options.fix_k1 {
+        fixed[4] = true;
+    }
+    if options.fix_k2 {
+        fixed[5] = true;
+    }
+    if options.zero_tangent_dist {
+        fixed[6] = true;
+        fixed[7] = true;
+    }
+    if options.fix_k3 {
+        fixed[8] = true;
+    }
+    let free_indices: Vec<usize> = (0..n_params).filter(|&i| !fixed[i]).collect();
+    if free_indices.is_empty() {
+        return Ok(initial.clone());
+    }
+
+    // Rebuild intrinsics / distortion / poses from the parameter vector.
+    let rebuild = |params: &[f64], n_views: usize| -> (CameraIntrinsics, Distortion, Vec<Pose>) {
+        let aspect_ratio = options
+            .fix_aspect_ratio
+            .filter(|r| *r > 0.0 && r.is_finite());
+        let fx = if let Some(ratio) = aspect_ratio {
+            ratio * params[1]
+        } else {
+            params[0]
+        };
+        let intrinsics = CameraIntrinsics::new(
+            fx,
+            params[1],
+            params[2],
+            params[3],
+            initial.intrinsics.width,
+            initial.intrinsics.height,
+        );
+        let distortion = Distortion {
+            k1: params[4],
+            k2: params[5],
+            p1: if options.zero_tangent_dist {
+                0.0
+            } else {
+                params[6]
+            },
+            p2: if options.zero_tangent_dist {
+                0.0
+            } else {
+                params[7]
+            },
+            k3: params[8],
+        };
+        let mut poses = Vec::with_capacity(n_views);
+        for i in 0..n_views {
+            let base = 9 + 6 * i;
+            let rv = nalgebra::Vector3::new(params[base], params[base + 1], params[base + 2]);
+            let t = nalgebra::Vector3::new(params[base + 3], params[base + 4], params[base + 5]);
+            poses.push(Pose::from_quat_translation(
+                nalgebra::UnitQuaternion::from_scaled_axis(rv),
+                t,
+            ));
+        }
+        (intrinsics, distortion, poses)
+    };
+
+    // Residuals: 2 per point (u, v reprojection error).
+    let residuals = |params: &[f64], n_views: usize| -> Vec<f64> {
+        let (intrinsics, distortion, poses) = rebuild(params, n_views);
+        let mut out = Vec::with_capacity(2 * total_pts);
+        for (i, ext) in poses.iter().enumerate() {
+            for (p3, p2) in object_points[i].iter().zip(image_points[i].iter()) {
+                let pc = ext.rotation * p3.coords + ext.translation;
+                if pc[2].abs() <= 1e-12 {
+                    out.push(0.0);
+                    out.push(0.0);
+                    continue;
+                }
+                let xn = pc[0] / pc[2];
+                let yn = pc[1] / pc[2];
+                let (xd, yd) = distortion.apply(xn, yn);
+                out.push(intrinsics.fx * xd + intrinsics.cx - p2.x);
+                out.push(intrinsics.fy * yd + intrinsics.cy - p2.y);
+            }
+        }
+        out
+    };
+
+    let mut lambda = 1e-3;
+    let mut best_params = params.clone();
+    let mut best_cost = residuals(&params, n_views)
+        .iter()
+        .map(|v| v * v)
+        .sum::<f64>();
+
+    for _ in 0..max_iters {
+        let r = residuals(&params, n_views);
+        let mut j = DMatrix::<f64>::zeros(r.len(), free_indices.len());
+        for (col, &pi) in free_indices.iter().enumerate() {
+            // Relative finite-difference step avoids poor conditioning from
+            // mixing units (pixel focal lengths vs. dimensionless rotations).
+            let scale = 1.0 + params[pi].abs();
+            let eps = 1e-7 * scale;
+            let mut p_pert = params.clone();
+            p_pert[pi] += eps;
+            let r_pert = residuals(&p_pert, n_views);
+            for (row, (rp, rb)) in r_pert.iter().zip(r.iter()).enumerate() {
+                j[(row, col)] = (rp - rb) / eps;
+            }
+        }
+
+        let jt = j.transpose();
+        let h = &jt * &j;
+        let g = &jt * nalgebra::DVector::from(r.clone());
+
+        // Column scaling improves conditioning (pixel focal lengths vs. small
+        // rotations/distortion). Solve in scaled coordinates then rescale back.
+        let col_norm: Vec<f64> = (0..h.ncols())
+            .map(|c| (h[(c, c)].abs()).sqrt().max(1e-12))
+            .collect();
+        let mut hs = h.clone();
+        let mut gs = g.clone();
+        for (c, &cn) in col_norm.iter().enumerate() {
+            for r in 0..hs.nrows() {
+                hs[(r, c)] /= cn;
+                hs[(c, r)] /= cn;
+            }
+            gs[c] /= cn;
+        }
+
+        // Damped normal equations (Marquardt).
+        let mut hd = hs.clone();
+        for i in 0..hd.nrows() {
+            hd[(i, i)] += lambda * hd[(i, i)].max(1e-12);
+        }
+        let delta_scaled = match hd.lu().solve(&gs) {
+            Some(d) => d,
+            None => {
+                lambda *= 2.0;
+                continue;
+            }
+        };
+        let mut delta = delta_scaled.clone();
+        for (c, &cn) in col_norm.iter().enumerate() {
+            delta[c] /= cn;
+        }
+
+        let mut p_new = params.clone();
+        for (col, &pi) in free_indices.iter().enumerate() {
+            p_new[pi] -= delta[col];
+        }
+        // Snap fixed parameters to their constrained values.
+        if let Some((pcx, pcy)) = options.fix_principal_point {
+            p_new[2] = pcx;
+            p_new[3] = pcy;
+        }
+
+        let new_cost = residuals(&p_new, n_views)
+            .iter()
+            .map(|v| v * v)
+            .sum::<f64>();
+        // Marquardt gain ratio computed in scaled coordinates.
+        let predicted = 0.5
+            * delta_scaled
+                .dot(&(delta_scaled.clone().component_mul(&hs.diagonal()) * lambda + &gs));
+        let rho = (best_cost - new_cost) / (predicted.abs().max(1e-300));
+        if new_cost < best_cost {
+            best_cost = new_cost;
+            best_params = p_new.clone();
+            params = p_new;
+            lambda = (lambda * (1.0 / 3.0)).max(1e-9);
+        } else {
+            lambda = (lambda * 2.0).min(1e12);
+        }
+        if lambda > 1e12 || best_cost < 1e-24 {
+            break;
+        }
+        // Stop when the gain ratio indicates convergence to a stationary point.
+        if rho < 1e-4 && delta.norm() < 1e-8 {
+            break;
+        }
+    }
+
+    let (intrinsics, distortion, extrinsics) = rebuild(&best_params, n_views);
+    let rms = compute_rms_reprojection(
+        &intrinsics,
+        &extrinsics,
+        &distortion,
+        object_points,
+        image_points,
+    )?;
+    Ok(CameraCalibrationResult {
+        intrinsics,
+        extrinsics,
+        distortion,
+        rms_reprojection_error: rms,
+    })
 }
 
 // ============================================================================
@@ -559,11 +790,12 @@ fn extrinsics_from_homography(k_inv: &Matrix3<f64>, h: &Matrix3<f64>) -> Result<
     Ok(Pose::new(r, t))
 }
 
-/// Compute RMS reprojection error
+/// Compute RMS reprojection error, accounting for lens distortion when present.
 #[allow(clippy::type_complexity)]
 fn compute_rms_reprojection(
     intrinsics: &CameraIntrinsics,
     extrinsics: &[Pose],
+    distortion: &Distortion,
     object_points: &[Vec<Point3<f64>>],
     image_points: &[Vec<Point2<f64>>],
 ) -> Result<f64> {
@@ -586,8 +818,11 @@ fn compute_rms_reprojection(
                     if pc[2].abs() <= 1e-18 {
                         continue;
                     }
-                    let u = intrinsics.fx * (pc[0] / pc[2]) + intrinsics.cx;
-                    let v = intrinsics.fy * (pc[1] / pc[2]) + intrinsics.cy;
+                    let xn = pc[0] / pc[2];
+                    let yn = pc[1] / pc[2];
+                    let (xd, yd) = distortion.apply(xn, yn);
+                    let u = intrinsics.fx * xd + intrinsics.cx;
+                    let v = intrinsics.fy * yd + intrinsics.cy;
                     let du = u - p2.x;
                     let dv = v - p2.y;
                     local_sq_sum += du * du + dv * dv;
@@ -623,181 +858,6 @@ fn is_valid_camera_calibration(result: &CameraCalibrationResult) -> bool {
         ext.rotation_matrix().iter().all(|v: &f64| v.is_finite())
             && ext.translation.iter().all(|v: &f64| v.is_finite())
     })
-}
-
-/// Estimate intrinsics from camera extrinsics
-fn estimate_intrinsics_from_extrinsics(
-    extrinsics: &[Pose],
-    object_points: &[Vec<Point3<f64>>],
-    image_points: &[Vec<Point2<f64>>],
-    fallback: CameraIntrinsics,
-) -> Result<CameraIntrinsics> {
-    let mut sx2 = 0.0f64;
-    let mut sxu = 0.0f64;
-    let mut sx = 0.0f64;
-    let mut su = 0.0f64;
-    let mut n_x = 0usize;
-
-    let mut sy2 = 0.0f64;
-    let mut syv = 0.0f64;
-    let mut sy = 0.0f64;
-    let mut sv = 0.0f64;
-    let mut n_y = 0usize;
-
-    for ((ext, obj), img) in extrinsics
-        .iter()
-        .zip(object_points.iter())
-        .zip(image_points.iter())
-    {
-        for (p3, p2) in obj.iter().zip(img.iter()) {
-            let pc = ext.rotation * p3.coords + ext.translation;
-            if pc[2].abs() <= 1e-12 {
-                continue;
-            }
-            let xn = pc[0] / pc[2];
-            let yn = pc[1] / pc[2];
-
-            sx2 += xn * xn;
-            sxu += xn * p2.x;
-            sx += xn;
-            su += p2.x;
-            n_x += 1;
-
-            sy2 += yn * yn;
-            syv += yn * p2.y;
-            sy += yn;
-            sv += p2.y;
-            n_y += 1;
-        }
-    }
-
-    if n_x < 2 || n_y < 2 {
-        return Err(cv_core::Error::AlgorithmError(
-            "estimate_intrinsics_from_extrinsics: insufficient valid points".to_string(),
-        ));
-    }
-
-    let det_x = sx2 * n_x as f64 - sx * sx;
-    let det_y = sy2 * n_y as f64 - sy * sy;
-    if det_x.abs() < 1e-18 || det_y.abs() < 1e-18 {
-        return Ok(fallback);
-    }
-
-    let fx = (sxu * n_x as f64 - sx * su) / det_x;
-    let cx = (sx2 * su - sx * sxu) / det_x;
-    let fy = (syv * n_y as f64 - sy * sv) / det_y;
-    let cy = (sy2 * sv - sy * syv) / det_y;
-
-    if !fx.is_finite() || !fy.is_finite() || fx.abs() < 1e-12 || fy.abs() < 1e-12 {
-        return Ok(fallback);
-    }
-
-    Ok(CameraIntrinsics::new(
-        fx,
-        fy,
-        cx,
-        cy,
-        fallback.width,
-        fallback.height,
-    ))
-}
-
-/// Refine distortion coefficients iteratively
-fn refine_distortion(
-    intrinsics: &CameraIntrinsics,
-    extrinsics: &[Pose],
-    initial_distortion: &Distortion,
-    object_points: &[Vec<Point3<f64>>],
-    image_points: &[Vec<Point2<f64>>],
-    max_iters: usize,
-) -> Result<Distortion> {
-    let mut distortion = *initial_distortion;
-    let mut params = [
-        distortion.k1,
-        distortion.k2,
-        distortion.p1,
-        distortion.p2,
-        distortion.k3,
-    ];
-
-    let total_pts: usize = object_points.iter().map(|v| v.len()).sum();
-    if total_pts < 10 {
-        return Ok(distortion);
-    }
-
-    for _ in 0..max_iters {
-        let mut j = DMatrix::<f64>::zeros(2 * total_pts, 5);
-        let mut r = DMatrix::<f64>::zeros(2 * total_pts, 1);
-
-        // Compute residual and Jacobian
-        let mut row_idx = 0;
-        for (i, ext) in extrinsics.iter().enumerate() {
-            for (p3, p2) in object_points[i].iter().zip(image_points[i].iter()) {
-                let pc = ext.rotation * p3.coords + ext.translation;
-                if pc[2].abs() <= 1e-12 {
-                    continue;
-                }
-
-                let pred = project_points_with_distortion(&[*p3], intrinsics, ext, &distortion)?[0];
-                r[(row_idx, 0)] = pred.x - p2.x;
-                r[(row_idx + 1, 0)] = pred.y - p2.y;
-
-                // Numerical Jacobian w.r.t distortion params
-                let eps = 1e-7;
-                for k in 0..5 {
-                    let mut d_perturbed = distortion;
-                    match k {
-                        0 => d_perturbed.k1 += eps,
-                        1 => d_perturbed.k2 += eps,
-                        2 => d_perturbed.p1 += eps,
-                        3 => d_perturbed.p2 += eps,
-                        4 => d_perturbed.k3 += eps,
-                        _ => {
-                            return Err(cv_core::Error::AlgorithmError(
-                                "Invalid distortion index".to_string(),
-                            ))
-                        }
-                    }
-                    let p_perturbed =
-                        project_points_with_distortion(&[*p3], intrinsics, ext, &d_perturbed)?[0];
-                    j[(row_idx, k)] = (p_perturbed.x - pred.x) / eps;
-                    j[(row_idx + 1, k)] = (p_perturbed.y - pred.y) / eps;
-                }
-                row_idx += 2;
-            }
-        }
-
-        // Truncate to actual number of rows (skipped behind-camera points
-        // leave trailing zero rows that corrupt the solve).
-        let j = j.rows(0, row_idx).clone_owned();
-        let r = r.rows(0, row_idx).clone_owned();
-
-        let jt = j.transpose();
-        let h = &jt * &j;
-        let g = &jt * &r;
-
-        let delta = h.lu().solve(&g).ok_or_else(|| {
-            cv_core::Error::AlgorithmError(
-                "Distortion refinement normal equation failed".to_string(),
-            )
-        })?;
-
-        for k in 0..5 {
-            params[k] -= delta[(k, 0)];
-        }
-
-        distortion.k1 = params[0];
-        distortion.k2 = params[1];
-        distortion.p1 = params[2];
-        distortion.p2 = params[3];
-        distortion.k3 = params[4];
-
-        if delta.norm() < 1e-9 {
-            break;
-        }
-    }
-
-    Ok(distortion)
 }
 
 /// Helper function to compute v_ij for intrinsic calibration

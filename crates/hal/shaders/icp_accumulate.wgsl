@@ -10,17 +10,30 @@ struct Params {
 @group(0) @binding(1) var<storage, read> target_points: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> target_normals: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> correspondences: array<vec2<u32>>; // (src_idx, tgt_idx)
-@group(0) @binding(4) var<storage, read_write> ata_accum: array<atomic<i32>, 36>; // 6x6 fixed size
-@group(0) @binding(5) var<storage, read_write> atb_accum: array<atomic<i32>, 6>;  // 6x1 fixed size
+@group(0) @binding(4) var<storage, read_write> ata_accum: array<atomic<u32>, 36>; // 6x6, bit-cast f32
+@group(0) @binding(5) var<storage, read_write> atb_accum: array<atomic<u32>, 6>;  // 6x1, bit-cast f32
 @group(0) @binding(6) var<uniform> params: Params;
 
-// Helper to add f32 to atomic i32 using fixed-point scaling
+// Atomic float addition via compare-exchange on the bit-cast value.
+// A previous revision accumulated i32(val * 1e6), which overflows the i32
+// range at |sum| > ~2147 — J^T J entries summed over thousands of meter-scale
+// correspondences blow past that and wrap to garbage.
+fn atomic_add_f32(accum: ptr<storage, array<atomic<u32>>, read_write>, addr: u32, val: f32) {
+    loop {
+        let old = atomicLoad(&(*accum)[addr]);
+        let new = bitcast<u32>(bitcast<f32>(old) + val);
+        let res = atomicCompareExchangeWeak(&(*accum)[addr], old, new);
+        if (res.exchanged) {
+            break;
+        }
+    }
+}
+
 fn atomicAddFloat(addr: u32, val: f32, is_ata: bool) {
-    let scaled = i32(val * 1000000.0);
     if (is_ata) {
-        atomicAdd(&ata_accum[addr], scaled);
+        atomic_add_f32(&ata_accum, addr, val);
     } else {
-        atomicAdd(&atb_accum[addr], scaled);
+        atomic_add_f32(&atb_accum, addr, val);
     }
 }
 

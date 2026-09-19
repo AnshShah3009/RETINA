@@ -78,7 +78,7 @@ impl Storage<f32> for GpuStorage {
     }
 
     fn device(&self) -> cv_core::storage::DeviceType {
-        cv_core::storage::DeviceType::Cuda
+        cv_core::storage::DeviceType::WebGPU
     }
 }
 
@@ -158,7 +158,7 @@ mod tests {
         assert!(!storage.is_empty());
 
         // Verify device type
-        assert_eq!(storage.device(), cv_core::storage::DeviceType::Cuda);
+        assert_eq!(storage.device(), cv_core::storage::DeviceType::WebGPU);
     }
 
     #[test]
