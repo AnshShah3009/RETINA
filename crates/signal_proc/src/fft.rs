@@ -48,6 +48,11 @@ pub fn ifft(input: &[Complex<f64>]) -> Vec<Complex<f64>> {
 ///
 /// Returns the first `N/2 + 1` complex coefficients (the non-redundant half).
 pub fn rfft(input: &[f64]) -> Vec<Complex<f64>> {
+    if input.is_empty() {
+        // `fft` returns an empty spectrum for empty input, so slicing
+        // `..n/2 + 1` (== `..1`) would panic.
+        return Vec::new();
+    }
     let spectrum = fft(input);
     let n = input.len();
     spectrum[..n / 2 + 1].to_vec()
@@ -214,6 +219,14 @@ mod tests {
             .unwrap()
             .0;
         assert!(max_bin == 1 || max_bin == n - 1);
+    }
+
+    #[test]
+    fn test_rfft_empty_input() {
+        // Regression: rfft(&[]) used to slice `spectrum[..1]` on an empty
+        // Vec returned by fft, panicking.
+        assert!(rfft(&[]).is_empty());
+        assert_eq!(rfft(&[1.0, 2.0, 3.0, 4.0]).len(), 3);
     }
 
     #[test]

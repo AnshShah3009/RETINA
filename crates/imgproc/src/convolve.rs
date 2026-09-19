@@ -583,7 +583,11 @@ pub fn sharpen(image: &GrayImage, amount: f32) -> GrayImage {
         *v *= -amount;
     }
     let center = kernel.width / 2;
-    kernel.data[center * kernel.width + center] += 1.0 + amount;
+    // The scaled Laplacian already contributes `4 * amount` at the centre, so
+    // adding 1.0 yields the standard unsharp kernel (centre `1 + 4 * amount`,
+    // neighbours `-amount`) with unit DC gain. Adding `1.0 + amount` instead
+    // made the DC gain `1 + amount`, brightening the whole image.
+    kernel.data[center * kernel.width + center] += 1.0;
     convolve(image, &kernel)
 }
 
@@ -607,5 +611,32 @@ mod tests {
         let out = gaussian_blur_with_border(&img, 1.0, BorderMode::Reflect101);
         assert_eq!(out.width(), img.width());
         assert_eq!(out.height(), img.height());
+    }
+
+    #[test]
+    fn sharpen_has_unit_dc_gain() {
+        // Regression: the kernel centre carried an extra `amount`, giving DC
+        // gain `1 + amount` and brightening flat regions.
+        let img = GrayImage::from_pixel(6, 6, Luma([100]));
+        for amount in [0.0f32, 0.5, 1.0, 2.0] {
+            let out = sharpen(&img, amount);
+            assert!(
+                out.as_raw().iter().all(|&p| p == 100),
+                "sharpen(amount = {amount}) brightened a flat image"
+            );
+        }
+
+        // Sharpening an edge must still amplify the local contrast.
+        let mut edge = GrayImage::new(6, 6);
+        for y in 0..6 {
+            for x in 0..6 {
+                edge.put_pixel(x, y, Luma([if x < 3 { 100 } else { 120 }]));
+            }
+        }
+        let sharpened = sharpen(&edge, 1.0);
+        let dark_side = sharpened.get_pixel(2, 3)[0];
+        let bright_side = sharpened.get_pixel(3, 3)[0];
+        assert!(dark_side < 100, "expected undershoot beside the edge");
+        assert!(bright_side > 120, "expected overshoot beside the edge");
     }
 }
