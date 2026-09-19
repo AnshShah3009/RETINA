@@ -37,6 +37,93 @@ fn get_pixel_nearest_with_border(img: &GrayImage, x: f32, y: f32, border: Border
     sample_pixel(img, xi, yi, border)
 }
 
+/// Catmull-Rom cubic kernel (Keys, a = -0.5).
+fn cubic_kernel(d: f32) -> f32 {
+    let a = d.abs();
+    if a <= 1.0 {
+        1.5 * a * a * a - 2.5 * a * a + 1.0
+    } else if a < 2.0 {
+        -0.5 * a * a * a + 2.5 * a * a - 4.0 * a + 2.0
+    } else {
+        0.0
+    }
+}
+
+fn get_pixel_cubic_with_border(img: &GrayImage, x: f32, y: f32, border: BorderMode) -> f32 {
+    let x0 = x.floor() as isize;
+    let y0 = y.floor() as isize;
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+
+    let wx = [
+        cubic_kernel(tx + 1.0),
+        cubic_kernel(tx),
+        cubic_kernel(1.0 - tx),
+        cubic_kernel(2.0 - tx),
+    ];
+    let wy = [
+        cubic_kernel(ty + 1.0),
+        cubic_kernel(ty),
+        cubic_kernel(1.0 - ty),
+        cubic_kernel(2.0 - ty),
+    ];
+
+    let mut sum = 0.0;
+    for (j, &wyj) in wy.iter().enumerate() {
+        for (i, &wxi) in wx.iter().enumerate() {
+            sum += wxi * wyj * sample_pixel(img, x0 + i as isize - 1, y0 + j as isize - 1, border);
+        }
+    }
+    sum
+}
+
+/// Lanczos window (a = 3).
+fn lanczos_kernel(d: f32) -> f32 {
+    const A: f32 = 3.0;
+    if d == 0.0 {
+        1.0
+    } else if d.abs() >= A {
+        0.0
+    } else {
+        let p = std::f32::consts::PI * d;
+        (p.sin() / p) * ((p / A).sin() / (p / A))
+    }
+}
+
+fn get_pixel_lanczos_with_border(img: &GrayImage, x: f32, y: f32, border: BorderMode) -> f32 {
+    let x0 = x.floor() as isize;
+    let y0 = y.floor() as isize;
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+
+    // 6 taps per axis: floor(c) - 2 ..= floor(c) + 3, normalized to unit sum.
+    let mut wx = [0.0f32; 6];
+    let mut wy = [0.0f32; 6];
+    for k in 0..6 {
+        wx[k] = lanczos_kernel(k as f32 - 2.0 - tx);
+        wy[k] = lanczos_kernel(k as f32 - 2.0 - ty);
+    }
+    let (sx, sy) = (wx.iter().sum::<f32>(), wy.iter().sum::<f32>());
+    if sx != 0.0 {
+        for w in &mut wx {
+            *w /= sx;
+        }
+    }
+    if sy != 0.0 {
+        for w in &mut wy {
+            *w /= sy;
+        }
+    }
+
+    let mut sum = 0.0;
+    for (j, &wyj) in wy.iter().enumerate() {
+        for (i, &wxi) in wx.iter().enumerate() {
+            sum += wxi * wyj * sample_pixel(img, x0 + i as isize - 2, y0 + j as isize - 2, border);
+        }
+    }
+    sum
+}
+
 fn sample_pixel(img: &GrayImage, x: isize, y: isize, border: BorderMode) -> f32 {
     let width = img.width() as usize;
     let height = img.height() as usize;
@@ -113,9 +200,9 @@ fn interpolate_sample(
 ) -> f32 {
     match interpolation {
         Interpolation::Nearest => get_pixel_nearest_with_border(src, x, y, border),
-        Interpolation::Linear | Interpolation::Cubic | Interpolation::Lanczos => {
-            get_pixel_bilinear_with_border(src, x, y, border)
-        }
+        Interpolation::Linear => get_pixel_bilinear_with_border(src, x, y, border),
+        Interpolation::Cubic => get_pixel_cubic_with_border(src, x, y, border),
+        Interpolation::Lanczos => get_pixel_lanczos_with_border(src, x, y, border),
     }
 }
 
@@ -146,13 +233,19 @@ pub fn warp_perspective_ex_ctx(
     border: BorderMode,
     group: &RuntimeRunner,
 ) -> GrayImage {
+    // Both public warp entry points take an OpenCV-style forward (src -> dst)
+    // transform. The sampling below is an inverse map (dst -> src), so invert
+    // the caller's matrix once here. `warp_affine_ex_ctx` delegates to this
+    // function and therefore passes its forward matrix uninverted.
+    let inv = matrix.try_inverse().unwrap_or(*matrix);
+
     // Check for GPU acceleration
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
         if interpolation == Interpolation::Linear && border == BorderMode::Constant(0) {
             if let Ok(result) = warp_gpu(
                 gpu,
                 src,
-                matrix,
+                &inv,
                 width,
                 height,
                 cv_hal::context::WarpType::Perspective,
@@ -171,7 +264,7 @@ pub fn warp_perspective_ex_ctx(
             let y = y as u32;
             for x in 0..width {
                 let pt = Point2::new(x as f32, y as f32);
-                let src_pt = transform_point(matrix, &pt);
+                let src_pt = transform_point(&inv, &pt);
                 let val = interpolate_sample(src, src_pt.x, src_pt.y, interpolation, border);
                 row[x as usize] = val.clamp(0.0, 255.0) as u8;
             }
@@ -324,13 +417,17 @@ pub fn warp_affine_ex_ctx(
         1.0,
     );
 
+    // Same convention as warp_perspective_ex_ctx: the caller's matrix is a
+    // forward (src -> dst) transform and the samplers need dst -> src.
+    let inv = matrix.try_inverse().unwrap_or(matrix);
+
     // Check for GPU acceleration
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
         if interpolation == Interpolation::Linear && border == BorderMode::Constant(0) {
             if let Ok(result) = warp_gpu(
                 gpu,
                 src,
-                &matrix,
+                &inv,
                 width,
                 height,
                 cv_hal::context::WarpType::Affine,
@@ -340,9 +437,8 @@ pub fn warp_affine_ex_ctx(
         }
     }
 
-    // Warp uses inverse mapping from destination -> source coordinates.
-    let inv = matrix.try_inverse().unwrap_or(matrix);
-    warp_perspective_ex_ctx(src, &inv, width, height, interpolation, border, group)
+    // `warp_perspective_ex_ctx` inverts the forward matrix itself.
+    warp_perspective_ex_ctx(src, &matrix, width, height, interpolation, border, group)
 }
 
 pub fn remap_ex(
@@ -382,6 +478,19 @@ pub fn remap_ex_ctx(
     border: BorderMode,
     group: &cv_runtime::orchestrator::RuntimeRunner,
 ) -> GrayImage {
+    // The loops below index `map_x[..width*height]`; validate up front exactly
+    // like `remap` does instead of panicking on a short map mid-iteration.
+    assert_eq!(
+        map_x.len(),
+        (width * height) as usize,
+        "map_x size must equal width*height"
+    );
+    assert_eq!(
+        map_y.len(),
+        (width * height) as usize,
+        "map_y size must equal width*height"
+    );
+
     // Check for GPU acceleration
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
         if let Ok(result) = remap_gpu(gpu, src, map_x, map_y, width, height, interpolation, border)
@@ -629,5 +738,109 @@ mod tests {
         let i = Matrix3::identity();
         let out = warp_perspective(&img, &i, 7, 7);
         assert_eq!(out.get_pixel(5, 4)[0], 180);
+    }
+
+    #[test]
+    fn warp_perspective_uses_forward_homography() {
+        // Non-symmetric forward homography mapping src(2, 2) onto dst(4, 3)
+        // exactly (the perspective denominator is 2*0.01 + 2*(-0.01) + 1 = 1).
+        // A previous revision passed the caller's matrix straight to the
+        // dst -> src sampler, so the caller's forward transform had to be
+        // inverted by hand (warp_affine did invert it, giving the two public
+        // entry points opposite conventions).
+        let mut img = GrayImage::new(8, 8);
+        img.put_pixel(2, 2, Luma([255]));
+
+        let m = Matrix3::new(1.0, 0.0, 2.0, 0.0, 1.0, 1.0, 0.01, -0.01, 1.0);
+        let out = warp_perspective_ex(
+            &img,
+            &m,
+            8,
+            8,
+            Interpolation::Nearest,
+            BorderMode::Constant(0),
+        );
+
+        assert_eq!(
+            out.get_pixel(4, 3)[0],
+            255,
+            "forward map must move (2,2) to (4,3)"
+        );
+        // The pixel at the inverse-mapped location must stay untouched.
+        assert_eq!(out.get_pixel(2, 2)[0], 0);
+
+        // A pure translation must behave identically through both entry points.
+        let t = Matrix3::new(1.0, 0.0, 2.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0);
+        let persp = warp_perspective_ex(
+            &img,
+            &t,
+            8,
+            8,
+            Interpolation::Nearest,
+            BorderMode::Constant(0),
+        );
+        let affine = warp_affine_ex(
+            &img,
+            [[1.0, 0.0, 2.0], [0.0, 1.0, 1.0]],
+            8,
+            8,
+            Interpolation::Nearest,
+            BorderMode::Constant(0),
+        );
+        assert_eq!(persp.as_raw(), affine.as_raw());
+        assert_eq!(persp.get_pixel(4, 3)[0], 255);
+    }
+
+    #[test]
+    fn cubic_and_lanczos_sampling_differ_from_bilinear() {
+        // A unit impulse at x=1 sampled half a pixel off: bilinear averages the
+        // two neighbours, whereas the cubic and Lanczos kernels spread the
+        // impulse over their wider support. A previous revision silently ran
+        // every interpolation variant through the bilinear sampler.
+        let mut img = GrayImage::new(8, 1);
+        img.put_pixel(1, 0, Luma([255]));
+
+        let width = 8u32;
+        let map_x: Vec<f32> = (0..width).map(|x| x as f32 + 0.5).collect();
+        let map_y: Vec<f32> = vec![0.0; width as usize];
+
+        let sample = |interpolation: Interpolation| {
+            remap_ex(
+                &img,
+                &map_x,
+                &map_y,
+                width,
+                1,
+                interpolation,
+                BorderMode::Replicate,
+            )
+        };
+
+        let linear = sample(Interpolation::Linear);
+        let cubic = sample(Interpolation::Cubic);
+        let lanczos = sample(Interpolation::Lanczos);
+
+        assert_eq!(linear.get_pixel(1, 0)[0], 127);
+        assert_ne!(cubic.get_pixel(1, 0)[0], linear.get_pixel(1, 0)[0]);
+        assert_ne!(lanczos.get_pixel(1, 0)[0], linear.get_pixel(1, 0)[0]);
+        // Cubic and Lanczos are interpolating kernels with different support.
+        assert_ne!(cubic.as_raw(), lanczos.as_raw());
+    }
+
+    #[test]
+    #[should_panic(expected = "map_x size must equal width*height")]
+    fn remap_ex_rejects_short_map() {
+        let img = GrayImage::new(4, 4);
+        let map_x = vec![0.0f32; 3];
+        let map_y = vec![0.0f32; 16];
+        let _ = remap_ex(
+            &img,
+            &map_x,
+            &map_y,
+            4,
+            4,
+            Interpolation::Linear,
+            BorderMode::Replicate,
+        );
     }
 }

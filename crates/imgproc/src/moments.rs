@@ -44,6 +44,11 @@ impl Moments {
     ///
     /// These are translation-, scale-, and rotation-invariant descriptors
     /// derived from normalized central moments up to 3rd order.
+    ///
+    /// All seven values are returned signed, matching OpenCV: h1..h4 are
+    /// non-negative by construction, while h5, h6 and h7 change sign with the
+    /// orientation of the shape (h7 flips under reflection) and taking their
+    /// absolute value would destroy that information.
     pub fn hu_moments(&self) -> [f64; 7] {
         let m00 = self.m00;
         if m00.abs() < 1e-12 {
@@ -83,15 +88,7 @@ impl Moments {
                 * (eta21 + eta03)
                 * (3.0 * (eta30 + eta12).powi(2) - (eta21 + eta03).powi(2));
 
-        [
-            h1.abs(),
-            h2.abs(),
-            h3.abs(),
-            h4.abs(),
-            h5.abs(),
-            h6.abs(),
-            h7.abs(),
-        ]
+        [h1, h2, h3, h4, h5, h6, h7]
     }
 }
 
@@ -309,6 +306,32 @@ mod tests {
         assert!((hu[0] - 0.16666666666666666).abs() < 0.01);
         // h2 should be 0 for a symmetric square
         assert!(hu[1].abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_hu_moments_are_signed() {
+        // Regression: hu_moments used to return `h.abs()` for every value, so
+        // h7 could never be negative. h7 flips sign under reflection, which a
+        // magnitude-only result cannot express.
+        let c = Contour {
+            points: vec![(0, 0), (6, 0), (0, 4)],
+        };
+        let mirrored = Contour {
+            points: vec![(0, 0), (-6, 0), (0, 4)],
+        };
+
+        let h = moments(&c).hu_moments();
+        let hm = moments(&mirrored).hu_moments();
+
+        assert!(h[6].abs() > 1e-12, "h7 should be non-zero here: {}", h[6]);
+        assert!(
+            (h[6] + hm[6]).abs() < 1e-9,
+            "h7 must flip sign under reflection: {} vs {}",
+            h[6],
+            hm[6]
+        );
+        // h5 is reflection invariant, so both must agree exactly.
+        assert!((h[4] - hm[4]).abs() < 1e-9);
     }
 
     #[test]

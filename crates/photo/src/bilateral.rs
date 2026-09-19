@@ -5,6 +5,14 @@ pub fn bilateral_filter(src: &GrayImage, d: i32, sigma_color: f32, sigma_space: 
     let height = src.height() as usize;
     let mut dst = GrayImage::new(src.width(), src.height());
 
+    // Guard degenerate sigmas: sigma == 0 makes the coefficient -inf, and
+    // `0 * -inf` is NaN for any neighbour equal to the centre, so the whole
+    // image came back as garbage (`NaN.min(255.0) as u8 == 255`). OpenCV
+    // derives sigma from the kernel size when it is not positive; fall back to
+    // unit sigma here (same guard as the HAL bilateral filter).
+    let sigma_color = if sigma_color > 0.0 { sigma_color } else { 1.0 };
+    let sigma_space = if sigma_space > 0.0 { sigma_space } else { 1.0 };
+
     let radius = if d <= 0 {
         (sigma_space * 1.5).ceil() as i32
     } else {
@@ -119,6 +127,31 @@ mod tests {
         // Explicit radius should work (d > 0)
         assert_eq!(filtered.width(), img.width());
         assert_eq!(filtered.height(), img.height());
+    }
+
+    #[test]
+    fn test_bilateral_filter_zero_sigma_is_sane() {
+        // Regression: sigma_color == 0 (or sigma_space == 0) divided by zero,
+        // producing -inf coefficients and NaN weights; every output pixel then
+        // came back as 255 because `NaN.min(255.0) == 255.0`.
+        let mut img = GrayImage::new(5, 5);
+        for y in 0..5 {
+            for x in 0..5 {
+                img.put_pixel(x, y, Luma([(20 + x * 10 + y * 5) as u8]));
+            }
+        }
+
+        for (sigma_color, sigma_space) in [(0.0f32, 5.0f32), (5.0, 0.0), (0.0, 0.0)] {
+            let filtered = bilateral_filter(&img, 5, sigma_color, sigma_space);
+            assert!(
+                filtered.as_raw().iter().all(|&p| p != 255),
+                "zero sigma produced garbage output for ({sigma_color}, {sigma_space})"
+            );
+            // A constant image must stay untouched with any sigma.
+            let flat = GrayImage::from_pixel(5, 5, Luma([128]));
+            let filtered_flat = bilateral_filter(&flat, 5, sigma_color, sigma_space);
+            assert!(filtered_flat.as_raw().iter().all(|&p| p == 128));
+        }
     }
 
     #[test]
