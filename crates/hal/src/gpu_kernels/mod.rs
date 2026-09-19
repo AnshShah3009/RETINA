@@ -260,12 +260,6 @@ pub mod shaders {
             // KDTree nearest neighbor search
             shaders.insert("kdtree_search", include_str!("kdtree_search.wgsl"));
 
-            // Voxel grid operations
-            shaders.insert(
-                "voxel_grid_downsample",
-                include_str!("voxel_grid_downsample.wgsl"),
-            );
-
             // Mesh vertex operations
             shaders.insert("mesh_laplacian", include_str!("mesh_laplacian.wgsl"));
 
