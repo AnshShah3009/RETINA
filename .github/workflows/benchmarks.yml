@@ -4,16 +4,16 @@ on:
   push:
     branches: [ master, main, develop ]
     paths:
-      - 'stereo/src/calib3d.rs'
-      - 'stereo/benches/**'
-      - 'stereo/Cargo.toml'
+      - 'crates/calib3d/src/calibration.rs'
+      - 'crates/calib3d/benches/**'
+      - 'crates/calib3d/Cargo.toml'
       - '.github/workflows/benchmarks.yml'
   pull_request:
     branches: [ master, main ]
     paths:
-      - 'stereo/src/calib3d.rs'
-      - 'stereo/benches/**'
-      - 'stereo/Cargo.toml'
+      - 'crates/calib3d/src/calibration.rs'
+      - 'crates/calib3d/benches/**'
+      - 'crates/calib3d/Cargo.toml'
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,9 +40,8 @@ jobs:
       uses: Swatinem/rust-cache@v2
 
     - name: Run benchmarks
-      working-directory: stereo
       run: |
-        cargo bench --bench calibration_benchmark -- --sample-size 20 --verbose
+        cargo bench -p cv-calib3d --bench calibration_benchmark -- --sample-size 20 --verbose
       timeout-minutes: 45
 
     - name: Upload benchmark artifacts

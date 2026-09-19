@@ -119,6 +119,11 @@ fn test_async_process_interaction() {
 
     let start = Instant::now();
 
+    // P1 signals the instant it starts releasing. P2's wait can only complete
+    // after that release, so the test asserts that ordering instead of a
+    // wall-clock margin, which swings with CI scheduling jitter.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<Instant>();
+
     // "Process" 1: Grabs memory, holds it, then releases
     let name_p1 = shm_name.clone();
     let p1 = thread::spawn(move || {
@@ -129,6 +134,7 @@ fn test_async_process_interaction() {
         println!("P1: Reserved 80MB. Sleeping...");
         thread::sleep(Duration::from_millis(100));
         println!("P1: Releasing memory.");
+        let _ = release_tx.send(Instant::now());
         local_coord.release_device(0).unwrap();
     });
 
@@ -147,15 +153,20 @@ fn test_async_process_interaction() {
         local_coord
             .wait_for_device_memory(0, 50, Duration::from_secs(2))
             .unwrap();
+        let woke_at = Instant::now();
         local_coord.reserve_device(0, 50, 0).unwrap();
         let waited = wait_start.elapsed();
 
         println!("P2: Woke up and reserved memory after {:?}", waited);
-        // Ensure we actually waited the ~90ms left of P1's sleep
+        // P2 must not have been able to proceed before P1 released.
+        let released_at = release_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("P1 never signalled its release");
         assert!(
-            waited >= Duration::from_millis(80),
-            "P2 didn't wait long enough: {:?}",
-            waited
+            woke_at >= released_at,
+            "P2 woke {:?} after start, before P1 released at {:?}",
+            woke_at.duration_since(start),
+            released_at.duration_since(start)
         );
 
         local_coord.release_device(0).unwrap();
