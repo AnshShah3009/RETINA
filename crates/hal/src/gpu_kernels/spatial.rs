@@ -43,7 +43,7 @@ fn voxel_of(p: vec3<f32>) -> vec3<i32> {
 
 fn voxel_hash(v: vec3<i32>) -> u32 {
     // Unsigned domain: negative coordinates must not wrap the bucket index.
-    return ((u32(v.x) *% 73856093u) ^ (u32(v.y) *% 19349663u) ^ (u32(v.z) *% 83492791u))
+    return ((u32(v.x) * 73856093u) ^ (u32(v.y) * 19349663u) ^ (u32(v.z) * 83492791u))
         & (params.table_size - 1u);
 }
 
@@ -321,7 +321,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Hash in the unsigned domain: negative coordinates would otherwise
     // make the signed modulo negative and u32() would wrap far past
     // num_buckets (out-of-bounds atomicAdd / dropped correspondences).
-    let hash = ((u32(cell_x) *% 73856093u) ^ (u32(cell_y) *% 19349663u) ^ (u32(cell_z) *% 83492791u)) % params.num_buckets;
+    let hash = ((u32(cell_x) * 73856093u) ^ (u32(cell_y) * 19349663u) ^ (u32(cell_z) * 83492791u)) % params.num_buckets;
     let bucket_idx = atomicAdd(&hash_counts[hash], 1u);
     
     if (bucket_idx < params.max_per_bucket) {
@@ -406,7 +406,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
             for (var dz: i32 = -1; dz <= 1; dz = dz + 1) {
                 let cx = cell_x + dx; let cy = cell_y + dy; let cz = cell_z + dz;
-                let hash = ((u32(cx) *% 73856093u) ^ (u32(cy) *% 19349663u) ^ (u32(cz) *% 83492791u)) % params.num_buckets;
+                let hash = ((u32(cx) * 73856093u) ^ (u32(cy) * 19349663u) ^ (u32(cz) * 83492791u)) % params.num_buckets;
                 let count = min(get_count(hash), params.max_per_bucket);
                 
                 for (var j = 0u; j < count; j = j + 1u) {
