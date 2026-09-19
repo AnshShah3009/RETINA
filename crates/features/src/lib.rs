@@ -68,6 +68,9 @@ pub mod matcher;
 pub mod orb;
 /// RANSAC-based model estimation and outlier rejection
 pub mod ransac;
+/// Visual-localization retrieval: bag-of-words vocabulary and inverted-file
+/// database, plus an LSH index over binary descriptors
+pub mod retrieval;
 /// SIFT (Scale-Invariant Feature Transform) detector and descriptor
 pub mod sift;
 /// USAC/NAPSAC/MAGSAC — enhanced RANSAC sampling and scoring strategies
@@ -90,6 +93,7 @@ pub use markers::*;
 pub use matcher::*;
 pub use orb::*;
 pub use ransac::*;
+pub use retrieval::*;
 pub use sift::*;
 pub use usac::*;
 
