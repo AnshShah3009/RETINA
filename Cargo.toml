@@ -94,6 +94,7 @@ members = [
     "crates/distributed",
     "crates/eval",
     "crates/cli",
+    "crates/localization",
 ]
 
 [workspace.dependencies]
@@ -171,6 +172,7 @@ cv-pointcloud = { path = "./crates/pointcloud" }
 cv-distributed = { path = "./crates/distributed", features = ["tracing"] }
 cv-eval = { path = "./crates/eval" }
 cv-cli = { path = "./crates/cli" }
+cv-localization = { path = "./crates/localization" }
 
 [profile.release]
 opt-level = 3

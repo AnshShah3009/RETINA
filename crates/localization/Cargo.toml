@@ -1,0 +1,24 @@
+[package]
+name = "cv-localization"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "End-to-end visual localization: retrieval + 2D-3D matching + PnP pose estimation against a landmark database"
+
+[dependencies]
+cv-core = { workspace = true }
+cv-features = { workspace = true }
+cv-calib3d = { workspace = true }
+cv-io = { workspace = true }
+nalgebra = { workspace = true }
+
+[features]
+default = []
+# Exposes the reproducible synthetic scene generator (always available to the
+# crate's own unit tests via `cfg(test)`). Enable it to build the bundled example
+# or to script your own runnable demo.
+synthetic = []
+
+[[example]]
+name = "synthetic_localization"
+required-features = ["synthetic"]
