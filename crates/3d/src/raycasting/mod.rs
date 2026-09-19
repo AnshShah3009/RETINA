@@ -190,6 +190,11 @@ pub fn closest_point_on_mesh(
     query: &Point3<f32>,
     mesh: &TriangleMesh,
 ) -> (Point3<f32>, f32, usize) {
+    if mesh.vertices.is_empty() {
+        // No geometry to project onto; report an infinite distance instead of
+        // panicking on `mesh.vertices[0]`.
+        return (*query, f32::INFINITY, 0);
+    }
     let mut closest_point = mesh.vertices[0];
     let mut closest_dist = (query.coords - closest_point.coords).norm();
     let mut closest_tri = 0;
@@ -303,6 +308,12 @@ pub fn closest_points_on_mesh_ctx(
 
 /// Compute mesh distance to another mesh (Hausdorff distance)
 pub fn mesh_to_mesh_distance(source: &TriangleMesh, target: &TriangleMesh) -> (f32, f32) {
+    if source.vertices.is_empty() || target.vertices.is_empty() {
+        // Distance to/from an empty mesh is undefined; return finite zeros
+        // rather than dividing by zero (NaN) in the mean below.
+        return (0.0, 0.0);
+    }
+
     // Forward distance: source -> target
     let forward_dists: Vec<f32> = source
         .vertices
@@ -388,5 +399,23 @@ mod tests {
 
         let hit = ray_triangle_intersection(&ray, v0, v1, v2);
         assert!(hit.is_none(), "Ray should miss the triangle");
+    }
+
+    #[test]
+    fn test_closest_point_on_empty_mesh() {
+        let mesh = TriangleMesh::new();
+        let query = Point3::new(1.0, 2.0, 3.0);
+        let (p, d, tri) = closest_point_on_mesh(&query, &mesh);
+        assert_eq!(p, query);
+        assert!(d.is_infinite());
+        assert_eq!(tri, 0);
+    }
+
+    #[test]
+    fn test_mesh_to_mesh_distance_empty_mesh_is_finite() {
+        let empty = TriangleMesh::new();
+        // Previously divided by 0 -> NaN.
+        let (hausdorff, mean) = mesh_to_mesh_distance(&empty, &empty);
+        assert!(hausdorff.is_finite() && mean.is_finite());
     }
 }

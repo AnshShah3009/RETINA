@@ -79,8 +79,12 @@ pub fn read_ply_gaussian_cloud<P: AsRef<Path>>(path: P) -> Result<GaussianCloud,
             let mut sh = SphericalHarmonics::from_dc(dc);
 
             if values.len() > 17 {
-                let copy_len = (values.len() - 17).min(sh.coeffs.len());
-                sh.coeffs[3..3 + copy_len].copy_from_slice(&values[17..17 + copy_len]);
+                // Higher-order SH coefficients (e.g. f_rest_*) follow the DC
+                // terms. `from_dc` only allocates the 3 DC coefficients, so
+                // grow the buffer before copying or the slice panics.
+                let extra = values.len() - 17;
+                sh.coeffs.resize(3 + extra, 0.0);
+                sh.coeffs[3..3 + extra].copy_from_slice(&values[17..17 + extra]);
             }
 
             let rotation = Vector4::new(rot_dc_a, rot_dc_b, rot_dc_c, rot_dc_d);
@@ -315,5 +319,26 @@ mod tests {
 
         let result = read_ply_gaussian_cloud(temp_file.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_ply_with_higher_order_sh() {
+        // A real 3DGS PLY carries f_rest_* (higher-order SH) after the 3 DC
+        // terms; reading one must not panic on the coeffs slice.
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "ply").unwrap();
+        writeln!(temp_file, "format ascii 1.0").unwrap();
+        writeln!(temp_file, "element vertex 1").unwrap();
+        writeln!(temp_file, "property float x").unwrap();
+        writeln!(temp_file, "end_header").unwrap();
+        // 14 base values + 3 DC + 9 higher-order SH = 26 values.
+        let values: Vec<String> = (0..26).map(|i| format!("{}", i as f32 * 0.1)).collect();
+        writeln!(temp_file, "{}", values.join(" ")).unwrap();
+        temp_file.flush().unwrap();
+
+        let cloud = read_ply_gaussian_cloud(temp_file.path()).expect("should parse");
+        assert_eq!(cloud.num_gaussians(), 1);
+        // 3 DC + 9 copied higher-order coefficients.
+        assert_eq!(cloud.gaussians[0].spherical_harmonics.coeffs.len(), 12);
     }
 }

@@ -24,11 +24,22 @@ pub fn radius_outlier_removal(
 
     let counts: Vec<usize> = pts_f32
         .par_iter()
-        .map(|p| {
-            // radius_search returns all within radius including self
+        .enumerate()
+        .map(|(self_idx, p)| {
+            // `radius_search` returns every point within the radius including
+            // self, and can report the same index more than once when distinct
+            // cells collide in the hash table. Deduplicate and drop self so
+            // each neighbour is counted exactly once (a duplicated self-hit
+            // would otherwise keep true outliers).
             let neighbors = grid.radius_search(p, radius as f32);
-            // Subtract 1 for self (self is always found)
-            neighbors.len().saturating_sub(1)
+            let mut unique: std::collections::HashSet<usize> =
+                std::collections::HashSet::with_capacity(neighbors.len());
+            for (idx, _) in neighbors {
+                if idx != self_idx {
+                    unique.insert(idx);
+                }
+            }
+            unique.len()
         })
         .collect();
 
@@ -42,4 +53,24 @@ pub fn radius_outlier_removal(
     }
 
     (inlier_points, inlier_indices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_radius_outlier_removal_keeps_dense_cluster() {
+        let points = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(0.05, 0.0, 0.0),
+            Point3::new(0.0, 0.05, 0.0),
+            Point3::new(10.0, 10.0, 10.0),
+        ];
+        // Each cluster point has two neighbours within 0.2; the isolated point
+        // has none, so it must be reported as an outlier.
+        let (inliers, indices) = radius_outlier_removal(&points, 0.2, 2);
+        assert_eq!(indices, vec![0, 1, 2]);
+        assert_eq!(inliers.len(), 3);
+    }
 }
