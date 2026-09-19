@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 pub mod device_registry;
 pub mod error;
 pub mod executor;

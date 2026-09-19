@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_core::{PointCloud, Rect};
 use cv_scientific::geometry::*;
 use cv_scientific::point_cloud::*;

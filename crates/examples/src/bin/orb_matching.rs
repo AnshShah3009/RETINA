@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Demo for visualizing ORB feature matches
 //!
 //! This example detects ORB features in two images, matches them,

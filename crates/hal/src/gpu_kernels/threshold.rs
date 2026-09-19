@@ -19,8 +19,23 @@ struct ThresholdParams<T: bytemuck::Pod + bytemuck::Zeroable> {
     _pad1: u32, // pad to 32 bytes for WGSL uniform alignment
 }
 
-unsafe impl<T: bytemuck::Pod + bytemuck::Zeroable> bytemuck::Pod for ThresholdParams<T> {}
-unsafe impl<T: bytemuck::Pod + bytemuck::Zeroable> bytemuck::Zeroable for ThresholdParams<T> {}
+// SAFETY: `threshold` is only instantiated for `T: Float`, whose implementations
+// (`f32`, `f64`, and the `half-precision` `f16`/`bf16`) are all plain scalar floats
+// (size 2/4/8, power-of-two alignment). Each layout packs without padding: `thresh`
+// sits at offset 8, `max_value` immediately after it, then `thresh_type`/`len`/`_pad0`/
+// `_pad1` fill the 4-byte-aligned tail (sizes 28/32/40 for f16/bf16, f32 and f64
+// respectively). Restricting the impl to `T: Float + Pod + Zeroable` matches the
+// function's own bound and excludes e.g. `u8`, whose `ThresholdParams<u8>` layout has
+// padding at bytes 10..12 and would make this impl unsound.
+unsafe impl<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable> bytemuck::Pod
+    for ThresholdParams<T>
+{
+}
+unsafe impl<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable> bytemuck::Zeroable
+    for ThresholdParams<T>
+{
+}
+const _: () = assert!(std::mem::size_of::<ThresholdParams<f32>>() == 32);
 
 pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     ctx: &GpuContext,
@@ -30,6 +45,20 @@ pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     thresh_type: ThresholdType,
 ) -> Result<GpuTensor<T>> {
     let len = input.shape.len();
+
+    // Pipeline setup — validate the dtype *before* any `bytemuck::bytes_of` on the
+    // params struct, so an unsupported `T` returns early instead of being reinterpreted.
+    let shader_source = match cv_core::DataType::from_type::<T>() {
+        Ok(cv_core::DataType::F32) => include_str!("../../shaders/threshold_f32.wgsl"),
+        Ok(_) => {
+            return Err(crate::Error::NotSupported(
+                "Unsupported threshold precision type".into(),
+            ))
+        }
+        _ => {
+            include_str!("../../shaders/threshold_f32.wgsl")
+        }
+    };
 
     let byte_size = (len * std::mem::size_of::<T>()) as u64;
 
@@ -60,18 +89,6 @@ pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    // Pipeline setup
-    let shader_source = match cv_core::DataType::from_type::<T>() {
-        Ok(cv_core::DataType::F32) => include_str!("../../shaders/threshold_f32.wgsl"),
-        Ok(_) => {
-            return Err(crate::Error::NotSupported(
-                "Unsupported threshold precision type".into(),
-            ))
-        }
-        _ => {
-            include_str!("../../shaders/threshold_f32.wgsl")
-        }
-    };
     let pipeline = ctx.create_compute_pipeline(shader_source, "main");
 
     // Bind group

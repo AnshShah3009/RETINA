@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 mod core;
 mod dnn;
 mod features;

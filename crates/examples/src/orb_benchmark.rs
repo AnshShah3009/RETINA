@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_core::{Tensor, TensorShape};
 use cv_features::orb::{detect_and_compute_ctx, orb_detect_and_compute, Orb};
 use cv_hal::compute::ComputeDevice;

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 pub mod mapping;
 pub mod pose_graph;
 pub mod tracking;

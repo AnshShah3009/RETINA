@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Examples for cv-rendering (Gaussian Splatting)
 //!
 //! Run with: cargo run --example gaussian_splatting_basic

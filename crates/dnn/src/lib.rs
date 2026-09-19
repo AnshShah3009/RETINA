@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Deep Learning Neural Network Inference
 //!
 //! Provides a high-level interface for running pre-trained neural network models

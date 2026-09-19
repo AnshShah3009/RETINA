@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Example: Ray Casting
 //!
 //! Run with: cargo run --example raycasting

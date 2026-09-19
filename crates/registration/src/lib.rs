@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Point cloud registration algorithms
 //!
 //! This crate provides comprehensive 3D point cloud registration algorithms

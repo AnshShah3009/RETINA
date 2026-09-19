@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Integration tests for Phase 2 storage redesign.
 //!
 //! Tests comprehensive scenarios combining BufferHandle, Storage trait,

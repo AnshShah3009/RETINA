@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Computational Photography Algorithms
 //!
 //! Provides algorithms for image enhancement, filtering, denoising,

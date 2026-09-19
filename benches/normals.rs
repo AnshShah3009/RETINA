@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 /// Normal estimation benchmarks — all paths, multiple cloud sizes.
 ///
 /// Paths measured (labelled to match Open3D equivalents):

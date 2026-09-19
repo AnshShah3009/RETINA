@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_core::geometry::{CameraIntrinsics, CameraModel, Distortion, PinholeModel};
 use nalgebra::Point3;
 

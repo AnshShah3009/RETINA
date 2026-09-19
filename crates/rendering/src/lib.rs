@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Rendering algorithms for computer vision
 //!
 //! This crate provides rendering and novel view synthesis algorithms:

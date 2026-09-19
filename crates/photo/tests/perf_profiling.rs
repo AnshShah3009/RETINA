@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_core::tensor::{CpuTensor, TensorShape};
 use cv_photo::{fast_nl_means_denoising, inpaint_telea};
 use std::time::Instant;

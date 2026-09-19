@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Video processing algorithms for motion estimation and object tracking
 //!
 //! This crate provides comprehensive video processing capabilities:

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_calib3d::*;
 use cv_core::{CameraIntrinsics, Distortion, Pose};
 use image::{GrayImage, Luma};
