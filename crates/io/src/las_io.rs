@@ -161,10 +161,16 @@ pub fn write_las<P: AsRef<Path>>(path: P, data: &LasData) -> cv_core::Result<()>
     use las::{Builder, Point, Write, Writer};
 
     let mut builder = Builder::from((1, 4)); // LAS 1.4
-    builder.point_format = if data.colors.is_some() {
-        las::point::Format::new(2).unwrap() // Format 2: XYZ + RGB
-    } else {
-        las::point::Format::new(0).unwrap() // Format 0: XYZ only
+                                             // Pick a point format that actually carries the fields we write. Formats 0
+                                             // and 2 have no GPS time slot, so writing `gps_times` with them silently
+                                             // dropped it; formats 1 and 3 include GPS time.
+    let has_color = data.colors.is_some();
+    let has_gps = data.gps_times.is_some();
+    builder.point_format = match (has_color, has_gps) {
+        (true, true) => las::point::Format::new(3).unwrap(), // XYZ + GPS + RGB
+        (false, true) => las::point::Format::new(1).unwrap(), // XYZ + GPS
+        (true, false) => las::point::Format::new(2).unwrap(), // XYZ + RGB
+        (false, false) => las::point::Format::new(0).unwrap(), // XYZ only
     };
 
     let header = builder
@@ -325,5 +331,67 @@ pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
         number_of_returns: filter_vec(&data.number_of_returns, mask),
         gps_times: filter_vec(&data.gps_times, mask),
         bounds: (min.x, min.y, min.z, max.x, max.y, max.z),
+    }
+}
+
+#[cfg(all(test, feature = "las"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_write_las_round_trips_gps_time() {
+        let data = LasData {
+            points: vec![Point3::new(1.0, 2.0, 3.0), Point3::new(4.0, 5.0, 6.0)],
+            colors: None,
+            intensities: None,
+            classifications: None,
+            return_numbers: None,
+            number_of_returns: None,
+            gps_times: Some(vec![1000.25, 2000.5]),
+            bounds: (1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
+            num_points: 2,
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "retina_las_gps_round_trip_{}.las",
+            std::process::id()
+        ));
+        write_las(&path, &data).expect("write_las failed");
+        let read = read_las(&path).expect("read_las failed");
+        let _ = std::fs::remove_file(&path);
+
+        let gps = read.gps_times.expect("gps_times missing after round-trip");
+        assert_eq!(gps.len(), 2);
+        assert!((gps[0] - 1000.25).abs() < 1e-6);
+        assert!((gps[1] - 2000.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_write_las_round_trips_gps_time_and_color() {
+        let data = LasData {
+            points: vec![Point3::new(1.0, 2.0, 3.0)],
+            colors: Some(vec![Point3::new(1.0, 0.0, 0.0)]),
+            intensities: None,
+            classifications: None,
+            return_numbers: None,
+            number_of_returns: None,
+            gps_times: Some(vec![42.5]),
+            bounds: (1.0, 2.0, 3.0, 1.0, 2.0, 3.0),
+            num_points: 1,
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "retina_las_gps_color_round_trip_{}.las",
+            std::process::id()
+        ));
+        write_las(&path, &data).expect("write_las failed");
+        let read = read_las(&path).expect("read_las failed");
+        let _ = std::fs::remove_file(&path);
+
+        let gps = read.gps_times.expect("gps_times missing after round-trip");
+        assert_eq!(gps.len(), 1);
+        assert!((gps[0] - 42.5).abs() < 1e-6);
+        let colors = read.colors.expect("colors missing after round-trip");
+        assert_eq!(colors.len(), 1);
     }
 }

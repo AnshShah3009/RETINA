@@ -12,11 +12,32 @@ impl Color {
     }
 
     pub fn hex(hex: &str) -> Self {
-        let hex = hex.trim_start_matches('#');
-        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
-        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
-        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
-        Color(r, g, b)
+        // Work on bytes so malformed/non-ASCII input cannot panic on a slice
+        // boundary. Accept the 6-digit form (#rrggbb) and the 3-digit CSS
+        // shorthand (#rgb); anything else falls back to black.
+        let bytes = hex.trim_start_matches('#').as_bytes();
+        let nibble = |c: u8| -> u8 {
+            match c {
+                b'0'..=b'9' => c - b'0',
+                b'a'..=b'f' => c - b'a' + 10,
+                b'A'..=b'F' => c - b'A' + 10,
+                _ => 0,
+            }
+        };
+
+        match bytes.len() {
+            3 => Color(
+                nibble(bytes[0]) * 0x11,
+                nibble(bytes[1]) * 0x11,
+                nibble(bytes[2]) * 0x11,
+            ),
+            6 => Color(
+                nibble(bytes[0]) * 16 + nibble(bytes[1]),
+                nibble(bytes[2]) * 16 + nibble(bytes[3]),
+                nibble(bytes[4]) * 16 + nibble(bytes[5]),
+            ),
+            _ => Color(0, 0, 0),
+        }
     }
 
     pub fn to_hex(&self) -> String {
@@ -162,5 +183,25 @@ impl Legend {
     pub fn position(mut self, pos: &str) -> Self {
         self.position = pos.to_string();
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_color_hex_handles_short_and_invalid_input() {
+        // 6-digit form
+        assert_eq!(Color::hex("#123456").to_hex(), "#123456");
+        assert_eq!(Color::hex("123456").to_hex(), "#123456");
+        // 3-digit CSS shorthand expands each nibble
+        assert_eq!(Color::hex("#fff").to_hex(), "#ffffff");
+        assert_eq!(Color::hex("#0f0").to_hex(), "#00ff00");
+        // Short / empty / invalid-length inputs must not panic
+        assert_eq!(Color::hex("#").to_hex(), "#000000");
+        assert_eq!(Color::hex("").to_hex(), "#000000");
+        assert_eq!(Color::hex("#12").to_hex(), "#000000");
+        assert_eq!(Color::hex("#12ff").to_hex(), "#000000");
     }
 }

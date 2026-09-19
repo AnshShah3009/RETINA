@@ -239,25 +239,75 @@ impl DnnNet {
     /// - Values: Normalized to [0.0, 1.0] range
     /// - Channels: 1 (converted to grayscale)
     pub fn preprocess(&self, img: &DynamicImage, runner: &ResourceGroup) -> Result<Tensor<f32>> {
-        let target_w = self.input_shape[3];
-        let target_h = self.input_shape[2];
-        let channels = self.input_shape[1];
-
-        let gray = img.to_luma8();
-        let resized = cv_imgproc::resize_ctx(
-            &gray,
-            target_w as u32,
-            target_h as u32,
-            cv_imgproc::Interpolation::Linear,
+        preprocess_grayscale(
+            img,
+            self.input_shape[1],
+            self.input_shape[2],
+            self.input_shape[3],
             runner,
-        );
-
-        let data: Vec<f32> = resized.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
-
-        Tensor::from_vec(
-            data,
-            cv_core::TensorShape::new(channels, target_h, target_w),
         )
-        .map_err(|e| Error::RuntimeError(e.to_string()))
+    }
+}
+
+/// Convert an image to a normalized `(channels, height, width)` f32 tensor.
+///
+/// The image is converted to a single luma plane and that plane is replicated
+/// across `channels` so the tensor's element count matches the model's input
+/// shape. Previously the luma plane was wrapped in a 3-channel shape, which made
+/// `Tensor::from_vec` fail with a `DimensionMismatch` for the standard
+/// `[1, 3, H, W]` input shape.
+fn preprocess_grayscale(
+    img: &DynamicImage,
+    channels: usize,
+    target_h: usize,
+    target_w: usize,
+    runner: &ResourceGroup,
+) -> Result<Tensor<f32>> {
+    let channels = channels.max(1);
+
+    let gray = img.to_luma8();
+    let resized = cv_imgproc::resize_ctx(
+        &gray,
+        target_w as u32,
+        target_h as u32,
+        cv_imgproc::Interpolation::Linear,
+        runner,
+    );
+
+    let mut data: Vec<f32> = Vec::with_capacity(target_w * target_h * channels);
+    for &v in resized.as_raw().iter() {
+        let normalized = v as f32 / 255.0;
+        for _ in 0..channels {
+            data.push(normalized);
+        }
+    }
+
+    Tensor::from_vec(
+        data,
+        cv_core::TensorShape::new(channels, target_h, target_w),
+    )
+    .map_err(|e| Error::RuntimeError(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::GrayImage;
+
+    #[test]
+    fn test_preprocess_produces_tensor_matching_model_shape() {
+        // Regression: the luma plane must be replicated to `channels` so the
+        // tensor length matches TensorShape::new(channels, h, w).
+        let group = cv_runtime::orchestrator::scheduler()
+            .expect("scheduler")
+            .get_default_group()
+            .expect("default group");
+        let img = DynamicImage::ImageLuma8(GrayImage::from_pixel(8, 8, image::Luma([128u8])));
+
+        let tensor = preprocess_grayscale(&img, 3, 4, 4, &group).expect("preprocess failed");
+        assert_eq!(tensor.shape.channels, 3);
+        assert_eq!(tensor.shape.height, 4);
+        assert_eq!(tensor.shape.width, 4);
+        assert_eq!(tensor.as_slice().expect("slice").len(), 3 * 4 * 4);
     }
 }

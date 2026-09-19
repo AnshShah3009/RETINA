@@ -108,7 +108,9 @@ impl Mog2 {
     /// occurs during processing.
     pub fn new(history: usize, var_threshold: f32, detect_shadows: bool) -> Self {
         Self {
-            history,
+            // `history` drives alpha = 1/history; a zero would yield inf and
+            // poison the model with NaNs, so clamp it to at least 1.
+            history: history.max(1),
             var_threshold,
             _detect_shadows: detect_shadows,
             n_mixtures: 5,
@@ -840,5 +842,27 @@ mod tests {
                 assert!(v == 0 || v == 255, "Unexpected mask value: {}", v);
             }
         }
+    }
+
+    #[test]
+    fn test_mog2_zero_history_is_clamped() {
+        // history = 0 used to give alpha = 1/0 = inf, poisoning the model.
+        let cpu = CpuBackend::new().unwrap();
+        let device = ComputeDevice::Cpu(&cpu);
+        let mut mog2 = Mog2::new(0, 16.0, false);
+
+        assert!(mog2.history >= 1);
+        assert!((1.0f32 / mog2.history as f32).is_finite());
+
+        let width = 8usize;
+        let height = 8usize;
+        let frame: CpuTensor<u8> = CpuTensor::from_vec(
+            vec![100u8; width * height],
+            TensorShape::new(1, height, width),
+        )
+        .unwrap();
+        let mask = mog2.apply_ctx(&frame, -1.0, &device).unwrap();
+        let mask_slice = mask.as_slice().unwrap();
+        assert!(mask_slice.iter().all(|&v| v == 0 || v == 255));
     }
 }
