@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_calib3d::stereo_matching::block_matching::stereo_block_match;
 use image::{GrayImage, Luma};
 use std::time::Instant;

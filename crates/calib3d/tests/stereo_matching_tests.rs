@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_calib3d::stereo_matching::*;
 use image::{GrayImage, Luma};
 

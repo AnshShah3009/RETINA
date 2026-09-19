@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use cv_core::{float::Float, CpuTensor, Tensor, TensorShape};
 use cv_hal::context::ComputeContext;

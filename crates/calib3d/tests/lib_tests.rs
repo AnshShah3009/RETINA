@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 // Extracted from lib.rs inline tests
 use cv_calib3d::*;
 use cv_core::{CameraIntrinsics, Distortion, Pose};

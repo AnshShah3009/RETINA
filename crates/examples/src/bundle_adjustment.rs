@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Example: Bundle Adjustment
 //!
 //! Run with: cargo run --example bundle_adjustment

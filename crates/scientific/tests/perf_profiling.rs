@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_scientific::fft::{fft, ifft};
 use cv_scientific::spatial::KDTree;
 use std::time::Instant;

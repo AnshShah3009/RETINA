@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Example: Plotting and 3D Visualization
 //!
 //! Run with: cargo run --example plot_demo

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Structure from Motion (SfM)
 //!
 //! This crate provides algorithms for 3D reconstruction from multiple 2D images.

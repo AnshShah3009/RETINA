@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! End-to-end tests for the `cv-bench` binary.
 //!
 //! Each test writes small input files into a self-cleaning temporary directory,

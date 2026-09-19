@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 //! Feature detection, extraction, and matching algorithms.
@@ -30,6 +31,10 @@
 //! let matcher = matcher::Matcher::new(matcher::MatchType::BruteForceHamming);
 //! let matches = matcher.match_descriptors(&descriptors, &descriptors);
 //! ```
+
+/// Shared 1-D Sobel / Gaussian gradient helpers used by the Harris and GFTT
+/// corner detectors (private implementation detail).
+mod gradients;
 
 /// AKAZE (Accelerated-KAZE) feature detector and descriptor
 pub mod akaze;

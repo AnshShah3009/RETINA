@@ -1,2 +1,3 @@
+#![forbid(unsafe_code)]
 pub mod point_cloud;
 pub use point_cloud::*;

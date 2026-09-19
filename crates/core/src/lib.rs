@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![allow(missing_docs)]
 //! Core computer vision types and traits
 //!

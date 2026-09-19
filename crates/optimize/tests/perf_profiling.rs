@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_optimize::general::{minimize_nelder_mead, NelderMeadConfig};
 use std::time::Instant;
 

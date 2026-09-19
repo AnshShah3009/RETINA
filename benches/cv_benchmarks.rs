@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Benchmarks for stereo vision algorithms
 //!
 //! Compares CPU vs GPU performance for stereo matching operations

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_core::geometry::CameraIntrinsics;
 use cv_runtime::orchestrator::{scheduler, WorkloadHint};
 use cv_slam::Slam;

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Plotting and Visualization
 //!
 //! This crate provides plotting and visualization capabilities equivalent to Python's

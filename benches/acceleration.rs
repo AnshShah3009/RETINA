@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use criterion::{criterion_group, criterion_main, Criterion};
 use cv_runtime::orchestrator::{scheduler, GroupPolicy, TaskPriority};
 use image::GrayImage;

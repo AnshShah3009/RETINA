@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Example: Feature Detection and Matching
 //!
 //! Run with: cargo run --example features_demo

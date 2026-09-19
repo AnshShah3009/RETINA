@@ -7,6 +7,8 @@ use image::GrayImage;
 use nalgebra::{Matrix3, Point2};
 use rayon::prelude::*;
 
+use crate::kernels::{cubic_kernel, lanczos_kernel};
+
 pub fn get_pixel_bilinear(img: &GrayImage, x: f32, y: f32) -> f32 {
     get_pixel_bilinear_with_border(img, x, y, BorderMode::Constant(0))
 }
@@ -37,18 +39,6 @@ fn get_pixel_nearest_with_border(img: &GrayImage, x: f32, y: f32, border: Border
     sample_pixel(img, xi, yi, border)
 }
 
-/// Catmull-Rom cubic kernel (Keys, a = -0.5).
-fn cubic_kernel(d: f32) -> f32 {
-    let a = d.abs();
-    if a <= 1.0 {
-        1.5 * a * a * a - 2.5 * a * a + 1.0
-    } else if a < 2.0 {
-        -0.5 * a * a * a + 2.5 * a * a - 4.0 * a + 2.0
-    } else {
-        0.0
-    }
-}
-
 fn get_pixel_cubic_with_border(img: &GrayImage, x: f32, y: f32, border: BorderMode) -> f32 {
     let x0 = x.floor() as isize;
     let y0 = y.floor() as isize;
@@ -75,19 +65,6 @@ fn get_pixel_cubic_with_border(img: &GrayImage, x: f32, y: f32, border: BorderMo
         }
     }
     sum
-}
-
-/// Lanczos window (a = 3).
-fn lanczos_kernel(d: f32) -> f32 {
-    const A: f32 = 3.0;
-    if d == 0.0 {
-        1.0
-    } else if d.abs() >= A {
-        0.0
-    } else {
-        let p = std::f32::consts::PI * d;
-        (p.sin() / p) * ((p / A).sin() / (p / A))
-    }
 }
 
 fn get_pixel_lanczos_with_border(img: &GrayImage, x: f32, y: f32, border: BorderMode) -> f32 {

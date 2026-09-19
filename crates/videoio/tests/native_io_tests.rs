@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_videoio::{
     backends::{PngSequenceCapture, PngSequenceWriter},
     VideoCapture, VideoWriter,

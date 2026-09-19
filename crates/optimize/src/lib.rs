@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 pub mod factor_graph;
 pub mod factors;
 pub mod general;

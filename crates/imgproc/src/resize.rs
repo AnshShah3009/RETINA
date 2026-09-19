@@ -3,6 +3,8 @@ use cv_runtime::orchestrator::ResourceGroup;
 use image::{GrayImage, RgbImage};
 use rayon::prelude::*;
 
+use crate::kernels::{cubic_kernel, lanczos_kernel};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interpolation {
     Nearest,
@@ -272,18 +274,6 @@ fn resize_rgb_linear(src: &RgbImage, width: u32, height: u32) -> RgbImage {
     dst
 }
 
-/// Interpolating catmull-rom kernel (Keys, a = -0.5).
-fn cubic_kernel(d: f32) -> f32 {
-    let a = d.abs();
-    if a <= 1.0 {
-        1.5 * a * a * a - 2.5 * a * a + 1.0
-    } else if a < 2.0 {
-        -0.5 * a * a * a + 2.5 * a * a - 4.0 * a + 2.0
-    } else {
-        0.0
-    }
-}
-
 /// Cubic weights for the taps `floor(f) - 1 ..= floor(f) + 2` (sums to 1).
 fn cubic_weights(f: f32) -> Vec<f32> {
     let t = f - f.floor();
@@ -293,19 +283,6 @@ fn cubic_weights(f: f32) -> Vec<f32> {
         cubic_kernel(1.0 - t),
         cubic_kernel(2.0 - t),
     ]
-}
-
-/// Lanczos window (a = 3).
-fn lanczos_kernel(d: f32) -> f32 {
-    const A: f32 = 3.0;
-    if d == 0.0 {
-        1.0
-    } else if d.abs() >= A {
-        0.0
-    } else {
-        let p = std::f32::consts::PI * d;
-        (p.sin() / p) * ((p / A).sin() / (p / A))
-    }
 }
 
 /// Lanczos-3 weights for the taps `floor(f) - 2 ..= floor(f) + 3`,

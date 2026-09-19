@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_core::point_cloud::PointCloud;
 use nalgebra::{Point3, Vector3};
 
