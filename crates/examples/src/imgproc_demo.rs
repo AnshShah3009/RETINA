@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Example: Image Processing
 //!
 //! Run with: cargo run --example imgproc_demo

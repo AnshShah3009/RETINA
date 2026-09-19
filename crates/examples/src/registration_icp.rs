@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Example: Point Cloud Registration
 //!
 //! Run with: cargo run --example registration_icp

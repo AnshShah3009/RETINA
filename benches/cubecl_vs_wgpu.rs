@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Benchmark: CubeCL kernels vs WGPU (WGSL shader) kernels vs CPU
 //!
 //! Compares three backend paths for identical operations:

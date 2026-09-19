@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! 3D File I/O Module
 //!
 //! Supports reading and writing point clouds and meshes in various formats:

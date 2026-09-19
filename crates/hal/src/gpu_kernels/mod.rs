@@ -260,12 +260,6 @@ pub mod shaders {
             // KDTree nearest neighbor search
             shaders.insert("kdtree_search", include_str!("kdtree_search.wgsl"));
 
-            // Voxel grid operations
-            shaders.insert(
-                "voxel_grid_downsample",
-                include_str!("voxel_grid_downsample.wgsl"),
-            );
-
             // Mesh vertex operations
             shaders.insert("mesh_laplacian", include_str!("mesh_laplacian.wgsl"));
 
@@ -1158,7 +1152,13 @@ pub mod spatial_gpu {
         Ok(results)
     }
 
-    /// Build VoxelGrid on GPU - downsamples point cloud by voxel
+    /// Build a voxel grid from a point cloud, downsampling by voxel size.
+    ///
+    /// The accumulation runs on the CPU (a dense grid indexed by voxel
+    /// coordinates, so the per-voxel mean is exact) and the resulting buffers
+    /// are uploaded to the device, where they can be read back or consumed by
+    /// later GPU passes. There is no compute shader involved; the name refers
+    /// to where the result lives, not where the work happens.
     pub fn build_voxel_grid(
         gpu: &crate::gpu::GpuContext,
         points: &[Vector3<f32>],
@@ -1240,7 +1240,10 @@ pub mod spatial_gpu {
         })
     }
 
-    /// Get downsampled points from voxel grid
+    /// Downsample a point cloud to one centroid per occupied voxel.
+    ///
+    /// Built on [`build_voxel_grid`], so the same note applies: the grid is
+    /// accumulated on the CPU and the buffers are uploaded for readback.
     pub fn voxel_grid_downsample(
         gpu: &crate::gpu::GpuContext,
         points: &[Vector3<f32>],

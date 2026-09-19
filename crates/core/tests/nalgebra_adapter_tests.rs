@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_core::float::Float;
 use cv_core::nalgebra_adapters::*;
 use nalgebra::{Matrix3, Matrix4, Point3, Vector3};

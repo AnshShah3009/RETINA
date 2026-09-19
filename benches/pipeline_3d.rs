@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Benchmark: 3D pipeline operations (marching cubes, KDTree, ICP, Poisson, TSDF)
 //!
 //! Run:

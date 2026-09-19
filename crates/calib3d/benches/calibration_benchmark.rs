@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use cv_calib3d::*;
 use nalgebra::{Point2, Point3, Rotation3, Vector3};

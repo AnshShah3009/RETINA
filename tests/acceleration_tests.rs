@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_3d::mesh::TriangleMesh;
 use cv_core::{Polygon, Tensor, TensorShape};
 use cv_hal::context::ComputeContext;

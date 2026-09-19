@@ -549,9 +549,16 @@ pub struct Mog2Params<T: Float> {
     pub _padding: [u32; 1],  // Align to 16 bytes for WGSL
 }
 
-// Safety: All fields are Pod when T: Pod. Repr(C) guarantees no padding surprises.
-unsafe impl<T: Float + bytemuck::Pod> bytemuck::Pod for Mog2Params<T> {}
-unsafe impl<T: Float + bytemuck::Zeroable> bytemuck::Zeroable for Mog2Params<T> {}
+// SAFETY: `Mog2Params<f32>` is `#[repr(C)]` with every byte occupied — three
+// leading `u32`s, six `f32`s, then `adaptive_k`/`max_components`/`_padding` fill the
+// 48-byte layout exactly, so there is no padding byte for `Pod` to expose. Only `f32`
+// is ever serialised (see `gpu_kernels::mog2_update`). A blanket impl over `T` would
+// be unsound: `Mog2Params<f64>` gains 4 bytes of interior padding after the three
+// `u32`s and 4 bytes of trailing padding, and safe callers could then read
+// uninitialised memory via `bytemuck::bytes_of`.
+unsafe impl bytemuck::Pod for Mog2Params<f32> {}
+unsafe impl bytemuck::Zeroable for Mog2Params<f32> {}
+const _: () = assert!(std::mem::size_of::<Mog2Params<f32>>() == 48);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorConversion {

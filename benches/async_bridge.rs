@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use image::GrayImage;
 use tokio::runtime::Runtime;

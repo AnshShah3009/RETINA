@@ -1647,6 +1647,7 @@ dependencies = [
  "bytemuck",
  "cv-core",
  "cv-hal",
+ "cv-math",
  "cv-runtime",
  "cv-scientific",
  "futures",
@@ -1858,6 +1859,7 @@ dependencies = [
  "geo-buffer",
  "nalgebra",
  "ndarray 0.17.2",
+ "num-traits",
  "rayon",
  "rstar 0.12.2",
 ]

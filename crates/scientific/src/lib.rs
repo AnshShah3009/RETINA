@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Scientific Computing — meta-crate re-exporting from cv-math, cv-geometry2d, cv-signal, cv-pointcloud
 //!
 //! This crate is a backward-compatible re-export layer. New code should depend on

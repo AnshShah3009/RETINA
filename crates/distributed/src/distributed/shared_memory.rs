@@ -38,6 +38,18 @@ const STALE_THRESHOLD_NS: u64 = 5_000_000_000;
 // --- Shared memory structures ---
 
 /// Cache-line aligned header (64 bytes).
+///
+/// # Safety
+///
+/// An instance of this type is *reinterpreted directly* over a shared, cross-process
+/// `mmap` region by casting a raw pointer (see the `*_ptr` helpers on `ShmCoordinator`).
+/// The contract that makes those casts sound:
+///
+/// * Every field that may be read or written concurrently — by another thread *or*
+///   another process — MUST be an `Atomic*`. It must never be accessed as plain data
+///   or through a `&mut` reference, which would be a data race.
+/// * `_pad` is written exactly once during initialization, before the header is
+///   published, and MUST never be mutated afterwards.
 #[repr(C, align(64))]
 struct ShmHeaderV3 {
     magic: AtomicU32,
@@ -50,6 +62,12 @@ struct ShmHeaderV3 {
 }
 
 /// Per-device state (128 bytes, cache-line aligned).
+///
+/// # Safety
+///
+/// See [`ShmHeaderV3`]: this type is reinterpreted over a shared `mmap` region, so
+/// every field touched concurrently (across threads or processes) MUST be an `Atomic*`,
+/// and `_pad` is written once before publication and never mutated afterwards.
 #[repr(C, align(64))]
 struct DeviceState {
     device_id: AtomicU32,
@@ -61,6 +79,12 @@ struct DeviceState {
 }
 
 /// Per-process slot (256 bytes, cache-line aligned).
+///
+/// # Safety
+///
+/// See [`ShmHeaderV3`]: this type is reinterpreted over a shared `mmap` region, so
+/// every field touched concurrently (across threads or processes) MUST be an `Atomic*`,
+/// and `_pad` is written once before publication and never mutated afterwards.
 #[repr(C, align(64))]
 struct ProcessSlot {
     state: AtomicU32,
@@ -80,10 +104,23 @@ const _: () = assert!(std::mem::size_of::<ShmHeaderV3>() == HEADER_SIZE);
 const _: () = assert!(std::mem::size_of::<DeviceState>() == DEVICE_STATE_SIZE);
 const _: () = assert!(std::mem::size_of::<ProcessSlot>() == PROCESS_SLOT_SIZE);
 
+// Compile-time alignment checks for the region casts in the `*_ptr` helpers: the
+// mapped base address is 64-byte aligned (page-aligned), so every region offset and
+// per-element stride must also be a multiple of 64 for the casts to satisfy the
+// `align(64)` of the target types.
+const _: () = assert!(DEVICE_REGION_OFFSET % 64 == 0);
+const _: () = assert!(SLOT_REGION_OFFSET % 64 == 0);
+const _: () = assert!(DEVICE_STATE_SIZE % 64 == 0);
+const _: () = assert!(PROCESS_SLOT_SIZE % 64 == 0);
+
 /// Cross-process coordinator using POSIX shared memory.
 ///
 /// Provides device reservation with memory budget enforcement, affinity group
 /// scheduling, and automatic stale-process reaping via background heartbeats.
+///
+/// `Send`/`Sync` are derived automatically: every field is already thread-safe
+/// (`memmap2::MmapMut` is `Send + Sync`, and the remaining fields are `usize`,
+/// `u32`, `PathBuf`, `Arc<AtomicU32>` and a `Mutex<Option<JoinHandle<()>>>`).
 pub struct ShmCoordinator {
     mmap: memmap2::MmapMut,
     slot_index: usize,
@@ -92,11 +129,6 @@ pub struct ShmCoordinator {
     heartbeat_stop: Arc<AtomicU32>,
     heartbeat_thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
-
-// SAFETY: The mmap region uses only atomic operations for cross-process access.
-// The coordinator owns its slot and all writes go through atomics.
-unsafe impl Send for ShmCoordinator {}
-unsafe impl Sync for ShmCoordinator {}
 
 /// Per-process reference counts keyed by `(shm path, slot_index)`.
 ///
@@ -227,7 +259,15 @@ impl ShmCoordinator {
 
     // --- Pointer helpers ---
 
+    /// The mapped base address must be 64-byte aligned so the `align(64)` region
+    /// casts below are valid; combined with the 64-multiple offsets/strides checked
+    /// by the const asserts above.
     fn header_ptr(mmap: &memmap2::MmapMut) -> &ShmHeaderV3 {
+        debug_assert_eq!(
+            mmap.as_ptr() as usize % 64,
+            0,
+            "shared-memory base must be 64-byte aligned"
+        );
         unsafe { &*(mmap.as_ptr() as *const ShmHeaderV3) }
     }
 
@@ -239,6 +279,11 @@ impl ShmCoordinator {
         if offset + DEVICE_STATE_SIZE > mmap.len() {
             return None;
         }
+        debug_assert_eq!(
+            mmap.as_ptr() as usize % 64,
+            0,
+            "shared-memory base must be 64-byte aligned"
+        );
         Some(unsafe { &*(mmap.as_ptr().add(offset) as *const DeviceState) })
     }
 
@@ -250,6 +295,11 @@ impl ShmCoordinator {
         if offset + PROCESS_SLOT_SIZE > mmap.len() {
             return None;
         }
+        debug_assert_eq!(
+            mmap.as_ptr() as usize % 64,
+            0,
+            "shared-memory base must be 64-byte aligned"
+        );
         Some(unsafe { &*(mmap.as_ptr().add(offset) as *const ProcessSlot) })
     }
 
@@ -940,7 +990,13 @@ impl ShmCoordinator {
         #[cfg(target_family = "unix")]
         #[cfg(not(target_os = "linux"))]
         {
-            unsafe { libc::kill(pid as i32, 0) == 0 }
+            // A pid read from shared memory is attacker-/corruption-controlled: a value
+            // above `i32::MAX` would wrap to a negative `i32`, and `kill(-n, 0)` probes
+            // process *group* n instead of failing. Reject non-representable pids.
+            let Ok(p) = i32::try_from(pid) else {
+                return false;
+            };
+            unsafe { libc::kill(p, 0) == 0 }
         }
         #[cfg(not(target_family = "unix"))]
         {

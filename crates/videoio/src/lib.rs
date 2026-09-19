@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Video input/output and camera capture
 //!
 //! This crate provides a unified interface for capturing video from cameras

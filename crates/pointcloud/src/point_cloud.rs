@@ -3,77 +3,14 @@ use nalgebra::{Matrix3, Point3, Vector3};
 use rayon::prelude::*;
 use rstar::PointDistance;
 use rstar::{RTree, RTreeObject, AABB};
-use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write};
 
 /// Analytic minimum eigenvector of a 3×3 symmetric matrix.
 ///
-/// Matches Open3D `PointCloudImpl.h` / Geometric Tools `RobustEigenSymmetric3x3`.
-/// Uses the trigonometric (Cardano) method for eigenvalues and the best
-/// cross-product of shifted matrix rows for the eigenvector — no iteration,
-/// exact closed-form result in ~50 scalar operations.
+/// Thin wrapper over the single shared implementation in `cv-math`
+/// (Open3D `PointCloudImpl.h` / Geometric Tools `RobustEigenSymmetric3x3`),
+/// also used by the f32 GPU and f64 CPU normal-estimation paths.
 fn fast_eigen3x3_min(m: &Matrix3<f32>) -> Vector3<f32> {
-    // Normalize to prevent overflow / underflow.
-    let max_c = m.abs().max();
-    if max_c < 1e-30 {
-        return Vector3::z();
-    }
-    let s = 1.0 / max_c;
-    let a00 = m[(0, 0)] * s;
-    let a01 = m[(0, 1)] * s;
-    let a02 = m[(0, 2)] * s;
-    let a11 = m[(1, 1)] * s;
-    let a12 = m[(1, 2)] * s;
-    let a22 = m[(2, 2)] * s;
-
-    let norm = a01 * a01 + a02 * a02 + a12 * a12;
-    let q = (a00 + a11 + a22) / 3.0;
-    let b00 = a00 - q;
-    let b11 = a11 - q;
-    let b22 = a22 - q;
-    let p = ((b00 * b00 + b11 * b11 + b22 * b22 + 2.0 * norm) / 6.0).sqrt();
-    if p < 1e-10 {
-        return Vector3::z();
-    }
-
-    // Determinant of (A - q*I) / p.
-    let c00 = b11 * b22 - a12 * a12;
-    let c01 = a01 * b22 - a12 * a02;
-    let c02 = a01 * a12 - b11 * a02;
-    let det = (b00 * c00 - a01 * c01 + a02 * c02) / (p * p * p);
-    let half_det = (det * 0.5_f32).clamp(-1.0, 1.0);
-    let angle = half_det.acos() / 3.0;
-
-    // Minimum eigenvalue: q + p * cos(angle + 2π/3) * 2.
-    const TWO_THIRDS_PI: f32 = 2.094_395_1;
-    let eval_min = q + p * (angle + TWO_THIRDS_PI).cos() * 2.0;
-
-    // Eigenvector: best cross-product of rows of (A - eval_min * I).
-    let r0 = Vector3::new(a00 - eval_min, a01, a02);
-    let r1 = Vector3::new(a01, a11 - eval_min, a12);
-    let r2 = Vector3::new(a02, a12, a22 - eval_min);
-
-    let r0xr1 = r0.cross(&r1);
-    let r0xr2 = r0.cross(&r2);
-    let r1xr2 = r1.cross(&r2);
-
-    let d0 = r0xr1.norm_squared();
-    let d1 = r0xr2.norm_squared();
-    let d2 = r1xr2.norm_squared();
-
-    let best = if d0 >= d1 && d0 >= d2 {
-        r0xr1
-    } else if d1 >= d2 {
-        r0xr2
-    } else {
-        r1xr2
-    };
-
-    let len = best.norm();
-    if len < 1e-10 {
-        return Vector3::z();
-    }
-    best / len
+    cv_math::linalg::min_eigenvector_3x3(m)
 }
 
 /// Downsample a point cloud with a voxel grid.
@@ -422,165 +359,6 @@ pub fn compute_normals_from_depth(
             }
         })
         .collect()
-}
-
-/// Write a point cloud to a PLY ASCII file.
-pub fn write_ply(pc: &PointCloud, path: &str) -> std::io::Result<()> {
-    let mut file = BufWriter::new(File::create(path)?);
-
-    writeln!(file, "ply")?;
-    writeln!(file, "format ascii 1.0")?;
-    writeln!(file, "element vertex {}", pc.len())?;
-    writeln!(file, "property float x")?;
-    writeln!(file, "property float y")?;
-    writeln!(file, "property float z")?;
-
-    if pc.colors.is_some() {
-        writeln!(file, "property uchar red")?;
-        writeln!(file, "property uchar green")?;
-        writeln!(file, "property uchar blue")?;
-    }
-
-    if pc.normals.is_some() {
-        writeln!(file, "property float nx")?;
-        writeln!(file, "property float ny")?;
-        writeln!(file, "property float nz")?;
-    }
-
-    writeln!(file, "end_header")?;
-
-    for i in 0..pc.len() {
-        let p = pc.points[i];
-        write!(file, "{} {} {}", p.x, p.y, p.z)?;
-
-        if let Some(colors) = &pc.colors {
-            let c = colors[i];
-            // Colors in Point3<f32> assumed 0..1 or 0..255? Open3D uses 0..1 usually in float.
-            // Let's assume 0..1 float and convert to uchar 0..255.
-            let r = (c.x * 255.0).clamp(0.0, 255.0) as u8;
-            let g = (c.y * 255.0).clamp(0.0, 255.0) as u8;
-            let b = (c.z * 255.0).clamp(0.0, 255.0) as u8;
-            write!(file, " {} {} {}", r, g, b)?;
-        }
-
-        if let Some(normals) = &pc.normals {
-            let n = normals[i];
-            write!(file, " {} {} {}", n.x, n.y, n.z)?;
-        }
-
-        writeln!(file)?;
-    }
-
-    Ok(())
-}
-
-pub fn read_ply(path: &str) -> std::io::Result<PointCloud> {
-    // Basic PLY ASCII reader (robustness limited)
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut lines = reader.lines();
-
-    let mut vertex_count = 0;
-    let mut has_colors = false;
-    let mut has_normals = false;
-    let mut header_ended = false;
-
-    // Parse Header
-    for line in lines.by_ref() {
-        let line = line?;
-        if line.starts_with("element vertex") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                vertex_count = parts[2].parse().unwrap_or(0);
-            }
-        } else if line.contains("property uchar red") {
-            has_colors = true;
-        } else if line.contains("property float nx") {
-            has_normals = true;
-        } else if line.trim() == "end_header" {
-            header_ended = true;
-            break;
-        }
-    }
-
-    if !header_ended {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "PLY header not found",
-        ));
-    }
-
-    let mut points = Vec::with_capacity(vertex_count);
-    let mut colors = if has_colors {
-        Some(Vec::with_capacity(vertex_count))
-    } else {
-        None
-    };
-    let mut normals = if has_normals {
-        Some(Vec::with_capacity(vertex_count))
-    } else {
-        None
-    };
-
-    for _ in 0..vertex_count {
-        if let Some(line) = lines.next() {
-            let line = line?;
-            let mut parts = line.split_whitespace();
-
-            // XYZ
-            let x: f32 = parts
-                .next()
-                .ok_or(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Missing X",
-                ))?
-                .parse()
-                .unwrap_or(0.0);
-            let y: f32 = parts
-                .next()
-                .ok_or(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Missing Y",
-                ))?
-                .parse()
-                .unwrap_or(0.0);
-            let z: f32 = parts
-                .next()
-                .ok_or(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Missing Z",
-                ))?
-                .parse()
-                .unwrap_or(0.0);
-            points.push(Point3::new(x, y, z));
-
-            // Optional Color
-            if let Some(c_vec) = &mut colors {
-                let r: u8 = parts.next().unwrap_or("0").parse().unwrap_or(0);
-                let g: u8 = parts.next().unwrap_or("0").parse().unwrap_or(0);
-                let b: u8 = parts.next().unwrap_or("0").parse().unwrap_or(0);
-                c_vec.push(Point3::new(
-                    r as f32 / 255.0,
-                    g as f32 / 255.0,
-                    b as f32 / 255.0,
-                ));
-            }
-
-            // Optional Normal
-            if let Some(n_vec) = &mut normals {
-                let nx: f32 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
-                let ny: f32 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
-                let nz: f32 = parts.next().unwrap_or("0").parse().unwrap_or(0.0);
-                n_vec.push(Vector3::new(nx, ny, nz));
-            }
-        }
-    }
-
-    Ok(PointCloud {
-        points,
-        colors,
-        normals,
-    })
 }
 
 /// Remove statistical outliers.
@@ -1070,7 +848,6 @@ fn compute_pair_features(
 mod tests {
     use super::*;
     use nalgebra::Point3;
-    use std::fs;
 
     #[test]
     fn test_voxel_down_sample() {
@@ -1118,23 +895,6 @@ mod tests {
         for n in normals.iter() {
             assert!(n.z.abs() > 0.9, "Normal {:?} is not vertical", n);
         }
-    }
-
-    #[test]
-    fn test_io() {
-        let points = vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0)];
-        let colors = vec![Point3::new(1.0, 0.0, 0.0), Point3::new(0.0, 1.0, 0.0)];
-        let pc = PointCloud::new(points).with_colors(colors).unwrap();
-
-        let path = "/tmp/test_pc.ply";
-        write_ply(&pc, path).unwrap();
-
-        let loaded = read_ply(path).unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert!(loaded.colors.is_some());
-
-        // Cleanup (optional, but good)
-        let _ = fs::remove_file(path);
     }
 
     #[test]

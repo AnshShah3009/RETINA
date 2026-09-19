@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Example: Kalman Filter
 //!
 //! Run with: cargo run --example kalman_filter

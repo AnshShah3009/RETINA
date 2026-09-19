@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_core::point_cloud::PointCloud;
 
 /// Point cloud logging interface.

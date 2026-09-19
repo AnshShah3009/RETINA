@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Roundtrip tests for new I/O formats (glTF, LAS).
 
 #[cfg(feature = "gltf")]

@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Example: Scientific Computing (Integration & Special Functions)
 //!
 //! Run with: cargo run --example scientific

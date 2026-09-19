@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Example: Core Types and Frame Conventions
 //!
 //! Run with: cargo run --example core_types

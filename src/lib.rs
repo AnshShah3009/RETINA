@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 pub use cv_3d as d3;
 pub use cv_calib3d as calib3d;
 pub use cv_core as core;

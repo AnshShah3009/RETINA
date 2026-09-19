@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 pub mod approx;
 pub mod bilateral;
 pub mod color;
@@ -11,6 +12,7 @@ pub mod fit_ellipse;
 pub mod geometry;
 pub mod histogram;
 pub mod hough;
+mod kernels;
 pub mod local_threshold;
 pub mod moments;
 pub mod morph;

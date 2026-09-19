@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Scientific Computing (scipy equivalents)
 //!
 //! This crate provides scientific computing functions equivalent to Python's scipy:

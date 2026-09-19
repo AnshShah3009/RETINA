@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 use cv_calib3d::{solve_pnp_dlt, solve_pnp_refine};
 use cv_core::{CameraIntrinsics, Distortion, Pose};
 use nalgebra::{Point2, Point3, Rotation3, Vector3};
