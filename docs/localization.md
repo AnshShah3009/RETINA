@@ -69,6 +69,66 @@ localized: inliers=75 matches=75 candidates=[4, 5, 3, 2, 1, 6, 7, 0] rmse=0.000p
 translation error 3.245e-16, rotation error 0.000e0 deg, success rate 1.00
 ```
 
+## Measured results
+
+First real-data measurements, run on the TUM RGB-D sequences below. These are
+single runs on one machine, reported with the exact command so they can be
+reproduced or contradicted. Dataset root: `/home/Phoenix/RUST/datasets`.
+
+Sequence sizes: `rgbd_dataset_freiburg1_desk` 613 RGB frames,
+`rgbd_dataset_freiburg1_xyz` 798 RGB frames, both with ground truth.
+
+```bash
+cargo build --release -p cv-localization --features synthetic --example tum_benchmark
+
+# same sequence: database from the first half, queries from the second half
+./target/release/examples/tum_benchmark \
+    --db-dir  datasets/rgbd_dataset_freiburg1_desk \
+    --db-frames 120 --query-frames 60 --stride 3 --features 1200
+
+# cross sequence: database from one traverse, queries from another
+./target/release/examples/tum_benchmark \
+    --db-dir  datasets/rgbd_dataset_freiburg1_desk \
+    --query-dir datasets/rgbd_dataset_freiburg1_xyz \
+    --db-frames 120 --query-frames 60 --stride 3 --features 1200
+```
+
+| Metric | same sequence | cross sequence |
+| --- | ---: | ---: |
+| database frames / landmarks | 102 / 25,849 | 120 / 23,277 |
+| observations per landmark | 1.52 | 1.56 |
+| **hit rate @1** | **75.0%** | **93.3%** |
+| hit rate @5 | 98.3% | 100% |
+| hit rate @10 | 100% | 100% |
+| localization success rate | 25.0% (15/60) | 21.7% (13/60) |
+| translation error (median) | 0.066 m | 0.054 m |
+| rotation error (median) | 2.63° | 3.04° |
+| mean inliers | 24.6 | 18.2 |
+| mean query time | 1651 ms | 1879 ms |
+
+The hit-radius for a correct retrieval is 1.0 m, and hit rate is the
+localization convention: a query counts when *any* of its top-k candidates is
+within that radius. The same runs report `recall@1 = 1.4-1.6%` under the
+information-retrieval convention (fraction of *all* frames within the radius
+that were retrieved); on a database this dense dozens of frames qualify per
+query, so that number says nothing about retrieval quality — both are printed
+side by side in the report for exactly that reason.
+
+**How to read this.** Retrieval is the part that works: across a different
+traverse of the same room, the correct place is ranked first 93% of the time.
+Localization success (21-25%) is the bottleneck, and the cause is visible in the
+table: the map has only ~1.5 observations per landmark, because the benchmark
+harness triangulates each consecutive database pair and does not merge tracks.
+A landmark seen by one or two keyframes supports few 2D-3D correspondences, so
+PnP often lacks the 12 inliers it requires. The pose is accurate when it
+succeeds (5-7 cm), which is consistent with that diagnosis: the localizer is not
+wrong, it is starved. Track merging and a denser reconstruction are the next
+piece of work, and these numbers are the baseline it has to beat.
+
+Earlier sparse configuration for comparison (31 database frames, 2,308
+landmarks, same sequence): 3.2% success, 0.044 m median translation error —
+map density, not the matching stage, moves this number.
+
 ## What is proven, and what is not
 
 Proven by the test suite, on a deterministic synthetic scene:
