@@ -21,7 +21,27 @@ pub fn resize(src: &GrayImage, width: u32, height: u32, interpolation: Interpola
         }
     }
     // Fallback: minimal CPU run
-    resize_linear(src, width, height)
+    resize_cpu(src, width, height, interpolation)
+}
+
+/// CPU dispatch for the requested interpolation.
+///
+/// Every variant is honoured: `Nearest`/`Linear` replicate/clamp sample the
+/// source, `Cubic` uses the Catmull-Rom kernel and `Lanczos` the Lanczos-3
+/// kernel (both separable and edge-clamped).
+fn resize_cpu(src: &GrayImage, width: u32, height: u32, interpolation: Interpolation) -> GrayImage {
+    if width == 0 || height == 0 {
+        return GrayImage::new(0, 0);
+    }
+    if src.width() == 0 || src.height() == 0 {
+        return GrayImage::new(width, height);
+    }
+    match interpolation {
+        Interpolation::Nearest => resize_nearest(src, width, height),
+        Interpolation::Linear => resize_linear(src, width, height),
+        Interpolation::Cubic => resize_sampled(src, width, height, 2, cubic_weights),
+        Interpolation::Lanczos => resize_sampled(src, width, height, 3, lanczos_weights),
+    }
 }
 
 pub fn resize_ctx(
@@ -34,6 +54,9 @@ pub fn resize_ctx(
     if width == 0 || height == 0 {
         return GrayImage::new(0, 0);
     }
+    if src.width() == 0 || src.height() == 0 {
+        return GrayImage::new(width, height);
+    }
 
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
         if interpolation == Interpolation::Linear {
@@ -43,7 +66,7 @@ pub fn resize_ctx(
         }
     }
 
-    group.run(|| resize_linear(src, width, height))
+    group.run(|| resize_cpu(src, width, height, interpolation))
 }
 
 fn resize_gpu(
@@ -78,7 +101,6 @@ fn resize_gpu(
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
 }
 
-#[allow(dead_code)]
 fn resize_nearest(src: &GrayImage, width: u32, height: u32) -> GrayImage {
     let mut dst = GrayImage::new(width, height);
     let src_width = src.width() as f32;
@@ -111,7 +133,12 @@ fn resize_linear(src: &GrayImage, width: u32, height: u32) -> GrayImage {
     let dst_width = (width.max(2) - 1) as f32;
     let dst_height = (height.max(2) - 1) as f32;
 
-    if src_width <= 0.0 || src_height <= 0.0 {
+    // Only an empty source has nothing to sample. A source with a single
+    // row/column (src_width or src_height == 0) is handled by the mapping
+    // below, which collapses that axis onto the single sample and therefore
+    // replicates it; a previous revision bailed out here and returned an
+    // all-zero image for 1-pixel sources.
+    if src.width() == 0 || src.height() == 0 {
         return dst;
     }
 
@@ -152,12 +179,51 @@ pub fn resize_rgb(
     src: &RgbImage,
     width: u32,
     height: u32,
-    _interpolation: Interpolation,
+    interpolation: Interpolation,
 ) -> RgbImage {
     if width == 0 || height == 0 {
         return RgbImage::new(0, 0);
     }
+    if src.width() == 0 || src.height() == 0 {
+        return RgbImage::new(width, height);
+    }
 
+    match interpolation {
+        Interpolation::Nearest => resize_rgb_nearest(src, width, height),
+        Interpolation::Linear => resize_rgb_linear(src, width, height),
+        Interpolation::Cubic => resize_rgb_sampled(src, width, height, 2, cubic_weights),
+        Interpolation::Lanczos => resize_rgb_sampled(src, width, height, 3, lanczos_weights),
+    }
+}
+
+/// Nearest-neighbour resampling of an RGB image (`resize_nearest` for gray).
+fn resize_rgb_nearest(src: &RgbImage, width: u32, height: u32) -> RgbImage {
+    let mut dst = RgbImage::new(width, height);
+    let src_width = src.width() as f32;
+    let src_height = src.height() as f32;
+    let dst_width = width as f32;
+    let dst_height = height as f32;
+
+    dst.as_mut()
+        .par_chunks_mut(width as usize * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y = y as u32;
+            for x in 0..width {
+                let sx = ((x as f32 * src_width / dst_width).floor() as u32).min(src.width() - 1);
+                let sy =
+                    ((y as f32 * src_height / dst_height).floor() as u32).min(src.height() - 1);
+                let pixel = src.get_pixel(sx, sy);
+                row[x as usize * 3] = pixel[0];
+                row[x as usize * 3 + 1] = pixel[1];
+                row[x as usize * 3 + 2] = pixel[2];
+            }
+        });
+
+    dst
+}
+
+fn resize_rgb_linear(src: &RgbImage, width: u32, height: u32) -> RgbImage {
     let mut dst = RgbImage::new(width, height);
     let src_width = src.width() as f32 - 1.0;
     let src_height = src.height() as f32 - 1.0;
@@ -165,7 +231,9 @@ pub fn resize_rgb(
     let dst_width = (width.max(2) - 1) as f32;
     let dst_height = (height.max(2) - 1) as f32;
 
-    if src_width <= 0.0 || src_height <= 0.0 {
+    // Only an empty source has nothing to sample; single-row/column sources
+    // are replicated by the mapping below (see resize_linear).
+    if src.width() == 0 || src.height() == 0 {
         return dst;
     }
 
@@ -204,6 +272,153 @@ pub fn resize_rgb(
     dst
 }
 
+/// Interpolating catmull-rom kernel (Keys, a = -0.5).
+fn cubic_kernel(d: f32) -> f32 {
+    let a = d.abs();
+    if a <= 1.0 {
+        1.5 * a * a * a - 2.5 * a * a + 1.0
+    } else if a < 2.0 {
+        -0.5 * a * a * a + 2.5 * a * a - 4.0 * a + 2.0
+    } else {
+        0.0
+    }
+}
+
+/// Cubic weights for the taps `floor(f) - 1 ..= floor(f) + 2` (sums to 1).
+fn cubic_weights(f: f32) -> Vec<f32> {
+    let t = f - f.floor();
+    vec![
+        cubic_kernel(t + 1.0),
+        cubic_kernel(t),
+        cubic_kernel(1.0 - t),
+        cubic_kernel(2.0 - t),
+    ]
+}
+
+/// Lanczos window (a = 3).
+fn lanczos_kernel(d: f32) -> f32 {
+    const A: f32 = 3.0;
+    if d == 0.0 {
+        1.0
+    } else if d.abs() >= A {
+        0.0
+    } else {
+        let p = std::f32::consts::PI * d;
+        (p.sin() / p) * ((p / A).sin() / (p / A))
+    }
+}
+
+/// Lanczos-3 weights for the taps `floor(f) - 2 ..= floor(f) + 3`,
+/// normalized so that they sum to 1.
+fn lanczos_weights(f: f32) -> Vec<f32> {
+    let t = f - f.floor();
+    let mut weights: Vec<f32> = (-2..=3).map(|i| lanczos_kernel(i as f32 - t)).collect();
+    let sum: f32 = weights.iter().sum();
+    if sum != 0.0 {
+        for w in &mut weights {
+            *w /= sum;
+        }
+    }
+    weights
+}
+
+/// Separable resampling of a `channels`-channel interleaved u8 buffer.
+///
+/// The coordinate mapping matches `resize_linear`: the source spans
+/// `0 ..= len - 1` across the destination's `0 ..= len - 1`, so `Cubic` and
+/// `Lanczos` degrade gracefully to the same geometry as the bilinear path.
+/// Taps outside the source replicate the nearest edge sample.
+fn resample_kernel(
+    src: &[u8],
+    src_size: (u32, u32),
+    dst_size: (u32, u32),
+    channels: usize,
+    radius: i32,
+    weights: fn(f32) -> Vec<f32>,
+) -> Vec<u8> {
+    debug_assert!(channels <= 4);
+    let (src_w, src_h) = src_size;
+    let (dst_w, dst_h) = dst_size;
+    let mut dst = vec![0u8; (dst_w * dst_h) as usize * channels];
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return dst;
+    }
+
+    let src_width = src_w as f32 - 1.0;
+    let src_height = src_h as f32 - 1.0;
+    let dst_width = (dst_w.max(2) - 1) as f32;
+    let dst_height = (dst_h.max(2) - 1) as f32;
+    let row_len = dst_w as usize * channels;
+
+    dst.par_chunks_mut(row_len)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let fy = (y as f32 / dst_height) * src_height;
+            let y0 = fy.floor() as i32;
+            let wy = weights(fy);
+
+            for x in 0..dst_w as usize {
+                let fx = (x as f32 / dst_width) * src_width;
+                let x0 = fx.floor() as i32;
+                let wx = weights(fx);
+
+                let mut acc = [0.0f32; 4];
+                for (i, &wxi) in wx.iter().enumerate() {
+                    let sx = (x0 - radius + 1 + i as i32).clamp(0, src_w as i32 - 1) as usize;
+                    for (j, &wyj) in wy.iter().enumerate() {
+                        let sy = (y0 - radius + 1 + j as i32).clamp(0, src_h as i32 - 1) as usize;
+                        let w = wxi * wyj;
+                        let base = (sy * src_w as usize + sx) * channels;
+                        for c in 0..channels {
+                            acc[c] += src[base + c] as f32 * w;
+                        }
+                    }
+                }
+                for c in 0..channels {
+                    row[x * channels + c] = (acc[c] + 0.5).clamp(0.0, 255.0) as u8;
+                }
+            }
+        });
+
+    dst
+}
+
+fn resize_sampled(
+    src: &GrayImage,
+    width: u32,
+    height: u32,
+    radius: i32,
+    weights: fn(f32) -> Vec<f32>,
+) -> GrayImage {
+    let data = resample_kernel(
+        src.as_raw(),
+        (src.width(), src.height()),
+        (width, height),
+        1,
+        radius,
+        weights,
+    );
+    GrayImage::from_raw(width, height, data).unwrap_or_else(|| GrayImage::new(width, height))
+}
+
+fn resize_rgb_sampled(
+    src: &RgbImage,
+    width: u32,
+    height: u32,
+    radius: i32,
+    weights: fn(f32) -> Vec<f32>,
+) -> RgbImage {
+    let data = resample_kernel(
+        src.as_raw(),
+        (src.width(), src.height()),
+        (width, height),
+        3,
+        radius,
+        weights,
+    );
+    RgbImage::from_raw(width, height, data).unwrap_or_else(|| RgbImage::new(width, height))
+}
+
 pub fn pyr_down(src: &GrayImage) -> GrayImage {
     let new_width = src.width() / 2;
     let new_height = src.height() / 2;
@@ -231,4 +446,120 @@ pub fn build_pyramid(src: &GrayImage, levels: u32) -> Vec<GrayImage> {
     }
 
     pyramid
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{Luma, Rgb};
+
+    #[test]
+    fn kernels_are_normalized_and_interpolating() {
+        for f in [0.0f32, 0.25, 0.5, 0.75, 1.5, 2.25] {
+            let c = cubic_weights(f);
+            assert_eq!(c.len(), 4);
+            assert!((c.iter().sum::<f32>() - 1.0).abs() < 1e-5, "cubic @ {f}");
+
+            let l = lanczos_weights(f);
+            assert_eq!(l.len(), 6);
+            assert!((l.iter().sum::<f32>() - 1.0).abs() < 1e-5, "lanczos @ {f}");
+        }
+
+        // At integer coordinates both kernels collapse onto the sample.
+        for (i, &w) in cubic_weights(3.0).iter().enumerate() {
+            let expected = if i == 1 { 1.0 } else { 0.0 };
+            assert!((w - expected).abs() < 1e-5);
+        }
+        for (i, &w) in lanczos_weights(3.0).iter().enumerate() {
+            let expected = if i == 2 { 1.0 } else { 0.0 };
+            assert!((w - expected).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn resize_dispatches_nearest() {
+        // 2x1 image: nearest must keep the exact source levels, while the
+        // bilinear path mixes them. Previously every variant returned the
+        // bilinear result.
+        let mut img = GrayImage::new(2, 1);
+        img.put_pixel(0, 0, Luma([0]));
+        img.put_pixel(1, 0, Luma([255]));
+
+        let nearest = resize(&img, 4, 1, Interpolation::Nearest);
+        assert_eq!(nearest.as_raw(), &[0, 0, 255, 255]);
+
+        let linear = resize(&img, 4, 1, Interpolation::Linear);
+        assert_ne!(nearest.as_raw(), linear.as_raw());
+    }
+
+    #[test]
+    fn resize_rgb_dispatches_nearest() {
+        let mut img = RgbImage::new(2, 1);
+        img.put_pixel(0, 0, Rgb([0, 10, 20]));
+        img.put_pixel(1, 0, Rgb([200, 210, 220]));
+
+        let nearest = resize_rgb(&img, 4, 1, Interpolation::Nearest);
+        assert_eq!(
+            nearest.as_raw().as_slice(),
+            &[0, 10, 20, 0, 10, 20, 200, 210, 220, 200, 210, 220]
+        );
+
+        let linear = resize_rgb(&img, 4, 1, Interpolation::Linear);
+        assert_ne!(nearest.as_raw(), linear.as_raw());
+    }
+
+    #[test]
+    fn cubic_and_lanczos_reproduce_a_linear_ramp() {
+        // Both kernels are interpolating, so a ramp resampled with them must
+        // stay within the rounding error of the bilinear result.
+        let ramp = GrayImage::from_fn(6, 6, |x, _| Luma([(x * 25) as u8]));
+        let linear = resize(&ramp, 15, 15, Interpolation::Linear);
+
+        for interp in [Interpolation::Cubic, Interpolation::Lanczos] {
+            let out = resize(&ramp, 15, 15, interp);
+            assert_eq!(out.dimensions(), (15, 15));
+            for (a, b) in out.as_raw().iter().zip(linear.as_raw()) {
+                assert!(
+                    (*a as i32 - *b as i32).abs() <= 3,
+                    "{interp:?} deviates from the ramp: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn single_pixel_source_is_replicated() {
+        // Regression: a 1x1 source hit the `src_width <= 0.0` guard and came
+        // back as an all-zero (black) image.
+        let img = GrayImage::from_pixel(1, 1, Luma([7]));
+        for interp in [
+            Interpolation::Nearest,
+            Interpolation::Linear,
+            Interpolation::Cubic,
+            Interpolation::Lanczos,
+        ] {
+            let out = resize(&img, 4, 3, interp);
+            assert_eq!(out.dimensions(), (4, 3));
+            assert!(
+                out.as_raw().iter().all(|&p| p == 7),
+                "{interp:?} did not replicate the single sample"
+            );
+        }
+
+        let rgb = RgbImage::from_pixel(1, 1, Rgb([9, 8, 7]));
+        let out_rgb = resize_rgb(&rgb, 3, 3, Interpolation::Linear);
+        assert!(out_rgb.pixels().all(|p| p.0 == [9, 8, 7]));
+    }
+
+    #[test]
+    fn single_row_source_is_replicated_along_that_axis() {
+        // A 1xN source has src_height == 0: the destination must reuse the
+        // only row instead of returning black.
+        let img = GrayImage::from_fn(4, 1, |x, _| Luma([(x * 20) as u8]));
+        let up = resize(&img, 4, 3, Interpolation::Linear);
+        assert_eq!(up.dimensions(), (4, 3));
+        for y in 0..3 {
+            assert_eq!(up.get_pixel(3, y)[0], img.get_pixel(3, 0)[0]);
+        }
+    }
 }

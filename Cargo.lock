@@ -1837,6 +1837,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cv-localization"
+version = "0.1.0"
+dependencies = [
+ "cv-calib3d",
+ "cv-core",
+ "cv-features",
+ "cv-io",
+ "nalgebra",
+]
+
+[[package]]
 name = "cv-math"
 version = "0.1.0"
 dependencies = [

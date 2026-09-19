@@ -1,4 +1,4 @@
-use crate::{gaussian_blur_with_border, BorderMode};
+use crate::BorderMode;
 use image::GrayImage;
 use wide::*;
 
@@ -296,8 +296,14 @@ fn local_mean_image(src: &GrayImage, block_size: u32) -> GrayImage {
 }
 
 fn local_gaussian_image(src: &GrayImage, block_size: u32) -> GrayImage {
+    // OpenCV's ADAPTIVE_THRESH_GAUSSIAN_C builds getGaussianKernel(block_size,
+    // sigma) and filters with exactly that window using BORDER_REPLICATE.
+    // Deriving the kernel size from sigma (ceil(6 * sigma)|1) widened the
+    // window and Reflect101 filled the borders with reflected samples, so the
+    // local mean disagreed with OpenCV's.
     let sigma = 0.3 * (((block_size as f32) - 1.0) * 0.5 - 1.0) + 0.8;
-    gaussian_blur_with_border(src, sigma, BorderMode::Reflect101)
+    let kernel_1d = crate::gaussian_kernel_1d(sigma, block_size as usize);
+    crate::separable_convolve(src, &kernel_1d, BorderMode::Replicate)
 }
 
 #[cfg(test)]
@@ -441,6 +447,38 @@ mod tests {
             0.0,
         );
         assert_eq!((result.width(), result.height()), (20, 20));
+    }
+
+    #[test]
+    fn adaptive_gaussian_uses_block_size_window() {
+        // The Gaussian window must be exactly `block_size` wide, as in
+        // OpenCV. Probe pixel (index 2, value 105) sits two columns away from
+        // a bright spike (index 4, value 255):
+        //   - 3-wide window [1..4]: local mean 102.6  -> 105 > mean -> 255
+        //   - the old sigma-derived 5-wide window [0..5]: mean 105.9 -> 0
+        let mut img = GrayImage::new(10, 5);
+        for y in 0..5 {
+            for x in 0..10 {
+                img.put_pixel(x, y, Luma([100]));
+            }
+            img.put_pixel(2, y, Luma([105]));
+            img.put_pixel(4, y, Luma([255]));
+        }
+
+        let result = adaptive_threshold(
+            &img,
+            255,
+            AdaptiveMethod::GaussianC,
+            ThresholdType::Binary,
+            3,
+            0.0,
+        );
+
+        assert_eq!(
+            result.get_pixel(2, 2)[0],
+            255,
+            "local mean must use a 3-wide (block_size) Gaussian window"
+        );
     }
 
     #[test]

@@ -33,6 +33,13 @@ fn sobel_f32(src: &GrayImage) -> (Vec<f32>, Vec<f32>) {
     let mut gx = vec![0.0f32; width * height];
     let mut gy = vec![0.0f32; width * height];
 
+    // A 3x3 Sobel window needs at least one interior row/column. Without this
+    // guard `1..(height - 1)`/`1..(width - 1)` underflow on zero-sized images
+    // (debug panic, wrap-then-OOB in release).
+    if width < 3 || height < 3 {
+        return (gx, gy);
+    }
+
     // Sobel 3x3 kernels:
     // Gx: [-1 0 1; -2 0 2; -1 0 1]
     // Gy: [-1 -2 -1; 0 0 0; 1 2 1]
@@ -542,6 +549,19 @@ pub fn hough_lines_p(
 mod tests {
     use super::*;
     use image::{GrayImage, Luma};
+
+    #[test]
+    fn sobel_f32_handles_tiny_images() {
+        // Regression: `1..(height - 1)` underflowed for zero-sized inputs.
+        for (w, h) in [(0u32, 0u32), (1, 1), (2, 1), (1, 2), (2, 2)] {
+            let img = GrayImage::new(w, h);
+            let (gx, gy) = sobel_f32(&img);
+            assert_eq!(gx.len(), (w * h) as usize);
+            assert_eq!(gy.len(), (w * h) as usize);
+            assert!(gx.iter().all(|&v| v == 0.0));
+            assert!(gy.iter().all(|&v| v == 0.0));
+        }
+    }
 
     #[test]
     fn test_hough_lines_detects_horizontal() {
