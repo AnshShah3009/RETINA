@@ -564,6 +564,15 @@ impl PolynomialExpansion {
 
 /// Solve 6x6 system A*x = b using Gaussian elimination with partial pivoting.
 /// Returns None if the matrix is singular (determinant ≈ 0).
+///
+/// This deliberately does *not* call `cv_math::linalg::solve_square`: that helper
+/// routes through nalgebra's generic (const-generic) LU, which measured ~1.7x
+/// slower than this hand-written loop for the 6x6 f32 case on the machine the
+/// consolidation was done on (84-96 ns/solve here vs 140-165 ns/solve for
+/// `nalgebra::linalg::LU` on the same 200k weighted normal-equations systems,
+/// `--release`). This function runs once per pixel, so that is ~20 ms/frame at
+/// VGA. The loop below is unchanged from the previous revision (same partial
+/// pivoting + back substitution), so the coefficients are bit-identical.
 fn solve_6x6_gauss(a: &mut [[f32; 6]; 6], b: &mut [f32; 6]) -> Option<[f32; 6]> {
     let n = 6;
 

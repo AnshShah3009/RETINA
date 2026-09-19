@@ -244,111 +244,17 @@ fn enforce_essential_constraints(e: &Matrix3<f64>) -> Result<Matrix3<f64>> {
 ///
 /// Includes Hartley normalization for numerical stability and
 /// enforces the rank-2 constraint on the resulting matrix.
+///
+/// Thin wrapper over [`crate::dlt::solve_dlt_fundamental`] — the single
+/// normalised 8-point implementation in the workspace.
 fn estimate_fundamental_8_point(
     pts1: &[Point2<f64>],
     pts2: &[Point2<f64>],
 ) -> Result<Matrix3<f64>> {
-    let (n1, t1) = normalize_points_hartley(pts1)?;
-    let (n2, t2) = normalize_points_hartley(pts2)?;
-    let n = n1.len();
-    let mut a = DMatrix::<f64>::zeros(n, 9);
-    for i in 0..n {
-        let x1 = n1[i].x;
-        let y1 = n1[i].y;
-        let x2 = n2[i].x;
-        let y2 = n2[i].y;
-        a[(i, 0)] = x2 * x1;
-        a[(i, 1)] = x2 * y1;
-        a[(i, 2)] = x2;
-        a[(i, 3)] = y2 * x1;
-        a[(i, 4)] = y2 * y1;
-        a[(i, 5)] = y2;
-        a[(i, 6)] = x1;
-        a[(i, 7)] = y1;
-        a[(i, 8)] = 1.0;
-    }
-
-    let svd = a.svd(true, true);
-    let vt = svd.v_t.ok_or_else(|| {
-        cv_core::Error::AlgorithmError("SVD failed in estimate_fundamental_8_point".to_string())
-    })?;
-    let fvec = vt.row(vt.nrows() - 1);
-    let f0 = Matrix3::new(
-        fvec[(0, 0)],
-        fvec[(0, 1)],
-        fvec[(0, 2)],
-        fvec[(0, 3)],
-        fvec[(0, 4)],
-        fvec[(0, 5)],
-        fvec[(0, 6)],
-        fvec[(0, 7)],
-        fvec[(0, 8)],
-    );
-    let f_rank2 = enforce_rank2(&f0)?;
-    let f = t2.transpose() * f_rank2 * t1;
-    Ok(f)
-}
-
-/// Hartley normalization: translate to centroid and scale for unit mean distance.
-///
-/// Improves numerical stability during matrix estimation by centering points
-/// at the origin and scaling so that the mean distance is sqrt(2).
-fn normalize_points_hartley(pts: &[Point2<f64>]) -> Result<(Vec<Point2<f64>>, Matrix3<f64>)> {
-    if pts.len() < 2 {
-        return Err(cv_core::Error::AlgorithmError(
-            "normalize_points_hartley requires at least 2 points".to_string(),
-        ));
-    }
-
-    let mx = pts.iter().map(|p| p.x).sum::<f64>() / pts.len() as f64;
-    let my = pts.iter().map(|p| p.y).sum::<f64>() / pts.len() as f64;
-    let mean_dist = pts
-        .iter()
-        .map(|p| ((p.x - mx) * (p.x - mx) + (p.y - my) * (p.y - my)).sqrt())
-        .sum::<f64>()
-        / pts.len() as f64;
-    if mean_dist <= 1e-12 {
-        return Err(cv_core::Error::AlgorithmError(
-            "degenerate points in normalize_points_hartley".to_string(),
-        ));
-    }
-
-    let s = (2.0f64).sqrt() / mean_dist;
-    let t = Matrix3::new(s, 0.0, -s * mx, 0.0, s, -s * my, 0.0, 0.0, 1.0);
-    let out = pts
-        .iter()
-        .map(|p| {
-            let v = t * Vector3::new(p.x, p.y, 1.0);
-            Point2::new(v[0], v[1])
-        })
-        .collect();
-    Ok((out, t))
-}
-
-/// Enforce rank-2 constraint using SVD.
-///
-/// Sets the smallest singular value to zero, ensuring the matrix
-/// has rank 2 (required property of Fundamental matrix).
-fn enforce_rank2(m: &Matrix3<f64>) -> Result<Matrix3<f64>> {
-    let svd = m.svd(true, true);
-    let u = svd.u.ok_or_else(|| {
-        cv_core::Error::AlgorithmError("SVD U missing in enforce_rank2".to_string())
-    })?;
-    let vt = svd.v_t.ok_or_else(|| {
-        cv_core::Error::AlgorithmError("SVD V^T missing in enforce_rank2".to_string())
-    })?;
-    let sigma = Matrix3::new(
-        svd.singular_values[0],
-        0.0,
-        0.0,
-        0.0,
-        svd.singular_values[1],
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-    );
-    Ok(u * sigma * vt)
+    let a1: Vec<[f64; 2]> = pts1.iter().map(|p| [p.x, p.y]).collect();
+    let a2: Vec<[f64; 2]> = pts2.iter().map(|p| [p.x, p.y]).collect();
+    crate::dlt::solve_dlt_fundamental(&a1, &a2)
+        .ok_or_else(|| cv_core::Error::AlgorithmError("Fundamental 8-point solve failed".into()))
 }
 
 /// Compute the Sampson error for a point pair against a matrix.

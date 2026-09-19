@@ -6,6 +6,11 @@ pub type Result<T> = cv_core::Result<T>;
 pub mod distortion;
 pub use distortion::{init_undistort_rectify_map, undistort_image, undistort_points};
 
+// The single normalised-DLT / Hartley-normalisation implementation, shared with
+// `cv-features`' RANSAC estimators.
+pub mod dlt;
+pub use dlt::{enforce_rank2, hartley_normalize, solve_dlt_fundamental, solve_dlt_homography};
+
 pub mod project;
 pub use project::{
     project_points, project_points_with_distortion, project_points_with_jacobian,
