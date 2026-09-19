@@ -10,8 +10,13 @@
 //! 2. Select disjoint database/query frames (a second directory may be supplied
 //!    for the cross-sequence case).
 //! 3. Detect ORB features and descriptors on every selected frame.
-//! 4. Triangulate a landmark map from consecutive database frames and lift every
-//!    match into a 2D observation of a 3D [`Landmark`].
+//! 4. Build a track-based landmark map: match descriptors between every database
+//!    frame pair inside a temporal window, keep the mutually consistent matches,
+//!    merge them into tracks with a union-find over `(frame, keypoint)` nodes,
+//!    triangulate each track from its widest-baseline pair of views and keep the
+//!    observations that reproject tightly. Every surviving observation is lifted
+//!    into a 2D observation of a 3D [`Landmark`], so a landmark seen by `k`
+//!    frames yields `k` correspondences rather than one.
 //! 5. Build a [`Database`] (optionally with a BoW [`Vocabulary`]) and localize
 //!    every query frame.
 //! 6. Aggregate plain localization, retrieval and timing metrics.
@@ -25,7 +30,7 @@ use crate::{evaluate_localization, Database, DatabaseImage, Landmark};
 use cv_calib3d::triangulate_points;
 use cv_core::{CameraIntrinsics, Descriptors, KeyPoint, Pose};
 use cv_eval::retrieval::{hit_rate_at_k, mean_average_precision, recall_at_k};
-use cv_features::matcher::match_descriptors;
+use cv_features::matcher::{MatchType, Matcher};
 use cv_features::orb::orb_detect_and_compute;
 use cv_features::retrieval::{descriptors_to_bytes, BowVector, Vocabulary};
 use cv_io::datasets::tum;
@@ -57,8 +62,14 @@ pub struct BenchmarkConfig {
     pub hit_radius: f64,
     /// Timestamp association tolerance in seconds.
     pub max_dt: f64,
-    /// Triangulation reprojection tolerance in pixels, checked in *both* views.
+    /// Triangulation reprojection tolerance in pixels. An observation whose
+    /// reprojection error under the reconstructed point exceeds this is dropped
+    /// from its track.
     pub tri_reproj: f64,
+    /// Temporal matching window: database frame `i` is matched against frames
+    /// `i + 1 ..= i + match_window`. Must be at least 1; a value of 1 reproduces
+    /// the old consecutive-pairs behaviour.
+    pub match_window: usize,
     /// Optional vocabulary size. When set, a [`Vocabulary`] is trained on the
     /// database descriptors and used for BoW retrieval.
     pub vocab: Option<usize>,
@@ -95,6 +106,13 @@ pub struct DatasetSummary {
     pub landmarks: usize,
     /// Mean number of keypoint observations per landmark.
     pub mean_observations_per_landmark: f64,
+    /// Median number of keypoint observations per landmark.
+    pub median_observations_per_landmark: f64,
+    /// Tracks with at least two observations that were handed to triangulation,
+    /// *before* the reprojection/cheirality filter (this is the raw track count).
+    pub triangulated_tracks: usize,
+    /// Tracks dropped by triangulation or the reprojection/cheirality filter.
+    pub rejected_tracks: usize,
     /// Width of the loaded frames in pixels (`0` when nothing was loaded).
     pub image_width: u32,
     /// Height of the loaded frames in pixels (`0` when nothing was loaded).
@@ -304,18 +322,22 @@ pub fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
         total_descriptors as f64 / num_frames as f64
     };
 
-    // ---- 4. Triangulate the landmark map from consecutive database frames ----
-    let (landmarks, per_image_landmarks, total_observations) = build_map(
+    // ---- 4. Build the landmark map from matched tracks of database frames ----
+    let map = build_map(
         &db_frames,
         &config.intrinsics,
         config.ratio,
         config.tri_reproj,
+        config.match_window,
     );
-    let mean_observations_per_landmark = if landmarks.is_empty() {
+    let landmarks = &map.landmarks;
+    let per_image_landmarks = &map.per_image;
+    let mean_observations_per_landmark = if map.landmarks.is_empty() {
         0.0
     } else {
-        total_observations as f64 / landmarks.len() as f64
+        map.total_observations as f64 / map.landmarks.len() as f64
     };
+    let median_observations_per_landmark = median(&map.observation_counts);
 
     // ---- 5. Build the database and localize every query ----
     let vocabulary = config.vocab.map(|k| {
@@ -327,7 +349,7 @@ pub fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
     });
 
     let mut database = Database::new(vocabulary);
-    for landmark in &landmarks {
+    for landmark in landmarks {
         database.add_landmark(landmark.clone());
     }
     for (id, frame) in db_frames.iter().enumerate() {
@@ -435,8 +457,11 @@ pub fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
             query_frames_requested: config.query_frames,
             features_requested: config.features,
             mean_features_per_frame,
-            landmarks: landmarks.len(),
+            landmarks: map.landmarks.len(),
             mean_observations_per_landmark,
+            median_observations_per_landmark,
+            triangulated_tracks: map.triangulated_tracks,
+            rejected_tracks: map.rejected_tracks,
             image_width,
             image_height,
         },
@@ -548,102 +573,297 @@ fn extract_frame(
     })
 }
 
-/// Triangulate a landmark map from consecutive database frames.
+/// Result of [`build_map`]: the accepted landmarks and everything needed to
+/// describe how well the map was reconstructed.
+struct MapBuild {
+    /// One landmark per surviving track.
+    landmarks: Vec<Landmark>,
+    /// Per-frame landmark assignment, parallel to each frame's descriptors.
+    per_image: Vec<Vec<Option<usize>>>,
+    /// Number of `Some` entries across `per_image` (total 2D observations).
+    total_observations: usize,
+    /// Observations per accepted landmark, in landmark order.
+    observation_counts: Vec<usize>,
+    /// Tracks with `>= 2` observations handed to triangulation, before filtering.
+    triangulated_tracks: usize,
+    /// Tracks dropped by triangulation or the reprojection/cheirality filter.
+    rejected_tracks: usize,
+}
+
+/// A disjoint-set (union-find) over `(frame, keypoint)` nodes.
 ///
-/// Returns the landmarks, per-image landmark assignments (parallel to each
-/// frame's descriptors) and the total number of keypoint observations.
+/// Links are unioned, then each node is grouped by its root to recover the
+/// tracks. Union by rank with path compression keeps the merges near-linear; the
+/// resulting tracks do not depend on the iteration order of any map because
+/// tracks are emitted by scanning nodes in ascending id order.
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<u8>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self {
+            parent: (0..n).collect(),
+            rank: vec![0; n],
+        }
+    }
+
+    fn find(&mut self, mut x: usize) -> usize {
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        // Path compression.
+        while self.parent[x] != root {
+            let next = self.parent[x];
+            self.parent[x] = root;
+            x = next;
+        }
+        root
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let (mut ra, mut rb) = (self.find(a), self.find(b));
+        if ra == rb {
+            return;
+        }
+        if self.rank[ra] < self.rank[rb] {
+            std::mem::swap(&mut ra, &mut rb);
+        }
+        self.parent[rb] = ra;
+        if self.rank[ra] == self.rank[rb] {
+            self.rank[ra] += 1;
+        }
+    }
+}
+
+/// Triangulate a set of observations `(frame, keypoint)` and keep the ones that
+/// reproject tightly.
+///
+/// The 3D point is triangulated from the two observing views with the largest
+/// camera-centre baseline (ties keep the earliest pair, for determinism). The
+/// point is then projected into every observing view and the observations whose
+/// reprojection error is within `tri_reproj` pixels, and which lie in front of
+/// their camera, are returned. `None` is returned when the point is degenerate
+/// or fewer than two observations survive.
+fn reconstruct_track(
+    obs: &[(usize, usize)],
+    frames: &[ExtractedFrame],
+    intrinsics: &CameraIntrinsics,
+    tri_reproj: f64,
+) -> Option<(Point3<f64>, Vec<(usize, usize)>)> {
+    if obs.len() < 2 {
+        return None;
+    }
+
+    // Pick the two views with the largest camera-centre baseline. Ties keep the
+    // earliest pair because the scan order is deterministic.
+    let mut best_pair = (0usize, 1usize);
+    let mut best_baseline = -1.0_f64;
+    for p in 0..obs.len() {
+        for q in p + 1..obs.len() {
+            let centre_p = frames[obs[p].0].pose_wc.translation;
+            let centre_q = frames[obs[q].0].pose_wc.translation;
+            let baseline = (centre_p - centre_q).norm();
+            if baseline > best_baseline {
+                best_baseline = baseline;
+                best_pair = (p, q);
+            }
+        }
+    }
+    let (fa, ka) = obs[best_pair.0];
+    let (fb, kb) = obs[best_pair.1];
+    let proj_a = projection_matrix(&frames[fa].pose_cw, intrinsics);
+    let proj_b = projection_matrix(&frames[fb].pose_cw, intrinsics);
+    let point_a = frames[fa].keypoints[ka].pt();
+    let point_b = frames[fb].keypoints[kb].pt();
+    let triangulated = triangulate_points(&proj_a, &proj_b, &[point_a], &[point_b]).ok()?;
+    let point = triangulated[0];
+    if !point.coords.iter().all(|c| c.is_finite()) {
+        return None;
+    }
+
+    // Reproject into every observing view; keep the in-front observations whose
+    // reprojection error is within tolerance.
+    let mut survivors: Vec<(usize, usize)> = Vec::with_capacity(obs.len());
+    for &(frame, kp) in obs {
+        let pose_cw = &frames[frame].pose_cw;
+        let camera = pose_cw.rotation * point.coords + pose_cw.translation;
+        if camera[2] <= 1e-6 {
+            continue;
+        }
+        let reprojected = intrinsics.project(&Point3::from(camera));
+        let keypoint = frames[frame].keypoints[kp].pt();
+        let error =
+            ((reprojected.x - keypoint.x).powi(2) + (reprojected.y - keypoint.y).powi(2)).sqrt();
+        if error <= tri_reproj {
+            survivors.push((frame, kp));
+        }
+    }
+    if survivors.len() < 2 {
+        return None;
+    }
+    Some((point, survivors))
+}
+
+/// Build a track-based landmark map from the database frames.
+///
+/// Every frame pair inside the temporal `match_window` is matched with the ratio
+/// test and only *mutually consistent* matches (the reverse best match from `j`
+/// back to `i` agrees) become links. A union-find over `(frame, keypoint)` nodes
+/// merges the links into tracks (at most one observation per frame per track),
+/// each track is triangulated from its largest-baseline pair of views, and only
+/// observations that reproject within `tri_reproj` pixels and lie in front of
+/// their camera survive. Each surviving track becomes one [`Landmark`] carrying
+/// the descriptors of all its surviving observations, and every surviving
+/// observation is assigned to it — so a landmark seen by `k` frames contributes
+/// `k` 2D-3D correspondences.
+///
+/// The result is deterministic: links are processed in a fixed order, tracks are
+/// processed in ascending first-observation order, and no hash-map iteration
+/// order is observed.
 fn build_map(
     frames: &[ExtractedFrame],
     intrinsics: &CameraIntrinsics,
     ratio: f32,
     tri_reproj: f64,
-) -> (Vec<Landmark>, Vec<Vec<Option<usize>>>, usize) {
-    let mut landmarks: Vec<Landmark> = Vec::new();
-    let mut per_image: Vec<Vec<Option<usize>>> = frames
+    match_window: usize,
+) -> MapBuild {
+    let per_image: Vec<Vec<Option<usize>>> = frames
         .iter()
         .map(|frame| vec![None; frame.descriptors.len()])
         .collect();
 
-    if frames.len() < 2 {
-        return (landmarks, per_image, 0);
+    let mut result = MapBuild {
+        landmarks: Vec::new(),
+        per_image,
+        total_observations: 0,
+        observation_counts: Vec::new(),
+        triangulated_tracks: 0,
+        rejected_tracks: 0,
+    };
+
+    let total_nodes: usize = frames.iter().map(|f| f.descriptors.len()).sum();
+    if frames.len() < 2 || total_nodes == 0 {
+        return result;
     }
 
-    for i in 0..frames.len() - 1 {
+    // Node id for `(frame, keypoint)` is `offset[frame] + keypoint`; frames are
+    // laid out consecutively, so ascending node id is ascending (frame, kp).
+    let mut offset = Vec::with_capacity(frames.len() + 1);
+    offset.push(0usize);
+    for frame in frames {
+        offset.push(offset[offset.len() - 1] + frame.descriptors.len());
+    }
+    let mut node_frame = vec![0usize; total_nodes];
+    let mut node_kp = vec![0usize; total_nodes];
+    for (fi, frame) in frames.iter().enumerate() {
+        for kp in 0..frame.descriptors.len() {
+            node_frame[offset[fi] + kp] = fi;
+            node_kp[offset[fi] + kp] = kp;
+        }
+    }
+
+    // ---- 2. Link mutually consistent matches inside the temporal window ----
+    let window = match_window.max(1);
+    let mut uf = UnionFind::new(total_nodes);
+    for i in 0..frames.len() {
         let a = &frames[i];
-        let b = &frames[i + 1];
-        if a.descriptors.is_empty() || b.descriptors.is_empty() {
+        if a.descriptors.is_empty() {
+            continue;
+        }
+        let end = (i + 1 + window).min(frames.len());
+        for j in i + 1..end {
+            let b = &frames[j];
+            if b.descriptors.is_empty() {
+                continue;
+            }
+            // Lowe ratio test in the forward direction; a match survives only if
+            // the reverse best match from `j` back to `i` agrees (cross-check).
+            let matcher = Matcher::new(MatchType::BruteForce)
+                .with_ratio_test(ratio)
+                .with_cross_check();
+            let matches = matcher.match_descriptors(&a.descriptors, &b.descriptors);
+
+            for m in &matches.matches {
+                let (Ok(ai), Ok(bi)) = (usize::try_from(m.query_idx), usize::try_from(m.train_idx))
+                else {
+                    continue;
+                };
+                if ai >= a.descriptors.len() || bi >= b.descriptors.len() {
+                    continue;
+                }
+                uf.union(offset[i] + ai, offset[j] + bi);
+            }
+        }
+    }
+
+    // ---- 3. Group nodes into tracks ----
+    // Scanning node ids in ascending order means each track is created (and its
+    // members appended) the first time its smallest node is seen, so tracks come
+    // out in ascending first-observation order. The map is only ever looked up,
+    // never iterated, so its order cannot leak into the result.
+    let mut tracks: Vec<Vec<usize>> = Vec::new();
+    let mut track_of_root: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+    for node in 0..total_nodes {
+        let root = uf.find(node);
+        let track = *track_of_root.entry(root).or_insert_with(|| {
+            tracks.push(Vec::new());
+            tracks.len() - 1
+        });
+        tracks[track].push(node);
+    }
+
+    // ---- 4. Triangulate and filter each track ----
+    for track in &tracks {
+        if track.len() < 2 {
             continue;
         }
 
-        let projection_a = projection_matrix(&a.pose_cw, intrinsics);
-        let projection_b = projection_matrix(&b.pose_cw, intrinsics);
-        let matches = match_descriptors(&a.descriptors, &b.descriptors, Some(ratio));
-
-        for m in &matches.matches {
-            let (Ok(ai), Ok(bi)) = (usize::try_from(m.query_idx), usize::try_from(m.train_idx))
-            else {
-                continue;
-            };
-            if ai >= a.keypoints.len() || bi >= b.keypoints.len() {
+        // Enforce at most one observation per frame. Nodes are visited in
+        // ascending order, so the first node of each frame has the lowest
+        // keypoint index; later nodes from the same frame are dropped.
+        let mut obs: Vec<(usize, usize)> = Vec::with_capacity(track.len());
+        let mut last_frame = usize::MAX;
+        for &node in track {
+            let frame = node_frame[node];
+            if frame == last_frame {
                 continue;
             }
-
-            let point_a = a.keypoints[ai].pt();
-            let point_b = b.keypoints[bi].pt();
-            let Ok(triangulated) =
-                triangulate_points(&projection_a, &projection_b, &[point_a], &[point_b])
-            else {
-                continue;
-            };
-            let point = triangulated[0];
-            if !point.coords.iter().all(|c| c.is_finite()) {
-                continue;
-            }
-
-            // In front of both cameras.
-            let camera_a = a.pose_cw.rotation * point.coords + a.pose_cw.translation;
-            let camera_b = b.pose_cw.rotation * point.coords + b.pose_cw.translation;
-            if camera_a[2] <= 1e-6 || camera_b[2] <= 1e-6 {
-                continue;
-            }
-
-            // Reprojection error below tolerance in both views.
-            let reprojected_a = intrinsics.project(&Point3::from(camera_a));
-            let reprojected_b = intrinsics.project(&Point3::from(camera_b));
-            let error_a = ((reprojected_a.x - point_a.x).powi(2)
-                + (reprojected_a.y - point_a.y).powi(2))
-            .sqrt();
-            let error_b = ((reprojected_b.x - point_b.x).powi(2)
-                + (reprojected_b.y - point_b.y).powi(2))
-            .sqrt();
-            if !(error_a <= tri_reproj && error_b <= tri_reproj) {
-                continue;
-            }
-
-            let index = landmarks.len();
-            landmarks.push(Landmark {
-                position: point,
-                descriptors: vec![
-                    a.descriptors.descriptors[ai].clone(),
-                    b.descriptors.descriptors[bi].clone(),
-                ],
-            });
-            if per_image[i][ai].is_none() {
-                per_image[i][ai] = Some(index);
-            }
-            if per_image[i + 1][bi].is_none() {
-                per_image[i + 1][bi] = Some(index);
-            }
+            obs.push((frame, node_kp[node]));
+            last_frame = frame;
         }
+        if obs.len() < 2 {
+            continue;
+        }
+        result.triangulated_tracks += 1;
+
+        let Some((point, survivors)) = reconstruct_track(&obs, frames, intrinsics, tri_reproj)
+        else {
+            result.rejected_tracks += 1;
+            continue;
+        };
+
+        // ---- 5. One landmark per surviving track, all its descriptors ----
+        let landmark_id = result.landmarks.len();
+        let descriptors = survivors
+            .iter()
+            .map(|&(frame, kp)| frames[frame].descriptors.descriptors[kp].clone())
+            .collect();
+        result.landmarks.push(Landmark {
+            position: point,
+            descriptors,
+        });
+        for &(frame, kp) in &survivors {
+            result.per_image[frame][kp] = Some(landmark_id);
+        }
+        result.total_observations += survivors.len();
+        result.observation_counts.push(survivors.len());
     }
 
-    let observations = per_image
-        .iter()
-        .flat_map(|landmarks| landmarks.iter())
-        .filter(|entry| entry.is_some())
-        .count();
-
-    (landmarks, per_image, observations)
+    result
 }
 
 /// Build the 3x4 pixel projection matrix `K * [R | t]` for a world-to-camera pose.
@@ -697,6 +917,23 @@ fn select_evenly(pool: &[usize], count: usize) -> Vec<usize> {
             pool[idx]
         })
         .collect()
+}
+
+/// Median of a sequence of counts, or `NaN` when it is empty.
+///
+/// For an even number of values the mean of the two middle values is returned.
+fn median(values: &[usize]) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    if n % 2 == 1 {
+        sorted[n / 2] as f64
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) as f64 / 2.0
+    }
 }
 
 /// Arithmetic mean, or `NaN` for an empty sequence.
