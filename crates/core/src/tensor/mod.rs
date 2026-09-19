@@ -1,8 +1,8 @@
-pub mod types;
 pub mod ops;
+pub mod types;
 
-pub use types::*;
 pub use ops::*;
+pub use types::*;
 
 #[cfg(test)]
 use crate::storage::{CpuStorage, Storage};

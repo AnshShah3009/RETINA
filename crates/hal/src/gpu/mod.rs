@@ -128,9 +128,7 @@ impl GpuContext {
     }
 }
 
-
 include!("compute_context_impl.rs");
-
 
 impl GpuContext {
     /// Compute dominant orientations for SIFT keypoints on GPU.

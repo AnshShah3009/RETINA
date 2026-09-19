@@ -165,7 +165,9 @@ fn test_geometry_remap() {
 fn test_resize_single_pixel_dimension() {
     // Regression: width or height == 1 previously divided by (n-1) == 0,
     // producing NaN coordinates and an all-black output.
-    let img = GrayImage::from_fn(32, 32, |x, y| image::Luma([((x * 7 + y * 13) % 254 + 1) as u8]));
+    let img = GrayImage::from_fn(32, 32, |x, y| {
+        image::Luma([((x * 7 + y * 13) % 254 + 1) as u8])
+    });
 
     let row = resize(&img, 16, 1, Interpolation::Linear);
     assert_eq!(row.dimensions(), (16, 1));
@@ -181,5 +183,3 @@ fn test_resize_single_pixel_dimension() {
         "1-pixel-wide resize must not be all black"
     );
 }
-
-

@@ -13,12 +13,28 @@
 use nalgebra::{Matrix3, Vector3};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum HandEyeMethod { Tsai, Park, Horaud, Andreff }
-impl Default for HandEyeMethod { fn default() -> Self { Self::Tsai } }
+pub enum HandEyeMethod {
+    Tsai,
+    Park,
+    Horaud,
+    Andreff,
+}
+impl Default for HandEyeMethod {
+    fn default() -> Self {
+        Self::Tsai
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RobotWorldHandEyeMethod { Shah, Li }
-impl Default for RobotWorldHandEyeMethod { fn default() -> Self { Self::Shah } }
+pub enum RobotWorldHandEyeMethod {
+    Shah,
+    Li,
+}
+impl Default for RobotWorldHandEyeMethod {
+    fn default() -> Self {
+        Self::Shah
+    }
+}
 
 /// Eye-in-hand calibration: solve A·X = X·B for X = `cam2gripper`.
 ///
@@ -28,8 +44,10 @@ impl Default for RobotWorldHandEyeMethod { fn default() -> Self { Self::Shah } }
 /// Returns `(R_cam2gripper, t_cam2gripper)` or `None` if the motions do not
 /// span enough independent rotations to determine the transform.
 pub fn calibrate_hand_eye(
-    r_gripper2base: &[Matrix3<f64>], t_gripper2base: &[Vector3<f64>],
-    r_target2cam: &[Matrix3<f64>], t_target2cam: &[Vector3<f64>],
+    r_gripper2base: &[Matrix3<f64>],
+    t_gripper2base: &[Vector3<f64>],
+    r_target2cam: &[Matrix3<f64>],
+    t_target2cam: &[Vector3<f64>],
     _method: HandEyeMethod,
 ) -> Option<(Matrix3<f64>, Vector3<f64>)> {
     let n = r_gripper2base.len();
@@ -68,7 +86,9 @@ fn rotation_vector_from_matrix(r: &Matrix3<f64>) -> Vector3<f64> {
     let trace = r[(0, 0)] + r[(1, 1)] + r[(2, 2)];
     let angle = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos();
     let denom = 2.0 * angle.sin();
-    if denom.abs() < 1e-10 { return Vector3::zeros(); }
+    if denom.abs() < 1e-10 {
+        return Vector3::zeros();
+    }
     Vector3::new(
         (r[(2, 1)] - r[(1, 2)]) / denom * angle,
         (r[(0, 2)] - r[(2, 0)]) / denom * angle,
@@ -77,11 +97,7 @@ fn rotation_vector_from_matrix(r: &Matrix3<f64>) -> Vector3<f64> {
 }
 
 fn skew(v: &Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(
-        0.0, -v.z, v.y,
-        v.z, 0.0, -v.x,
-        -v.y, v.x, 0.0,
-    )
+    Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
 }
 
 /// Convert γ = 2·sin(θ/2)·axis into a rotation matrix.
@@ -150,9 +166,7 @@ fn solve_ax_xb(
     let mut tr_rows: Vec<[f64; 3]> = Vec::with_capacity(a_rot.len());
     let mut tr_rhs: Vec<f64> = Vec::with_capacity(a_rot.len());
     for ((ar, atr), btr) in a_rot.iter().zip(a_tr.iter()).zip(b_tr.iter()) {
-        tr_rows.push([
-            ar[(0, 0)] - 1.0, ar[(0, 1)], ar[(0, 2)],
-        ]);
+        tr_rows.push([ar[(0, 0)] - 1.0, ar[(0, 1)], ar[(0, 2)]]);
         let v = r_x * btr - atr;
         tr_rhs.push(v.x);
         tr_rows.push([ar[(1, 0)], ar[(1, 1)] - 1.0, ar[(1, 2)]]);
@@ -189,23 +203,13 @@ fn quat_to_mat3(q: &[f64; 4]) -> Option<Matrix3<f64>> {
 /// Hamilton convention with `(w, x, y, z)` component order.
 fn quat_left(q: &[f64; 4]) -> nalgebra::Matrix4<f64> {
     let [w, x, y, z] = *q;
-    nalgebra::Matrix4::new(
-        w, -x, -y, -z,
-        x,  w, -z,  y,
-        y,  z,  w, -x,
-        z, -y,  x,  w,
-    )
+    nalgebra::Matrix4::new(w, -x, -y, -z, x, w, -z, y, y, z, w, -x, z, -y, x, w)
 }
 
 /// Right quaternion-multiplication matrix: R(b)·vec(a) = vec(a ⊗ b).
 fn quat_right(q: &[f64; 4]) -> nalgebra::Matrix4<f64> {
     let [w, x, y, z] = *q;
-    nalgebra::Matrix4::new(
-        w, -x, -y, -z,
-        x,  w,  z, -y,
-        y, -z,  w,  x,
-        z,  y, -x,  w,
-    )
+    nalgebra::Matrix4::new(w, -x, -y, -z, x, w, z, -y, y, -z, w, x, z, y, -x, w)
 }
 
 /// Robot-world/hand-eye calibration: solve A·X = Z·B.
@@ -214,8 +218,10 @@ fn quat_right(q: &[f64; 4]) -> nalgebra::Matrix4<f64> {
 /// * returns `(R_base2world, t_base2world, R_gripper2cam, t_gripper2cam)`
 ///   i.e. X and Z from A_i·X = Z·B_i, or `None` when the data is degenerate.
 pub fn calibrate_robot_world_hand_eye(
-    r_world2cam: &[Matrix3<f64>], t_world2cam: &[Vector3<f64>],
-    r_base2gripper: &[Matrix3<f64>], t_base2gripper: &[Vector3<f64>],
+    r_world2cam: &[Matrix3<f64>],
+    t_world2cam: &[Vector3<f64>],
+    r_base2gripper: &[Matrix3<f64>],
+    t_base2gripper: &[Vector3<f64>],
     _method: RobotWorldHandEyeMethod,
 ) -> Option<(Matrix3<f64>, Vector3<f64>, Matrix3<f64>, Vector3<f64>)> {
     let n = r_world2cam.len();
@@ -285,8 +291,13 @@ fn average_rotations(rots: &[Matrix3<f64>]) -> Option<Matrix3<f64>> {
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(i, _)| i)?;
     let col = eig.eigenvectors.column(idx);
-    let q = nalgebra::Quaternion::from_vector(nalgebra::Vector4::new(col[0], col[1], col[2], col[3]));
-    Some(nalgebra::UnitQuaternion::from_quaternion(q).to_rotation_matrix().into_inner())
+    let q =
+        nalgebra::Quaternion::from_vector(nalgebra::Vector4::new(col[0], col[1], col[2], col[3]));
+    Some(
+        nalgebra::UnitQuaternion::from_quaternion(q)
+            .to_rotation_matrix()
+            .into_inner(),
+    )
 }
 
 fn average_translations(ts: &[Vector3<f64>]) -> Vector3<f64> {
@@ -306,7 +317,10 @@ mod tests {
     struct Lcg(u64);
     impl Lcg {
         fn next_f64(&mut self) -> f64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((self.0 >> 33) as f64 / (u32::MAX >> 1) as f64) - 1.0
         }
         fn rotation(&mut self, max_angle: f64) -> Matrix3<f64> {
@@ -327,10 +341,7 @@ mod tests {
         let x_true_t = Vector3::new(0.05, -0.02, 0.10);
 
         // Fixed base→target transform
-        let b2t = (
-            rng.rotation(1.0),
-            Vector3::new(0.5, 0.1, 0.8),
-        );
+        let b2t = (rng.rotation(1.0), Vector3::new(0.5, 0.1, 0.8));
 
         let n = 8;
         let mut r_g2b = Vec::new();
@@ -339,7 +350,10 @@ mod tests {
         let mut t_t2c = Vec::new();
 
         for _ in 0..n {
-            let g = (rng.rotation(1.5), Vector3::new(rng.next_f64(), rng.next_f64(), rng.next_f64()));
+            let g = (
+                rng.rotation(1.5),
+                Vector3::new(rng.next_f64(), rng.next_f64(), rng.next_f64()),
+            );
             // H_b2t = G⁻¹ X ⇒ T = target2cam = (b2t⁻¹ G X)⁻¹ = X⁻¹ G⁻¹ b2t
             let g_inv_rot = g.0.transpose();
             let g_inv_t = -(g_inv_rot * g.1);
@@ -358,9 +372,8 @@ mod tests {
             t_t2c.push(m_t);
         }
 
-        let (r_x, t_x) =
-            calibrate_hand_eye(&r_g2b, &t_g2b, &r_t2c, &t_t2c, HandEyeMethod::Tsai)
-                .expect("hand-eye should converge on synthetic data");
+        let (r_x, t_x) = calibrate_hand_eye(&r_g2b, &t_g2b, &r_t2c, &t_t2c, HandEyeMethod::Tsai)
+            .expect("hand-eye should converge on synthetic data");
 
         // Compare up to sign of relative motion ambiguity: check A·X ≈ X·B residual
         // and closeness to ground truth.
@@ -391,7 +404,10 @@ mod tests {
         for _ in 0..n {
             // Random consistent pair: choose B_i (base2gripper) freely, then
             // A_i = Z · B_i · X⁻¹
-            let b = (rng.rotation(1.4), Vector3::new(rng.next_f64(), rng.next_f64(), rng.next_f64()));
+            let b = (
+                rng.rotation(1.4),
+                Vector3::new(rng.next_f64(), rng.next_f64(), rng.next_f64()),
+            );
             let x_inv_rot = x_true_rot.transpose();
             let x_inv_t = -(x_inv_rot * &x_true_t);
             let m1_rot = z_true_rot * b.0;
@@ -403,13 +419,23 @@ mod tests {
         }
 
         let (rx, tx, rz, tz) = calibrate_robot_world_hand_eye(
-            &r_w2c, &t_w2c, &r_b2g, &t_b2g, RobotWorldHandEyeMethod::Shah,
+            &r_w2c,
+            &t_w2c,
+            &r_b2g,
+            &t_b2g,
+            RobotWorldHandEyeMethod::Shah,
         )
         .expect("robot-world hand-eye should converge");
 
-        assert!(rotation_vector_from_matrix(&(x_true_rot.transpose() * rx)).norm() < 1e-3, "X rotation mismatch");
+        assert!(
+            rotation_vector_from_matrix(&(x_true_rot.transpose() * rx)).norm() < 1e-3,
+            "X rotation mismatch"
+        );
         assert!((tx - x_true_t).norm() < 1e-3, "X translation mismatch");
-        assert!(rotation_vector_from_matrix(&(z_true_rot.transpose() * rz)).norm() < 1e-3, "Z rotation mismatch");
+        assert!(
+            rotation_vector_from_matrix(&(z_true_rot.transpose() * rz)).norm() < 1e-3,
+            "Z rotation mismatch"
+        );
         assert!((tz - z_true_t).norm() < 1e-3, "Z translation mismatch");
     }
 }

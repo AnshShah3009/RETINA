@@ -265,7 +265,7 @@ fn local_mean_image(src: &GrayImage, block_size: u32) -> GrayImage {
 
     let integral_size = (width + 1) * (height + 1);
     // u64: 255·W·H overflows u32 beyond ~16.9 Mpixel.
-        let mut integral: Vec<u64> = vec![0u64; integral_size];
+    let mut integral: Vec<u64> = vec![0u64; integral_size];
 
     for y in 0..height {
         let mut row_sum = 0u64;

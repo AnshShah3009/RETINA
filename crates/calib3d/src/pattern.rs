@@ -338,8 +338,16 @@ fn assign_grid_points(
     }
     // Spacing uniformity within 35% across each axis (real boards are
     // regular; junk candidate sets produce wildly uneven k-means centers).
-    let ru = if spacing[0] > 1e-9 { spacing[1] / spacing[0] } else { f64::INFINITY };
-    let rv = if spacing[2] > 1e-9 { spacing[3] / spacing[2] } else { f64::INFINITY };
+    let ru = if spacing[0] > 1e-9 {
+        spacing[1] / spacing[0]
+    } else {
+        f64::INFINITY
+    };
+    let rv = if spacing[2] > 1e-9 {
+        spacing[3] / spacing[2]
+    } else {
+        f64::INFINITY
+    };
     if !(0.5..=2.0).contains(&ru) || !(0.5..=2.0).contains(&rv) {
         return Err(cv_core::Error::AlgorithmError(format!(
             "chessboard corner assignment failed spacing-uniformity check \

@@ -368,10 +368,7 @@ pub fn compute_odometry(
         // Compute RMSE approximation from the Gauss-Newton JTr residual
         // Note: this is |J^T r|² not the true RMSE, but it serves as a
         // valid convergence criterion since both converge together
-        let jtr_norm_sq: f32 = final_data[21..27]
-            .iter()
-            .map(|&x| x * x)
-            .sum::<f32>();
+        let jtr_norm_sq: f32 = final_data[21..27].iter().map(|&x| x * x).sum::<f32>();
         let rmse_approx = (jtr_norm_sq / num_pixels as f32).sqrt();
 
         // Convergence check

@@ -4,7 +4,7 @@
 //! precise camera calibration and sub-pixel corner refinement.
 
 use crate::aruco::{ArucoDetector, ArucoDictionary, DetectedMarker};
-use cv_core::{Float, CpuTensor, Result};
+use cv_core::{CpuTensor, Float, Result};
 use nalgebra::{Matrix3, Point3};
 use std::collections::HashMap;
 
@@ -94,11 +94,7 @@ pub struct CharucoDetector {
 }
 
 impl CharucoDetector {
-    pub fn new(
-        board: CharucoBoard,
-        params: CharucoParameters,
-        detector: ArucoDetector,
-    ) -> Self {
+    pub fn new(board: CharucoBoard, params: CharucoParameters, detector: ArucoDetector) -> Self {
         Self {
             board,
             params,
@@ -108,10 +104,7 @@ impl CharucoDetector {
 
     /// Detect ChArUco board corners from image.
     /// Internally detects ArUco markers first, then interpolates chessboard corner positions.
-    pub fn detect<T: Float>(
-        &self,
-        image: &CpuTensor<T>,
-    ) -> Result<CharucoCorners> {
+    pub fn detect<T: Float>(&self, image: &CpuTensor<T>) -> Result<CharucoCorners> {
         let markers = self.aruco_detector.detect(image)?;
         self.interpolate_corners(&markers)
     }
@@ -124,7 +117,10 @@ impl CharucoDetector {
         let sx = self.board.squares_x;
         let sy = self.board.squares_y;
         if sx < 2 || sy < 2 {
-            return Ok(CharucoCorners { corners: vec![], ids: vec![] });
+            return Ok(CharucoCorners {
+                corners: vec![],
+                ids: vec![],
+            });
         }
 
         // marker id -> cell (col, row)
@@ -164,10 +160,7 @@ impl CharucoDetector {
                 (col, row + 1, marker.corners[3]),
             ] {
                 if ic <= sx - 2 && ir <= sy - 2 {
-                    corner_data
-                        .entry((ic, ir))
-                        .or_default()
-                        .push([pt.0, pt.1]);
+                    corner_data.entry((ic, ir)).or_default().push([pt.0, pt.1]);
                 }
             }
         }
@@ -178,7 +171,9 @@ impl CharucoDetector {
         let mut sorted_keys: Vec<(usize, usize)> = corner_data.keys().copied().collect();
         sorted_keys.sort();
         for (ic, ir) in sorted_keys {
-            let Some(pts) = corner_data.get(&(ic, ir)) else { continue };
+            let Some(pts) = corner_data.get(&(ic, ir)) else {
+                continue;
+            };
             if pts.len() < self.params.min_markers {
                 continue;
             }

@@ -118,15 +118,18 @@ fn douglas_peucker(
 }
 
 /// Perpendicular distance from point to line segment
-fn perpendicular_distance(pt: &Point2<f64>, line_start: &Point2<f64>, line_end: &Point2<f64>) -> f64 {
+fn perpendicular_distance(
+    pt: &Point2<f64>,
+    line_start: &Point2<f64>,
+    line_end: &Point2<f64>,
+) -> f64 {
     let dx = line_end.x - line_start.x;
     let dy = line_end.y - line_start.y;
     let len_sq = dx * dx + dy * dy;
     if len_sq == 0.0 {
         return (pt.x - line_start.x).hypot(pt.y - line_start.y);
     }
-    let num = ((line_end.y - line_start.y) * pt.x
-        - (line_end.x - line_start.x) * pt.y
+    let num = ((line_end.y - line_start.y) * pt.x - (line_end.x - line_start.x) * pt.y
         + line_end.x * line_start.y
         - line_end.y * line_start.x)
         .abs();

@@ -207,9 +207,9 @@ impl Triangulator {
         }
 
         let svd = nalgebra::SVD::new(a, false, true);
-        let v_t = svd.v_t.ok_or_else(|| {
-            cv_core::Error::AlgorithmError("SVD failed to compute V_t".into())
-        })?;
+        let v_t = svd
+            .v_t
+            .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed to compute V_t".into()))?;
 
         // Check for degeneracy: the smallest singular value should be significantly smaller than the second smallest
         if svd.singular_values[3] > 0.1 * svd.singular_values[2] {

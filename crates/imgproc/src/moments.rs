@@ -66,15 +66,18 @@ impl Moments {
 
         let h4 = (eta30 + eta12).powi(2) + (eta21 + eta03).powi(2);
 
-        let h5 = (eta30 - 3.0 * eta12) * (eta30 + eta12)
+        let h5 = (eta30 - 3.0 * eta12)
+            * (eta30 + eta12)
             * ((eta30 + eta12).powi(2) - 3.0 * (eta21 + eta03).powi(2))
-            + (3.0 * eta21 - eta03) * (eta21 + eta03)
+            + (3.0 * eta21 - eta03)
+                * (eta21 + eta03)
                 * (3.0 * (eta30 + eta12).powi(2) - (eta21 + eta03).powi(2));
 
         let h6 = (eta20 - eta02) * ((eta30 + eta12).powi(2) - (eta21 + eta03).powi(2))
             + 4.0 * eta11 * (eta30 + eta12) * (eta21 + eta03);
 
-        let h7 = (3.0 * eta21 - eta03) * (eta30 + eta12)
+        let h7 = (3.0 * eta21 - eta03)
+            * (eta30 + eta12)
             * ((eta30 + eta12).powi(2) - 3.0 * (eta21 + eta03).powi(2))
             - (eta30 - 3.0 * eta12)
                 * (eta21 + eta03)

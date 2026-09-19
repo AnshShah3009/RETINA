@@ -355,9 +355,18 @@ pub fn stereo_rectify_matrices(
         0.0, 0.0, 1.0, 0.0,
     );
     let p2 = Matrix3x4::new(
-        fx, 0.0, cx2, -fx * baseline, //
-        0.0, fy, cy, 0.0, //
-        0.0, 0.0, 1.0, 0.0,
+        fx,
+        0.0,
+        cx2,
+        -fx * baseline, //
+        0.0,
+        fy,
+        cy,
+        0.0, //
+        0.0,
+        0.0,
+        1.0,
+        0.0,
     );
 
     // Disparity-to-depth: Z = fx·baseline / d. Following OpenCV,
@@ -444,16 +453,12 @@ mod rectify_tests {
         let intr_l = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
         let intr_r = CameraIntrinsics::new(505.0, 502.0, 315.0, 242.0, 640, 480);
 
-        let r_l = Rotation3::from_axis_angle(
-            &Unit::new_normalize(Vector3::new(0.1, 0.05, 1.0)),
-            0.15,
-        )
-        .into_inner();
-        let r_r = Rotation3::from_axis_angle(
-            &Unit::new_normalize(Vector3::new(-0.07, 0.12, 1.0)),
-            -0.22,
-        )
-        .into_inner();
+        let r_l =
+            Rotation3::from_axis_angle(&Unit::new_normalize(Vector3::new(0.1, 0.05, 1.0)), 0.15)
+                .into_inner();
+        let r_r =
+            Rotation3::from_axis_angle(&Unit::new_normalize(Vector3::new(-0.07, 0.12, 1.0)), -0.22)
+                .into_inner();
         let left = Pose::new(r_l, Vector3::new(0.02, -0.01, 0.05));
         let right = Pose::new(r_r, Vector3::new(-0.18, 0.03, 0.06));
 
@@ -531,4 +536,3 @@ mod rectify_tests {
         )
     }
 }
-

@@ -30,7 +30,9 @@ impl CpuBackend {
                 Err(e) => {
                     tracing::warn!(
                         "RUSTCV_CPU_THREADS '{}' is invalid ({}), using default {}",
-                        v, e, rayon::current_num_threads()
+                        v,
+                        e,
+                        rayon::current_num_threads()
                     );
                     None
                 }

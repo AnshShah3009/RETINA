@@ -23,8 +23,7 @@ pub fn read_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
         // despite the spec forbidding it. Genuine ASCII files always contain
         // "facet normal" (or at least "endsolid") shortly after, so look for
         // those markers before committing to the text parser.
-        let marker_in_header =
-            header_str.contains("facet") || header_str.contains("endsolid");
+        let marker_in_header = header_str.contains("facet") || header_str.contains("endsolid");
         let marker_in_peek = if marker_in_header {
             false
         } else {

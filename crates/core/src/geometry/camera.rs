@@ -1,5 +1,5 @@
-use nalgebra::{Matrix3, Point2, Point3};
 use super::distortion::{Distortion, DistortionF32};
+use nalgebra::{Matrix3, Point2, Point3};
 
 /// Trait defining a camera model for projecting 3D points to 2D pixels and vice versa.
 pub trait CameraModel<T: nalgebra::Scalar> {

@@ -489,8 +489,16 @@ pub fn polygon_intersection(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
     // Sutherland-Hodgman's inside test assumes CCW clip orientation; a CW
     // wound (but otherwise identical) ring previously returned an empty
     // intersection. Normalize both rings first.
-    let sa = if ring_signed_area(&sa) < 0.0 { sa.into_iter().rev().collect() } else { sa };
-    let sb = if ring_signed_area(&sb) < 0.0 { sb.into_iter().rev().collect() } else { sb };
+    let sa = if ring_signed_area(&sa) < 0.0 {
+        sa.into_iter().rev().collect()
+    } else {
+        sa
+    };
+    let sb = if ring_signed_area(&sb) < 0.0 {
+        sb.into_iter().rev().collect()
+    } else {
+        sb
+    };
     let mut result = sutherland_hodgman(&sa, &sb);
     if result.len() < 3 {
         return vec![];
@@ -511,25 +519,28 @@ pub fn polygon_intersection(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
 /// Holes of the inputs participate in the operation. Returns every ring of
 /// the result as separate polygons (exteriors only).
 pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
-    use geo::{Coord, LineString, Polygon as GeoPolygon};
     use geo::algorithm::bool_ops::OpType;
     use geo::BooleanOps;
+    use geo::{Coord, LineString, Polygon as GeoPolygon};
 
     fn to_geo(p: &Polygon) -> GeoPolygon<f64> {
-        let exterior: Vec<Coord<f64>> =
-            open_ring(&p.exterior).iter().map(|pt| Coord { x: pt.x, y: pt.y }).collect();
+        let exterior: Vec<Coord<f64>> = open_ring(&p.exterior)
+            .iter()
+            .map(|pt| Coord { x: pt.x, y: pt.y })
+            .collect();
         let interiors: Vec<LineString<f64>> = p
             .holes
             .iter()
             .map(|h| {
                 LineString::from(
-                    h.iter().map(|pt| Coord { x: pt.x, y: pt.y }).collect::<Vec<_>>(),
+                    h.iter()
+                        .map(|pt| Coord { x: pt.x, y: pt.y })
+                        .collect::<Vec<_>>(),
                 )
             })
             .collect();
         GeoPolygon::new(LineString::from(exterior), interiors)
     }
-
 
     let ga = to_geo(a);
     let gb = to_geo(b);
@@ -547,8 +558,7 @@ pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
             .interiors()
             .iter()
             .map(|ls| {
-                let mut h: Vec<Point2D> =
-                    ls.points().map(|c| Point2D::new(c.x(), c.y())).collect();
+                let mut h: Vec<Point2D> = ls.points().map(|c| Point2D::new(c.x(), c.y())).collect();
                 close_ring(&mut h);
                 h
             })
@@ -1333,7 +1343,6 @@ pub fn to_geojson(polygon: &Polygon) -> String {
     s.push_str("]}");
     s
 }
-
 
 #[cfg(test)]
 mod union_buffer_tests {

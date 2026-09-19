@@ -88,8 +88,7 @@ impl Lbd {
                         for bit in 0..n_bits {
                             // Center the offsets around zero, positive side
                             // along the canonical normal.
-                            let offset =
-                                (bit as f32 - (n_bits as f32 - 1.0) / 2.0) * step;
+                            let offset = (bit as f32 - (n_bits as f32 - 1.0) / 2.0) * step;
                             let x_p = (lx + nx * offset).round() as i32;
                             let y_p = (ly + ny * offset).round() as i32;
                             let x_n = (lx - nx * offset).round() as i32;

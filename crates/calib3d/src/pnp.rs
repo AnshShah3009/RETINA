@@ -44,9 +44,10 @@ pub fn solve_pnp_dlt(
 
     // ---- Planarity detection ----
     let n_pts = object_points.len();
-    let centroid = object_points.iter().fold(Vector3::<f64>::zeros(), |acc, p| {
-        acc + p.coords
-    }) / n_pts as f64;
+    let centroid = object_points
+        .iter()
+        .fold(Vector3::<f64>::zeros(), |acc, p| acc + p.coords)
+        / n_pts as f64;
     let mut cov = Matrix3::<f64>::zeros();
     for p in object_points {
         let d = p.coords - centroid;
@@ -702,11 +703,7 @@ impl PnpSolver {
         //   w²  = a²/d.
         let m = sb * sb - sc * sc;
         let dpoly = [1.0, -2.0 * ca, 1.0];
-        let npoly = [
-            m * dpoly[0] - sa * sa,
-            m * dpoly[1],
-            m * dpoly[2] + sa * sa,
-        ];
+        let npoly = [m * dpoly[0] - sa * sa, m * dpoly[1], m * dpoly[2] + sa * sa];
         let dpoly_d = [-2.0 * sa * sa * cb, 2.0 * sa * sa * cg];
 
         fn pmul(a: &[f64], b: &[f64]) -> Vec<f64> {
@@ -730,7 +727,7 @@ impl PnpSolver {
 
         let t1 = pmul(&npoly, &npoly); // scaled by a² below
         let t2 = pmul(&npoly, &dpoly_d); // scaled by −2a²cb below
-        // T3 = (a² − b²·d) · D²  where  a² appears ONLY in the constant term.
+                                         // T3 = (a² − b²·d) · D²  where  a² appears ONLY in the constant term.
         let t3 = {
             let t = [sa * sa - sb * sb, 2.0 * sb * sb * ca, -sb * sb];
             pmul(&t, &pmul(&dpoly_d, &dpoly_d))
@@ -751,7 +748,6 @@ impl PnpSolver {
         if !c4.is_finite() || c4.abs() < 1e-14 {
             return Ok(Vec::new());
         }
- 
 
         let mut companion = nalgebra::DMatrix::<f64>::zeros(4, 4);
         companion[(0, 3)] = -coeff[0] / c4;
@@ -786,10 +782,7 @@ impl PnpSolver {
                     + coeff[0]
             };
             let poly_prime = |x: f64| -> f64 {
-                4.0 * coeff[4] * x.powi(3)
-                    + 3.0 * coeff[3] * x * x
-                    + 2.0 * coeff[2] * x
-                    + coeff[1]
+                4.0 * coeff[4] * x.powi(3) + 3.0 * coeff[3] * x * x + 2.0 * coeff[2] * x + coeff[1]
             };
             for _ in 0..5 {
                 let f = poly_at(q);
@@ -1077,7 +1070,11 @@ mod dlt_planar_tests {
         // Regression: for planar targets (z=0 chessboard-style), plain DLT is
         // rank-deficient and previously returned poses with ~1000 px error.
         let intr = intrinsics();
-        let r_true = Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(Vector3::new(1.0, 2.0, 3.0)), 0.09).into_inner();
+        let r_true = Rotation3::from_axis_angle(
+            &nalgebra::Unit::new_normalize(Vector3::new(1.0, 2.0, 3.0)),
+            0.09,
+        )
+        .into_inner();
         let t_true = Vector3::new(0.1, -0.05, 2.0);
 
         // 7x7 grid of planar object points at z = 0.
@@ -1121,7 +1118,11 @@ mod dlt_planar_tests {
     #[test]
     fn test_dlt_non_planar_low_reprojection_error() {
         let intr = intrinsics();
-        let r_true = Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(Vector3::new(-2.0, 1.0, 0.5)), 0.19).into_inner();
+        let r_true = Rotation3::from_axis_angle(
+            &nalgebra::Unit::new_normalize(Vector3::new(-2.0, 1.0, 0.5)),
+            0.19,
+        )
+        .into_inner();
         let t_true = Vector3::new(0.2, 0.1, 2.5);
 
         // Non-planar cloud: two offset grids.
@@ -1151,10 +1152,13 @@ mod dlt_planar_tests {
             err_sq += (pr.x - img.x).powi(2) + (pr.y - img.y).powi(2);
         }
         let rms = (err_sq / object_points.len() as f64).sqrt();
-        assert!(rms < 1e-3, "non-planar DLT reprojection RMS too large: {}", rms);
+        assert!(
+            rms < 1e-3,
+            "non-planar DLT reprojection RMS too large: {}",
+            rms
+        );
     }
 }
-
 
 #[cfg(test)]
 mod p3p_tests {
@@ -1190,8 +1194,7 @@ mod p3p_tests {
             img[i] = [pr.x, pr.y];
         }
 
-        let poses =
-            PnpSolver::estimate_p3p(&obj, &img, &m).expect("P3P should not error");
+        let poses = PnpSolver::estimate_p3p(&obj, &img, &m).expect("P3P should not error");
 
         assert!(!poses.is_empty(), "P3P must return at least one solution");
         // The ground-truth pose must be among the (up to 4) candidates.
@@ -1218,4 +1221,3 @@ mod p3p_tests {
         assert!(PnpSolver::estimate_p3p(&obj, &img, &m).is_err());
     }
 }
-

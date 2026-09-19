@@ -227,9 +227,8 @@ async fn execute_pipeline(
                 if let crate::device_registry::BackendContext::Gpu(gpu_ctx) =
                     device_runtime.context()
                 {
-                    let mut all_tensors: Vec<
-                        Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>,
-                    > = Vec::new();
+                    let mut all_tensors: Vec<Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> =
+                        Vec::new();
 
                     for &input_id in inputs {
                         if let Some(tensor) = allocator.create_tensor(input_id) {

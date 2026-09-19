@@ -110,8 +110,6 @@ impl Tracker for TemplateTracker {
             }
         }
 
-        Err(Error::RuntimeError(
-            "Failed to track object".to_string(),
-        ))
+        Err(Error::RuntimeError("Failed to track object".to_string()))
     }
 }

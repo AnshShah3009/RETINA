@@ -483,7 +483,13 @@ pub fn bm3d<T: Float + Default + 'static>(
             // a previous revision only subtracted the block mean).
             for b in 0..n_matches {
                 let offset = b * bs * bs;
-                dct_2d(&group[offset..offset + bs * bs], bs, &dct_b, &mut scratch_a, &mut coefs);
+                dct_2d(
+                    &group[offset..offset + bs * bs],
+                    bs,
+                    &dct_b,
+                    &mut scratch_a,
+                    &mut coefs,
+                );
 
                 let mut nonzero = 0usize;
                 for c in coefs.iter_mut() {
@@ -620,11 +626,7 @@ fn dct_basis(bs: usize) -> Vec<f64> {
         };
         for (x, v) in row.iter_mut().enumerate() {
             *v = ck
-                * ((k as f64)
-                    * std::f64::consts::PI
-                    * (2.0 * x as f64 + 1.0)
-                    / (2.0 * nf))
-                    .cos();
+                * ((k as f64) * std::f64::consts::PI * (2.0 * x as f64 + 1.0) / (2.0 * nf)).cos();
         }
     }
     b
@@ -1048,8 +1050,7 @@ mod bm3d_dct_tests {
 
         let noisy_mse = mse(&noisy);
 
-        let tensor =
-            CpuTensor::<f32>::from_vec(noisy.clone(), TensorShape::new(1, h, w)).unwrap();
+        let tensor = CpuTensor::<f32>::from_vec(noisy.clone(), TensorShape::new(1, h, w)).unwrap();
         let denoised = bm3d(&tensor, 0.15, 8, 16, 15).unwrap();
         let den_mse = mse(denoised.as_slice().unwrap());
 

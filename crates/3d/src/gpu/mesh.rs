@@ -36,8 +36,7 @@ pub fn laplacian_smooth(
                 continue;
             }
             let centroid: Vector3<f32> =
-                adj[i].iter().map(|&j| old[j].coords).sum::<Vector3<f32>>()
-                    / adj[i].len() as f32;
+                adj[i].iter().map(|&j| old[j].coords).sum::<Vector3<f32>>() / adj[i].len() as f32;
             v[i] = Point3::from(old[i].coords * (1.0 - lambda) + centroid * lambda);
         }
     }

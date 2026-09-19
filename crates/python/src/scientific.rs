@@ -60,7 +60,8 @@ fn find_peaks(
 /// Simple linear regression: y = slope * x + intercept.
 #[pyfunction]
 fn linear_regression(py: Python<'_>, x: Vec<f64>, y: Vec<f64>) -> PyResult<(f64, f64, f64)> {
-    let result = py.allow_threads(|| cv_scientific::stats::linregress(&x, &y))
+    let result = py
+        .allow_threads(|| cv_scientific::stats::linregress(&x, &y))
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
     Ok((result.slope, result.intercept, result.r_squared))
 }

@@ -819,10 +819,10 @@ pub mod stereo {
     }
 }
 
-pub mod registration;
 pub mod mesh;
-pub mod tsdf;
 pub mod raycasting;
+pub mod registration;
+pub mod tsdf;
 
 /// Voxel downsample
 pub fn voxel_downsample(points: &[Point3<f32>], voxel_size: f32) -> Vec<Point3<f32>> {

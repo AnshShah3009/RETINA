@@ -3,7 +3,11 @@ use cv_core::Float;
 
 /// Map a single coordinate using the given border mode.
 /// Returns `None` when the pixel should use the constant fill value.
-pub(crate) fn map_border_coord_1d<T: Float>(coord: isize, len: usize, mode: &BorderMode<T>) -> Option<usize> {
+pub(crate) fn map_border_coord_1d<T: Float>(
+    coord: isize,
+    len: usize,
+    mode: &BorderMode<T>,
+) -> Option<usize> {
     let n = len as isize;
     if n <= 0 {
         return None;

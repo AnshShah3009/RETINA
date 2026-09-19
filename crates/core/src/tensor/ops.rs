@@ -1,6 +1,6 @@
+use super::types::{CpuTensor, DataType, One, Tensor, TensorShape};
 use crate::float::Float;
 use crate::storage::{CpuStorage, Storage};
-use super::types::{DataType, CpuTensor, One, Tensor, TensorShape};
 use std::default::Default;
 use std::fmt;
 use std::marker::PhantomData;

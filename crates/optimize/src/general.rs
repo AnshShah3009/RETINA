@@ -5,24 +5,24 @@
 //!
 //! All implementations are from scratch with no external optimization dependencies.
 
-#[path = "nelder_mead.rs"]
-pub mod nelder_mead;
 #[path = "bfgs.rs"]
 pub mod bfgs;
+#[path = "brent.rs"]
+pub mod brent;
 #[path = "lbfgsb.rs"]
 pub mod lbfgsb;
 #[path = "levenberg_marquardt.rs"]
 pub mod levenberg_marquardt;
-#[path = "brent.rs"]
-pub mod brent;
+#[path = "nelder_mead.rs"]
+pub mod nelder_mead;
 #[path = "newton.rs"]
 pub mod newton;
 
-pub use nelder_mead::*;
 pub use bfgs::*;
+pub use brent::*;
 pub use lbfgsb::*;
 pub use levenberg_marquardt::*;
-pub use brent::*;
+pub use nelder_mead::*;
 pub use newton::*;
 
 // ---------------------------------------------------------------------------

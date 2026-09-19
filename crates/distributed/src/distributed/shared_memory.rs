@@ -188,7 +188,9 @@ impl ShmCoordinator {
 
         // Increment refcount atomically — protects against premature
         // file deletion in Drop when multiple processes attach concurrently
-        Self::header_ptr(&mmap).refcount.fetch_add(1, Ordering::Release);
+        Self::header_ptr(&mmap)
+            .refcount
+            .fetch_add(1, Ordering::Release);
 
         Ok(Self {
             mmap,

@@ -45,8 +45,7 @@ pub fn icp_point_to_plane(
                                 target_normals[idx].y as f64,
                                 target_normals[idx].z as f64,
                             );
-                            let p =
-                                nalgebra::Vector3::new(tp.x as f64, tp.y as f64, tp.z as f64);
+                            let p = nalgebra::Vector3::new(tp.x as f64, tp.y as f64, tp.z as f64);
                             let q = nalgebra::Vector3::new(
                                 closest.x as f64,
                                 closest.y as f64,
@@ -54,9 +53,8 @@ pub fn icp_point_to_plane(
                             );
                             let d = p - q;
                             let cross = p.cross(&n);
-                            let row = nalgebra::Vector6::new(
-                                cross.x, cross.y, cross.z, n.x, n.y, n.z,
-                            );
+                            let row =
+                                nalgebra::Vector6::new(cross.x, cross.y, cross.z, n.x, n.y, n.z);
                             let rhs = -n.dot(&d);
                             ata += row * row.transpose();
                             atb += row * rhs;

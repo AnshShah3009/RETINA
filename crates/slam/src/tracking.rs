@@ -232,12 +232,10 @@ impl Tracker {
         };
 
         // Attempt ICP refinement if we have GPU support and previous depth data
-        if let (Some(ref last_depth), Some(ref last_frame)) = (&self.last_depth, &self.last_frame)
-        {
+        if let (Some(ref last_depth), Some(ref last_frame)) = (&self.last_depth, &self.last_frame) {
             let prev_pose = last_frame.pose;
             // Try to refine pose using dense ICP
-            if let Err(e) =
-                self.refine_pose_with_icp(&mut pose, &prev_pose, last_depth, &depth_cpu)
+            if let Err(e) = self.refine_pose_with_icp(&mut pose, &prev_pose, last_depth, &depth_cpu)
             {
                 // If ICP fails, just continue with sparse tracking result
                 eprintln!("ICP refinement failed: {}", e);
@@ -290,8 +288,7 @@ impl Tracker {
         //   T_rel = T_prev · T_curr⁻¹   (curr-cam coords -> prev-cam coords),
         // not the absolute world->camera pose.
         let t_rel = prev_pose.matrix() * pose.inverse().matrix();
-        let pose_matrix_f32 =
-            nalgebra::Matrix4::from_iterator(t_rel.iter().map(|&x| x as f32));
+        let pose_matrix_f32 = nalgebra::Matrix4::from_iterator(t_rel.iter().map(|&x| x as f32));
 
         // Call dense ICP
         let (ata, atb) = cv_hal::gpu_kernels::icp::dense_step(

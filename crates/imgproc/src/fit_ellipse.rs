@@ -4,15 +4,15 @@
 //! - `fit_ellipse_direct`: Direct Least Squares (Fitzgibbon 1999)
 //! - `fit_ellipse`: Standard ellipse fitting
 
-use nalgebra::{DMatrix, DVector, Matrix3, Matrix6, Point2, Point3, Vector3};
 use cv_core::geometry::RotatedRect;
+use nalgebra::{DMatrix, DVector, Matrix3, Matrix6, Point2, Point3, Vector3};
 
 /// Result of ellipse fitting — returns RotatedRect bounding the ellipse
 #[derive(Debug, Clone, Copy)]
 pub struct EllipseResult {
     pub center: Point2<f64>,
-    pub size: (f64, f64),     // (width, height) = (major_axis*2, minor_axis*2)
-    pub angle: f64,            // rotation in degrees
+    pub size: (f64, f64), // (width, height) = (major_axis*2, minor_axis*2)
+    pub angle: f64,       // rotation in degrees
 }
 
 impl EllipseResult {
@@ -27,14 +27,19 @@ impl EllipseResult {
     }
 }
 
-
 /// Conic vector <-> symmetric quad-form matrix (packed halves: xy, xz, yz
 /// entries carry factor 2 in the polynomial).
 fn conic_to_mat(conic: &[f64; 6]) -> Matrix3<f64> {
     Matrix3::new(
-        conic[0], conic[1] / 2.0, conic[3] / 2.0,
-        conic[1] / 2.0, conic[2], conic[4] / 2.0,
-        conic[3] / 2.0, conic[4] / 2.0, conic[5],
+        conic[0],
+        conic[1] / 2.0,
+        conic[3] / 2.0,
+        conic[1] / 2.0,
+        conic[2],
+        conic[4] / 2.0,
+        conic[3] / 2.0,
+        conic[4] / 2.0,
+        conic[5],
     )
 }
 
@@ -285,15 +290,11 @@ fn eigenpairs_3x3(m: &Matrix3<f64>) -> Vec<(f64, nalgebra::Vector3<f64>)> {
     // repeated-root boundary where rounding flips its sign; clamp into the
     // trig branch there instead of dropping to the single-root Cardano path
     // and losing the coincident real roots.
-    let disc_tol = 1e-9_f64
-        * (4.0 * p.abs().powi(3) + 27.0 * q.abs()).max(1.0);
+    let disc_tol = 1e-9_f64 * (4.0 * p.abs().powi(3) + 27.0 * q.abs()).max(1.0);
     if disc >= -disc_tol && p.abs() > 1e-15 {
         // Three real roots (trigonometric form).
         let mm = 2.0 * (-p / 3.0).sqrt();
-        let theta = (3.0 * q / (p * mm))
-            .clamp(-1.0, 1.0)
-            .acos()
-            / 3.0;
+        let theta = (3.0 * q / (p * mm)).clamp(-1.0, 1.0).acos() / 3.0;
         for k in 0..3usize {
             let lam = mm * (theta - 2.0 * PI * k as f64 / 3.0).cos() + tr / 3.0;
             if let Some(v) = eigvec_for_lambda(m, lam) {
@@ -328,14 +329,13 @@ fn eigvec_for_lambda(m: &Matrix3<f64>, lam: f64) -> Option<nalgebra::Vector3<f64
     let n02 = c02.norm();
     let n12 = c12.norm();
 
-    let best = [(n01, c01), (n02, c02), (n12, c12)]
-        .into_iter()
-        .fold(None::<(f64, nalgebra::Vector3<f64>)>, |acc, (n, v)| {
-            match acc {
-                Some((bn, _)) if bn >= n => acc,
-                _ => Some((n, v)),
-            }
-        })?;
+    let best = [(n01, c01), (n02, c02), (n12, c12)].into_iter().fold(
+        None::<(f64, nalgebra::Vector3<f64>)>,
+        |acc, (n, v)| match acc {
+            Some((bn, _)) if bn >= n => acc,
+            _ => Some((n, v)),
+        },
+    )?;
 
     let (_, v) = best;
     let n = v.norm();

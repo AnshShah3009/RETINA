@@ -69,9 +69,12 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
         props.iter().position(|p| names.contains(&p.as_str()))
     };
 
-    let xi = pos_of(&["x"]).ok_or_else(|| Error::ParseError("PLY: missing x property".to_string()))?;
-    let yi = pos_of(&["y"]).ok_or_else(|| Error::ParseError("PLY: missing y property".to_string()))?;
-    let zi = pos_of(&["z"]).ok_or_else(|| Error::ParseError("PLY: missing z property".to_string()))?;
+    let xi =
+        pos_of(&["x"]).ok_or_else(|| Error::ParseError("PLY: missing x property".to_string()))?;
+    let yi =
+        pos_of(&["y"]).ok_or_else(|| Error::ParseError("PLY: missing y property".to_string()))?;
+    let zi =
+        pos_of(&["z"]).ok_or_else(|| Error::ParseError("PLY: missing z property".to_string()))?;
 
     let nxi = pos_of(&["nx", "normal_x"]);
     let nyi = pos_of(&["ny", "normal_y"]);
@@ -83,8 +86,7 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     let ri = pos_of(&["r", "red"]);
     let gi = pos_of(&["g", "green"]);
     let bi = pos_of(&["b", "blue"]);
-    let has_colors =
-        rgb_i.is_some() || (ri.is_some() && gi.is_some() && bi.is_some());
+    let has_colors = rgb_i.is_some() || (ri.is_some() && gi.is_some() && bi.is_some());
 
     // Parse data
     let mut points = Vec::with_capacity(num_vertices);

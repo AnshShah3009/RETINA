@@ -665,16 +665,18 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
 
             // Solve the full 6x6 system A*c = b using Gaussian elimination with partial pivoting
             // (avoids 614,400 heap allocations of DMatrix/DVector per VGA frame)
-            let c = solve_6x6_gauss(&mut a, &mut b).map(|sol| {
-                PolyCoeffs(
-                    sol[0], // A: x^2
-                    sol[1], // B: xy
-                    sol[2], // C: y^2
-                    sol[3], // D: x
-                    sol[4], // E: y
-                    sol[5], // F: constant
-                )
-            }).unwrap_or_else(|| PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+            let c = solve_6x6_gauss(&mut a, &mut b)
+                .map(|sol| {
+                    PolyCoeffs(
+                        sol[0], // A: x^2
+                        sol[1], // B: xy
+                        sol[2], // C: y^2
+                        sol[3], // D: x
+                        sol[4], // E: y
+                        sol[5], // F: constant
+                    )
+                })
+                .unwrap_or_else(|| PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
 
             coeffs.push(c);
         }

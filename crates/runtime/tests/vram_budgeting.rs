@@ -19,7 +19,9 @@ fn test_vram_budgeting_automatic_integration() {
     assert_eq!(initial_used, 0, "Initial usage should be 0");
 
     // Reserve and release via coordinator directly
-    coord.reserve_device(0, 4, 0).expect("Failed to reserve 4MB");
+    coord
+        .reserve_device(0, 4, 0)
+        .expect("Failed to reserve 4MB");
 
     let usage_after_reserve = coord.device_memory_usage();
     let used_after_reserve = usage_after_reserve
@@ -27,10 +29,7 @@ fn test_vram_budgeting_automatic_integration() {
         .find(|(idx, _, _)| *idx == 0)
         .map(|(_, used, _)| *used)
         .unwrap_or(0);
-    assert_eq!(
-        used_after_reserve, 4,
-        "Should reflect 4MB reservation"
-    );
+    assert_eq!(used_after_reserve, 4, "Should reflect 4MB reservation");
 
     coord.release_device(0).expect("Failed to release");
 

@@ -92,7 +92,11 @@ impl PyMeshReconstruction {
 /// Auto-select the fastest available backend (GPU -> CPU).
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_auto(py: Python<'_>, points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
+fn estimate_normals_auto(
+    py: Python<'_>,
+    points: Vec<(f32, f32, f32)>,
+    k: usize,
+) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
         py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_auto(&pts_from_py(&points), k)))
     })
@@ -102,7 +106,11 @@ fn estimate_normals_auto(py: Python<'_>, points: Vec<(f32, f32, f32)>, k: usize)
 /// CPU-only: voxel-hash kNN + analytic eigensolver.
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_cpu(py: Python<'_>, points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
+fn estimate_normals_cpu(
+    py: Python<'_>,
+    points: Vec<(f32, f32, f32)>,
+    k: usize,
+) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
         py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_cpu(&pts_from_py(&points), k)))
     })
@@ -112,7 +120,11 @@ fn estimate_normals_cpu(py: Python<'_>, points: Vec<(f32, f32, f32)>, k: usize) 
 /// GPU: Morton sort (CPU) + WebGPU PCA.
 #[pyfunction]
 #[pyo3(signature = (points, k=15))]
-fn estimate_normals_gpu(py: Python<'_>, points: Vec<(f32, f32, f32)>, k: usize) -> PyResult<Vec<(f32, f32, f32)>> {
+fn estimate_normals_gpu(
+    py: Python<'_>,
+    points: Vec<(f32, f32, f32)>,
+    k: usize,
+) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
         py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_gpu(&pts_from_py(&points), k)))
     })

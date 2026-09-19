@@ -163,7 +163,8 @@ where
         let (inliers, score, mask) = scorer(&model, points);
 
         // Local optimization
-        let (model, inliers, score, mask) = if inliers >= (n as f64 * params.lo_inlier_ratio) as usize
+        let (model, inliers, score, mask) = if inliers
+            >= (n as f64 * params.lo_inlier_ratio) as usize
             && params.local_optim != LocalOptimMethod::Null
         {
             refine_local(points, &model, &mask, params, estimator, scorer)
@@ -398,7 +399,10 @@ mod tests {
         let mut pts = Vec::new();
         // Ground truth: y = 2x + 5
         for x in 0..50 {
-            pts.push(Point2::new(x as f64, 2.0 * x as f64 + 5.0 + rng.random_range(-0.05..0.05)));
+            pts.push(Point2::new(
+                x as f64,
+                2.0 * x as f64 + 5.0 + rng.random_range(-0.05..0.05),
+            ));
         }
         // Add outliers
         for _ in 0..20 {

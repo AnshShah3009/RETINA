@@ -434,10 +434,7 @@ impl Akaze {
             // Use the level index recorded at detection time; the old
             // size.log2() reconstruction collapsed every sublevel of an
             // octave onto a single (wrong) blur scale.
-            let level_idx = kp
-                .class_id
-                .min(evolution.len() as i32 - 1)
-                .max(0) as usize;
+            let level_idx = kp.class_id.min(evolution.len() as i32 - 1).max(0) as usize;
             let level = &evolution[level_idx];
 
             if let Some(desc) = self.compute_msurf_descriptor(level, kp)? {
