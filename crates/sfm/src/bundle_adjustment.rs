@@ -3,7 +3,7 @@ use cv_runtime::orchestrator::{scheduler, ResourceGroup};
 use nalgebra::{DMatrix, DVector, Point2, Point3, Rotation3, UnitQuaternion, Vector3};
 use rayon::prelude::*;
 
-use cv_optimize::sparse::{SparseMatrix, Triplet};
+use cv_optimize::sparse::{CgSolver, LinearSolver, SparseMatrix, Triplet};
 
 #[derive(Clone)]
 pub struct Landmark {
@@ -171,77 +171,49 @@ impl SfMState {
         DVector::from_vec(residuals)
     }
 
+    /// Dense Jacobian of the reprojection residuals.
+    ///
+    /// This is the same analytic derivative as [`Self::numerical_jacobian_sparse`],
+    /// materialised dense. It used to be built by central differences: for each
+    /// parameter it cloned the whole parameter vector twice and recomputed every
+    /// residual, i.e. O(parameters x residuals) full state rebuilds — with ~1,400
+    /// landmarks that is thousands of rebuilds per bundle-adjustment iteration,
+    /// which is what made the sequential solver appear to hang.
     pub fn numerical_jacobian(&self) -> DMatrix<f64> {
-        if let Ok(s) = scheduler() {
-            if let Ok(group) = s.get_default_group() {
-                return self.numerical_jacobian_ctx(&group);
-            }
-        }
-
-        // Fallback to sequential execution if scheduler fails
-        let params = self.to_parameters();
-        let n_res = self.residuals().len();
-        let n_params = params.len();
-        let eps = 1e-6;
-
-        let mut jacobian_data = vec![0.0; n_res * n_params];
-        for j in 0..n_params {
-            let mut params_plus = params.clone();
-            let mut params_minus = params.clone();
-            params_plus[j] += eps;
-            params_minus[j] -= eps;
-
-            let (res_plus, res_minus) =
-                self.compute_residuals_for_param(&params_plus, &params_minus);
-            for i in 0..n_res {
-                jacobian_data[j * n_res + i] = (res_plus.get(i).unwrap_or(&0.0)
-                    - res_minus.get(i).unwrap_or(&0.0))
-                    / (2.0 * eps);
-            }
-        }
-        DMatrix::from_vec(n_res, n_params, jacobian_data)
+        let sparse = self.numerical_jacobian_sparse();
+        sparse.to_dense()
     }
 
+    /// Dense Jacobian computed on the compute device.
+    ///
+    /// Kept for API compatibility. The analytic derivative is cheap enough that
+    /// splitting it across the pool costs more in scheduling than it saves, so
+    /// this now simply returns [`Self::numerical_jacobian`]; the group is unused.
     #[allow(clippy::needless_range_loop)]
-    pub fn numerical_jacobian_ctx(&self, group: &ResourceGroup) -> DMatrix<f64> {
-        let params = self.to_parameters();
-        let n_res = self.residuals().len();
-        let n_params = params.len();
-        let eps = 1e-6;
-
-        let jacobian_data: Vec<f64> = group.run(|| {
-            (0..n_params)
-                .into_par_iter()
-                .flat_map(|j| {
-                    let mut params_plus = params.clone();
-                    let mut params_minus = params.clone();
-                    params_plus[j] += eps;
-                    params_minus[j] -= eps;
-
-                    let (res_plus, res_minus) =
-                        self.compute_residuals_for_param(&params_plus, &params_minus);
-
-                    let mut col = vec![0.0; n_res];
-                    for i in 0..n_res {
-                        col[i] = (res_plus.get(i).unwrap_or(&0.0)
-                            - res_minus.get(i).unwrap_or(&0.0))
-                            / (2.0 * eps);
-                    }
-                    col
-                })
-                .collect()
-        });
-
-        // DMatrix is column-major by default in nalgebra for from_vec
-        DMatrix::from_vec(n_res, n_params, jacobian_data)
+    pub fn numerical_jacobian_ctx(&self, _group: &ResourceGroup) -> DMatrix<f64> {
+        self.numerical_jacobian()
     }
 
+    /// Analytic sparse Jacobian of the reprojection residuals.
+    ///
+    /// The residual of an observation is the 2D projection error of a landmark
+    /// seen by a camera, parameterised as in [`Self::to_parameters`]: each camera
+    /// is a left-multiplied axis-angle (scaled-axis) vector plus a translation,
+    /// each landmark is a 3D point. Differentiating that closed form is exact and
+    /// costs O(observations), because a row depends only on the one camera and
+    /// the one landmark it observes.
+    ///
+    /// This replaces a finite-difference construction that cloned the whole
+    /// parameter vector once per parameter per observation — O(observations x
+    /// parameters) full state rebuilds, which made bundle adjustment appear to
+    /// hang (a 12-camera / 1400-landmark reconstruction spent minutes in one
+    /// Jacobian). `numerical_jacobian_fd` keeps the old scheme as a test oracle.
     pub fn numerical_jacobian_sparse(&self) -> SparseMatrix {
         let params = self.to_parameters();
         let n_res = self.residuals().len();
         let n_params = params.len();
         let n_cam = self.cameras.len();
-        let eps = 1e-6;
+        let landmark_offset = 6 * n_cam;
 
         let mut triplets = Vec::new();
 
@@ -257,54 +229,177 @@ impl SfMState {
             }
             for (cam_idx, _obs) in &lm.observations {
                 // residuals() skips out-of-range cameras without emitting rows
-                if *cam_idx >= self.cameras.len() {
+                if *cam_idx >= n_cam {
                     continue;
                 }
-                // Camera block (6 params)
-                for k in 0..6 {
-                    let mut p_perturbed = params.clone();
-                    p_perturbed[6 * cam_idx + k] += eps;
-                    let (res_plus, _) =
-                        self.compute_residuals_for_param_local(&p_perturbed, *cam_idx, lm_idx);
+                let cam = &self.cameras[*cam_idx];
 
-                    let base_pt = self.cameras[*cam_idx].rotation * lm.position
-                        + self.cameras[*cam_idx].translation;
-                    let base_proj = self.intrinsics.project(&base_pt);
+                // Point in camera coordinates and its projection.
+                let p_cam = cam.rotation * lm.position + cam.translation;
+                let (x, y, z) = (p_cam.x, p_cam.y, p_cam.z);
+                if z.abs() < 1e-10 {
+                    // The projection is clamped here; the derivative is not
+                    // meaningful, so emit zeros for this observation.
+                    res_idx += 2;
+                    continue;
+                }
+                let inv_z = 1.0 / z;
+                let inv_z2 = inv_z * inv_z;
+                // d(pixel)/d(camera point) — the standard pinhole projection
+                // Jacobian, rows for x and y respectively.
+                let (dx_dxc, dx_dyc, dx_dzc) = (
+                    self.intrinsics.fx * inv_z,
+                    0.0,
+                    -self.intrinsics.fx * x * inv_z2,
+                );
+                let (dy_dxc, dy_dyc, dy_dzc) = (
+                    0.0,
+                    self.intrinsics.fy * inv_z,
+                    -self.intrinsics.fy * y * inv_z2,
+                );
 
-                    triplets.push(Triplet::new(
-                        res_idx,
-                        6 * cam_idx + k,
-                        (res_plus.x - base_proj.x) / eps,
-                    ));
-                    triplets.push(Triplet::new(
-                        res_idx + 1,
-                        6 * cam_idx + k,
-                        (res_plus.y - base_proj.y) / eps,
-                    ));
+                // `from_parameters` builds the rotation as
+                // `UnitQuaternion::new(scaled_axis)`, which nalgebra evaluates
+                // through the quaternion (Halley) form
+                //     R = I + 2aK + 2K^2,   a = cos(t/2),   K = skew(s*w),
+                // with t = |w| and s = sin(t/2)/t. The textbook closed form
+                // expm([w]_x) is not what the library computes, so the derivative
+                // has to follow the same parameterisation; the finite-difference
+                // oracle in the tests pins this.
+                //
+                // With e_i the i-th basis vector:
+                //   da/dw_i = -(sin(t/2)/2) * (w_i/t)
+                //   ds/dw_i = ds/dt * (w_i/t),
+                //             ds/dt = (t*cos(t/2)/2 - sin(t/2)) / t^2
+                //   dK/dw_i = skew(s*e_i + (ds/dw_i)*w)
+                //   dR/dw_i = 2(da/dw_i)K + 2a(dK/dw_i) + 2(dK/dw_i * K + K * dK/dw_i)
+                // and d(p_cam)/d(w_i) = dR/dw_i * p, p being the landmark in
+                // world coordinates.
+                let w = cam.rotation.to_rotation_matrix().scaled_axis();
+                let theta = w.norm();
+                let half = 0.5 * theta;
+                let (a, da_dt, s, ds_dt): (f64, f64, f64, f64) = if theta < 1e-12 {
+                    // limits as t -> 0: cos(t/2) -> 1, sin(t/2)/t -> 1/2.
+                    (1.0f64, 0.0f64, 0.5f64, -1.0 / 24.0)
+                } else {
+                    (
+                        half.cos(),
+                        -half.sin() * 0.5,
+                        half.sin() / theta,
+                        (half * half.cos() - half.sin()) / (theta * theta),
+                    )
+                };
+                let p_vec = Vector3::new(lm.position.x, lm.position.y, lm.position.z);
+                let skew_of = |v: Vector3<f64>| {
+                    nalgebra::Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
+                };
+                let k_mat = skew_of(s * w);
+
+                // Camera block: columns 6*cam + 0..6 (axis-angle, then translation).
+                for i in 0..3 {
+                    let dtw = if theta < 1e-12 { 0.0 } else { w[i] / theta };
+                    let da = da_dt * dtw;
+                    let ds = ds_dt * dtw;
+                    let mut e_i = Vector3::zeros();
+                    e_i[i] = s;
+                    e_i += ds * w;
+                    let dk = skew_of(e_i);
+                    let dpc = (2.0 * da * (k_mat * p_vec)
+                        + 2.0 * a * (dk * p_vec)
+                        + 2.0 * ((dk * k_mat + k_mat * dk) * p_vec));
+                    let dx = dx_dxc * dpc.x + dx_dyc * dpc.y + dx_dzc * dpc.z;
+                    let dy = dy_dxc * dpc.x + dy_dyc * dpc.y + dy_dzc * dpc.z;
+                    let col = 6 * cam_idx + i;
+                    triplets.push(Triplet::new(res_idx, col, dx));
+                    triplets.push(Triplet::new(res_idx + 1, col, dy));
+                }
+                for k in 0..3 {
+                    let dx = if k == 0 {
+                        dx_dxc
+                    } else if k == 1 {
+                        dx_dyc
+                    } else {
+                        dx_dzc
+                    };
+                    let dy = if k == 0 {
+                        dy_dxc
+                    } else if k == 1 {
+                        dy_dyc
+                    } else {
+                        dy_dzc
+                    };
+                    let col = 6 * cam_idx + 3 + k;
+                    triplets.push(Triplet::new(res_idx, col, dx));
+                    triplets.push(Triplet::new(res_idx + 1, col, dy));
                 }
 
-                // Landmark block (3 params)
+                // Landmark block: d(camera point)/d(landmark) = R.
+                let r = cam.rotation.to_rotation_matrix().into_inner();
+                for k in 0..3 {
+                    let col = landmark_offset + 3 * lm_idx + k;
+                    let dx = dx_dxc * r[(0, k)] + dx_dyc * r[(1, k)] + dx_dzc * r[(2, k)];
+                    let dy = dy_dxc * r[(0, k)] + dy_dyc * r[(1, k)] + dy_dzc * r[(2, k)];
+                    triplets.push(Triplet::new(res_idx, col, dx));
+                    triplets.push(Triplet::new(res_idx + 1, col, dy));
+                }
+                res_idx += 2;
+            }
+        }
+
+        let _ = params;
+        SparseMatrix::from_triplets(n_res, n_params, &triplets)
+    }
+
+    /// Finite-difference Jacobian, kept as a test oracle for the analytic one.
+    ///
+    /// This is the original O(observations x parameters) construction. It is
+    /// never used by the solver; `#[cfg(test)]` is applied by the caller.
+    #[cfg(test)]
+    fn numerical_jacobian_fd(&self) -> SparseMatrix {
+        let params = self.to_parameters();
+        let n_res = self.residuals().len();
+        let n_params = params.len();
+        let n_cam = self.cameras.len();
+        let eps = 1e-6;
+
+        let mut triplets = Vec::new();
+
+        let mut res_idx = 0;
+        for (lm_idx, lm) in self.landmarks.iter().enumerate() {
+            if !lm.is_valid {
+                res_idx += 2 * lm.observations.iter().filter(|(ci, _)| *ci < n_cam).count();
+                continue;
+            }
+            for (cam_idx, _obs) in &lm.observations {
+                if *cam_idx >= n_cam {
+                    continue;
+                }
+
+                for k in 0..6 {
+                    let idx = 6 * cam_idx + k;
+                    let mut p_plus = params.clone();
+                    p_plus[idx] += eps;
+                    let mut p_minus = params.clone();
+                    p_minus[idx] -= eps;
+                    let (pp, _) = self.compute_residuals_for_param_local(&p_plus, *cam_idx, lm_idx);
+                    let (pm, _) =
+                        self.compute_residuals_for_param_local(&p_minus, *cam_idx, lm_idx);
+                    triplets.push(Triplet::new(res_idx, idx, (pp.x - pm.x) / (2.0 * eps)));
+                    triplets.push(Triplet::new(res_idx + 1, idx, (pp.y - pm.y) / (2.0 * eps)));
+                }
+
                 let offset = 6 * n_cam;
                 for k in 0..3 {
-                    let mut p_perturbed = params.clone();
-                    p_perturbed[offset + 3 * lm_idx + k] += eps;
-                    let (res_plus, _) =
-                        self.compute_residuals_for_param_local(&p_perturbed, *cam_idx, lm_idx);
-
-                    let base_pt = self.cameras[*cam_idx].rotation * lm.position
-                        + self.cameras[*cam_idx].translation;
-                    let base_proj = self.intrinsics.project(&base_pt);
-
-                    triplets.push(Triplet::new(
-                        res_idx,
-                        offset + 3 * lm_idx + k,
-                        (res_plus.x - base_proj.x) / eps,
-                    ));
-                    triplets.push(Triplet::new(
-                        res_idx + 1,
-                        offset + 3 * lm_idx + k,
-                        (res_plus.y - base_proj.y) / eps,
-                    ));
+                    let idx = offset + 3 * lm_idx + k;
+                    let mut p_plus = params.clone();
+                    p_plus[idx] += eps;
+                    let mut p_minus = params.clone();
+                    p_minus[idx] -= eps;
+                    let (pp, _) = self.compute_residuals_for_param_local(&p_plus, *cam_idx, lm_idx);
+                    let (pm, _) =
+                        self.compute_residuals_for_param_local(&p_minus, *cam_idx, lm_idx);
+                    triplets.push(Triplet::new(res_idx, idx, (pp.x - pm.x) / (2.0 * eps)));
+                    triplets.push(Triplet::new(res_idx + 1, idx, (pp.y - pm.y) / (2.0 * eps)));
                 }
                 res_idx += 2;
             }
@@ -485,27 +580,37 @@ fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfi
     // Stall detection: see SparseLMSolver::minimize.
     let mut rejections = 0u32;
 
+    // The normal equations stay sparse. Materialising J dense and Cholesky-ing
+    // J^T J was O(parameters^3) on a system that is mostly empty: with 9 cameras
+    // and ~1,000 landmarks (3,060 parameters) a single bundle adjustment took
+    // 35 seconds, almost all of it in the dense factorisation. A sparse
+    // conjugate-gradient solve on J^T J + lambda*diag(J^T J) touches only the
+    // nonzeros and costs milliseconds for the same result.
+    let n_params = current_params.len();
+    let cpu = match cv_hal::cpu::CpuBackend::new() {
+        Some(cpu) => cpu,
+        None => return, // no CPU backend: leave the state untouched
+    };
+    let device = cv_hal::compute::ComputeDevice::Cpu(&cpu);
+    let cg = CgSolver {
+        max_iters: 200,
+        tolerance: 1e-10,
+    };
+
     for iteration in 0..config.max_iterations {
-        // Use the sequential version of numerical_jacobian() which handles its own fallback
-        let j = state.numerical_jacobian();
-        let r = current_residuals.clone();
+        let j = state.numerical_jacobian_sparse();
+        let r = &current_residuals;
 
-        let jtj = &j.transpose() * &j;
-        let jtr = j.transpose() * r;
+        // (J^T J + lambda*diag(J^T J)) delta = -J^T r, built from the sparse
+        // Jacobian so the system never becomes dense.
+        let (mut lhs, jtr) = j.normal_equations_sparse(r);
+        let neg_jtr = -jtr;
+        // Marquardt damping: scale the diagonal, keeping the system SPD.
+        lhs.scale_diagonal(1.0 + lambda);
 
-        let mut lhs = jtj.clone();
-        for i in 0..lhs.nrows() {
-            lhs[(i, i)] *= 1.0 + lambda;
-        }
-
-        let neg_jtr = -&jtr;
-        let delta = if let Some(ch) = lhs.clone().cholesky() {
-            ch.solve(&neg_jtr)
-        } else {
-            lhs.lu()
-                .solve(&neg_jtr)
-                .unwrap_or_else(|| DVector::zeros(jtr.len()))
-        };
+        let delta = cg
+            .solve(&device, &lhs, &neg_jtr)
+            .unwrap_or_else(|_| DVector::zeros(n_params));
 
         let next_params = &current_params + &delta;
         state.from_parameters(&next_params);
@@ -953,6 +1058,92 @@ mod tests {
         assert!(j.values.iter().any(|v| v.abs() > 0.0));
     }
 
+    /// The analytic Jacobian must agree with the finite-difference construction
+    /// it replaced. The two use the same parameterisation (`to_parameters`) and
+    /// the same residual, so every stored entry must match to the accuracy of a
+    /// central-free forward difference at eps = 1e-6.
+    #[test]
+    fn test_analytic_jacobian_matches_finite_difference() {
+        use nalgebra::UnitQuaternion;
+
+        let intrinsics = create_test_intrinsics();
+        let mut state = SfMState::new(intrinsics);
+
+        // A few cameras with non-trivial rotations and translations, so no
+        // derivative degenerates to zero or a pure identity.
+        let cams: Vec<(Vector3<f64>, Vector3<f64>)> = vec![
+            (Vector3::zeros(), Vector3::zeros()),
+            (
+                Vector3::new(0.08, -0.15, 0.05),
+                Vector3::new(0.4, -0.2, 0.1),
+            ),
+            (
+                Vector3::new(-0.22, 0.11, 0.30),
+                Vector3::new(-0.5, 0.35, -0.15),
+            ),
+        ];
+        for (axis, trans) in &cams {
+            state.add_camera(Pose {
+                rotation: UnitQuaternion::new(*axis),
+                translation: *trans,
+            });
+        }
+
+        // Landmarks in front of every camera, each seen by all three.
+        for i in 0..12 {
+            let p = Point3::new(
+                -1.5 + 0.31 * i as f64,
+                -0.8 + 0.19 * i as f64,
+                4.0 + 0.13 * i as f64,
+            );
+            let obs: Vec<(usize, Point2<f64>)> = cams
+                .iter()
+                .enumerate()
+                .map(|(ci, (axis, trans))| {
+                    let rot: nalgebra::Rotation3<f64> = nalgebra::Rotation3::new(*axis);
+                    let pc = rot * p + *trans;
+                    (ci, intrinsics.project(&pc))
+                })
+                .collect();
+            state.add_landmark(p, obs);
+        }
+
+        let analytic = state.numerical_jacobian_sparse();
+        let fd = state.numerical_jacobian_fd();
+
+        assert_eq!(analytic.rows, fd.rows, "row count");
+        assert_eq!(analytic.cols, fd.cols, "column count");
+        // CSR: same stored entries, and the same per-row column pattern.
+        assert_eq!(analytic.values.len(), fd.values.len(), "stored entries");
+        assert_eq!(analytic.row_ptr, fd.row_ptr, "row pointer");
+
+        let mut max_rel = 0.0f64;
+        let mut checked = 0usize;
+        for row in 0..analytic.rows {
+            let start = analytic.row_ptr[row] as usize;
+            let end = analytic.row_ptr[row + 1] as usize;
+            assert_eq!(
+                &analytic.col_indices[start..end],
+                &fd.col_indices[start..end],
+                "column pattern of row {row}"
+            );
+            for i in start..end {
+                let a = analytic.values[i];
+                let f = fd.values[i];
+                let scale = a.abs().max(f.abs()).max(1.0);
+                max_rel = max_rel.max((a - f).abs() / scale);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the comparison must actually inspect entries");
+        assert!(
+            max_rel < 1e-3,
+            "analytic Jacobian differs from finite differences (max relative \
+             difference {max_rel} over {checked} entries); a sign or transpose \
+             error is the usual cause"
+        );
+    }
+
     #[test]
     fn test_invalid_landmark_handling() {
         let intrinsics = create_test_intrinsics();
@@ -976,5 +1167,75 @@ mod tests {
         let residuals = state.residuals();
         // Should only have residuals for valid landmarks
         assert_eq!(residuals.len(), 4); // Only 2nd landmark: 2 residuals
+    }
+
+    /// The sparse normal-equation system must agree with the dense one, since
+    /// bundle adjustment now solves the sparse form and every other code path
+    /// (including the tests) still reasons about the dense one.
+    #[test]
+    fn test_sparse_normal_equations_match_dense() {
+        use nalgebra::UnitQuaternion;
+
+        let intrinsics = create_test_intrinsics();
+        let mut state = SfMState::new(intrinsics);
+        let cams = [
+            (Vector3::zeros(), Vector3::zeros()),
+            (Vector3::new(0.1, -0.2, 0.05), Vector3::new(0.3, -0.1, 0.2)),
+        ];
+        for (axis, trans) in &cams {
+            state.add_camera(Pose {
+                rotation: UnitQuaternion::new(*axis),
+                translation: *trans,
+            });
+        }
+        for i in 0..8 {
+            let p = Point3::new(
+                -1.0 + 0.4 * i as f64,
+                -0.5 + 0.2 * i as f64,
+                4.0 + 0.3 * i as f64,
+            );
+            let obs: Vec<(usize, Point2<f64>)> = cams
+                .iter()
+                .enumerate()
+                .map(|(ci, (axis, trans))| {
+                    let rot: Rotation3<f64> = Rotation3::new(*axis);
+                    (ci, intrinsics.project(&(rot * p + *trans)))
+                })
+                .collect();
+            state.add_landmark(p, obs);
+        }
+
+        let j_sparse = state.numerical_jacobian_sparse();
+        let j_dense = state.numerical_jacobian();
+        let r = state.residuals();
+
+        let (lhs_sparse, jtr_sparse) = j_sparse.normal_equations_sparse(&r);
+        let (lhs_dense, jtr_dense) = j_sparse.normal_equations(&r);
+
+        assert_eq!(jtr_sparse.len(), jtr_dense.len());
+        for i in 0..jtr_sparse.len() {
+            assert!(
+                (jtr_sparse[i] - jtr_dense[i]).abs() < 1e-9,
+                "J^T r differs at {i}: {} vs {}",
+                jtr_sparse[i],
+                jtr_dense[i]
+            );
+        }
+
+        let dense_lhs = j_dense.transpose() * &j_dense;
+        let sparse_dense = lhs_sparse.to_dense();
+        for r0 in 0..dense_lhs.nrows() {
+            for c0 in 0..dense_lhs.ncols() {
+                let a = dense_lhs[(r0, c0)];
+                let b = sparse_dense[(r0, c0)];
+                if a.abs() < 1e-12 && b.abs() < 1e-12 {
+                    continue;
+                }
+                assert!(
+                    (a - b).abs() < 1e-9,
+                    "J^T J differs at ({r0},{c0}): {a} vs {b}"
+                );
+            }
+        }
     }
 }

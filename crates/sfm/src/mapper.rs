@@ -411,6 +411,18 @@ pub struct Mapping {
     pub report: MappingReport,
 }
 
+/// Emit a stage/progress line to stderr when `CV_SFM_PROGRESS` is set.
+///
+/// The mapping report is only available once the whole run finishes, so a stage
+/// that is slow or stuck is invisible from the outside. This writes to stderr
+/// (unbuffered) and is a no-op unless the variable is set, so it costs nothing
+/// in normal use.
+fn progress(args: std::fmt::Arguments<'_>) {
+    if std::env::var_os("CV_SFM_PROGRESS").is_some() {
+        eprintln!("[sfm] {args}");
+    }
+}
+
 /// Run the incremental mapper.
 ///
 /// See the [module documentation](self) for the algorithm and the pose
@@ -427,28 +439,42 @@ pub struct Mapping {
 /// registers every view.
 pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperConfig) -> Mapping {
     let n = views.len();
+    progress(format_args!("map_views: {n} views"));
 
     // ---- 1. Pair selection ----
     let pairs = select_pairs(views, config);
+    progress(format_args!("pair selection: {} pairs", pairs.len()));
 
     // ---- 2. Pairwise verification ----
     let mut verified: Vec<VerifiedPair> = Vec::new();
     let mut pair_diagnostics: Vec<(usize, usize, usize, Option<usize>)> = Vec::new();
     if n >= 2 {
+        let mut done = 0usize;
         for &(a, b) in &pairs {
             let (matches, pair) = verify_pair(a, b, views, config);
             pair_diagnostics.push((a, b, matches, pair.as_ref().map(|p| p.inliers.len())));
             if let Some(pair) = pair {
                 verified.push(pair);
             }
+            done += 1;
+            if done % 10 == 0 {
+                progress(format_args!(
+                    "verify: {done}/{} pairs, {} verified",
+                    pairs.len(),
+                    verified.len()
+                ));
+            }
         }
     }
+    progress(format_args!("verify done: {} verified", verified.len()));
 
     // ---- 3. Tracks ----
     let tracks = build_tracks(views, &verified);
+    progress(format_args!("tracks: {}", tracks.len()));
 
     // ---- 4. Seed candidates ----
     let (candidates, seed_diagnostics) = seed_candidates(&verified, views, intrinsics, config);
+    progress(format_args!("seed candidates: {}", candidates.len()));
 
     let mut report = MappingReport {
         views_supplied: n,
@@ -640,25 +666,45 @@ fn run_incremental(
     triangulate_new_tracks(&mut est, views, intrinsics, config);
 
     // ---- Incremental registration ----
-    let mut last_tried: Vec<Option<usize>> = vec![None; n];
+    // `attempts_left` bounds the loop. A view is retried only after the map has
+    // grown, and the previous guard (`last_tried` holding the correspondence
+    // count) was not sufficient: retriangulation can move that count back to a
+    // previously seen value, which re-enabled the same failed view forever. The
+    // loop therefore terminates after a bounded number of passes with no
+    // registration, and each view gets at most `max_view_attempts` tries.
+    const MAX_IDLE_PASSES: usize = 3;
+    const MAX_VIEW_ATTEMPTS: usize = 3;
+    let mut attempts: Vec<u8> = vec![0; n];
     let mut since_ba = 0usize;
+    let mut idle_passes = 0usize;
 
     loop {
+        if idle_passes >= MAX_IDLE_PASSES {
+            progress(format_args!(
+                "registration: stopping after {MAX_IDLE_PASSES} idle passes"
+            ));
+            break;
+        }
         let corr = gather_correspondences(&est);
         let mut order: Vec<usize> = (0..n)
             .filter(|&v| {
                 est.cam_of_view[v].is_none()
                     && corr[v].len() >= config.min_pnp_correspondences
-                    && last_tried[v] != Some(corr[v].len())
+                    && (attempts[v] as usize) < MAX_VIEW_ATTEMPTS
             })
             .collect();
         // Most correspondences first; lowest view index breaks ties.
         order.sort_by(|&x, &y| corr[y].len().cmp(&corr[x].len()).then(x.cmp(&y)));
+        progress(format_args!(
+            "registration pass: {} views registered, {} candidates",
+            est.cam_of_view.iter().filter(|c| c.is_some()).count(),
+            order.len()
+        ));
 
         let mut progressed = false;
         for v in order {
             let entries = &corr[v];
-            last_tried[v] = Some(entries.len());
+            attempts[v] = attempts[v].saturating_add(1);
             let object_points: Vec<Point3<f64>> =
                 entries.iter().map(|&(p, _)| est.points[p]).collect();
             let image_points: Vec<Point2<f64>> = entries
@@ -732,8 +778,13 @@ fn run_incremental(
             }
         }
 
-        if !progressed {
-            break;
+        if progressed {
+            idle_passes = 0;
+        } else {
+            // No view registered this pass. Retry the remaining candidates after
+            // the map has settled (a later view may add points an earlier one
+            // could not see), but only a bounded number of times.
+            idle_passes += 1;
         }
     }
 
