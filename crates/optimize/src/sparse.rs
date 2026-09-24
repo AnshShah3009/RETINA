@@ -66,6 +66,19 @@ impl SparseMatrix {
     pub fn spmv_ctx(&self, ctx: &ComputeDevice, x: &DVector<f64>) -> Result<DVector<f64>, String> {
         match ctx {
             ComputeDevice::Gpu(gpu) => {
+                // The SpMV is dispatched through a type-erased `ctx`, so the
+                // compiler cannot prove it is a large, well-conditioned,
+                // compute-bound product; and the round trip is actively harmful
+                // here. The LM solve calls this twice per CG iteration, up to
+                // 200 times per iteration and ~10 iterations per bundle
+                // adjustment, so a device whose queues are already busy (or
+                // whose wait is bounded) stalls the whole optimization. Use the
+                // GPU only when the system is large enough to pay for it.
+                const GPU_MIN_NNZ: usize = 1 << 20;
+                if self.values.len() < GPU_MIN_NNZ {
+                    return self.spmv_native(x);
+                }
+
                 // GPU kernels operate in f32; convert once for upload.
                 let x_f32: Vec<f32> = x.iter().map(|&v| v as f32).collect();
                 let values_f32: Vec<f32> = self.values.iter().map(|&v| v as f32).collect();
@@ -92,24 +105,140 @@ impl SparseMatrix {
                         .collect(),
                 ))
             }
-            ComputeDevice::Cpu(_cpu) => {
-                // Native f64 SpMV: downcasting matrix and vector to f32 here
-                // loses ~7 significant digits and stalls CG convergence when
-                // solving LM normal equations.
-                let mut res = DVector::zeros(self.rows);
-                for r in 0..self.rows {
-                    let start = self.row_ptr[r] as usize;
-                    let end = self.row_ptr[r + 1] as usize;
-                    let mut sum = 0.0f64;
-                    for i in start..end {
-                        sum += self.values[i] * x[self.col_indices[i] as usize];
-                    }
-                    res[r] = sum;
-                }
-                Ok(res)
-            }
+            ComputeDevice::Cpu(_cpu) => self.spmv_native(x),
             ComputeDevice::Mlx(_) => Err("MLX SpMV not implemented yet. Use CPU backend.".into()),
         }
+    }
+
+    /// Native f64 sparse mat-vec. Used for the CPU backend and for small
+    /// systems on other backends: downcasting to f32 for a GPU round trip
+    /// loses ~7 significant digits (which stalls CG convergence on the LM
+    /// normal equations) and costs more in transfers than the multiply itself
+    /// for anything but a very large matrix.
+    pub fn spmv_native(&self, x: &DVector<f64>) -> Result<DVector<f64>, String> {
+        if x.len() != self.cols {
+            return Err(format!(
+                "spmv dimension mismatch: vector has {} entries, matrix has {} columns",
+                x.len(),
+                self.cols
+            ));
+        }
+        let mut res = DVector::zeros(self.rows);
+        for r in 0..self.rows {
+            let start = self.row_ptr[r] as usize;
+            let end = self.row_ptr[r + 1] as usize;
+            let mut sum = 0.0f64;
+            for i in start..end {
+                sum += self.values[i] * x[self.col_indices[i] as usize];
+            }
+            res[r] = sum;
+        }
+        Ok(res)
+    }
+
+    /// Normal equations (J^T J, J^T r) as a *sparse* J^T J.
+    ///
+    /// J^T J is formed from the nonzeros of J directly, so the system stays
+    /// sparse end to end. That matters for bundle adjustment: the Jacobian has
+    /// one block per observation, so J^T J has O(observations) nonzeros while
+    /// the dense form is O(parameters^2) and dominates the iteration.
+    pub fn normal_equations_sparse(&self, r: &DVector<f64>) -> (SparseMatrix, DVector<f64>) {
+        if r.len() != self.rows {
+            return (SparseMatrix::from_triplets(0, 0, &[]), DVector::zeros(0));
+        }
+        let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
+        let mut jtr = DVector::zeros(self.cols);
+        for row in 0..self.rows {
+            let start = self.row_ptr[row] as usize;
+            let end = self.row_ptr[row + 1] as usize;
+            let rv = r[row];
+            for a in start..end {
+                let ca = self.col_indices[a] as usize;
+                let va = self.values[a];
+                jtr[ca] += va * rv;
+                for b in start..end {
+                    let cb = self.col_indices[b] as usize;
+                    triplets.push(Triplet::new(ca, cb, va * self.values[b]));
+                }
+            }
+        }
+        (
+            SparseMatrix::from_triplets(self.cols, self.cols, &triplets),
+            jtr,
+        )
+    }
+
+    /// Scale the diagonal of a sparse matrix in place (Marquardt damping).
+    pub fn scale_diagonal(&mut self, scale: f64) {
+        for r in 0..self.rows {
+            let start = self.row_ptr[r] as usize;
+            let end = self.row_ptr[r + 1] as usize;
+            for i in start..end {
+                if self.col_indices[i] as usize == r {
+                    self.values[i] *= scale;
+                }
+            }
+        }
+    }
+
+    /// Diagonal of J^T J, used for Marquardt damping.
+    pub fn jtj_diagonal(&self) -> DVector<f64> {
+        let mut diag = DVector::zeros(self.cols);
+        for r in 0..self.rows {
+            let start = self.row_ptr[r] as usize;
+            let end = self.row_ptr[r + 1] as usize;
+            for i in start..end {
+                let c = self.col_indices[i] as usize;
+                let v = self.values[i];
+                diag[c] += v * v;
+            }
+        }
+        diag
+    }
+
+    /// Normal equations (J^T J, J^T r) for J = self, built from the sparse
+    /// structure. Returns a dense J^T J (the system is much smaller than J once
+    /// the observations outnumber the parameters) and an exact J^T r.
+    pub fn normal_equations(&self, r: &DVector<f64>) -> (nalgebra::DMatrix<f64>, DVector<f64>) {
+        if r.len() != self.rows {
+            return (
+                nalgebra::DMatrix::zeros(self.cols, self.cols),
+                DVector::zeros(self.cols),
+            );
+        }
+        let mut jtj = nalgebra::DMatrix::zeros(self.cols, self.cols);
+        let mut jtr = DVector::zeros(self.cols);
+        for row in 0..self.rows {
+            let start = self.row_ptr[row] as usize;
+            let end = self.row_ptr[row + 1] as usize;
+            let rv = r[row];
+            for a in start..end {
+                let ca = self.col_indices[a] as usize;
+                let va = self.values[a];
+                jtr[ca] += va * rv;
+                for b in start..end {
+                    let cb = self.col_indices[b] as usize;
+                    jtj[(ca, cb)] += va * self.values[b];
+                }
+            }
+        }
+        (jtj, jtr)
+    }
+
+    /// Materialise this CSR matrix as a dense `DMatrix`.
+    ///
+    /// Intended for the small/medium systems where a dense normal-equation solve
+    /// is still the right algorithm; the caller decides the size threshold.
+    pub fn to_dense(&self) -> nalgebra::DMatrix<f64> {
+        let mut m = nalgebra::DMatrix::zeros(self.rows, self.cols);
+        for r in 0..self.rows {
+            let start = self.row_ptr[r] as usize;
+            let end = self.row_ptr[r + 1] as usize;
+            for i in start..end {
+                m[(r, self.col_indices[i] as usize)] = self.values[i];
+            }
+        }
+        m
     }
 
     pub fn transpose_spmv_ctx(
