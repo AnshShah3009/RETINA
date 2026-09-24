@@ -72,9 +72,15 @@ OPTIONS:
                           that registered it (ablation switch)
     --pnp-iters <N>       PnP RANSAC iterations                  [default: 2000]
                                                                  [default: 0.25]
-    --ba-every <N>        bundle adjustment every N registrations (0 = never)
-                                                                 [default: 10]
-    --ba-iters <N>        bundle-adjustment iterations per call  [default: 10]
+    --ba-every <N>        global bundle adjustment every N registrations (0 = never)
+                                                                  [default: 10]
+    --local-ba-window <N>  cameras in each local BA problem, including the new
+                           camera; 0 disables local BA                [default: 6]
+    --local-ba-min-overlap <N>
+                           minimum shared landmarks for a co-visible camera
+                                                                  [default: 10]
+    --ba-iters <N>        local/global bundle-adjustment iterations per call
+                                                                  [default: 10]
     --no-ba-final         skip the final bundle adjustment
     --ba-dense            run bundle adjustment on the dense sequential path
                           (robust kernel on, sparsity off)
@@ -116,6 +122,8 @@ struct Args {
     retriangulate: bool,
     pnp_iters: usize,
     ba_every: usize,
+    local_ba_window: usize,
+    local_ba_min_overlap: usize,
     ba_iters: usize,
     ba_final: bool,
     ba_dense: bool,
@@ -209,6 +217,8 @@ fn run(args: &Args) -> Result<(), String> {
         retriangulate: args.retriangulate,
         pnp_ransac_iters: args.pnp_iters,
         ba_every: args.ba_every,
+        local_ba_window: args.local_ba_window,
+        local_ba_min_overlap: args.local_ba_min_overlap,
         ba_final: args.ba_final,
         ba_max_iterations: args.ba_iters,
         ba_use_sparsity: !args.ba_dense,
@@ -375,7 +385,10 @@ fn print_config(
         ),
     };
     let ba = format!(
-        "every {} registrations{}, {} iters, {}",
+        "local window {} / min overlap {} after every registration; global every {} \
+         registrations{}, {} iters, {}",
+        args.local_ba_window,
+        args.local_ba_min_overlap,
         args.ba_every,
         if args.ba_final { " + final" } else { "" },
         args.ba_iters,
@@ -461,7 +474,8 @@ fn print_report(mapping: &Mapping, ground_truth: &[Pose], views: &[View], args: 
     println!("  3D points          : {}", report.num_points);
     println!("  observations       : {}", report.num_observations);
     println!("  mean track length  : {:.3}", report.mean_track_length);
-    println!("  bundle adjustments : {} accepted", report.ba_runs);
+    println!("  local BA           : {} accepted", report.local_ba_runs);
+    println!("  global BA          : {} accepted", report.ba_runs);
 
     // Failure breakdown.
     let mut unreachable = 0usize;
@@ -513,7 +527,7 @@ fn print_report(mapping: &Mapping, ground_truth: &[Pose], views: &[View], args: 
         let mut match_sum = 0usize;
         let mut inlier_sum = 0usize;
         let mut verified_count = 0usize;
-        for &(a, b, matches, inliers) in &report.pair_diagnostics {
+        for &(_, _, matches, inliers) in &report.pair_diagnostics {
             match_sum += matches;
             match inliers {
                 Some(count) => {
@@ -884,6 +898,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut retriangulate = true;
     let mut pnp_iters = 2000usize;
     let mut ba_every = 10usize;
+    let mut local_ba_window = 6usize;
+    let mut local_ba_min_overlap = 10usize;
     let mut ba_iters = 10usize;
     let mut ba_final = true;
     let mut ba_dense = false;
@@ -922,6 +938,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--retriangulate" => retriangulate = true,
             "--pnp-iters" => pnp_iters = parse(&take(argv, &mut i, flag)?, flag)?,
             "--ba-every" => ba_every = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--local-ba-window" => local_ba_window = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--local-ba-min-overlap" => {
+                local_ba_min_overlap = parse(&take(argv, &mut i, flag)?, flag)?
+            }
             "--ba-iters" => ba_iters = parse(&take(argv, &mut i, flag)?, flag)?,
             "--no-ba-final" => ba_final = false,
             "--ba-dense" => ba_dense = true,
@@ -1000,6 +1020,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         retriangulate,
         pnp_iters,
         ba_every,
+        local_ba_window,
+        local_ba_min_overlap,
         ba_iters,
         ba_final,
         ba_dense,
