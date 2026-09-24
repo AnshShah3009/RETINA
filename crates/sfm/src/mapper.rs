@@ -41,10 +41,13 @@
 //!    yet are triangulated from their widest-baseline registered pair and
 //!    filtered by cheirality, parallax and reprojection error.
 //!
-//! 6. **Refinement.** The existing [`crate::bundle_adjustment::bundle_adjust`]
-//!    is run every `ba_every` registrations and once more at the end. The
-//!    parameters are validated after each call: a non-finite result is rejected
-//!    and the previous state kept.
+//! 6. **Refinement.** After every successful incremental registration, a local
+//!    bundle adjustment is run on the new camera, its most covisible registered
+//!    neighbours, and their landmarks. The existing
+//!    [`crate::bundle_adjustment::bundle_adjust`] is also run globally every
+//!    `ba_every` registrations and once more at the end. The parameters are
+//!    validated after each call: a non-finite result is rejected and the
+//!    previous state kept.
 //!
 //! 7. **Output.** [`Reconstruction`] holds the cameras in ascending view order,
 //!    the 3D points in creation order and each point's surviving observations.
@@ -225,6 +228,12 @@ pub struct MapperConfig {
     pub min_pnp_inlier_ratio: f64,
     /// Run bundle adjustment every this many registrations (`0` disables it).
     pub ba_every: usize,
+    /// Number of registered cameras in each local bundle-adjustment problem,
+    /// including the newly registered camera. `0` disables local adjustment.
+    pub local_ba_window: usize,
+    /// Minimum number of shared landmarks between the new camera and a candidate
+    /// neighbour for that neighbour to enter the local problem.
+    pub local_ba_min_overlap: usize,
     /// Run one final bundle adjustment after the last registration.
     pub ba_final: bool,
     /// Bundle-adjustment iterations per call.
@@ -260,6 +269,8 @@ impl Default for MapperConfig {
             min_pnp_inliers: 10,
             min_pnp_inlier_ratio: 0.25,
             ba_every: 10,
+            local_ba_window: 6,
+            local_ba_min_overlap: 10,
             ba_final: true,
             ba_max_iterations: 10,
             ba_use_sparsity: true,
@@ -395,9 +406,12 @@ pub struct MappingReport {
     pub num_observations: usize,
     /// `num_observations / num_points` (`0.0` when there are no points).
     pub mean_track_length: f64,
-    /// Number of successful `bundle_adjust` calls (rejected/failed calls are not
-    /// counted).
+    /// Number of successful full-reconstruction `bundle_adjust` calls (rejected/failed
+    /// calls are not counted).
     pub ba_runs: usize,
+    /// Number of successful local `bundle_adjust` calls (rejected/failed calls are
+    /// not counted).
+    pub local_ba_runs: usize,
     /// Per-view outcome, ascending by view index.
     pub outcomes: Vec<ViewOutcome>,
 }
@@ -499,6 +513,7 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
         num_observations: 0,
         mean_track_length: 0.0,
         ba_runs: 0,
+        local_ba_runs: 0,
         outcomes: Vec::new(),
     };
 
@@ -563,10 +578,12 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
         mut est,
         mut outcomes,
         ba_runs,
+        local_ba_runs,
         seed,
     } = best;
     report.seed = Some((seed.a, seed.b));
     report.ba_runs = ba_runs;
+    report.local_ba_runs = local_ba_runs;
 
     // ---- 6. Report remaining failures ----
     let final_corr = gather_correspondences(&est);
@@ -631,6 +648,7 @@ struct Hypothesis {
     est: Est,
     outcomes: Vec<Option<ViewOutcome>>,
     ba_runs: usize,
+    local_ba_runs: usize,
     seed: SeedChoice,
 }
 
@@ -649,6 +667,7 @@ fn run_incremental(
     let n = views.len();
     let mut outcomes: Vec<Option<ViewOutcome>> = vec![None; n];
     let mut ba_runs = 0usize;
+    let mut local_ba_runs = 0usize;
 
     // ---- Initialization: the world frame is the seed's first camera ----
     let mut est = Est::new(n, tracks.to_vec());
@@ -749,6 +768,9 @@ fn run_incremental(
                             retriangulate(&mut est, views, intrinsics, config);
                         }
                         since_ba += 1;
+                        if refine_local(&mut est, v, views, intrinsics, config) {
+                            local_ba_runs += 1;
+                        }
                         if config.ba_every > 0 && since_ba >= config.ba_every {
                             if refine(&mut est, views, intrinsics, config) {
                                 ba_runs += 1;
@@ -800,6 +822,7 @@ fn run_incremental(
         est,
         outcomes,
         ba_runs,
+        local_ba_runs,
         seed: *seed,
     }
 }
@@ -1690,6 +1713,170 @@ fn triangulate_track(
 // Refinement
 // ---------------------------------------------------------------------------
 
+/// The deterministic camera and landmark subset used for local BA.
+///
+/// The indices refer to the mapper's `Est`, rather than to a sub-state. Keeping
+/// those indices makes the writeback boundary explicit: cameras and landmarks
+/// omitted here are never assigned to by local refinement.
+struct LocalBaProblem {
+    /// The new camera first, followed by its selected co-visible neighbours.
+    cameras: Vec<usize>,
+    /// Original `Est::points` indices observed by at least one selected camera.
+    landmarks: Vec<usize>,
+}
+
+/// Construct the local BA problem for a newly registered view.
+///
+/// A co-visible camera shares at least `local_ba_min_overlap` surviving
+/// landmarks with the new camera. Candidates are sorted by shared-landmark count
+/// descending and camera index ascending, then the first
+/// `local_ba_window - 1` are selected. All collections are vectors in
+/// registration/landmark order, so selection does not depend on hash-map
+/// iteration.
+fn local_ba_problem(est: &Est, new_view: usize, config: &MapperConfig) -> Option<LocalBaProblem> {
+    if config.local_ba_window < 2 {
+        return None;
+    }
+    let new_camera = est.cam_of_view.get(new_view).copied().flatten()?;
+
+    // Repeated observation pairs cannot occur in a valid track, so the inner loop
+    // stays linear and follows fixed landmark/camera order.
+    let mut shared_counts = vec![0usize; est.poses.len()];
+    for observations in &est.point_obs {
+        let mut shares_new = false;
+        for &(view, _) in observations {
+            let camera = est.cam_of_view[view]?;
+            if camera == new_camera {
+                shares_new = true;
+            }
+        }
+        if !shares_new {
+            continue;
+        }
+        for &(view, _) in observations {
+            let camera = est.cam_of_view[view]?;
+            if camera != new_camera {
+                shared_counts[camera] += 1;
+            }
+        }
+    }
+
+    let mut neighbours: Vec<(usize, usize)> = shared_counts
+        .iter()
+        .enumerate()
+        .filter_map(|(camera, &count)| {
+            (count > 0 && camera != new_camera && count >= config.local_ba_min_overlap)
+                .then_some((count, camera))
+        })
+        .collect();
+    neighbours.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+
+    let mut cameras = Vec::with_capacity(config.local_ba_window.min(est.poses.len()));
+    cameras.push(new_camera);
+    cameras.extend(
+        neighbours
+            .into_iter()
+            .take(config.local_ba_window - 1)
+            .map(|(_, camera)| camera),
+    );
+    if cameras.len() < 2 {
+        return None;
+    }
+
+    let mut camera_to_local = vec![None; est.poses.len()];
+    for (local, &camera) in cameras.iter().enumerate() {
+        camera_to_local[camera] = Some(local);
+    }
+    let landmarks = est
+        .point_obs
+        .iter()
+        .enumerate()
+        .filter_map(|(landmark, observations)| {
+            observations
+                .iter()
+                .any(|&(view, _)| {
+                    est.cam_of_view
+                        .get(view)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|camera| camera_to_local[camera].is_some())
+                })
+                .then_some(landmark)
+        })
+        .collect::<Vec<_>>();
+
+    (!landmarks.is_empty()).then_some(LocalBaProblem { cameras, landmarks })
+}
+
+/// Refine the local BA problem for `new_view` and write back only its subset.
+///
+/// The full state is still passed through the same settings as global BA. The
+/// resulting sub-state is accepted only when its dimensions and all parameters
+/// are valid. No filtering, retraction, or removal occurs here: a local landmark
+/// is optimised using only observations from the selected cameras, and only the
+/// selected camera poses and landmark positions are written back.
+fn refine_local(
+    est: &mut Est,
+    new_view: usize,
+    views: &[View],
+    intrinsics: &CameraIntrinsics,
+    config: &MapperConfig,
+) -> bool {
+    let Some(problem) = local_ba_problem(est, new_view, config) else {
+        return false;
+    };
+
+    let mut camera_to_local = vec![None; est.poses.len()];
+    for (local, &camera) in problem.cameras.iter().enumerate() {
+        camera_to_local[camera] = Some(local);
+    }
+    let mut state = SfMState::new(*intrinsics);
+    for &camera in &problem.cameras {
+        state.add_camera(est.poses[camera]);
+    }
+    for &landmark in &problem.landmarks {
+        let observations = est.point_obs[landmark]
+            .iter()
+            .filter_map(|&(view, keypoint)| {
+                let camera = est.cam_of_view[view]?;
+                let local = camera_to_local[camera]?;
+                Some((local, views[view].keypoints[keypoint].pt()))
+            })
+            .collect();
+        state.add_landmark(est.points[landmark], observations);
+    }
+
+    bundle_adjust(&mut state, &mapper_ba_config(config));
+    if state.cameras.len() != problem.cameras.len()
+        || state.landmarks.len() != problem.landmarks.len()
+        || !state.cameras.iter().all(pose_is_finite)
+        || state
+            .landmarks
+            .iter()
+            .any(|landmark| !point_is_finite(&landmark.position))
+    {
+        return false;
+    }
+
+    for (local, &camera) in problem.cameras.iter().enumerate() {
+        est.poses[camera] = state.cameras[local];
+    }
+    for (local, &landmark) in problem.landmarks.iter().enumerate() {
+        est.points[landmark] = state.landmarks[local].position;
+    }
+    true
+}
+
+fn mapper_ba_config(config: &MapperConfig) -> BundleAdjustmentConfig {
+    BundleAdjustmentConfig {
+        max_iterations: config.ba_max_iterations,
+        convergence_threshold: 1e-6,
+        lambda: 0.001,
+        use_sparsity: config.ba_use_sparsity,
+        robust_kernel: config.ba_robust_kernel,
+    }
+}
+
 /// Run the crate's bundle adjustment on the current state.
 ///
 /// Returns `true` when the refined parameters were accepted. A call that produces
@@ -1718,14 +1905,7 @@ fn refine(
         state.add_landmark(est.points[landmark], observations);
     }
 
-    let ba_config = BundleAdjustmentConfig {
-        max_iterations: config.ba_max_iterations,
-        convergence_threshold: 1e-6,
-        lambda: 0.001,
-        use_sparsity: config.ba_use_sparsity,
-        robust_kernel: config.ba_robust_kernel,
-    };
-    bundle_adjust(&mut state, &ba_config);
+    bundle_adjust(&mut state, &mapper_ba_config(config));
 
     let poses_ok = state.cameras.iter().all(pose_is_finite)
         && state
@@ -1974,6 +2154,115 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), 8);
         assert_eq!(sample_unique_indices(3, 5, 1), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn local_ba_writes_back_only_the_selected_subset() {
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        let poses = [
+            Pose::identity(),
+            Pose::from_quat_translation(
+                nalgebra::UnitQuaternion::identity(),
+                Vector3::new(0.05, 0.0, 0.0),
+            ),
+            Pose::from_quat_translation(
+                nalgebra::UnitQuaternion::identity(),
+                Vector3::new(-0.03, 0.01, 0.0),
+            ),
+            Pose::from_quat_translation(
+                nalgebra::UnitQuaternion::identity(),
+                Vector3::new(-0.07, 0.02, 0.0),
+            ),
+        ];
+        let world_points = [
+            Point3::new(-0.45, -0.20, 4.0),
+            Point3::new(0.20, -0.10, 4.2),
+            Point3::new(0.35, 0.22, 4.1),
+            Point3::new(-0.20, 0.30, 4.3),
+            // Seen only by camera 2, which is deliberately outside the window.
+            Point3::new(0.80, 0.40, 4.0),
+        ];
+
+        let mut views = Vec::new();
+        for pose in poses {
+            let mut keypoints = Vec::with_capacity(world_points.len());
+            for (point_index, point) in world_points.iter().enumerate() {
+                let camera = pose.rotation * point.coords + pose.translation;
+                let projected = intrinsics.project(&Point3::from(camera));
+                if point_index == 4 {
+                    // Only view 2 uses this point; other views receive a harmless
+                    // placeholder so every observation has a valid keypoint index.
+                    keypoints.push(KeyPoint::new(10.0, 10.0));
+                } else {
+                    keypoints.push(KeyPoint::new(projected.x, projected.y));
+                }
+            }
+            views.push(View::new(keypoints, Descriptors::new(), 640, 480));
+        }
+        // A fifth view is present only to keep the state sized like a normal map;
+        // it is unregistered and therefore cannot enter local BA.
+        views.push(View::new(
+            vec![KeyPoint::new(0.0, 0.0); world_points.len()],
+            Descriptors::new(),
+            640,
+            480,
+        ));
+
+        let mut est = Est::new(views.len(), vec![Vec::new(); world_points.len()]);
+        for (view, pose) in poses.into_iter().enumerate() {
+            est.add_camera(view, pose);
+        }
+        est.points = world_points.to_vec();
+        est.point_obs = vec![
+            vec![(0, 0), (1, 0), (2, 0), (3, 0)],
+            vec![(0, 1), (1, 1), (2, 1), (3, 1)],
+            vec![(0, 2), (1, 2), (2, 2), (3, 2)],
+            vec![(0, 3), (1, 3), (2, 3), (3, 3)],
+            vec![(2, 4)],
+        ];
+        est.point_tracks = (0..world_points.len()).collect();
+        est.track_point = (0..world_points.len()).map(Some).collect();
+
+        let config = MapperConfig {
+            local_ba_window: 3,
+            local_ba_min_overlap: 2,
+            ba_max_iterations: 1,
+            ba_use_sparsity: false,
+            ba_robust_kernel: false,
+            ba_every: 0,
+            ba_final: false,
+            ..MapperConfig::default()
+        };
+        let problem = local_ba_problem(&est, 3, &config).expect("a co-visible local problem");
+        let repeated = local_ba_problem(&est, 3, &config).expect("a repeated local problem");
+        assert_eq!(problem.cameras, repeated.cameras);
+        assert_eq!(problem.landmarks, repeated.landmarks);
+        // Camera 2 ties with cameras 0 and 1, but the window is three cameras
+        // and the ascending-index tie-break selects 0 then 1, leaving 2 outside.
+        assert_eq!(problem.cameras, vec![3, 0, 1]);
+        assert_eq!(problem.landmarks, vec![0, 1, 2, 3]);
+
+        let outside_camera = est.cam_of_view[2].expect("camera 2 is registered");
+        let outside_pose = est.poses[outside_camera];
+        let outside_point = est.points[4];
+        assert!(refine_local(&mut est, 3, &views, &intrinsics, &config));
+
+        // These are the explicit writeback boundary checks: neither an omitted
+        // camera nor a landmark outside the sub-problem is assigned to.
+        assert_eq!(
+            est.poses[outside_camera].translation,
+            outside_pose.translation
+        );
+        assert_eq!(
+            est.poses[outside_camera].rotation.into_inner(),
+            outside_pose.rotation.into_inner()
+        );
+        assert_eq!(est.points[4], outside_point);
+
+        // The full-state entry point remains available independently of local BA.
+        assert!(refine(&mut est, &views, &intrinsics, &config));
+        assert!(est.poses.iter().all(pose_is_finite));
+        assert!(est.points.iter().all(point_is_finite));
     }
 
     #[test]
