@@ -71,7 +71,6 @@ OPTIONS:
     --no-retriangulate    keep each landmark at the depth of the first two views
                           that registered it (ablation switch)
     --pnp-iters <N>       PnP RANSAC iterations                  [default: 2000]
-    --min-inlier-ratio <R> minimum PnP inlier ratio to register a view
                                                                  [default: 0.25]
     --ba-every <N>        bundle adjustment every N registrations (0 = never)
                                                                  [default: 10]
@@ -116,7 +115,6 @@ struct Args {
     max_reproj: f64,
     retriangulate: bool,
     pnp_iters: usize,
-    min_inlier_ratio: f64,
     ba_every: usize,
     ba_iters: usize,
     ba_final: bool,
@@ -210,7 +208,6 @@ fn run(args: &Args) -> Result<(), String> {
         max_reproj_px: args.max_reproj,
         retriangulate: args.retriangulate,
         pnp_ransac_iters: args.pnp_iters,
-        min_pnp_inlier_ratio: args.min_inlier_ratio,
         ba_every: args.ba_every,
         ba_final: args.ba_final,
         ba_max_iterations: args.ba_iters,
@@ -421,8 +418,9 @@ fn print_config(
         if args.retriangulate { "yes" } else { "NO" }
     );
     println!(
-        "  PnP                : {} iterations, min inlier ratio {:.2}",
-        args.pnp_iters, args.min_inlier_ratio
+        "  PnP                : {} iterations, min inliers {}",
+        args.pnp_iters,
+        cv_sfm::mapper::MapperConfig::default().min_pnp_inliers
     );
     println!("  bundle adjustment  : {ba}");
     println!(
@@ -885,7 +883,6 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut max_reproj = 4.0f64;
     let mut retriangulate = true;
     let mut pnp_iters = 2000usize;
-    let mut min_inlier_ratio = 0.25f64;
     let mut ba_every = 10usize;
     let mut ba_iters = 10usize;
     let mut ba_final = true;
@@ -924,7 +921,6 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--no-retriangulate" => retriangulate = false,
             "--retriangulate" => retriangulate = true,
             "--pnp-iters" => pnp_iters = parse(&take(argv, &mut i, flag)?, flag)?,
-            "--min-inlier-ratio" => min_inlier_ratio = parse(&take(argv, &mut i, flag)?, flag)?,
             "--ba-every" => ba_every = parse(&take(argv, &mut i, flag)?, flag)?,
             "--ba-iters" => ba_iters = parse(&take(argv, &mut i, flag)?, flag)?,
             "--no-ba-final" => ba_final = false,
@@ -973,9 +969,6 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     if pnp_iters < 64 {
         return Err("--pnp-iters must be at least 64".to_string());
     }
-    if !(min_inlier_ratio >= 0.0 && min_inlier_ratio <= 1.0) {
-        return Err("--min-inlier-ratio must be in [0, 1]".to_string());
-    }
     if !(min_parallax.is_finite() && min_parallax >= 0.0) {
         return Err("--min-parallax must be non-negative".to_string());
     }
@@ -1006,7 +999,6 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         max_reproj,
         retriangulate,
         pnp_iters,
-        min_inlier_ratio,
         ba_every,
         ba_iters,
         ba_final,
