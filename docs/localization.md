@@ -172,10 +172,12 @@ performance work and the remaining gaps.
 | fr1_xyz | 14 | 10 | 3 | **100.0%** | 1,784 | 2.0 cm | 1.1° |
 | fr1_xyz | 60 | 5 | 3 | **73.3%** | 5,658 | 5.4 cm | 9.2° |
 | fr1_desk | 40 | 5 | 3 | 22.5% | — | — | — |
-| fr1_desk | 40 | 2 | 3 | **100.0%** | 3,257 | 8.5 cm | 6.5° |
-| fr1_desk | 150 | 2 | 3 | 43.3% | 6,456 | 13.0 cm | 18.1° |
+| fr1_desk | 40 | 2 | 3 | **100.0%** | 5,490 | 7.7 cm | **2.7°** |
+| fr1_desk | 150 | 2 | 3 | 43.3% → **63.3%** | 16,360 | 13.0 → **5.8 cm** | 18.1 → **3.8°** |
 
-(The xyz rows predate the bundle-adjustment fix; the desk rows are after it.)
+(The xyz rows predate the bundle-adjustment and local-BA work; the desk rows are
+after. The 150-view row shows the effect of local bundle adjustment, which was
+added after the original measurement.)
 
 **Frame spacing dominates the registration rate.** The same mapper, the same
 code, the same sequence: at stride 5 it registers 22.5% of 40 views, at stride 2
@@ -189,11 +191,20 @@ graph. A production pipeline must choose the stride from the sequence, not fix i
 **Two failures remain, and they are different problems.**
 
 1. *Coverage* — solved by adequate frame spacing, as above.
-2. *Drift* — at 150 views the map is still incomplete (43.3%) and the poses
-   have drifted badly (18.1° rotation). There is no local bundle adjustment: BA
-   runs globally every ten registrations, so an error introduced early is never
-   repaired locally and the whole reconstruction bends. This is the next piece of
-   work, and it is what separates this mapper from the mature implementations.
+2. *Drift* — local bundle adjustment after each registration addressed this. On
+   the 150-view run it took registration from 43.3% to 63.3%, camera-centre error
+   from 13.0 cm to 5.8 cm and rotation error from 18.1° to 3.8°, because an error
+   introduced at one view is now corrected where it happened rather than bending
+   the whole reconstruction at the next global pass. It costs a 7× wall-time
+   increase (53 s → 384 s) because the local window still goes through the
+   global solver; that is the obvious next optimisation.
+
+   Still short of a mature mapper, which additionally needs: a
+   homography-versus-essential model decision (the standard defence for
+   low-parallax and near-planar pairs, which this mapper has no answer for),
+   explicit gauge fixing in bundle adjustment, per-observation rather than
+   per-landmark outlier rejection, and track merging so the same physical point
+   triangulated from several pairs becomes one landmark.
 
 For reference, the mapper currently uses: 1.5 px / 500-iteration F-matrix RANSAC
 for pair verification, eight-point essential-matrix seeding from the best of 8
