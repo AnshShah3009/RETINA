@@ -220,7 +220,8 @@ pub struct MapperConfig {
     /// Minimum PnP inliers for a registration to be accepted.
     pub min_pnp_inliers: usize,
     /// Minimum PnP inlier ratio (`inliers / correspondences`) for a registration
-    /// to be accepted.
+    /// to be accepted. See the acceptance site for why the ratio matters even
+    /// when the absolute count is satisfied.
     pub min_pnp_inlier_ratio: f64,
     /// Run bundle adjustment every this many registrations (`0` disables it).
     pub ba_every: usize,
@@ -677,6 +678,14 @@ fn run_incremental(
                 Ok((pose, inliers)) => {
                     let inlier_count = inliers.iter().filter(|&&flag| flag).count();
                     let inlier_ratio = inlier_count as f64 / entries.len().max(1) as f64;
+                    // Both gates are needed. Measured on TUM fr1_desk: relaxing
+                    // this to an absolute inlier count alone (COLMAP-style)
+                    // registered one more view, but that view's pose was wrong
+                    // (12 inliers of 73), and retriangulation then spread the
+                    // error through the map — camera-centre RMSE went from
+                    // 0.0102 m to 0.0604 m and the rotation error from 0.79 to
+                    // 3.09 degrees. The ratio is what rejects a confident-looking
+                    // pose built from mostly wrong correspondences.
                     if inlier_count >= config.min_pnp_inliers
                         && inlier_ratio >= config.min_pnp_inlier_ratio
                         && pose_is_finite(&pose)
