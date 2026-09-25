@@ -80,6 +80,8 @@ OPTIONS:
                                                                   [default: 10]
     --local-ba-window <N>  cameras in each local BA problem, including the new
                            camera; 0 disables local BA                [default: 6]
+    --local-ba-max-points <N>     maximum landmarks in one local bundle
+                                  adjustment [default: 800]
     --local-ba-min-overlap <N>
                            minimum shared landmarks for a co-visible camera
                                                                   [default: 10]
@@ -131,6 +133,7 @@ struct Args {
     ba_every: usize,
     local_ba_window: usize,
     local_ba_min_overlap: usize,
+    local_ba_max_points: usize,
     ba_iters: usize,
     ba_final: bool,
     ba_dense: bool,
@@ -229,6 +232,7 @@ fn run(args: &Args) -> Result<(), String> {
         ba_every: args.ba_every,
         local_ba_window: args.local_ba_window,
         local_ba_min_overlap: args.local_ba_min_overlap,
+        local_ba_max_points: args.local_ba_max_points,
         ba_final: args.ba_final,
         ba_max_iterations: args.ba_iters,
         ba_use_sparsity: !args.ba_dense,
@@ -941,6 +945,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut ba_every = 10usize;
     let mut local_ba_window = 6usize;
     let mut local_ba_min_overlap = 10usize;
+    let mut local_ba_max_points = 800usize;
     let mut ba_iters = 10usize;
     let mut ba_final = true;
     let mut ba_dense = false;
@@ -983,6 +988,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--pnp-iters" => pnp_iters = parse(&take(argv, &mut i, flag)?, flag)?,
             "--ba-every" => ba_every = parse(&take(argv, &mut i, flag)?, flag)?,
             "--local-ba-window" => local_ba_window = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--local-ba-max-points" => {
+                local_ba_max_points = parse(&take(argv, &mut i, flag)?, flag)?
+            }
             "--local-ba-min-overlap" => {
                 local_ba_min_overlap = parse(&take(argv, &mut i, flag)?, flag)?
             }
@@ -1078,6 +1086,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         ba_every,
         local_ba_window,
         local_ba_min_overlap,
+        local_ba_max_points,
         ba_iters,
         ba_final,
         ba_dense,
