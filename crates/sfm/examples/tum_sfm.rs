@@ -57,6 +57,10 @@ OPTIONS:
     --ratio <R>           Lowe ratio-test threshold              [default: 0.75]
     --window <W>          sequential pair window: view i pairs with
                           i+1..=i+W                             [default: 3]
+    --h-threshold <P>     homography RANSAC transfer threshold, px [default: 1.5]
+    --h-iters <N>         homography RANSAC iterations           [default: 500]
+    --planar-margin <S>   homography-vs-essential score margin
+                          required to exclude a seed pair          [default: 0.05]
     --retrieval <V>       enable the bag-of-words widening with a vocabulary of
                           V words (default: sequential pairs only)
     --neighbours <M>      retrieved neighbours per view when --retrieval is set
@@ -111,6 +115,9 @@ struct Args {
     features: usize,
     ratio: f32,
     window: usize,
+    h_ransac_threshold_px: f64,
+    h_ransac_iters: usize,
+    planar_score_margin: f64,
     retrieval: Option<usize>,
     neighbours: usize,
     max_dt: f64,
@@ -209,6 +216,9 @@ fn run(args: &Args) -> Result<(), String> {
                 window: args.window,
             },
         },
+        h_ransac_threshold_px: args.h_ransac_threshold_px,
+        h_ransac_iters: args.h_ransac_iters,
+        planar_score_margin: args.planar_score_margin,
         min_seed_inliers: args.min_seed_inliers,
         seed_hypotheses: args.seed_hypotheses,
         seed_pair: args.seed_pair,
@@ -414,6 +424,10 @@ fn print_config(
     );
     println!("  ratio              : {:.3}", args.ratio);
     println!("  pair selection     : {pairs}");
+    println!(
+        "  homography RANSAC  : {:.2} px / {} iterations; planar margin {:.3}",
+        args.h_ransac_threshold_px, args.h_ransac_iters, args.planar_score_margin
+    );
     println!("  max-dt             : {:.4} s", args.max_dt);
     println!("  min-seed-inliers   : {}", args.min_seed_inliers);
     println!("  seed-hypotheses    : {}", args.seed_hypotheses);
@@ -450,6 +464,10 @@ fn print_report(mapping: &Mapping, ground_truth: &[Pose], views: &[View], args: 
     println!("mapping");
     println!("  pairs selected     : {}", report.pairs_selected);
     println!("  pairs verified     : {}", report.pairs_verified);
+    println!(
+        "  planar/degenerate  : {} (kept in tracks, excluded from seeding)",
+        report.pairs_planar
+    );
     println!(
         "  pair epipolar RMS  : {:.3} px (mean over verified pairs)",
         report.mean_pair_epipolar_rmse_px
@@ -522,7 +540,7 @@ fn print_report(mapping: &Mapping, ground_truth: &[Pose], views: &[View], args: 
 
     if args.pairs {
         println!();
-        println!("per-pair diagnostics (view a, view b, matches, verified inliers)");
+        println!("per-pair diagnostics (matches, F verification, and H-vs-E model selection)");
         let mut failed = 0usize;
         let mut match_sum = 0usize;
         let mut inlier_sum = 0usize;
@@ -554,6 +572,26 @@ fn print_report(mapping: &Mapping, ground_truth: &[Pose], views: &[View], args: 
                 Some(count) => println!("  ({a:3}, {b:3})  matches {matches:5}  inliers {count:5}"),
                 None => println!("  ({a:3}, {b:3})  matches {matches:5}  REJECTED"),
             }
+        }
+        for diagnostic in &report.pair_model_diagnostics {
+            let a = diagnostic.a;
+            let b = diagnostic.b;
+            let matches = diagnostic.matches;
+            let fundamental_inliers = diagnostic.fundamental_inliers;
+            let homography_inliers = diagnostic.homography_inliers;
+            let essential_score = diagnostic.essential_score;
+            let homography_score = diagnostic.homography_score;
+            let score_margin = diagnostic.score_margin;
+            let decision = if diagnostic.planar {
+                "PLANAR (tracks only)"
+            } else {
+                "seed-eligible"
+            };
+            println!(
+                "  ({a:3}, {b:3})  matches {matches:5}  E/H inliers {fundamental_inliers:5}/\
+                 {homography_inliers:5}  E/H score {essential_score:.4}/{homography_score:.4}  \
+                 margin {score_margin:+.4}  {decision}"
+            );
         }
         println!();
         println!("seed candidates (view a, view b, cleanly triangulating correspondences)");
@@ -887,6 +925,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut features = 1500usize;
     let mut ratio = 0.75f32;
     let mut window = 3usize;
+    let mut h_ransac_threshold_px = 1.5f64;
+    let mut h_ransac_iters = 500usize;
+    let mut planar_score_margin = 0.05f64;
     let mut retrieval: Option<usize> = None;
     let mut neighbours = 5usize;
     let mut max_dt = 0.02f64;
@@ -922,6 +963,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--features" => features = parse(&take(argv, &mut i, flag)?, flag)?,
             "--ratio" => ratio = parse(&take(argv, &mut i, flag)?, flag)?,
             "--window" => window = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--h-threshold" => h_ransac_threshold_px = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--h-iters" => h_ransac_iters = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--planar-margin" => planar_score_margin = parse(&take(argv, &mut i, flag)?, flag)?,
             "--retrieval" => retrieval = Some(parse(&take(argv, &mut i, flag)?, flag)?),
             "--neighbours" => neighbours = parse(&take(argv, &mut i, flag)?, flag)?,
             "--max-dt" => max_dt = parse(&take(argv, &mut i, flag)?, flag)?,
@@ -974,6 +1018,15 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     if window == 0 {
         return Err("--window must be at least 1".to_string());
     }
+    if !(h_ransac_threshold_px.is_finite() && h_ransac_threshold_px > 0.0) {
+        return Err("--h-threshold must be positive".to_string());
+    }
+    if h_ransac_iters == 0 {
+        return Err("--h-iters must be at least 1".to_string());
+    }
+    if !(planar_score_margin.is_finite() && planar_score_margin > 0.0) {
+        return Err("--planar-margin must be positive".to_string());
+    }
     if neighbours == 0 {
         return Err("--neighbours must be at least 1".to_string());
     }
@@ -1009,6 +1062,9 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         features,
         ratio,
         window,
+        h_ransac_threshold_px,
+        h_ransac_iters,
+        planar_score_margin,
         retrieval,
         neighbours,
         max_dt,
