@@ -248,6 +248,15 @@ pub struct MapperConfig {
     /// Minimum number of shared landmarks between the new camera and a candidate
     /// neighbour for that neighbour to enter the local problem.
     pub local_ba_min_overlap: usize,
+    /// Maximum number of landmarks in one local bundle adjustment, taken in
+    /// descending order of how many selected cameras observe them.
+    ///
+    /// Bounds the cost so a local solve stays local as the map grows. Measured
+    /// on TUM fr1_desk, 150 views: uncapped the local problem reached 841
+    /// points and 174 ms per call; 300 points is ~75 ms but rotation error
+    /// degrades 3.8 -> 9.3 degrees, and 600 gives 6.5 degrees. 800 preserves
+    /// the uncapped accuracy (3.85 degrees) at 195 s instead of 212 s.
+    pub local_ba_max_points: usize,
     /// Run one final bundle adjustment after the last registration.
     pub ba_final: bool,
     /// Bundle-adjustment iterations per call.
@@ -288,6 +297,7 @@ impl Default for MapperConfig {
             ba_every: 10,
             local_ba_window: 6,
             local_ba_min_overlap: 10,
+            local_ba_max_points: 800,
             ba_final: true,
             ba_max_iterations: 10,
             ba_use_sparsity: true,
@@ -2148,23 +2158,38 @@ fn local_ba_problem(est: &Est, new_view: usize, config: &MapperConfig) -> Option
     for (local, &camera) in cameras.iter().enumerate() {
         camera_to_local[camera] = Some(local);
     }
-    let landmarks = est
+    // Landmarks visible to the selected cameras, ranked by how many of those
+    // cameras observe each one. Without a cap this set grows with the whole map,
+    // so a "local" solve became progressively more expensive as the
+    // reconstruction grew (measured: 400 points at the start of a 60-view run,
+    // 841 by the end, 79 ms -> 174 ms per call, ~90 calls). A local bundle
+    // adjustment is meant to be local: the landmarks that anchor the new view
+    // to its neighbours are the ones the adjustment is for. Ties are broken by
+    // ascending landmark index so the selection is deterministic.
+    let mut ranked: Vec<(usize, usize)> = est
         .point_obs
         .iter()
         .enumerate()
         .filter_map(|(landmark, observations)| {
-            observations
+            let count = observations
                 .iter()
-                .any(|&(view, _)| {
+                .filter(|&&(view, _)| {
                     est.cam_of_view
                         .get(view)
                         .copied()
                         .flatten()
                         .is_some_and(|camera| camera_to_local[camera].is_some())
                 })
-                .then_some(landmark)
+                .count();
+            (count > 0).then_some((count, landmark))
         })
-        .collect::<Vec<_>>();
+        .collect();
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+    let landmarks: Vec<usize> = ranked
+        .into_iter()
+        .take(config.local_ba_max_points)
+        .map(|(_, landmark)| landmark)
+        .collect();
 
     (!landmarks.is_empty()).then_some(LocalBaProblem { cameras, landmarks })
 }
