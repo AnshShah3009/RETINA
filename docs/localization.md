@@ -173,7 +173,8 @@ performance work and the remaining gaps.
 | fr1_xyz | 60 | 5 | 3 | **73.3%** | 5,658 | 5.4 cm | 9.2° |
 | fr1_desk | 40 | 5 | 3 | 22.5% | — | — | — |
 | fr1_desk | 40 | 2 | 3 | **100.0%** | 5,490 | 7.7 cm | **2.7°** |
-| fr1_desk | 150 | 2 | 3 | 43.3% → **63.3%** | 16,360 | 13.0 → **5.8 cm** | 18.1 → **3.8°** |
+| fr1_desk | 60 | 2 | 3 | **83.3%** | — | 6.9 cm | **3.3°** |
+| fr1_desk | 150 | 2 | 3 | 43.3% → **63.3%** | 16,631 | 13.0 → **5.8 cm** | 18.1 → **3.8°** |
 
 (The xyz rows predate the bundle-adjustment and local-BA work; the desk rows are
 after. The 150-view row shows the effect of local bundle adjustment, which was
