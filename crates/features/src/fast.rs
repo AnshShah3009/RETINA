@@ -1,5 +1,6 @@
 use cv_core::{KeyPoint, KeyPoints};
 use image::GrayImage;
+use rayon::prelude::*;
 
 /// FAST-9 corner detector
 /// Uses a 16-pixel Bresenham circle of radius 3
@@ -19,44 +20,63 @@ pub fn fast_detect(image: &GrayImage, threshold: u8, max_keypoints: usize) -> Ke
         (-3, 0),  (-3, -1), (-2, -2), (-1, -3),
     ];
 
-    for y in 3..height - 3 {
-        for x in 3..width - 3 {
-            let p = image.get_pixel(x as u32, y as u32)[0];
+    // Scan the image one row at a time, in parallel. Each pixel's verdict
+    // depends only on its own 16-pixel neighbourhood, so rows are independent;
+    // collecting per-row and concatenating in order preserves the exact
+    // raster-order output the serial loop produced, which the pyramid-level
+    // truncation and non-maximum suppression downstream rely on.
+    //
+    // This scan was the single largest cost in ORB detection: it runs once per
+    // pyramid level (8 per image) and measured 40 ms/frame on 640x480 TUM frames
+    // while descriptor extraction, which already parallelises, took the rest.
+    let raw = image.as_raw();
+    let w = width as usize;
+    let mut rows: Vec<Vec<KeyPoint>> = (3..height - 3)
+        .into_par_iter()
+        .map(|y| {
+            let mut found: Vec<KeyPoint> = Vec::new();
+            let row = y as usize * w;
+            for x in 3..width - 3 {
+                let p = raw[row + x as usize];
 
-            let high_threshold = p.saturating_add(threshold);
-            let low_threshold = p.saturating_sub(threshold);
+                let high_threshold = p.saturating_add(threshold);
+                let low_threshold = p.saturating_sub(threshold);
 
-            // Full test - check all 16 pixels directly
-            let mut pixel_values = [0u8; 16];
-            let mut brighter_count = 0u32;
-            let mut darker_count = 0u32;
+                // Full test - check all 16 pixels directly
+                let mut pixel_values = [0u8; 16];
+                let mut brighter_count = 0u32;
+                let mut darker_count = 0u32;
 
-            for (i, (dx, dy)) in circle_offsets.iter().enumerate() {
-                let px = (x + dx) as u32;
-                let py = (y + dy) as u32;
-                let val = image.get_pixel(px, py)[0];
-                pixel_values[i] = val;
+                for (i, (dx, dy)) in circle_offsets.iter().enumerate() {
+                    let px = (x + dx) as usize;
+                    let py = (y + dy) as usize;
+                    let val = raw[py * w + px];
+                    pixel_values[i] = val;
 
-                if val > high_threshold {
-                    brighter_count += 1;
-                } else if val < low_threshold {
-                    darker_count += 1;
+                    if val > high_threshold {
+                        brighter_count += 1;
+                    } else if val < low_threshold {
+                        darker_count += 1;
+                    }
+                }
+
+                // Quick rejection: need at least 9 bright or 9 dark to have a chance
+                if brighter_count < 9 && darker_count < 9 {
+                    continue;
+                }
+
+                // Check for 9 contiguous brighter or darker pixels
+                if has_n_contiguous(&pixel_values, p, threshold, 9, true)
+                    || has_n_contiguous(&pixel_values, p, threshold, 9, false)
+                {
+                    found.push(KeyPoint::new(x as f64, y as f64));
                 }
             }
-
-            // Quick rejection: need at least 9 bright or 9 dark to have a chance
-            if brighter_count < 9 && darker_count < 9 {
-                continue;
-            }
-
-            // Check for 9 contiguous brighter or darker pixels
-            if has_n_contiguous(&pixel_values, p, threshold, 9, true)
-                || has_n_contiguous(&pixel_values, p, threshold, 9, false)
-            {
-                let kp = KeyPoint::new(x as f64, y as f64);
-                keypoints.push(kp);
-            }
-        }
+            found
+        })
+        .collect::<Vec<Vec<KeyPoint>>>();
+    for r in rows.iter_mut() {
+        keypoints.append(r);
     }
 
     if keypoints.len() > max_keypoints {
