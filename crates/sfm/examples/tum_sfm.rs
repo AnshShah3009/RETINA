@@ -47,8 +47,10 @@ USAGE:
     tum_sfm --dir <path> [OPTIONS]
 
 REQUIRED:
-    --dir <path>          TUM sequence directory containing rgb.txt,
-                          groundtruth.txt and rgb/*.png
+    --dir <path>          sequence directory: a TUM sequence (rgb.txt,
+                          groundtruth.txt, rgb/*.png) or a COLMAP/ETH3D scene
+                          (images/*.png with a sparse/ text model)
+    --format <F>          auto (default), tum, or colmap
 
 OPTIONS:
     --frames <N>          number of views handed to the mapper   [default: 20]
@@ -112,6 +114,7 @@ after applying that alignment's rotation.
 #[derive(Debug, Clone)]
 struct Args {
     dir: PathBuf,
+    format_name: String,
     frames: usize,
     stride: usize,
     features: usize,
@@ -155,7 +158,7 @@ fn main() {
         print!("{}", usage());
         return;
     }
-    let args = match parse_args(&argv) {
+    let mut args = match parse_args(&argv) {
         Ok(args) => args,
         Err(err) => {
             eprintln!("error: {err}\n");
@@ -163,7 +166,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    match run(&args) {
+    match run(&mut args) {
         Ok(()) => {}
         Err(err) => {
             eprintln!("error: {err}");
@@ -172,11 +175,36 @@ fn main() {
     }
 }
 
-fn run(args: &Args) -> Result<(), String> {
+fn run(args: &mut Args) -> Result<(), String> {
     let total_started = Instant::now();
 
-    // ---- 1. Load and associate the sequence ----
-    let (files, ground_truth, sequence_len) = load_sequence(&args.dir, args.max_dt)?;
+    // ---- 1. Load the sequence ----
+    // "auto" picks COLMAP when a sparse model is present (ETH3D), else TUM.
+    let colmap_like = match args.format_name.as_str() {
+        "colmap" => true,
+        "tum" => false,
+        _ => {
+            args.dir.join("sparse/0/images.txt").is_file()
+                || args.dir.join("sparse/images.txt").is_file()
+        }
+    };
+    let (files, ground_truth, sequence_len, intrinsics_override) = if colmap_like {
+        let (files, poses, intrinsics) = load_colmap_sequence(&args.dir)?;
+        let n = files.len();
+        (files, poses, n, Some(intrinsics))
+    } else {
+        let (files, poses, n) = load_sequence(&args.dir, args.max_dt)?;
+        (files, poses, n, None)
+    };
+    if let Some(k) = intrinsics_override {
+        // The COLMAP model carries the true intrinsics; the TUM defaults do not
+        // apply to a different camera.
+        println!(
+            "intrinsics: from COLMAP model (fx={}, fy={}, cx={}, cy={})",
+            k.fx, k.fy, k.cx, k.cy
+        );
+        args.intrinsics = k;
+    }
     let indices: Vec<usize> = (0..args.frames)
         .map(|k| k * args.stride)
         .take_while(|&i| i < files.len())
@@ -904,6 +932,74 @@ fn load_sequence(dir: &Path, max_dt: f64) -> Result<(Vec<String>, Vec<Pose>, usi
     Ok((files, poses, len))
 }
 
+/// Load a COLMAP/ETH3D-style sequence: an image directory plus a COLMAP sparse
+/// model in `sparse/0` (or `sparse/`), scoring against the registered poses.
+///
+/// ETH3D ships exactly this layout (`images/*.png` + a COLMAP text model), so the
+/// same mapper and the same scoring work on it without a TUM index file. The
+/// poses come from the model, so they are only used to score the reconstruction —
+/// the mapper itself never sees them.
+fn load_colmap_sequence(dir: &Path) -> Result<(Vec<String>, Vec<Pose>, CameraIntrinsics), String> {
+    use cv_io::datasets::colmap;
+
+    let sparse = ["sparse/0", "sparse", "colmap/sparse/0"]
+        .iter()
+        .map(|p| dir.join(p))
+        .find(|p| p.join("images.txt").is_file())
+        .ok_or_else(|| {
+            format!(
+                "no COLMAP text model found under {} (looked for sparse/0/images.txt)",
+                dir.display()
+            )
+        })?;
+
+    let cameras = colmap::read_cameras_text(sparse.join("cameras.txt"))
+        .map_err(|e| format!("cameras.txt: {e}"))?;
+    let images = colmap::read_images_text(sparse.join("images.txt"))
+        .map_err(|e| format!("images.txt: {e}"))?;
+
+    let by_id: std::collections::HashMap<u32, &colmap::Camera> =
+        cameras.iter().map(|c| (c.id, c)).collect();
+    let camera = cameras
+        .iter()
+        .filter(|c| c.intrinsics.is_some())
+        .min_by_key(|c| c.id)
+        .ok_or_else(|| "no camera with known intrinsics in cameras.txt".to_string())?;
+    let intrinsics = camera
+        .intrinsics
+        .ok_or_else(|| "camera has no usable intrinsics".to_string())?;
+    let _ = by_id;
+
+    // COLMAP stores world-to-camera; the mapper and the scorer work in
+    // camera-to-world, so invert.
+    let mut entries: Vec<(String, Pose)> = images
+        .iter()
+        .filter_map(|img| {
+            let pose_cw = img.pose.inverse();
+            let path = dir.join("images").join(&img.name);
+            if path.is_file() {
+                // `extract_view` resolves names against the sequence directory,
+                // so return the path relative to that root, not to images/.
+                Some((format!("images/{}", img.name), pose_cw))
+            } else {
+                None
+            }
+        })
+        .collect();
+    // Deterministic order: by image name, so a rerun selects the same views.
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if entries.is_empty() {
+        return Err(format!(
+            "no images from {} were found under {}/images",
+            sparse.display(),
+            dir.display()
+        ));
+    }
+    let (files, poses) = entries.into_iter().unzip();
+    Ok((files, poses, intrinsics))
+}
+
 /// Detect ORB features on one frame.
 fn extract_view(dir: &Path, filename: &str, features: usize) -> Result<View, String> {
     let path = dir.join(filename);
@@ -924,6 +1020,7 @@ fn extract_view(dir: &Path, filename: &str, features: usize) -> Result<View, Str
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut dir: Option<PathBuf> = None;
+    let mut format_name: String = String::from("auto");
     let mut frames = 60usize;
     let mut stride = 5usize;
     let mut features = 1500usize;
@@ -963,6 +1060,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         let flag = argv[i].as_str();
         match flag {
             "--dir" => dir = Some(PathBuf::from(take(argv, &mut i, flag)?)),
+            "--format" => format_name = take(argv, &mut i, flag)?,
             "--frames" => frames = parse(&take(argv, &mut i, flag)?, flag)?,
             "--stride" => stride = parse(&take(argv, &mut i, flag)?, flag)?,
             "--features" => features = parse(&take(argv, &mut i, flag)?, flag)?,
@@ -1065,6 +1163,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 
     Ok(Args {
         dir,
+        format_name,
         frames,
         stride,
         features,
