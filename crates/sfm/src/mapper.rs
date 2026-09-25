@@ -16,8 +16,12 @@
 //!
 //! 2. **Pair verification.** Descriptors are matched with Lowe's ratio test and
 //!    a mutual-consistency (cross) check, the fundamental matrix is estimated
-//!    from the matches with a deterministic RANSAC (see *Determinism* below) and
-//!    only the surviving inlier correspondences are kept.
+//!    from the matches with a deterministic RANSAC (see *Determinism* below),
+//!    and a homography is fitted from those same matches. A normalized
+//!    MSAC model-selection score identifies pairs explained significantly better
+//!    by a homography; only the surviving fundamental-matrix inlier
+//!    correspondences are kept. Degenerate pairs still contribute these matches
+//!    to track building, but are excluded from seed selection.
 //!
 //! 3. **Track building.** A disjoint-set (union-find) over `(view, keypoint)`
 //!    nodes merges the verified correspondences into tracks, enforcing at most
@@ -72,9 +76,9 @@
 //!
 //! * pairs, tracks, seed candidates and views are always processed in a fixed
 //!   ascending index order;
-//! * the fundamental-matrix RANSAC uses an iteration-indexed, seeded linear
-//!   congruential sampler (the same construction `cv-calib3d`'s PnP RANSAC
-//!   uses), never `rand`;
+//! * the fundamental-matrix and homography RANSACs use an iteration-indexed,
+//!   seeded linear congruential sampler (the same construction `cv-calib3d`'s PnP
+//!   RANSAC uses), never `rand`;
 //! * [`cv_calib3d::solve_pnp_ransac`] samples by iteration index already, so it
 //!   is deterministic; and
 //! * no `HashMap`/`HashSet` is iterated anywhere in this module.
@@ -93,8 +97,8 @@
 //! ```
 
 use cv_calib3d::{
-    find_essential_mat, find_fundamental_mat, recover_pose_from_essential, solve_pnp_ransac,
-    triangulate_points,
+    find_essential_mat, find_fundamental_mat, recover_pose_from_essential, solve_dlt_homography,
+    solve_pnp_ransac, triangulate_points,
 };
 use cv_core::{CameraIntrinsics, Descriptors, KeyPoint, Pose};
 use cv_features::matcher::{MatchType, Matcher};
@@ -185,6 +189,16 @@ pub struct MapperConfig {
     /// Maximum fundamental-matrix RANSAC iterations (an adaptive bound may stop it
     /// earlier; that bound is a deterministic function of the data).
     pub f_ransac_iters: usize,
+    /// Homography RANSAC transfer-error threshold, in pixels. It defaults to the
+    /// fundamental threshold because both scores below use the same residual
+    /// scale and the same correspondences.
+    pub h_ransac_threshold_px: f64,
+    /// Maximum homography RANSAC iterations.
+    pub h_ransac_iters: usize,
+    /// Minimum normalized-score advantage required to classify a verified pair
+    /// as planar/degenerate. A pair is rejected as a seed only when its
+    /// homography score exceeds its essential score by at least this margin.
+    pub planar_score_margin: f64,
     /// Minimum inliers for a pair to count as verified.
     pub min_pair_inliers: usize,
     /// Minimum inliers for a pair to be considered as a seed.
@@ -254,6 +268,9 @@ impl Default for MapperConfig {
             min_pair_matches: 20,
             f_ransac_threshold_px: 1.5,
             f_ransac_iters: 500,
+            h_ransac_threshold_px: 1.5,
+            h_ransac_iters: 500,
+            planar_score_margin: 0.05,
             min_pair_inliers: 30,
             min_seed_inliers: 20,
             min_seed_points: 30,
@@ -383,9 +400,18 @@ pub struct MappingReport {
     pub pairs_selected: usize,
     /// Candidate pairs that passed matching + fundamental-matrix verification.
     pub pairs_verified: usize,
+    /// Verified pairs whose homography significantly outscored the essential
+    /// model. Their correspondences remain in track building, but they are not
+    /// seed candidates.
+    pub pairs_planar: usize,
     /// Mean RMS Sampson error of the verified pairs' inliers, in pixels (`0.0`
     /// when no pair was verified). A sanity check on the covisibility graph.
     pub mean_pair_epipolar_rmse_px: f64,
+    /// Per verified pair: fundamental and homography RANSAC results, normalized
+    /// scores and whether the pair was classified planar. These diagnostics are
+    /// populated for every pair that reached both model fits, including pairs
+    /// that cannot be used as seeds.
+    pub pair_model_diagnostics: Vec<PairModelDiagnostic>,
     /// Per candidate pair, in pair-selection order: `(view a, view b, descriptor
     /// matches, verified inliers)`. `None` inliers means the pair failed
     /// verification; a pair that produced too few matches reports them anyway, so
@@ -462,12 +488,14 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
     // ---- 2. Pairwise verification ----
     let mut verified: Vec<VerifiedPair> = Vec::new();
     let mut pair_diagnostics: Vec<(usize, usize, usize, Option<usize>)> = Vec::new();
+    let mut pair_model_diagnostics: Vec<PairModelDiagnostic> = Vec::new();
     if n >= 2 {
         let mut done = 0usize;
         for &(a, b) in &pairs {
-            let (matches, pair) = verify_pair(a, b, views, config);
+            let (matches, pair) = verify_pair(a, b, views, intrinsics, config);
             pair_diagnostics.push((a, b, matches, pair.as_ref().map(|p| p.inliers.len())));
             if let Some(pair) = pair {
+                pair_model_diagnostics.push(pair.model);
                 verified.push(pair);
             }
             done += 1;
@@ -496,6 +524,7 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
         registration_rate: 0.0,
         pairs_selected: pairs.len(),
         pairs_verified: verified.len(),
+        pairs_planar: verified.iter().filter(|pair| pair.model.planar).count(),
         mean_pair_epipolar_rmse_px: if verified.is_empty() {
             0.0
         } else {
@@ -506,6 +535,7 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
                 / verified.len() as f64
         },
         pair_diagnostics,
+        pair_model_diagnostics,
         seed_diagnostics,
         seed: None,
         seed_hypotheses_tried: 0,
@@ -1005,6 +1035,33 @@ fn retrieval_pairs(
 // Pair verification
 // ---------------------------------------------------------------------------
 
+/// Diagnostic record for the two competing two-view models.
+///
+/// The scores are computed from the same set of descriptor matches and the same
+/// pixel threshold. They are deliberately kept in the public report so a run
+/// can explain why a pair was (or was not) considered planar.
+#[derive(Debug, Clone, Copy)]
+pub struct PairModelDiagnostic {
+    /// Lower view index.
+    pub a: usize,
+    /// Higher view index.
+    pub b: usize,
+    /// Number of descriptor matches entering both fits.
+    pub matches: usize,
+    /// Number of fundamental-matrix inliers.
+    pub fundamental_inliers: usize,
+    /// Number of homography inliers.
+    pub homography_inliers: usize,
+    /// Normalized Sampson score of the essential model.
+    pub essential_score: f64,
+    /// Normalized transfer-error score of the homography model.
+    pub homography_score: f64,
+    /// `homography_score - essential_score` (zero when a fit was unavailable).
+    pub score_margin: f64,
+    /// Whether the pair is marked planar/degenerate and excluded from seeding.
+    pub planar: bool,
+}
+
 /// A candidate pair whose epipolar geometry survived RANSAC.
 struct VerifiedPair {
     /// Lower view index.
@@ -1016,6 +1073,8 @@ struct VerifiedPair {
     /// RMS Sampson error of the inliers under the fitted fundamental matrix, in
     /// pixels. Reported as a sanity metric for the covisibility graph.
     epipolar_rmse_px: f64,
+    /// Homography-vs-essential model-selection decision for this pair.
+    model: PairModelDiagnostic,
 }
 
 /// Match, ratio-test, cross-check and RANSAC-verify one pair.
@@ -1026,6 +1085,7 @@ fn verify_pair(
     a: usize,
     b: usize,
     views: &[View],
+    intrinsics: &CameraIntrinsics,
     config: &MapperConfig,
 ) -> (usize, Option<VerifiedPair>) {
     let va = &views[a];
@@ -1091,6 +1151,63 @@ fn verify_pair(
         .sum();
     let epipolar_rmse_px = (error_sum / inliers.len() as f64).max(0.0).sqrt();
 
+    // Fit the competing homography on exactly the same descriptor matches. The
+    // fundamental RANSAC mask is retained for the track filter, but is not used
+    // as the homography input: a planar scene must not lose correspondences that
+    // the epipolar model itself finds ambiguous. The essential hypothesis is
+    // fitted on the F inliers, which are the correspondences already accepted by
+    // the existing pair verification; this keeps both model scores comparable
+    // without introducing a second random sampler.
+    let (h, h_mask) = robust_homography(
+        &points_a,
+        &points_b,
+        config.h_ransac_threshold_px,
+        config.h_ransac_iters,
+        pair_seed(a, b) ^ 0xD1B5_4A32_D192_ED03,
+    )
+    .unwrap_or((Matrix3::identity(), vec![false; points_a.len()]));
+    let inlier_points_a: Vec<Point2<f64>> = mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &is_inlier)| is_inlier.then_some(points_a[i]))
+        .collect();
+    let inlier_points_b: Vec<Point2<f64>> = mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &is_inlier)| is_inlier.then_some(points_b[i]))
+        .collect();
+    let essential_score = if inlier_points_a.len() >= 8 {
+        find_essential_mat(&inlier_points_a, &inlier_points_b, intrinsics)
+            .map(|essential| {
+                essential_model_score(
+                    &essential,
+                    &points_a,
+                    &points_b,
+                    intrinsics,
+                    config.f_ransac_threshold_px,
+                )
+            })
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    let homography_score =
+        normalized_homography_score(&h, &points_a, &points_b, config.h_ransac_threshold_px);
+    let score_margin = homography_score - essential_score;
+    let margin = config.planar_score_margin.max(0.0);
+    let planar = margin > 0.0 && homography_score > essential_score && score_margin >= margin;
+    let model = PairModelDiagnostic {
+        a,
+        b,
+        matches: match_count,
+        fundamental_inliers: mask.iter().filter(|&&is_inlier| is_inlier).count(),
+        homography_inliers: h_mask.iter().filter(|&&is_inlier| is_inlier).count(),
+        essential_score,
+        homography_score,
+        score_margin,
+        planar,
+    };
+
     (
         match_count,
         Some(VerifiedPair {
@@ -1098,6 +1215,7 @@ fn verify_pair(
             b,
             inliers,
             epipolar_rmse_px,
+            model,
         }),
     )
 }
@@ -1207,6 +1325,245 @@ fn robust_fundamental(
     }
 
     Some((model, mask))
+}
+
+/// Deterministic RANSAC for a homography.
+///
+/// Minimal samples have four points. Scoring uses symmetric forward/inverse
+/// transfer error, so a model that maps points to the other side of the image
+/// cannot obtain a spuriously good score. Each sampled model is scored on every
+/// correspondence; a final fit is attempted from the best inlier set.
+fn robust_homography(
+    points_a: &[Point2<f64>],
+    points_b: &[Point2<f64>],
+    threshold_px: f64,
+    max_iters: usize,
+    seed: u64,
+) -> Option<(Matrix3<f64>, Vec<bool>)> {
+    let n = points_a.len();
+    if n < 4 || points_b.len() != n || !threshold_px.is_finite() || threshold_px <= 0.0 {
+        return None;
+    }
+    let threshold = threshold_px * threshold_px;
+
+    let mut best_model: Option<Matrix3<f64>> = None;
+    let mut best_mask = vec![false; n];
+    let mut best_count = 0usize;
+    let mut best_error = f64::INFINITY;
+    let mut adaptive = max_iters as f64;
+
+    for iteration in 0..max_iters {
+        if iteration as f64 >= adaptive {
+            break;
+        }
+        let sample = sample_unique_indices(n, 4, seed ^ (iteration as u64));
+        let source: Vec<[f64; 2]> = sample
+            .iter()
+            .map(|&i| [points_a[i].x, points_a[i].y])
+            .collect();
+        let destination: Vec<[f64; 2]> = sample
+            .iter()
+            .map(|&i| [points_b[i].x, points_b[i].y])
+            .collect();
+        let Some(model) = solve_dlt_homography(&source, &destination) else {
+            continue;
+        };
+
+        let Some((mask, count, error_sum)) =
+            homography_inliers(&model, points_a, points_b, threshold)
+        else {
+            continue;
+        };
+        if count == 0 {
+            continue;
+        }
+        let mean_error = error_sum / count as f64;
+        if count > best_count || (count == best_count && mean_error < best_error) {
+            best_count = count;
+            best_error = mean_error;
+            best_model = Some(model);
+            best_mask = mask;
+            let w = count as f64 / n as f64;
+            let w4 = w.powi(4);
+            if w4 > 0.0 && w4 < 1.0 {
+                let k = (1.0 - 0.99f64).ln() / (1.0 - w4).ln();
+                adaptive = k.min(max_iters as f64);
+            }
+        }
+    }
+
+    let mut model = best_model?;
+    let mut mask = best_mask;
+    let mut count = best_count;
+    for _ in 0..3 {
+        let inlier_a: Vec<[f64; 2]> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &is_inlier)| is_inlier.then_some([points_a[i].x, points_a[i].y]))
+            .collect();
+        let inlier_b: Vec<[f64; 2]> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &is_inlier)| is_inlier.then_some([points_b[i].x, points_b[i].y]))
+            .collect();
+        let Some(refined) = solve_dlt_homography(&inlier_a, &inlier_b) else {
+            break;
+        };
+        let Some((next_mask, next_count, _)) =
+            homography_inliers(&refined, points_a, points_b, threshold)
+        else {
+            break;
+        };
+        if next_count >= count {
+            model = refined;
+            mask = next_mask;
+            count = next_count;
+        } else {
+            break;
+        }
+    }
+    Some((model, mask))
+}
+
+fn homography_inliers(
+    model: &Matrix3<f64>,
+    points_a: &[Point2<f64>],
+    points_b: &[Point2<f64>],
+    threshold_sq: f64,
+) -> Option<(Vec<bool>, usize, f64)> {
+    let inverse = model.try_inverse()?;
+    let mut mask = vec![false; points_a.len()];
+    let mut count = 0usize;
+    let mut error_sum = 0.0;
+    for i in 0..points_a.len() {
+        let forward = transfer_error(model, points_a[i], points_b[i]);
+        let backward = transfer_error(&inverse, points_b[i], points_a[i]);
+        let squared = 0.5 * (forward + backward);
+        if squared.is_finite() && squared <= threshold_sq {
+            mask[i] = true;
+            count += 1;
+            error_sum += squared;
+        }
+    }
+    Some((mask, count, error_sum))
+}
+
+fn transfer_error(model: &Matrix3<f64>, source: Point2<f64>, target: Point2<f64>) -> f64 {
+    let predicted = model * Vector3::new(source.x, source.y, 1.0);
+    if !predicted.iter().all(|value| value.is_finite()) || predicted[2].abs() <= 1e-12 {
+        return f64::INFINITY;
+    }
+    let residual = Vector3::new(
+        predicted[0] / predicted[2] - target.x,
+        predicted[1] / predicted[2] - target.y,
+        0.0,
+    );
+    residual.norm_squared()
+}
+
+/// Higher-is-better MSAC score normalized by its ideal value.
+///
+/// For every correspondence this is `max(0, 1 - e^2 / t^2)`, so a zero-residual
+/// inlier contributes one. Dividing by the number of all descriptor matches
+/// rewards coverage as well as accuracy, and a model that also explains the
+/// outliers remains penalized. SH-style 1-exp(-S/T^2) scores are algebraically
+/// equivalent up to scale; because fundamental Sampson and symmetric homography
+/// transfer errors are both squared pixels, the same threshold and the same
+/// `2 / (t^2 n)` normalization make their difference directly meaningful.
+fn normalized_msac_score(
+    model: &Matrix3<f64>,
+    points_a: &[Point2<f64>],
+    points_b: &[Point2<f64>],
+    mask: &[bool],
+    threshold_px: f64,
+    homography: bool,
+) -> f64 {
+    let n = points_a.len().max(points_b.len());
+    if n == 0 || points_a.len() != points_b.len() || mask.len() != n || threshold_px <= 0.0 {
+        return 0.0;
+    }
+    let inverse = if homography {
+        model.try_inverse()
+    } else {
+        None
+    };
+    let threshold_sq = threshold_px * threshold_px;
+    let mut score = 0.0;
+    for i in 0..n {
+        let error = if homography {
+            let Some(inverse) = inverse.as_ref() else {
+                return 0.0;
+            };
+            0.5 * (transfer_error(model, points_a[i], points_b[i])
+                + transfer_error(inverse, points_b[i], points_a[i]))
+        } else {
+            sampson_sq(model, &points_a[i], &points_b[i])
+        };
+        if mask[i] {
+            score += (1.0 - error / threshold_sq).max(0.0);
+        }
+    }
+    (2.0 * score / (threshold_sq * n as f64)).clamp(0.0, 1.0)
+}
+
+/// Calculate the normalized essential score on calibrated pixel correspondences.
+fn essential_model_score(
+    essential: &Matrix3<f64>,
+    points_a: &[Point2<f64>],
+    points_b: &[Point2<f64>],
+    intrinsics: &CameraIntrinsics,
+    threshold_px: f64,
+) -> f64 {
+    let k_inv = intrinsics.inverse_matrix();
+    let focal = 0.5 * (intrinsics.fx + intrinsics.fy).max(1e-12);
+    let threshold = threshold_px / focal;
+    if points_a.len() != points_b.len() || points_a.is_empty() {
+        return 0.0;
+    }
+    let normalize = |point: Point2<f64>| {
+        let p = k_inv * Vector3::new(point.x, point.y, 1.0);
+        Point2::new(p[0] / p[2], p[1] / p[2])
+    };
+    let threshold_sq = threshold * threshold;
+    let mut score = 0.0;
+    for (a, b) in points_a.iter().zip(points_b.iter()) {
+        let a = normalize(*a);
+        let b = normalize(*b);
+        let error = sampson_sq(essential, &a, &b);
+        if error <= threshold_sq {
+            score += 1.0 - error / threshold_sq;
+        }
+    }
+    (score / points_a.len() as f64).clamp(0.0, 1.0)
+}
+
+/// Calculate the normalized homography score on pixel correspondences.
+fn normalized_homography_score(
+    model: &Matrix3<f64>,
+    points_a: &[Point2<f64>],
+    points_b: &[Point2<f64>],
+    threshold_px: f64,
+) -> f64 {
+    if points_a.len() != points_b.len() || points_a.is_empty() {
+        return 0.0;
+    }
+    let Some(inverse) = model.try_inverse() else {
+        return 0.0;
+    };
+    let threshold_sq = threshold_px * threshold_px;
+    if threshold_sq <= 0.0 || !threshold_sq.is_finite() {
+        return 0.0;
+    }
+    let mut score = 0.0;
+    for (a, b) in points_a.iter().zip(points_b.iter()) {
+        let forward = transfer_error(model, *a, *b);
+        let backward = transfer_error(&inverse, *b, *a);
+        let error = 0.5 * (forward + backward);
+        if error <= threshold_sq {
+            score += 1.0 - error / threshold_sq;
+        }
+    }
+    (score / points_a.len() as f64).clamp(0.0, 1.0)
 }
 
 /// Sampson distance, squared, of a correspondonce under `f`.
@@ -1410,6 +1767,11 @@ fn seed_candidates(
     let mut diagnostics: Vec<(usize, usize, usize)> = Vec::new();
     let mut forced: Option<SeedChoice> = None;
     for pair in verified {
+        // A pair may still contribute its robust matches to track building, but
+        // its essential decomposition is not trusted when H significantly beats E.
+        if pair.model.planar {
+            continue;
+        }
         if pair.inliers.len() < config.min_seed_inliers {
             continue;
         }
@@ -1428,10 +1790,9 @@ fn seed_candidates(
     // A forced seed may be a pair below `min_seed_inliers`; build it anyway.
     if let Some(requested) = config.seed_pair {
         if forced.is_none() {
-            if let Some(pair) = verified
-                .iter()
-                .find(|pair| (pair.a, pair.b) == requested && pair.inliers.len() >= 8)
-            {
+            if let Some(pair) = verified.iter().find(|pair| {
+                (pair.a, pair.b) == requested && !pair.model.planar && pair.inliers.len() >= 8
+            }) {
                 if let Some((good, choice)) = seed_from_pair(pair, views, intrinsics, config) {
                     diagnostics.push((pair.a, pair.b, good));
                     forced = Some(choice);
@@ -2041,6 +2402,135 @@ mod tests {
             ground_truth.push(pose_wc);
         }
         (views, ground_truth)
+    }
+
+    /// Build exact descriptor matches for two fixed cameras. A descriptor stores
+    /// its point id, so every point has exactly one zero-distance match in the
+    /// other view and there is no random sampling or numerical noise in the test.
+    fn exact_views(points: &[Point3<f64>], cameras: &[Pose]) -> Vec<View> {
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        cameras
+            .iter()
+            .map(|pose_cw| {
+                let mut keypoints = Vec::with_capacity(points.len());
+                let mut descriptors = Descriptors::with_capacity(points.len());
+                for (id, point) in points.iter().enumerate() {
+                    let camera = pose_cw.rotation * point.coords + pose_cw.translation;
+                    assert!(camera[2] > 0.0, "synthetic point is behind its camera");
+                    let projected = intrinsics.project(&Point3::from(camera));
+                    assert!(
+                        (0.0..640.0).contains(&projected.x) && (0.0..480.0).contains(&projected.y),
+                        "synthetic point is outside the image: {projected:?}"
+                    );
+                    keypoints.push(KeyPoint::new(projected.x, projected.y));
+                    let mut data = vec![0u8; 32];
+                    data[0] = (id & 0xFF) as u8;
+                    data[1] = ((id >> 8) & 0xFF) as u8;
+                    descriptors.push(Descriptor::new(
+                        data,
+                        KeyPoint::new(projected.x, projected.y),
+                    ));
+                }
+                View::new(keypoints, descriptors, 640, 480)
+            })
+            .collect()
+    }
+
+    fn model_selection_config() -> MapperConfig {
+        MapperConfig {
+            min_pair_matches: 8,
+            min_pair_inliers: 8,
+            f_ransac_threshold_px: 1.5,
+            f_ransac_iters: 500,
+            h_ransac_threshold_px: 1.5,
+            h_ransac_iters: 500,
+            planar_score_margin: 0.05,
+            ba_every: 0,
+            ba_final: false,
+            ..MapperConfig::default()
+        }
+    }
+
+    #[test]
+    fn planar_pair_is_degenerate_but_keeps_track_matches() {
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        let cameras = [
+            Pose::identity(),
+            Pose::from_quat_translation(
+                nalgebra::UnitQuaternion::identity(),
+                Vector3::new(0.30, 0.0, 0.0),
+            ),
+        ];
+        let points: Vec<Point3<f64>> = (0..8)
+            .flat_map(|y| {
+                (0..8).map(move |x| Point3::new(-1.4 + 0.4 * x as f64, -1.05 + 0.3 * y as f64, 4.0))
+            })
+            .collect();
+        let views = exact_views(&points, &cameras);
+        let config = model_selection_config();
+
+        let pair = verify_pair(0, 1, &views, &intrinsics, &config)
+            .1
+            .expect("the exact planar pair passes fundamental verification");
+        assert!(pair.model.planar, "planar diagnostic: {:?}", pair.model);
+        assert!(
+            pair.model.homography_score > pair.model.essential_score + config.planar_score_margin,
+            "H should significantly beat E: {:?}",
+            pair.model
+        );
+
+        // Model selection is seed-only: the same inliers remain in the covisibility
+        // graph and can become a multi-view track.
+        let tracks = build_tracks(&views, std::slice::from_ref(&pair));
+        assert_eq!(tracks.len(), points.len());
+        assert!(tracks
+            .iter()
+            .all(|track| track.len() == 2 && track[0].0 == 0 && track[1].0 == 1));
+        let (seeds, _) = seed_candidates(std::slice::from_ref(&pair), &views, &intrinsics, &config);
+        assert!(
+            seeds.is_empty(),
+            "a planar pair must not initialize the map"
+        );
+    }
+
+    #[test]
+    fn volumetric_pair_with_significant_baseline_is_not_degenerate() {
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        let cameras = [
+            Pose::identity(),
+            Pose::from_quat_translation(
+                nalgebra::UnitQuaternion::identity(),
+                Vector3::new(0.70, 0.0, 0.0),
+            ),
+        ];
+        // Depth 4-8 m: close enough that a 500 px focal length keeps every point
+        // inside a 640x480 image in both views, with real depth variation so the
+        // scene is not a homography. The 0.70 m baseline gives a ~10 degree
+        // parallax at 4 m, well above the degenerate regime.
+        let points: Vec<Point3<f64>> = [4.0, 6.0, 8.0]
+            .into_iter()
+            .flat_map(|z| {
+                [-0.36, -0.12, 0.12, 0.36]
+                    .into_iter()
+                    .flat_map(move |x| [-0.24, 0.0, 0.24].map(move |y| Point3::new(x, y, z)))
+            })
+            .collect();
+        let views = exact_views(&points, &cameras);
+        let config = model_selection_config();
+
+        let pair = verify_pair(0, 1, &views, &intrinsics, &config)
+            .1
+            .expect("the exact volumetric pair passes fundamental verification");
+        assert!(
+            !pair.model.planar,
+            "volumetric diagnostic: {:?}",
+            pair.model
+        );
+        assert!(
+            pair.model.essential_score > pair.model.homography_score,
+            "E should explain the volumetric data better: {:?}",
+            pair.model
+        );
     }
 
     #[test]
