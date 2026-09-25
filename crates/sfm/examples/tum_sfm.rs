@@ -183,10 +183,15 @@ fn run(args: &mut Args) -> Result<(), String> {
     let colmap_like = match args.format_name.as_str() {
         "colmap" => true,
         "tum" => false,
-        _ => {
-            args.dir.join("sparse/0/images.txt").is_file()
-                || args.dir.join("sparse/images.txt").is_file()
-        }
+        // "auto": a COLMAP model in any of the usual layouts means COLMAP.
+        _ => [
+            "sparse/0/images.txt",
+            "sparse/images.txt",
+            "colmap/sparse/0/images.txt",
+            "dslr_calibration_undistorted/images.txt",
+        ]
+        .iter()
+        .any(|rel| args.dir.join(rel).is_file()),
     };
     let (files, ground_truth, sequence_len, intrinsics_override) = if colmap_like {
         let (files, poses, intrinsics) = load_colmap_sequence(&args.dir)?;
@@ -942,16 +947,22 @@ fn load_sequence(dir: &Path, max_dt: f64) -> Result<(Vec<String>, Vec<Pose>, usi
 fn load_colmap_sequence(dir: &Path) -> Result<(Vec<String>, Vec<Pose>, CameraIntrinsics), String> {
     use cv_io::datasets::colmap;
 
-    let sparse = ["sparse/0", "sparse", "colmap/sparse/0"]
-        .iter()
-        .map(|p| dir.join(p))
-        .find(|p| p.join("images.txt").is_file())
-        .ok_or_else(|| {
-            format!(
-                "no COLMAP text model found under {} (looked for sparse/0/images.txt)",
-                dir.display()
-            )
-        })?;
+    // ETH3D names the directory after the calibration rather than "sparse".
+    let sparse = [
+        "sparse/0",
+        "sparse",
+        "colmap/sparse/0",
+        "dslr_calibration_undistorted",
+    ]
+    .iter()
+    .map(|p| dir.join(p))
+    .find(|p| p.join("images.txt").is_file())
+    .ok_or_else(|| {
+        format!(
+            "no COLMAP text model found under {} (looked for sparse/0/images.txt)",
+            dir.display()
+        )
+    })?;
 
     let cameras = colmap::read_cameras_text(sparse.join("cameras.txt"))
         .map_err(|e| format!("cameras.txt: {e}"))?;
@@ -976,14 +987,24 @@ fn load_colmap_sequence(dir: &Path) -> Result<(Vec<String>, Vec<Pose>, CameraInt
         .iter()
         .filter_map(|img| {
             let pose_cw = img.pose.inverse();
-            let path = dir.join("images").join(&img.name);
-            if path.is_file() {
-                // `extract_view` resolves names against the sequence directory,
-                // so return the path relative to that root, not to images/.
-                Some((format!("images/{}", img.name), pose_cw))
-            } else {
-                None
-            }
+            // ETH3D nests the frames one level deeper
+            // (images/dslr_images_undistorted/*.JPG) while the COLMAP model
+            // stores a bare file name, so search the usual layouts.
+            let path = [
+                dir.join("images").join(&img.name),
+                dir.join("images/dslr_images_undistorted").join(&img.name),
+                dir.join(&img.name),
+            ]
+            .into_iter()
+            .find(|p| p.is_file());
+            let path = path?;
+            // `extract_view` resolves names against the sequence directory, so
+            // return the path relative to that root.
+            let relative = path
+                .strip_prefix(dir)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| format!("images/{}", img.name));
+            Some((relative, pose_cw))
         })
         .collect();
     // Deterministic order: by image name, so a rerun selects the same views.
