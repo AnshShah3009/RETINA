@@ -971,19 +971,41 @@ fn load_colmap_sequence(dir: &Path) -> Result<(Vec<String>, Vec<Pose>, CameraInt
 
     let by_id: std::collections::HashMap<u32, &colmap::Camera> =
         cameras.iter().map(|c| (c.id, c)).collect();
-    let camera = cameras
+    // The mapper carries ONE camera model for the whole reconstruction, so a
+    // scene whose views span several DSLRs cannot be reconstructed correctly
+    // with a single intrinsics. ETH3D scenes have up to six cameras with
+    // slightly different focal lengths, and silently using the first one's
+    // values for every view produces wrong geometry (measured: electro
+    // registered 17% with one camera's intrinsics applied to all views).
+    // Restrict to the largest set of views sharing one camera.
+    let mut per_camera: std::collections::HashMap<u32, Vec<&colmap::Image>> =
+        std::collections::HashMap::new();
+    for img in &images {
+        per_camera.entry(img.camera_id).or_default().push(img);
+    }
+    let (chosen_camera, chosen_images) = per_camera
         .iter()
-        .filter(|c| c.intrinsics.is_some())
-        .min_by_key(|c| c.id)
-        .ok_or_else(|| "no camera with known intrinsics in cameras.txt".to_string())?;
+        .max_by_key(|(camera, imgs)| (imgs.len(), std::cmp::Reverse(**camera)))
+        .map(|(camera, imgs)| (*camera, imgs.clone()))
+        .ok_or_else(|| "images.txt contains no images".to_string())?;
+    let camera = by_id
+        .get(&chosen_camera)
+        .ok_or_else(|| format!("camera {chosen_camera} referenced but absent from cameras.txt"))?;
     let intrinsics = camera
         .intrinsics
-        .ok_or_else(|| "camera has no usable intrinsics".to_string())?;
-    let _ = by_id;
+        .ok_or_else(|| format!("camera {chosen_camera} has no usable intrinsics"))?;
+    if per_camera.len() > 1 {
+        eprintln!(
+            "note: scene spans {} cameras; using camera {chosen_camera} ({} of {} views)",
+            per_camera.len(),
+            chosen_images.len(),
+            images.len()
+        );
+    }
 
     // COLMAP stores world-to-camera; the mapper and the scorer work in
     // camera-to-world, so invert.
-    let mut entries: Vec<(String, Pose)> = images
+    let mut entries: Vec<(String, Pose)> = chosen_images
         .iter()
         .filter_map(|img| {
             let pose_cw = img.pose.inverse();
