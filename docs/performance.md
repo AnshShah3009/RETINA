@@ -89,3 +89,41 @@ rotation error while still cutting the run.
   two-GPU parity test), not by these pipelines. PnP RANSAC and descriptor
   matching are the candidates worth profiling on the GPU next, not image
   filtering.
+
+## ETH3D
+
+The mapper reads COLMAP text models, so it runs on ETH3D without a conversion
+step. Courtyard, 6208x4134 DSLR, 12 consecutive views from one camera:
+
+```bash
+cargo run --release -p cv-sfm --example tum_sfm -- \
+    --dir datasets/courtyard --frames 12 --stride 1 --window 3 --features 8000
+```
+
+| | |
+| --- | ---: |
+| registered | **83.3%** (10/12) |
+| 3D points / mean track | 6,838 / 2.57 |
+| reprojection RMSE | 0.50 px |
+| camera-centre RMSE | 0.3 cm |
+| rotation RMSE (pose-aware) | 0.07° |
+| wall time | 41 s |
+
+The feature budget dominates at this image size:
+
+| `--features` | registered |
+| ---: | ---: |
+| 2,000 | 25.0% |
+| 5,000 | 58.3% |
+| 8,000 | **83.3%** |
+| 10,000 | 83.3% |
+
+TUM-sized defaults leave a 25-megapixel image far too sparsely covered. The
+default is deliberately left alone — the right feature count is scene-dependent,
+and quietly changing it would hide the effect — but this is the first thing to
+raise on any high-resolution sequence.
+
+This scene is also the degenerate regime: 18 of 21 verified pairs are classified
+planar (a shallow ring around a largely flat courtyard), so the
+homography-versus-essential selection is excluding most of the pair graph from
+seeding, as intended.
