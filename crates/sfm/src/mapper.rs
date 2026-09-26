@@ -186,6 +186,10 @@ pub struct MapperConfig {
     pub min_pair_matches: usize,
     /// Inlier threshold of the fundamental-matrix RANSAC, in pixels (Sampson).
     pub f_ransac_threshold_px: f64,
+    /// Match a query view's descriptors against the map's landmarks to find
+    /// 2D-3D correspondences, instead of relying only on track membership.
+    /// Without this, registration cannot reach past the verified pair graph.
+    pub map_matching: bool,
     /// Maximum fundamental-matrix RANSAC iterations (an adaptive bound may stop it
     /// earlier; that bound is a deterministic function of the data).
     pub f_ransac_iters: usize,
@@ -276,6 +280,7 @@ impl Default for MapperConfig {
             pair_selection: PairSelection::Sequential { window: 3 },
             min_pair_matches: 20,
             f_ransac_threshold_px: 1.5,
+            map_matching: true,
             f_ransac_iters: 500,
             h_ransac_threshold_px: 1.5,
             h_ransac_iters: 500,
@@ -626,7 +631,7 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
     report.local_ba_runs = local_ba_runs;
 
     // ---- 6. Report remaining failures ----
-    let final_corr = gather_correspondences(&est);
+    let final_corr = gather_correspondences_matching(&est, views, config);
     for view in 0..n {
         if outcomes[view].is_none() {
             let count = final_corr[view].len();
@@ -744,7 +749,7 @@ fn run_incremental(
             ));
             break;
         }
-        let corr = gather_correspondences(&est);
+        let corr = gather_correspondences_matching(&est, views, config);
         let mut order: Vec<usize> = (0..n)
             .filter(|&v| {
                 est.cam_of_view[v].is_none()
@@ -944,12 +949,79 @@ impl Est {
 /// For every view, the `(landmark, keypoint)` pairs that link it to an existing
 /// 3D point. Only unregistered views are interesting, but all are filled so the
 /// final failure report can use the same structure.
-fn gather_correspondences(est: &Est) -> Vec<Vec<(usize, usize)>> {
+/// 2D-3D correspondences for every unregistered view.
+///
+/// A view can only be offered points whose tracks already contain one of its
+/// keypoints, which limits registration to the pair graph that happened to be
+/// verified. On a wide-baseline sequence that graph does not reach far: measured
+/// on ETH3D courtyard, views past the verified window reported "no 3D point
+/// visible in this view" with zero correspondences while the map held thousands
+/// of points.
+///
+/// So the query view's descriptors are also matched directly against the
+/// descriptors the map already stores for its landmarks. A match gives the
+/// (landmark, this view's keypoint) pair that PnP needs. Track membership is
+/// tried first because it is exact; descriptor matching is the fallback that lets
+/// the map grow past the verified pairs.
+fn gather_correspondences_matching(
+    est: &Est,
+    views: &[View],
+    config: &MapperConfig,
+) -> Vec<Vec<(usize, usize)>> {
     let mut corr: Vec<Vec<(usize, usize)>> = vec![Vec::new(); est.cam_of_view.len()];
     for (point, &track) in est.point_tracks.iter().enumerate() {
         for &(view, kp) in &est.track_obs[track] {
             if est.cam_of_view[view].is_none() {
                 corr[view].push((point, kp));
+            }
+        }
+    }
+
+    if !config.map_matching {
+        return corr;
+    }
+
+    // Descriptors of every landmark, kept parallel to `points`, so a match index
+    // maps straight back to a landmark.
+    // Build the map's descriptor table by walking the tracks once. EVERY
+    // registered observation of a landmark is included, not just the first:
+    // a landmark's appearance drifts with viewpoint, so matching a distant view
+    // against one view's descriptor produces mostly wrong correspondences
+    // (measured: 59-101 correspondences, 0-1 inliers). Duplicates are harmless
+    // because a match is deduplicated by landmark.
+    let mut map_descs = Descriptors::with_capacity(est.points.len());
+    let mut map_point: Vec<usize> = Vec::with_capacity(est.points.len());
+    for (point, &track) in est.point_tracks.iter().enumerate() {
+        for &(view, kp) in &est.track_obs[track] {
+            if est.cam_of_view[view].is_some() {
+                if let Some(d) = views[view].descriptors.descriptors.get(kp) {
+                    map_descs.push(d.clone());
+                    map_point.push(point);
+                }
+            }
+        }
+    }
+    if map_descs.len() < 8 {
+        return corr;
+    }
+
+    let matcher = Matcher::new(MatchType::BruteForce).with_ratio_test(config.ratio);
+    for (view, entry) in corr.iter_mut().enumerate() {
+        if est.cam_of_view[view].is_some() || entry.len() >= config.min_pnp_correspondences {
+            continue;
+        }
+        let matches = matcher.match_descriptors(&views[view].descriptors, &map_descs);
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for m in &matches.matches {
+            let (Ok(q), Ok(t)) = (usize::try_from(m.query_idx), usize::try_from(m.train_idx))
+            else {
+                continue;
+            };
+            let Some(&point) = map_point.get(t) else {
+                continue;
+            };
+            if seen.insert(point) {
+                entry.push((point, q));
             }
         }
     }
