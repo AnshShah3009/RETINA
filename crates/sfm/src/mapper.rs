@@ -190,6 +190,30 @@ pub struct MapperConfig {
     /// 2D-3D correspondences, instead of relying only on track membership.
     /// Without this, registration cannot reach past the verified pair graph.
     pub map_matching: bool,
+    /// Lowe ratio applied when matching a query view against the map.
+    ///
+    /// Kept separate from `ratio` so the two can be tuned independently, but
+    /// measured at 0.75: raising it to 0.90 quadrupled the correspondences
+    /// (38 -> 591 per query on ETH3D courtyard) while inliers stayed at ~1, so
+    /// the extra matches are noise. A looser ratio trades precision for volume
+    /// that PnP cannot use.
+    ///
+    /// Map-level matching does not currently register views. The blockers were
+    /// measured rather than assumed, and are not the ones first suspected:
+    ///   * the descriptor is fine — view-to-view ORB matches on courtyard are
+    ///     961 at a gap of 1 and still 322 at a gap of 9, which is plenty to
+    ///     verify pairs, and 30+ pairs do verify;
+    ///   * tracks are long enough — 2,149 of 6,950 have three or more views and
+    ///     507 have five or more, so the input to triangulation is not thin;
+    ///   * seeding is not being rejected — across 6,950 tracks the parallax,
+    ///     reprojection and observation-count filters reject nothing.
+    /// What remains is that the reconstructed map is small relative to the
+    /// features it was built from (1,147 landmarks from six views holding
+    /// ~48,000 features), and query-to-landmark matches against that small
+    /// table do not survive the ratio test. Widening the pair graph further did
+    /// not help (window 3, 6 and 10 all register 7/15). Closing this needs the
+    /// map to carry far more landmarks per view, not more candidate matches.
+    pub map_ratio: f32,
     /// Maximum fundamental-matrix RANSAC iterations (an adaptive bound may stop it
     /// earlier; that bound is a deterministic function of the data).
     pub f_ransac_iters: usize,
@@ -281,6 +305,7 @@ impl Default for MapperConfig {
             min_pair_matches: 20,
             f_ransac_threshold_px: 1.5,
             map_matching: true,
+            map_ratio: 0.75,
             f_ransac_iters: 500,
             h_ransac_threshold_px: 1.5,
             h_ransac_iters: 500,
@@ -1005,9 +1030,12 @@ fn gather_correspondences_matching(
         return corr;
     }
 
-    let matcher = Matcher::new(MatchType::BruteForce).with_ratio_test(config.ratio);
+    let matcher = Matcher::new(MatchType::BruteForce).with_ratio_test(config.map_ratio);
     for (view, entry) in corr.iter_mut().enumerate() {
-        if est.cam_of_view[view].is_some() || entry.len() >= config.min_pnp_correspondences {
+        if est.cam_of_view[view].is_some() {
+            continue;
+        }
+        if entry.len() >= config.min_pnp_correspondences {
             continue;
         }
         let matches = matcher.match_descriptors(&views[view].descriptors, &map_descs);
