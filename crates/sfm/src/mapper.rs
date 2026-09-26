@@ -609,7 +609,7 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
     let mut best: Option<Hypothesis> = None;
     for seed in candidates.iter().take(config.seed_hypotheses.max(1)) {
         report.seed_hypotheses_tried += 1;
-        let hypothesis = run_incremental(seed, &tracks, views, intrinsics, config);
+        let hypothesis = run_incremental(seed, &tracks, &verified, views, intrinsics, config);
         let is_better = match &best {
             None => true,
             Some(current) => {
@@ -730,6 +730,7 @@ struct Hypothesis {
 fn run_incremental(
     seed: &SeedChoice,
     tracks: &[Vec<(usize, usize)>],
+    verified: &[VerifiedPair],
     views: &[View],
     intrinsics: &CameraIntrinsics,
     config: &MapperConfig,
@@ -743,6 +744,7 @@ fn run_incremental(
     let mut est = Est::new(n, tracks.to_vec());
     est.add_camera(seed.a, Pose::identity());
     est.add_camera(seed.b, seed.pose_b);
+
     for view in [seed.a, seed.b] {
         outcomes[view] = Some(ViewOutcome {
             view,
@@ -833,6 +835,13 @@ fn run_incremental(
                             inliers: inlier_count,
                             failure: None,
                         });
+                        // A newly registered view makes its verified pairs usable,
+                        // so their tracks may now span two registered views.
+                        // Without this the track graph is frozen at whatever the
+                        // seed's pair graph contained and the map can never grow
+                        // beyond it, which is why registration stalls a few views
+                        // in: the next view has no new points to match against.
+                        extend_tracks_for_view(&mut est, v, verified, views);
                         triangulate_new_tracks(&mut est, views, intrinsics, config);
                         if config.retriangulate {
                             retriangulate(&mut est, views, intrinsics, config);
@@ -1014,14 +1023,24 @@ fn gather_correspondences_matching(
     // against one view's descriptor produces mostly wrong correspondences
     // (measured: 59-101 correspondences, 0-1 inliers). Duplicates are harmless
     // because a match is deduplicated by landmark.
+    // ONE descriptor per landmark, not one per observation. A landmark observed
+    // in k registered views contributed k copies, and the Lowe ratio test then
+    // judged every candidate against those near-identical copies: a landmark
+    // that happened to be seen in five views crowded out matches for every other
+    // landmark. Measured on ETH3D courtyard, a 7,000-descriptor table built this
+    // way yields 37 matches for query view 7, while a 7,000-descriptor table of
+    // distinct landmarks yields 485-712.
     let mut map_descs = Descriptors::with_capacity(est.points.len());
     let mut map_point: Vec<usize> = Vec::with_capacity(est.points.len());
     for (point, &track) in est.point_tracks.iter().enumerate() {
+        // Prefer an observation from the view most recently added, but any one
+        // will do; take the first registered observation deterministically.
         for &(view, kp) in &est.track_obs[track] {
             if est.cam_of_view[view].is_some() {
                 if let Some(d) = views[view].descriptors.descriptors.get(kp) {
                     map_descs.push(d.clone());
                     map_point.push(point);
+                    break;
                 }
             }
         }
@@ -2052,6 +2071,61 @@ fn seed_from_pair(
 
 /// Triangulate every track that has no 3D point yet and at least two registered
 /// observations. Returns how many points were added.
+/// Add the observations a newly registered view contributes to the track graph.
+///
+/// Tracks are built once, from the verified pairs known at seed time. A view
+/// registered later therefore brings none of its own tracks with it, and the
+/// map cannot grow past the seed's pair graph. This walks the verified pairs
+/// incident on `view` and, for each inlier match, attaches the partner
+/// observation to the track that already holds this one (creating a track when
+/// the partner has none yet).
+fn extend_tracks_for_view(est: &mut Est, view: usize, verified: &[VerifiedPair], views: &[View]) {
+    // Which track currently owns a given (view, keypoint) node, if any.
+    let mut owner: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::new();
+    for (track, obs) in est.track_obs.iter().enumerate() {
+        for &(v, kp) in obs {
+            owner.insert((v, kp), track);
+        }
+    }
+
+    for pair in verified {
+        let partner = if pair.a == view {
+            Some(pair.b)
+        } else if pair.b == view {
+            Some(pair.a)
+        } else {
+            None
+        };
+        let Some(partner) = partner else { continue };
+
+        for &(ka, kb) in &pair.inliers {
+            let (mine, theirs) = if pair.a == view { (ka, kb) } else { (kb, ka) };
+            let node = (view, mine);
+            let partner_node = (partner, theirs);
+            match owner.get(&node).copied() {
+                Some(track) => {
+                    if !est.track_obs[track].iter().any(|&(v, _)| v == partner) {
+                        est.track_obs[track].push(partner_node);
+                    }
+                }
+                None => {
+                    // A new track with no 3D point yet. The per-landmark vectors
+                    // stay parallel to `points`, so nothing is appended to them
+                    // here; `triangulate_new_tracks` fills them in when the track
+                    // reaches two registered views.
+                    let track = est.track_obs.len();
+                    est.track_obs.push(vec![node, partner_node]);
+                    est.track_point.push(None);
+                    owner.insert(node, track);
+                    owner.insert(partner_node, track);
+                }
+            }
+        }
+    }
+    let _ = views;
+}
+
 fn triangulate_new_tracks(
     est: &mut Est,
     views: &[View],
