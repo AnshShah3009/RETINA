@@ -51,6 +51,10 @@ REQUIRED:
                           groundtruth.txt, rgb/*.png) or a COLMAP/ETH3D scene
                           (images/*.png with a sparse/ text model)
     --format <F>          auto (default), tum, or colmap
+    --contiguous          select a spatially contiguous chain of views instead
+                          of a name-ordered sample
+    --contiguous-radius <R>  maximum metres between neighbouring cameras when
+                          --contiguous is set [default: 1.0]
 
 OPTIONS:
     --frames <N>          number of views handed to the mapper   [default: 20]
@@ -117,6 +121,8 @@ after applying that alignment's rotation.
 struct Args {
     dir: PathBuf,
     format_name: String,
+    contiguous: bool,
+    contiguous_radius: f64,
     frames: usize,
     stride: usize,
     features: usize,
@@ -197,7 +203,8 @@ fn run(args: &mut Args) -> Result<(), String> {
         .any(|rel| args.dir.join(rel).is_file()),
     };
     let (files, ground_truth, sequence_len, intrinsics_override) = if colmap_like {
-        let (files, poses, intrinsics) = load_colmap_sequence(&args.dir)?;
+        let (files, poses, intrinsics) =
+            load_colmap_sequence(&args.dir, args.contiguous, args.contiguous_radius)?;
         let n = files.len();
         (files, poses, n, Some(intrinsics))
     } else {
@@ -952,7 +959,11 @@ fn load_sequence(dir: &Path, max_dt: f64) -> Result<(Vec<String>, Vec<Pose>, usi
 /// same mapper and the same scoring work on it without a TUM index file. The
 /// poses come from the model, so they are only used to score the reconstruction —
 /// the mapper itself never sees them.
-fn load_colmap_sequence(dir: &Path) -> Result<(Vec<String>, Vec<Pose>, CameraIntrinsics), String> {
+fn load_colmap_sequence(
+    dir: &Path,
+    contiguous: bool,
+    contiguous_radius: f64,
+) -> Result<(Vec<String>, Vec<Pose>, CameraIntrinsics), String> {
     use cv_io::datasets::colmap;
 
     // ETH3D names the directory after the calibration rather than "sparse".
@@ -1039,6 +1050,44 @@ fn load_colmap_sequence(dir: &Path) -> Result<(Vec<String>, Vec<Pose>, CameraInt
         .collect();
     // Deterministic order: by image name, so a rerun selects the same views.
     entries.sort_by(|a, b| a.0.cmp(&b.0));
+    // Optionally walk a contiguous capture instead of a name-ordered sample.
+    // Frames are named by capture order on a rig, so the name order is already
+    // a traversal; taking a prefix gives overlapping views, whereas a strided
+    // sample across the whole set can select cameras metres apart that share no
+    // scene at all.
+    if contiguous {
+        // keep the largest chain whose neighbouring centres are within
+        // --contiguous-radius metres
+        let max_step = contiguous_radius;
+        let mut best_at = 0usize;
+        let mut best_len = 0usize;
+        for start in 0..entries.len() {
+            let mut end = start + 1;
+            while end < entries.len() {
+                let d = (entries[end].1.inverse().translation
+                    - entries[end - 1].1.inverse().translation)
+                    .norm();
+                if d > max_step {
+                    break;
+                }
+                end += 1;
+            }
+            if end - start > best_len {
+                best_len = end - start;
+                best_at = start;
+            }
+        }
+        // keep only the densest chain
+        entries.drain(best_at + best_len..);
+        entries.drain(..best_at);
+        eprintln!(
+            "contiguous selection: {} views spanning the densest chain (radius {max_step} m);              consecutive steps: {:?}",
+            entries.len(),
+            entries.windows(2)
+                .map(|w| ((w[1].1.inverse().translation - w[0].1.inverse().translation).norm() * 100.0).round() as i64)
+                .collect::<Vec<_>>()
+        );
+    }
 
     if entries.is_empty() {
         return Err(format!(
@@ -1072,6 +1121,8 @@ fn extract_view(dir: &Path, filename: &str, features: usize) -> Result<View, Str
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut dir: Option<PathBuf> = None;
     let mut format_name: String = String::from("auto");
+    let mut contiguous = false;
+    let mut contiguous_radius = 1.0f64;
     let mut frames = 60usize;
     let mut stride = 5usize;
     let mut features = 1500usize;
@@ -1113,6 +1164,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         match flag {
             "--dir" => dir = Some(PathBuf::from(take(argv, &mut i, flag)?)),
             "--format" => format_name = take(argv, &mut i, flag)?,
+            "--contiguous" => contiguous = true,
+            "--contiguous-radius" => contiguous_radius = parse(&take(argv, &mut i, flag)?, flag)?,
             "--frames" => frames = parse(&take(argv, &mut i, flag)?, flag)?,
             "--stride" => stride = parse(&take(argv, &mut i, flag)?, flag)?,
             "--features" => features = parse(&take(argv, &mut i, flag)?, flag)?,
@@ -1217,6 +1270,8 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     Ok(Args {
         dir,
         format_name,
+        contiguous,
+        contiguous_radius,
         frames,
         stride,
         features,

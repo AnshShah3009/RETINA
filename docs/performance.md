@@ -170,3 +170,70 @@ Neither number is a like-for-like comparison: they publish low-resolution
 many-view aggregates across many scenes, we have measured two DSLR-resolution
 scenes. But on the only axis that matters for a mapper — how much of a sequence
 it can reconstruct — we are behind, and the gap is not a tuning difference.
+
+## Why courtyard stops registering, in detail
+
+The failure is not a matching bug, and the ablation that proves it is worth
+recording.
+
+The example selects views sorted by **file name**, not spatially, so the 15 views
+are scattered across the whole courtyard. Measuring where each unregistered view
+sits relative to the reconstructed cluster:
+
+| view | distance to nearest registered camera |
+| ---: | ---: |
+| 7 | 5.20 m |
+| 8 | 5.45 m |
+| 9 | 5.79 m |
+| 10 | 6.15 m |
+| 11 | 6.86 m |
+| 12 | 7.28 m |
+| 13 | 6.43 m |
+| 14 | 12.53 m |
+
+The registered cameras sit around ground-truth centres x = +3..+6 m, y = +1,
+z = +3.5; view 7 is at (-2.21, -0.32, -5.99) and view 14 at (+10.39, +4.57,
++7.02). The map covers one region of the courtyard and the remaining views
+genuinely have little or no overlap with it.
+
+The ablation settles what the mapper does with those views. For view 7, map
+matching yields 90 correspondences over 90 *distinct* landmarks (so no duplicate
+crowding), every one of them in front of the camera at a plausible 1.7-10 m
+depth — and PnP cannot find any consistent pose at all. For view 8, PnP returns a
+pose that is wrong by 176 degrees in rotation and 8 m in translation. The matches
+are coincidental rather than correct: a landmark seen from 5 m away in a cluttered
+courtyard produces a few plausible-looking descriptor coincidences, and PnP
+correctly refuses to build a pose from them.
+
+So the 30.4% is not the mapper failing at its own task. The task is "extend this
+map across the scene", and the remaining views are somewhere else. A production
+pipeline would either capture overlapping views or detect the gap; our harness
+does neither, and the number should be read as a property of the selection, not
+of the algorithm. The honest comparison to visloc-rs's 99.88% — which registers
+near-every camera in a scene chosen for many-view overlap — still does not hold,
+and closing it needs a mapper that can bridge gaps this one declines to.
+
+## Contiguous view selection
+
+Selecting views by file name spans the scene, so the unregistered ones have no
+overlap with the map and registration is not being asked a question it can
+answer. `--contiguous` keeps the longest run of views whose camera centres are
+within `--contiguous-radius` metres:
+
+```bash
+cargo run --release -p cv-sfm --example tum_sfm -- \
+    --dir datasets/courtyard --stride 1 --contiguous --contiguous-radius 2.0 \
+    --window 3 --features 8000 --f-threshold 8.0
+```
+
+| selection | registered |
+| --- | ---: |
+| name-ordered (`--stride 1`) | 7 / 12 — 58.3% |
+| contiguous (`--stride 1 --contiguous`) | 7 / 7 — **100.0%** |
+
+The difference is entirely the selection. The mapper reconstructs an overlapping
+capture essentially completely, with sub-millimetre camera-centre error; what it
+does not do is bridge a multi-metre gap, which is what the remaining views
+demanded. Bridging those gaps — loop closure, or a retrieval-guided pair graph
+that crosses empty space — is the genuine remaining work, and this measurement
+says so precisely instead of leaving it mixed in with a selection artefact.
