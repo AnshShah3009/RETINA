@@ -59,6 +59,8 @@ OPTIONS:
     --ratio <R>           Lowe ratio-test threshold              [default: 0.75]
     --window <W>          sequential pair window: view i pairs with
                           i+1..=i+W                             [default: 3]
+    --f-threshold <P>     fundamental RANSAC Sampson threshold, px
+                          [default: 1.5]
     --h-threshold <P>     homography RANSAC transfer threshold, px [default: 1.5]
     --h-iters <N>         homography RANSAC iterations           [default: 500]
     --planar-margin <S>   homography-vs-essential score margin
@@ -120,6 +122,7 @@ struct Args {
     features: usize,
     ratio: f32,
     window: usize,
+    f_ransac_threshold_px: f64,
     h_ransac_threshold_px: f64,
     h_ransac_iters: usize,
     planar_score_margin: f64,
@@ -252,6 +255,7 @@ fn run(args: &mut Args) -> Result<(), String> {
                 window: args.window,
             },
         },
+        f_ransac_threshold_px: args.f_ransac_threshold_px,
         h_ransac_threshold_px: args.h_ransac_threshold_px,
         h_ransac_iters: args.h_ransac_iters,
         planar_score_margin: args.planar_score_margin,
@@ -461,6 +465,10 @@ fn print_config(
     );
     println!("  ratio              : {:.3}", args.ratio);
     println!("  pair selection     : {pairs}");
+    println!(
+        "  fundamental RANSAC : {:.2} px (Sampson)",
+        args.f_ransac_threshold_px
+    );
     println!(
         "  homography RANSAC  : {:.2} px / {} iterations; planar margin {:.3}",
         args.h_ransac_threshold_px, args.h_ransac_iters, args.planar_score_margin
@@ -1069,6 +1077,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut features = 1500usize;
     let mut ratio = 0.75f32;
     let mut window = 3usize;
+    let mut f_ransac_threshold_px = 1.5f64;
     let mut h_ransac_threshold_px = 1.5f64;
     let mut h_ransac_iters = 500usize;
     let mut planar_score_margin = 0.05f64;
@@ -1109,6 +1118,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--features" => features = parse(&take(argv, &mut i, flag)?, flag)?,
             "--ratio" => ratio = parse(&take(argv, &mut i, flag)?, flag)?,
             "--window" => window = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--f-threshold" => f_ransac_threshold_px = parse(&take(argv, &mut i, flag)?, flag)?,
             "--h-threshold" => h_ransac_threshold_px = parse(&take(argv, &mut i, flag)?, flag)?,
             "--h-iters" => h_ransac_iters = parse(&take(argv, &mut i, flag)?, flag)?,
             "--planar-margin" => planar_score_margin = parse(&take(argv, &mut i, flag)?, flag)?,
@@ -1212,6 +1222,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         features,
         ratio,
         window,
+        f_ransac_threshold_px,
         h_ransac_threshold_px,
         h_ransac_iters,
         planar_score_margin,

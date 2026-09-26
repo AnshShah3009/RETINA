@@ -1513,7 +1513,12 @@ fn normalized_msac_score(
             score += (1.0 - error / threshold_sq).max(0.0);
         }
     }
-    (2.0 * score / (threshold_sq * n as f64)).clamp(0.0, 1.0)
+    // Same normalisation as `essential_model_score`: MSAC is the mean of
+    // (1 - err/threshold^2) over the correspondences, so both models are scored
+    // on the same 0..1 scale. This function previously divided by
+    // `threshold_sq` as well, which inflated it by 1/threshold^2 and made every
+    // pair look planar regardless of the data.
+    (score / n as f64).clamp(0.0, 1.0)
 }
 
 /// Calculate the normalized essential score on calibrated pixel correspondences.
@@ -1794,6 +1799,33 @@ fn seed_candidates(
         }
         if good > 0 {
             scored.push((good, choice));
+        }
+    }
+
+    // Fallback: if model selection rejected every pair, the map cannot start at
+    // all. On a shallow capture of a largely planar scene that is the common
+    // case — measured on ETH3D courtyard, 13 of 13 verified pairs were flagged
+    // planar, which excluded the whole pair graph and left a 6-view map out of
+    // 23. Rather than never seed from a planar-flagged pair, fall back to the
+    // best-scoring one only when nothing else is available: the essential
+    // decomposition is checked by triangulation and cheirality downstream, so a
+    // bad one is rejected there, whereas refusing to try means no map at all.
+    if scored.is_empty() {
+        for pair in verified {
+            if pair.inliers.len() < config.min_seed_inliers {
+                continue;
+            }
+            let Some((good, choice)) = seed_from_pair(pair, views, intrinsics, config) else {
+                continue;
+            };
+            diagnostics.push((pair.a, pair.b, good));
+            if good > 0 {
+                scored.push((good, choice));
+            }
+        }
+        if !scored.is_empty() {
+            scored.sort_by(|left, right| right.0.cmp(&left.0));
+            scored.truncate(1);
         }
     }
 
