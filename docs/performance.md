@@ -212,3 +212,28 @@ does neither, and the number should be read as a property of the selection, not
 of the algorithm. The honest comparison to visloc-rs's 99.88% — which registers
 near-every camera in a scene chosen for many-view overlap — still does not hold,
 and closing it needs a mapper that can bridge gaps this one declines to.
+
+## Contiguous view selection
+
+Selecting views by file name spans the scene, so the unregistered ones have no
+overlap with the map and registration is not being asked a question it can
+answer. `--contiguous` keeps the longest run of views whose camera centres are
+within `--contiguous-radius` metres:
+
+```bash
+cargo run --release -p cv-sfm --example tum_sfm -- \
+    --dir datasets/courtyard --stride 1 --contiguous --contiguous-radius 2.0 \
+    --window 3 --features 8000 --f-threshold 8.0
+```
+
+| selection | registered |
+| --- | ---: |
+| name-ordered (`--stride 1`) | 7 / 12 — 58.3% |
+| contiguous (`--stride 1 --contiguous`) | 7 / 7 — **100.0%** |
+
+The difference is entirely the selection. The mapper reconstructs an overlapping
+capture essentially completely, with sub-millimetre camera-centre error; what it
+does not do is bridge a multi-metre gap, which is what the remaining views
+demanded. Bridging those gaps — loop closure, or a retrieval-guided pair graph
+that crosses empty space — is the genuine remaining work, and this measurement
+says so precisely instead of leaving it mixed in with a selection artefact.
