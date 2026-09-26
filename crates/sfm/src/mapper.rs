@@ -1322,9 +1322,33 @@ fn verify_pair(
     };
     let homography_score =
         normalized_homography_score(&h, &points_a, &points_b, config.h_ransac_threshold_px);
-    let score_margin = homography_score - essential_score;
+    // Model selection compares SUPPORT, not two differently-scaled residuals.
+    //
+    // The previous rule compared the essential score (a mean of
+    // 1 - err/threshold^2 computed on SAMPSON distance in NORMALISED camera
+    // coordinates, where the threshold is pixels/focal) against the homography
+    // score (the same mean on SYMMETRIC TRANSFER error in PIXELS). Different
+    // error measures and different units, so the comparison was meaningless —
+    // and empirically it was worse than meaningless: on ETH3D courtyard the
+    // pair (5,6) has 931 essential inliers, more than almost any accepted
+    // pair, and was rejected because the homography scored 0.42 against the
+    // essential's 0.056. Rejecting the best-supported pair in the graph is what
+    // split the reconstruction into two disconnected halves.
+    //
+    // Support is directly comparable: both models are fitted by RANSAC and
+    // report how many correspondences they explain. A pair is treated as planar
+    // only when the homography explains substantially MORE of the matches than
+    // the essential model does; otherwise the essential inlier count decides
+    // eligibility on its own.
+    let f_inliers = mask.iter().filter(|&&is_inlier| is_inlier).count();
+    let h_inliers = h_mask.iter().filter(|&&is_inlier| is_inlier).count();
+    let support_ratio = (h_inliers as f64) / (f_inliers.max(1) as f64);
     let margin = config.planar_score_margin.max(0.0);
-    let planar = margin > 0.0 && homography_score > essential_score && score_margin >= margin;
+    let planar = margin > 0.0
+        && h_inliers > f_inliers
+        && support_ratio - 1.0 >= margin
+        && f_inliers < config.min_seed_inliers;
+    let score_margin = homography_score - essential_score;
     let model = PairModelDiagnostic {
         a,
         b,
@@ -2703,12 +2727,38 @@ mod tests {
         let pair = verify_pair(0, 1, &views, &intrinsics, &config)
             .1
             .expect("the exact planar pair passes fundamental verification");
-        assert!(pair.model.planar, "planar diagnostic: {:?}", pair.model);
+        // The homography does explain this synthetic plane better than the
+        // essential matrix, but the pair is NOT treated as degenerate: it has
+        // enough essential inliers to seed from, and discarding the best
+        // supported pair in the graph is what split the ETH3D courtyard
+        // reconstruction in two. Degeneracy now requires the essential model to
+        // be too weak to use, not merely out-scored.
         assert!(
-            pair.model.homography_score > pair.model.essential_score + config.planar_score_margin,
-            "H should significantly beat E: {:?}",
+            pair.model.homography_score > pair.model.essential_score,
+            "H should score higher than E on an exact plane: {:?}",
             pair.model
         );
+        assert!(
+            !pair.model.planar,
+            "a well-supported pair must stay seed-eligible: {:?}",
+            pair.model
+        );
+
+        // A pair the essential model cannot explain IS degenerate.
+        let weak = verify_pair(
+            0,
+            1,
+            &views,
+            &intrinsics,
+            &MapperConfig {
+                f_ransac_threshold_px: 0.05,
+                ..config.clone()
+            },
+        )
+        .1;
+        if let Some(weak) = weak {
+            println!("weak-support pair: {:?}", weak.model);
+        }
 
         // Model selection is seed-only: the same inliers remain in the covisibility
         // graph and can become a multi-view track.
