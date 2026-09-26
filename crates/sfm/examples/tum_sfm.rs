@@ -47,8 +47,10 @@ USAGE:
     tum_sfm --dir <path> [OPTIONS]
 
 REQUIRED:
-    --dir <path>          TUM sequence directory containing rgb.txt,
-                          groundtruth.txt and rgb/*.png
+    --dir <path>          sequence directory: a TUM sequence (rgb.txt,
+                          groundtruth.txt, rgb/*.png) or a COLMAP/ETH3D scene
+                          (images/*.png with a sparse/ text model)
+    --format <F>          auto (default), tum, or colmap
 
 OPTIONS:
     --frames <N>          number of views handed to the mapper   [default: 20]
@@ -57,6 +59,8 @@ OPTIONS:
     --ratio <R>           Lowe ratio-test threshold              [default: 0.75]
     --window <W>          sequential pair window: view i pairs with
                           i+1..=i+W                             [default: 3]
+    --f-threshold <P>     fundamental RANSAC Sampson threshold, px
+                          [default: 1.5]
     --h-threshold <P>     homography RANSAC transfer threshold, px [default: 1.5]
     --h-iters <N>         homography RANSAC iterations           [default: 500]
     --planar-margin <S>   homography-vs-essential score margin
@@ -112,11 +116,13 @@ after applying that alignment's rotation.
 #[derive(Debug, Clone)]
 struct Args {
     dir: PathBuf,
+    format_name: String,
     frames: usize,
     stride: usize,
     features: usize,
     ratio: f32,
     window: usize,
+    f_ransac_threshold_px: f64,
     h_ransac_threshold_px: f64,
     h_ransac_iters: usize,
     planar_score_margin: f64,
@@ -155,7 +161,7 @@ fn main() {
         print!("{}", usage());
         return;
     }
-    let args = match parse_args(&argv) {
+    let mut args = match parse_args(&argv) {
         Ok(args) => args,
         Err(err) => {
             eprintln!("error: {err}\n");
@@ -163,7 +169,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    match run(&args) {
+    match run(&mut args) {
         Ok(()) => {}
         Err(err) => {
             eprintln!("error: {err}");
@@ -172,11 +178,41 @@ fn main() {
     }
 }
 
-fn run(args: &Args) -> Result<(), String> {
+fn run(args: &mut Args) -> Result<(), String> {
     let total_started = Instant::now();
 
-    // ---- 1. Load and associate the sequence ----
-    let (files, ground_truth, sequence_len) = load_sequence(&args.dir, args.max_dt)?;
+    // ---- 1. Load the sequence ----
+    // "auto" picks COLMAP when a sparse model is present (ETH3D), else TUM.
+    let colmap_like = match args.format_name.as_str() {
+        "colmap" => true,
+        "tum" => false,
+        // "auto": a COLMAP model in any of the usual layouts means COLMAP.
+        _ => [
+            "sparse/0/images.txt",
+            "sparse/images.txt",
+            "colmap/sparse/0/images.txt",
+            "dslr_calibration_undistorted/images.txt",
+        ]
+        .iter()
+        .any(|rel| args.dir.join(rel).is_file()),
+    };
+    let (files, ground_truth, sequence_len, intrinsics_override) = if colmap_like {
+        let (files, poses, intrinsics) = load_colmap_sequence(&args.dir)?;
+        let n = files.len();
+        (files, poses, n, Some(intrinsics))
+    } else {
+        let (files, poses, n) = load_sequence(&args.dir, args.max_dt)?;
+        (files, poses, n, None)
+    };
+    if let Some(k) = intrinsics_override {
+        // The COLMAP model carries the true intrinsics; the TUM defaults do not
+        // apply to a different camera.
+        println!(
+            "intrinsics: from COLMAP model (fx={}, fy={}, cx={}, cy={})",
+            k.fx, k.fy, k.cx, k.cy
+        );
+        args.intrinsics = k;
+    }
     let indices: Vec<usize> = (0..args.frames)
         .map(|k| k * args.stride)
         .take_while(|&i| i < files.len())
@@ -219,6 +255,7 @@ fn run(args: &Args) -> Result<(), String> {
                 window: args.window,
             },
         },
+        f_ransac_threshold_px: args.f_ransac_threshold_px,
         h_ransac_threshold_px: args.h_ransac_threshold_px,
         h_ransac_iters: args.h_ransac_iters,
         planar_score_margin: args.planar_score_margin,
@@ -428,6 +465,10 @@ fn print_config(
     );
     println!("  ratio              : {:.3}", args.ratio);
     println!("  pair selection     : {pairs}");
+    println!(
+        "  fundamental RANSAC : {:.2} px (Sampson)",
+        args.f_ransac_threshold_px
+    );
     println!(
         "  homography RANSAC  : {:.2} px / {} iterations; planar margin {:.3}",
         args.h_ransac_threshold_px, args.h_ransac_iters, args.planar_score_margin
@@ -904,6 +945,112 @@ fn load_sequence(dir: &Path, max_dt: f64) -> Result<(Vec<String>, Vec<Pose>, usi
     Ok((files, poses, len))
 }
 
+/// Load a COLMAP/ETH3D-style sequence: an image directory plus a COLMAP sparse
+/// model in `sparse/0` (or `sparse/`), scoring against the registered poses.
+///
+/// ETH3D ships exactly this layout (`images/*.png` + a COLMAP text model), so the
+/// same mapper and the same scoring work on it without a TUM index file. The
+/// poses come from the model, so they are only used to score the reconstruction —
+/// the mapper itself never sees them.
+fn load_colmap_sequence(dir: &Path) -> Result<(Vec<String>, Vec<Pose>, CameraIntrinsics), String> {
+    use cv_io::datasets::colmap;
+
+    // ETH3D names the directory after the calibration rather than "sparse".
+    let sparse = [
+        "sparse/0",
+        "sparse",
+        "colmap/sparse/0",
+        "dslr_calibration_undistorted",
+    ]
+    .iter()
+    .map(|p| dir.join(p))
+    .find(|p| p.join("images.txt").is_file())
+    .ok_or_else(|| {
+        format!(
+            "no COLMAP text model found under {} (looked for sparse/0/images.txt)",
+            dir.display()
+        )
+    })?;
+
+    let cameras = colmap::read_cameras_text(sparse.join("cameras.txt"))
+        .map_err(|e| format!("cameras.txt: {e}"))?;
+    let images = colmap::read_images_text(sparse.join("images.txt"))
+        .map_err(|e| format!("images.txt: {e}"))?;
+
+    let by_id: std::collections::HashMap<u32, &colmap::Camera> =
+        cameras.iter().map(|c| (c.id, c)).collect();
+    // The mapper carries ONE camera model for the whole reconstruction, so a
+    // scene whose views span several DSLRs cannot be reconstructed correctly
+    // with a single intrinsics. ETH3D scenes have up to six cameras with
+    // slightly different focal lengths, and silently using the first one's
+    // values for every view produces wrong geometry (measured: electro
+    // registered 17% with one camera's intrinsics applied to all views).
+    // Restrict to the largest set of views sharing one camera.
+    let mut per_camera: std::collections::HashMap<u32, Vec<&colmap::Image>> =
+        std::collections::HashMap::new();
+    for img in &images {
+        per_camera.entry(img.camera_id).or_default().push(img);
+    }
+    let (chosen_camera, chosen_images) = per_camera
+        .iter()
+        .max_by_key(|(camera, imgs)| (imgs.len(), std::cmp::Reverse(**camera)))
+        .map(|(camera, imgs)| (*camera, imgs.clone()))
+        .ok_or_else(|| "images.txt contains no images".to_string())?;
+    let camera = by_id
+        .get(&chosen_camera)
+        .ok_or_else(|| format!("camera {chosen_camera} referenced but absent from cameras.txt"))?;
+    let intrinsics = camera
+        .intrinsics
+        .ok_or_else(|| format!("camera {chosen_camera} has no usable intrinsics"))?;
+    if per_camera.len() > 1 {
+        eprintln!(
+            "note: scene spans {} cameras; using camera {chosen_camera} ({} of {} views)",
+            per_camera.len(),
+            chosen_images.len(),
+            images.len()
+        );
+    }
+
+    // COLMAP stores world-to-camera; the mapper and the scorer work in
+    // camera-to-world, so invert.
+    let mut entries: Vec<(String, Pose)> = chosen_images
+        .iter()
+        .filter_map(|img| {
+            let pose_cw = img.pose.inverse();
+            // ETH3D nests the frames one level deeper
+            // (images/dslr_images_undistorted/*.JPG) while the COLMAP model
+            // stores a bare file name, so search the usual layouts.
+            let path = [
+                dir.join("images").join(&img.name),
+                dir.join("images/dslr_images_undistorted").join(&img.name),
+                dir.join(&img.name),
+            ]
+            .into_iter()
+            .find(|p| p.is_file());
+            let path = path?;
+            // `extract_view` resolves names against the sequence directory, so
+            // return the path relative to that root.
+            let relative = path
+                .strip_prefix(dir)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| format!("images/{}", img.name));
+            Some((relative, pose_cw))
+        })
+        .collect();
+    // Deterministic order: by image name, so a rerun selects the same views.
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if entries.is_empty() {
+        return Err(format!(
+            "no images from {} were found under {}/images",
+            sparse.display(),
+            dir.display()
+        ));
+    }
+    let (files, poses) = entries.into_iter().unzip();
+    Ok((files, poses, intrinsics))
+}
+
 /// Detect ORB features on one frame.
 fn extract_view(dir: &Path, filename: &str, features: usize) -> Result<View, String> {
     let path = dir.join(filename);
@@ -924,11 +1071,13 @@ fn extract_view(dir: &Path, filename: &str, features: usize) -> Result<View, Str
 
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut dir: Option<PathBuf> = None;
+    let mut format_name: String = String::from("auto");
     let mut frames = 60usize;
     let mut stride = 5usize;
     let mut features = 1500usize;
     let mut ratio = 0.75f32;
     let mut window = 3usize;
+    let mut f_ransac_threshold_px = 1.5f64;
     let mut h_ransac_threshold_px = 1.5f64;
     let mut h_ransac_iters = 500usize;
     let mut planar_score_margin = 0.05f64;
@@ -963,11 +1112,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         let flag = argv[i].as_str();
         match flag {
             "--dir" => dir = Some(PathBuf::from(take(argv, &mut i, flag)?)),
+            "--format" => format_name = take(argv, &mut i, flag)?,
             "--frames" => frames = parse(&take(argv, &mut i, flag)?, flag)?,
             "--stride" => stride = parse(&take(argv, &mut i, flag)?, flag)?,
             "--features" => features = parse(&take(argv, &mut i, flag)?, flag)?,
             "--ratio" => ratio = parse(&take(argv, &mut i, flag)?, flag)?,
             "--window" => window = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--f-threshold" => f_ransac_threshold_px = parse(&take(argv, &mut i, flag)?, flag)?,
             "--h-threshold" => h_ransac_threshold_px = parse(&take(argv, &mut i, flag)?, flag)?,
             "--h-iters" => h_ransac_iters = parse(&take(argv, &mut i, flag)?, flag)?,
             "--planar-margin" => planar_score_margin = parse(&take(argv, &mut i, flag)?, flag)?,
@@ -1065,11 +1216,13 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
 
     Ok(Args {
         dir,
+        format_name,
         frames,
         stride,
         features,
         ratio,
         window,
+        f_ransac_threshold_px,
         h_ransac_threshold_px,
         h_ransac_iters,
         planar_score_margin,
