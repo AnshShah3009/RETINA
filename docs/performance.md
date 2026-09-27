@@ -723,3 +723,44 @@ essentially all wrong on the views that fail, and no post-hoc geometric filter
 recovers that. The descriptor does not match at these textures, so there is no
 correct association for a filter to preserve. The fix has to happen at
 extraction or association, before PnP is ever called.
+
+## Histogram equalisation: a fourth thing that did not work
+
+The texture measurement points at contrast, and the standard remedy is
+histogram equalisation. It genuinely fixes the measurement - the dimmest
+electro frame goes from block std 1.98 to 4.42, past the 6.2 region of the
+sequence that registers 45/45 - so it was implemented (256-bin cumulative
+distribution; `image` 0.25 exports no such helper) and measured on all three
+sequences.
+
+| sequence | without | with equalisation |
+| --- | --- | --- |
+| ETH3D electro, 12 views | 3/12 — 242 points | 3/12 — 292 points |
+| ETH3D electro, 5 views | 3/5 — 455 points | 3/5 — 245 points |
+| TUM fr1_desk, 40 views | 23/40 | 25/40 |
+| **TUM fr1_xyz, 45 views** | **45/45 — 1.36 cm** | **40/45 — 5.39 cm** |
+
+It helps fr1_desk (23 -> 25) and adds points on the long ETH3D chain, and it
+**badly damages fr1_xyz**: five views lost and camera-centre error up from 1.36 cm
+to 5.39 cm - a fourfold regression on the sequence that works best.
+
+The reason is that equalisation amplifies noise wherever there is little signal.
+fr1_xyz is already well exposed, so its histogram is spread out and equalisation
+stretches sensor noise into spurious corners, which then enter the map and
+poison it. On a dim frame the same operation is doing something useful. Applied
+unconditionally it trades a well-exposed capture for a poorly-exposed one.
+
+It was reverted rather than made conditional. A per-sequence switch would be
+tuning to the test set, and the honest summary is that this needs an
+exposure-aware normalisation, not a global transform.
+
+### The pattern across all of these
+
+Four separate interventions aimed at the ETH3D descriptor limit - geometric
+filtering of 2D-3D associations, a viewpoint gate, PnP gate relaxation, and
+contrast normalisation - have now been built and measured, and none improves the
+number that matters. Each is defensible in isolation and each is wrong once
+measured against a sequence that already works. That is the useful result: the
+limit is genuinely at the descriptor, the straightforward mitigations do not
+reach it, and a fix needs to be either a scale-appropriate descriptor or an
+association method that does not depend on descriptor discriminability at all.
