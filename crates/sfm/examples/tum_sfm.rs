@@ -73,7 +73,7 @@ OPTIONS:
     --loop-min-gap <N>    minimum index separation for a revisit to count as
                           a loop [default: 10]
     --loop-max-px <P>     reprojection budget for accepting a loop, px
-                          [default: 4.0]
+                          [default: 2.0]
     --no-loop-gnc         fuse every verified loop, without the consistency
                           check (default: check on)
     --h-threshold <P>     homography RANSAC transfer threshold, px [default: 1.5]
@@ -1176,9 +1176,9 @@ fn extract_view(dir: &Path, filename: &str, features: usize) -> Result<View, Str
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut dir: Option<PathBuf> = None;
     let mut format_name: String = String::from("auto");
-    let mut loop_closure = false;
+    let mut loop_closure = true;
     let mut loop_min_gap = 10usize;
-    let mut loop_max_px = 4.0f64;
+    let mut loop_max_px = 2.0f64;
     let mut loop_gnc = true;
     let mut map_ratio = 0.75f32;
     let mut contiguous = false;

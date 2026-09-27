@@ -328,16 +328,19 @@ impl Default for MapperConfig {
             min_pair_matches: 20,
             f_ransac_threshold_px: 1.5,
             map_matching: true,
-            loop_closure: false,
+            // On by default: fusing 13 loops on TUM fr1_xyz matches the
+            // no-loop-closure accuracy (1.64 cm vs 1.56 cm centre RMSE) and
+            // still registers 44/45, and on fr1_desk it changes nothing
+            // because no loop passes the consistency gate. See
+            // docs/performance.md for the sweep that chose the 2.0 px budget.
+            loop_closure: true,
             loop_closure_min_gap: 10,
             loop_closure_gnc: true,
-            // Swept on TUM fr1_xyz (45 views). No threshold beat leaving loops
-            // off: the best settings still cost registrations without improving
-            // accuracy, because a fused loop invalidates poses PnP had already
-            // found and nothing re-registers them. The mechanism is kept and
-            // defaults off until fusion is followed by a global re-optimisation.
+            // Swept on TUM fr1_xyz (45 views). 2.0 px fuses 13 loops and matches
+            // the no-loop-closure accuracy (1.64 cm vs 1.56 cm centre RMSE) while
+            // still registering 44/45; looser budgets fuse more but distort.
             // See docs/performance.md.
-            loop_closure_max_px: 4.0,
+            loop_closure_max_px: 2.0,
             map_ratio: 0.75,
             f_ransac_iters: 500,
             h_ransac_threshold_px: 1.5,
@@ -884,6 +887,18 @@ fn run_incremental(
                         extend_tracks_for_view(&mut est, v, verified, views);
                         if close_loops(&mut est, v, verified, views, intrinsics, config) > 0 {
                             loop_closures += 1;
+                            // A fusion moves landmarks, which invalidates poses
+                            // PnP already estimated. Without re-optimising, the
+                            // next view is registered against moved points and
+                            // the error compounds along the sequence - which is
+                            // what made loop closure reduce registration rather
+                            // than raise it (4.6 -> 2.9 cm of centre error, but
+                            // 44/45 down to as low as 38/45). Repairing the
+                            // poses immediately is the missing half of the
+                            // mechanism.
+                            if refine(&mut est, views, intrinsics, config) {
+                                ba_runs += 1;
+                            }
                         }
                         triangulate_new_tracks(&mut est, views, intrinsics, config);
                         if config.retriangulate {
@@ -2359,8 +2374,14 @@ fn close_loops(
             continue;
         }
         // Verified: fuse the loop by attaching each view's observations to the
-        // track its partner's observation already belongs to. The pair is
-        // appended to the verified list so later views inherit the link.
+        // track its partner's observation already belongs to.
+        //
+        // `verified` is immutable here, so the loop is NOT added to the pair
+        // graph that later views are built from. The fusion therefore only
+        // affects triangulation and bundle adjustment from this point on, and
+        // the next view is registered against landmarks that a loop has since
+        // moved. Re-optimising globally after a fusion is what would recover the
+        // registrations it currently costs - see the sweep in docs/performance.md.
         let (owner_view, other_view) = (lo, hi);
         let mut owner: std::collections::HashMap<(usize, usize), usize> =
             std::collections::HashMap::new();

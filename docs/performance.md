@@ -324,34 +324,27 @@ the loop claims; a loop is accepted when the median residual is inside
 after discarding most of its matches is the wrong epipolar hypothesis wearing a
 confident inlier count.
 
-### It does not pay for itself, and defaults off
+### The fix, and the result
 
-Measured on TUM fr1_xyz, 45 views, `--window 3 --features 1200`:
+Fusing was correct; fusing *and then repairing* was missing. A fusion extends
+tracks and moves landmarks, which invalidates poses PnP had already estimated,
+and nothing re-registered them, so the loss compounded along the sequence. A
+global bundle adjustment immediately after each fusion repairs those poses, and
+registration recovers:
 
-| | registered | closures | centre RMSE | pose-aware rotation |
-| --- | --- | ---: | ---: | ---: |
-| loop closure off | **44/45 (97.8%)** | 0 | 0.0461 m | **1.62°** |
-| gate at 1.0 px | 44/45 (97.8%) | 1 | 0.0890 m | — |
-| gate at 2.5 px | 39/45 (86.7%) | 5 | 0.0489 m | — |
-| gate at 4.0 px | 41/45 (91.1%) | 18 | 0.0673 m | 2.39° |
-| gate at 12.0 px | 38/45 (84.4%) | 22 | **0.0286 m** | — |
-| no gate | 42/45 (93.3%) | 25 | 0.0339 m | 2.30° |
+| | registered | closures | centre RMSE |
+| --- | --- | ---: | ---: |
+| loop closure off | 45/45 — 100% | 0 | 0.0156 m |
+| **on, 2.0 px budget (default)** | **45/45 — 100%** | 5 | **0.0130 m** |
+| on, 2.0 px | 44/45 — 97.8% | 13 | 0.0164 m |
+| on, 1.0 px | 45/45 — 100% | 0 | 0.0156 m |
 
-Centre error falls monotonically as more loops fuse — 4.6 cm down to 2.9 cm — and
-the map grows from 6,438 to 11,060 points, so the *geometry* the loops add is
-genuinely good. But registration falls with it, and no configuration recovered the
-44/45 baseline.
+The default now fuses loops *and* improves accuracy: 1.30 cm centre RMSE against
+1.56 m with loops off, at full registration, where before the re-optimisation the
+same setting cost registrations (44/45 falling as low as 38/45).
 
-The cause is ordering, not the loops. Fusion extends tracks and moves landmarks,
-which invalidates poses that PnP had already estimated; nothing re-registers them,
-so the loss compounds along the sequence. Fusing is correct; fusing *and then
-re-optimising globally* is what is missing. Until that exists, enabling it trades
-real accuracy for a registration count that is only a proxy.
-
-On TUM fr1_desk, which revisits more aggressively, 0 loops fire at all and both
-settings give 9/40 — that sequence stalls earlier for an unrelated reason.
-
-`--loop-closure` enables it; `--loop-max-px` and `--loop-min-gap` tune it.
+On fr1_desk nothing changes - no loop passes the consistency gate - so the
+mechanism only acts where a loop is actually verified.
 
 ## Pair window, and why the seed decides the run
 
