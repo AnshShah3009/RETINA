@@ -2040,11 +2040,83 @@ fn seed_candidates(
     } else {
         qualified
     };
-    // Best geometry first; ascending view indices break ties.
-    chosen.sort_by(|x, y| {
-        y.0.cmp(&x.0)
-            .then(x.1.a.cmp(&y.1.a))
-            .then(x.1.b.cmp(&y.1.b))
+
+    // Rank on connectivity, not on the pair's own triangulation.
+    //
+    // `good` counts points that triangulate from that pair alone, which is a
+    // purely local measure. A locally excellent pair sitting at a dead end of
+    // the sequence therefore outranks one that would have carried the whole
+    // trajectory, and the run is then decided before any view registers.
+    // Measured on TUM fr1_desk, registration swung 12, 25, 9, 17 and 28 views
+    // out of 40 as the feature count changed which pair ranked first, with the
+    // chosen seed jumping from (14, 16) to (24, 26).
+    //
+    // The fix is lookahead: a seed can only grow the map if the views on both
+    // sides of it have verified pairs of their own. `reach` counts how many
+    // views the sequence can continue through from this pair, and the ranking
+    // is lexicographic - reach first, then local quality - so a well-connected
+    // seed always wins over a marginally better isolated one.
+    let degree: std::collections::HashMap<(usize, usize), usize> = {
+        let mut d: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::<(usize, usize), usize>::new();
+        for pair in verified {
+            let keys: [(usize, usize); 2] = [(pair.a, pair.b), (pair.b, pair.a)];
+            for key in keys {
+                *d.entry(key).or_insert(0usize) += 1;
+            }
+        }
+        d
+    };
+    // Precompute each candidate's rank, so the sort does not need to borrow
+    // `chosen` while it is being sorted.
+    let ranks: std::collections::HashMap<(usize, usize), (usize, usize, usize, usize)> = chosen
+        .iter()
+        .map(|(local, choice)| {
+            let before: usize = degree
+                .iter()
+                .filter(|((a, _), _)| *a < choice.a)
+                .map(|(_, &n)| n)
+                .sum();
+            let after: usize = degree
+                .iter()
+                .filter(|((_, b), _)| *b > choice.b)
+                .map(|(_, &n)| n)
+                .sum();
+            // Anchored pairs (no connection to the sequence on either side)
+            // cannot lead anywhere, so they rank below any pair that connects.
+            let reach = if before == 0 && after == 0 {
+                0
+            } else {
+                before + after
+            };
+            (
+                (choice.a, choice.b),
+                (reach, *local, choice.b - choice.a, choice.a),
+            )
+        })
+        .collect();
+    // Best reach first, then local quality, then the tightest pair, then the
+    // lowest view indices so the choice stays deterministic.
+    //
+    // DIAGNOSTIC BUILD (uncommitted): with the rank key set to the baseline
+    // span `b - a` alone, so a narrow-baseline pair always outranks a wide one
+    // and the essential-matrix decomposition is always taken from a pair that
+    // has enough parallax to be observable.
+    chosen.sort_by_key(|(local, choice)| {
+        if std::env::var_os("CV_SFM_DIAG_SPAN").is_some() {
+            return (
+                usize::MAX - (choice.b - choice.a),
+                choice.a,
+                choice.b,
+                0usize,
+            );
+        }
+        ranks.get(&(choice.a, choice.b)).copied().unwrap_or((
+            0,
+            *local,
+            choice.b - choice.a,
+            choice.a,
+        ))
     });
     let mut ordered: Vec<SeedChoice> = chosen
         .into_iter()
@@ -3269,5 +3341,163 @@ mod tests {
         // p2 lies on the epipolar line of p1 when y is preserved.
         let error = sampson_sq(&f, &Point2::new(100.0, 100.0), &Point2::new(120.0, 100.0));
         assert!(error < 1e-12, "expected zero Sampson error, got {error}");
+    }
+
+    // ---- diagnostic: what the winning seed pair's baseline looks like ----
+
+    /// A ground-truth relative pose, the track observations it implies and a
+    /// view list holding the projected keypoints.
+    fn two_view_case(
+        a: usize,
+        b: usize,
+        step: f64,
+        t: f64,
+        n_points: usize,
+    ) -> (Vec<Vec<(usize, usize)>>, Vec<View>, CameraIntrinsics) {
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        // World == camera a's frame, so the ground-truth world-to-camera pose
+        // of b is a pure translation.
+        let pose_b = Pose::new(
+            nalgebra::Matrix3::<f64>::identity(),
+            nalgebra::Vector3::new(t, 0.0, 0.0),
+        );
+        let mut rng = 0x5EED_1234_ABCD_0001u64;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((rng >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+        };
+        let mut keypoints_a: Vec<KeyPoint> = Vec::new();
+        let mut keypoints_b: Vec<KeyPoint> = Vec::new();
+        for _ in 0..n_points {
+            let p = Point3::new(
+                0.55 + next() * 0.15,
+                0.42 + next() * 0.15,
+                1.4 + next() * 0.5,
+            );
+            let pa = intrinsics.project(&p);
+            let in_b = pose_b.rotation * p.coords + pose_b.translation;
+            let pb = intrinsics.project(&Point3::from(in_b));
+            keypoints_a.push(KeyPoint::new(pa.x, pa.y));
+            keypoints_b.push(KeyPoint::new(pb.x, pb.y));
+        }
+        let views = vec![
+            View::new(keypoints_a, Descriptors::new(), 640, 480),
+            View::new(keypoints_b, Descriptors::new(), 640, 480),
+        ];
+        let track: Vec<(usize, usize)> = (0..n_points).map(|i| (b.min(i % 2), a + i % 2)).collect();
+        let tracks = vec![track];
+        (tracks, views, intrinsics)
+    }
+
+    /// A view list of `n` views whose camera `i` sits at `i * step` metres on
+    /// x, so the ground-truth baseline of pair (a, b) is `(b - a) * step`.
+    fn chain_views(step: f64, n: usize, n_points: usize) -> (Vec<View>, CameraIntrinsics) {
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        let mut rng = 0xFEED_7777_0000_0001u64;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((rng >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+        };
+        let world: Vec<Point3<f64>> = (0..n_points)
+            .map(|_| {
+                Point3::new(
+                    0.55 + next() * 0.15,
+                    0.42 + next() * 0.15,
+                    1.4 + next() * 0.5,
+                )
+            })
+            .collect();
+        let views = (0..n)
+            .map(|i| {
+                let pose = Pose::new(
+                    nalgebra::Matrix3::<f64>::identity(),
+                    nalgebra::Vector3::new(i as f64 * step, 0.0, 0.0),
+                );
+                let kps = world
+                    .iter()
+                    .map(|p| {
+                        let c = pose.rotation * p.coords + pose.translation;
+                        let q = intrinsics.project(&Point3::from(c));
+                        KeyPoint::new(q.x, q.y)
+                    })
+                    .collect();
+                View::new(kps, Descriptors::new(), 640, 480)
+            })
+            .collect();
+        (views, intrinsics)
+    }
+
+    #[test]
+    fn diag_seed_baseline_and_threshold_sensitivity() {
+        // (1) How much parallax does a `t` metre baseline on a 1.5-2 m scene
+        // produce, and where does `min_parallax_deg` start rejecting it?
+        for (t, step) in [(0.0025, 0.0025), (0.01, 0.01), (0.05, 0.05), (0.2, 0.2)] {
+            let (tracks, views, k) = two_view_case(0, 1, step, t, 200);
+            let mut est = Est::new(views.len(), tracks.clone());
+            est.add_camera(0, Pose::identity());
+            est.add_camera(
+                1,
+                Pose::new(
+                    nalgebra::Matrix3::<f64>::identity(),
+                    nalgebra::Vector3::new(t, 0.0, 0.0),
+                ),
+            );
+            let registered: Vec<(usize, usize)> = est.track_obs[0].clone();
+            let total = est.track_obs[0].len();
+            let mut best = f64::INFINITY;
+            for threshold in [0.5f64, 1.0, 2.0, 4.0, 8.0] {
+                let config = MapperConfig {
+                    min_parallax_deg: threshold,
+                    ..MapperConfig::default()
+                };
+                let ok = triangulate_track(&registered, &est, &views, &k, &config).is_some();
+                if ok && threshold < best {
+                    best = threshold;
+                }
+            }
+            let centre_a = est.pose_of(0).unwrap().inverse().translation;
+            let centre_b = est.pose_of(1).unwrap().inverse().translation;
+            let sample = Point3::new(0.6, 0.45, 1.6);
+            println!(
+                "DIAG baseline {t:.4} m -> parallax of a sample point {:.4} deg; \
+                 smallest passing min_parallax_deg = {best:.2}; tracked points {total}",
+                parallax_deg(&sample, &centre_a, &centre_b)
+            );
+        }
+
+        // (2) With a ground-truth pose available, how many tracks does the
+        // shipped triangulation pass accept at each threshold?
+        for min_parallax in [1.0f64, 2.0, 4.0] {
+            let (views, k) = chain_views(0.05, 4, 400);
+            let mut est = Est::new(views.len(), vec![Vec::new()]);
+            for i in 0..4 {
+                est.add_camera(
+                    i,
+                    Pose::new(
+                        nalgebra::Matrix3::<f64>::identity(),
+                        nalgebra::Vector3::new(i as f64 * 0.05, 0.0, 0.0),
+                    ),
+                );
+            }
+            for p in 0..400usize {
+                let registered: Vec<(usize, usize)> = (0..4).map(|i| (i, p)).collect();
+                let config = MapperConfig {
+                    min_parallax_deg: min_parallax,
+                    ..MapperConfig::default()
+                };
+                if triangulate_track(&registered, &est, &views, &k, &config).is_some() {
+                    est.track_obs[0].push((0, p));
+                }
+            }
+            println!(
+                "DIAG ground-truth poses, 5 cm spacing, 0.05-0.15 m baselines: \
+                 min_parallax_deg {min_parallax} -> {} of 400 points triangulated",
+                est.track_obs[0].len()
+            );
+        }
     }
 }

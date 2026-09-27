@@ -137,7 +137,7 @@ fn has_n_contiguous(
 /// A previous revision returned the MINIMUM ring difference — nearly zero
 /// for genuine corners (half the ring sits on each side), so NMS ranked
 /// corners arbitrarily.
-pub fn corner_score(image: &GrayImage, x: i32, y: i32, threshold: u8) -> u8 {
+pub fn corner_score(image: &GrayImage, x: i32, y: i32, threshold: u8) -> f64 {
     const CIRCLE_OFFSETS: [(i32, i32); 16] = [
         (0, -3),
         (1, -3),
@@ -200,9 +200,25 @@ pub fn corner_score(image: &GrayImage, x: i32, y: i32, threshold: u8) -> u8 {
         }
     }
 
-    // Score relative to threshold, clamped to u8 like OpenCV's V = sum - t.
-    let v = best.saturating_sub(t * 9);
-    v.clamp(0, 255) as u8
+    // Score relative to the threshold, as OpenCV's V = sum - t.
+    //
+    // The excess is *not* clamped to u8. A u8 response saturates at 255, so on
+    // a busy image the several thousand keypoints that exceed the threshold all
+    // score identically and the caller's top-N cut keeps an arbitrary subset -
+    // measured on TUM fr1_desk, registration swung 12, 25, 9, 17 and 28 views
+    // out of 40 purely as the feature budget changed which of the tied
+    // keypoints survived. Returning the excess at full range restores a real
+    // ordering, so the strongest corners are always the ones kept.
+    //
+    // The value is capped only where it would exceed what a caller can store
+    // in an f64 response, which no reachable image can approach.
+    best.saturating_sub(t * 9).max(0) as f64
+}
+
+/// The same measure as [`corner_score`], kept as the `u8` form the FAST detector
+/// itself compares against its threshold.
+pub fn corner_score_u8(image: &GrayImage, x: i32, y: i32, threshold: u8) -> u8 {
+    corner_score(image, x, y, threshold).min(255.0) as u8
 }
 
 /// Maximum sum of |differences| over any window of exactly 9 contiguous
@@ -230,7 +246,7 @@ fn sliding_max9(diffs: &[i32; 16], state: &[u8; 16], want: u8) -> i32 {
 
 /// Non-maximum suppression for FAST keypoints
 pub fn non_max_suppression(keypoints: KeyPoints, image: &GrayImage, threshold: u8) -> KeyPoints {
-    let mut scored_kps: Vec<(KeyPoint, u8)> = keypoints
+    let mut scored_kps: Vec<(KeyPoint, f64)> = keypoints
         .keypoints
         .into_iter()
         .map(|kp| {
@@ -240,7 +256,9 @@ pub fn non_max_suppression(keypoints: KeyPoints, image: &GrayImage, threshold: u
         .collect();
 
     // Sort by score descending
-    scored_kps.sort_by(|a, b| b.1.cmp(&a.1));
+    // `total_cmp` gives a total order, so a NaN cannot make this panic and
+    // equal scores keep a deterministic order.
+    scored_kps.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let mut suppressed: Vec<KeyPoint> = Vec::new();
     let min_distance = 5.0; // Minimum distance between keypoints
