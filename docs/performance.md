@@ -678,3 +678,48 @@ described above, not a different configuration.
 
 No regression from the texture-aware tiebreak: TUM fr1_xyz still registers 45/45
 at 1.30 cm centre RMSE, fr1_desk still 23/40.
+
+## Three more things that were tried against the ETH3D descriptor limit, and did not work
+
+The remaining failures reduce to bad 2D-3D associations, so the obvious move is to
+filter them geometrically before PnP. Three variants were built and measured.
+None changed the outcome, and the reasons are worth recording.
+
+### Cheirality against the query view is a no-op
+
+The first attempt rejected landmarks behind the camera. It cannot work: the query
+view is *by definition* unregistered at that point - its pose is what PnP is being
+asked to estimate - so there is no viewpoint to test it against. The filter
+returns "visible" for every match and changes nothing.
+
+The same trap applies to a reprojection gate: projecting a landmark through the
+query view's pose requires the pose, which does not exist yet. Both were removed
+rather than left in as decoration that appears to do work.
+
+### A viewpoint gate against the map does reject real garbage, and still does not help
+
+The remaining option is to test the landmark against a camera that *is*
+registered - one that previously observed it. A landmark seen from an adjacent
+frame is unlikely to be visible from a viewpoint two metres away, and descriptor
+matching has no notion of viewpoint at all. Filtering on the angle between the
+landmark and the viewing direction of a camera that observed it (swept at 180, 60,
+30 and 10 degrees) rejects roughly 40% of offered matches, and those are genuinely
+implausible.
+
+It does not change the result: 3/12 registered, 242 points, at every angle. The
+surviving 17-25 correspondences per view are still wrong, and 2,000 PnP samples
+still find no consensus among them. The filter removes bad matches but there are
+not enough correct ones left for PnP to succeed, and it is not what is missing.
+
+The filter was reverted rather than shipped. It is defensible on first principles
+and it does remove matches that no correct association could explain, but it
+buys no measurable improvement on any dataset here, and a filter that cannot be
+shown to help is complexity that will cost more later than it saves now.
+
+### What this actually establishes
+
+The 2D-3D associations are not "mostly right with some outliers" - they are
+essentially all wrong on the views that fail, and no post-hoc geometric filter
+recovers that. The descriptor does not match at these textures, so there is no
+correct association for a filter to preserve. The fix has to happen at
+extraction or association, before PnP is ever called.
