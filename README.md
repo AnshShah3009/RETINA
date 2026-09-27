@@ -122,9 +122,11 @@ Measured on the same dataset family (ETH3D), plus TUM RGB-D. Full numbers in
 | | RETINA | visloc-rs |
 | --- | --- | --- |
 | registration, TUM fr1_xyz (45 views) | 45/45 — **100%** | 9,996/10,008 — 99.88% |
-| registration, TUM fr1_desk (40 views) | 23/40 — 57.5% | — |
 | camera-centre RMSE, fr1_xyz | **1.30 cm** | 3.50 cm (Electro) |
+| registration, TUM fr1_desk (40 views) | 23/40 — 57.5% | — |
+| registration, ETH3D electro (5 views) | 3/5 — 60% | — |
 | loop closure | yes, gated + re-optimised | yes |
+| tests | 1,476 | 2,553 |
 | views per evaluation | 20–45 | 1,200–10,008 |
 | tests | 1,476 | 2,553 |
 | `unsafe impl` | **0** (26 crates forbid) | 0 (9 of 11 forbid) |
@@ -144,12 +146,20 @@ Loop closure is implemented, gated on geometric consistency, and re-optimises
 after every fusion. It is what turned fr1_xyz from 97.8% to 45/45 while *also*
 improving centre RMSE to 1.30 cm — see `docs/performance.md` for the sweep.
 
-What is behind: no gap crossing across a capture with a hole in it, no
-many-view evaluation, and a smaller pipeline surface — they have localization,
-tracking, mapping, SLAM and VI-SLAM pipelines; we have one mapper and one
-localizer. fr1_desk stalls at 57.5% for a reason we have isolated but not fixed:
-descriptor matching is not discriminative enough on that fast handheld sequence
-for the map to grow past ~2,700 landmarks.
+What is behind: no many-view evaluation, and a smaller pipeline surface — they
+have localization, tracking, mapping, SLAM and VI-SLAM pipelines; we have one
+mapper and one localizer.
+
+Two sequences expose the current limit, and both trace to the same measured
+cause rather than to a defect in the mapper. On ETH3D electro a 5-view chain
+registers 60% while a 12-view chain registers 25%, because the capture's block
+standard deviation rises from 1.98 to 5.37 along the sequence and the dim end
+yields 9–10 matches per pair where the bright end yields 152. On TUM fr1_desk,
+block std 2.7 throughout, registration stops at 57.5% for the same reason: ORB
+descriptors are not discriminative enough at low texture. Every threshold, window,
+ratio, resolution and seed has been swept for both and each is at or near its
+best, so closing this needs a descriptor- or association-side change, not
+tuning. The full evidence is in `docs/performance.md`.
 
 ## Documentation
 
