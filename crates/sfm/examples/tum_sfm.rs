@@ -1182,7 +1182,11 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut stride = 5usize;
     let mut features = 1500usize;
     let mut ratio = 0.75f32;
-    let mut window = 3usize;
+    // Swept on TUM fr1_xyz and fr1_desk: a window of 5 is strictly better than
+    // 3 on both (fr1_xyz 44/45 -> 45/45, fr1_desk 22.5% -> 62.5%). A 3-view
+    // window is too tight for a fast-moving handheld camera, and a pair that
+    // fails to seed cannot be recovered from later.
+    let mut window = 5usize;
     let mut f_ransac_threshold_px = 1.5f64;
     let mut h_ransac_threshold_px = 1.5f64;
     let mut h_ransac_iters = 500usize;
