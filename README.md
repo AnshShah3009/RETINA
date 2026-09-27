@@ -121,17 +121,18 @@ Measured on the same dataset family (ETH3D), plus TUM RGB-D. Full numbers in
 
 | | RETINA | visloc-rs |
 | --- | --- | --- |
-| registration, long contiguous run | 44/45 — **97.8%** | 9,996/10,008 — 99.88% |
+| registration, TUM fr1_xyz (45 views) | 45/45 — **100%** | 9,996/10,008 — 99.88% |
+| registration, TUM fr1_desk (40 views) | 25/40 — 62.5% | — |
 | registration, 20–30 views | **100%** | — |
-| camera-centre RMSE | **1.65–4.61 cm** | 3.50 cm (Electro) |
+| camera-centre RMSE | **1.39–4.53 cm** | 3.50 cm (Electro) |
 | views per evaluation | 20–45 | 1,200–10,008 |
 | tests | 1,476 | 2,553 |
 | `unsafe impl` | **0** (26 crates forbid) | 0 (9 of 11 forbid) |
 
-**Not parity, and the gap is stated plainly.** Registration is close but not equal
-(97.8% vs 99.88%), and every comparison is on tens of views against their
-thousands, so it is not like-for-like. Our *accuracy* is better (1.65 cm vs 3.50 cm
-centre RMSE), but at 20–45 views that is the easier regime.
+**Not parity, and the gap is stated plainly.** fr1_xyz now registers every view,
+but fr1_desk reaches only 62.5%, and every comparison is on tens of views against
+their thousands, so it is not like-for-like. Our *accuracy* is better (1.39 cm vs
+3.50 cm centre RMSE), but at 20–45 views that is the easier regime.
 
 What is genuinely ahead: crate breadth (~30 vs 10, covering imgproc, photo, dnn,
 video, rendering, plot, viewer, point clouds, many IO formats, Python bindings), a
@@ -139,10 +140,13 @@ wgpu CPU/GPU HAL with cross-device parity proven on a discrete and an integrated
 GPU, a whole evaluation and benchmark layer, and a defect log
 ([docs/bug-log.md](docs/bug-log.md)) recording what was wrong and how it was found.
 
-What is behind: no loop closure, no gap crossing across a capture with a hole in
-it, no many-view evaluation, and a smaller pipeline surface — they have
-localization, tracking, mapping, SLAM and VI-SLAM pipelines; we have one mapper and
-one localizer.
+What is behind: loop closure is implemented but **does not yet pay for itself** —
+it improves geometry (centre error 4.6 → 2.9 cm) while reducing registration,
+because fusion invalidates poses PnP had already found and nothing re-registers
+them; the whole sweep is in `docs/performance.md`. There is no gap crossing across
+a capture with a hole in it, no many-view evaluation, and a smaller pipeline
+surface — they have localization, tracking, mapping, SLAM and VI-SLAM pipelines;
+we have one mapper and one localizer.
 
 ## Documentation
 
