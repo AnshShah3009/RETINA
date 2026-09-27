@@ -237,3 +237,43 @@ does not do is bridge a multi-metre gap, which is what the remaining views
 demanded. Bridging those gaps — loop closure, or a retrieval-guided pair graph
 that crosses empty space — is the genuine remaining work, and this measurement
 says so precisely instead of leaving it mixed in with a selection artefact.
+
+## Why 58% and not 100%: the capture has a hole in it
+
+Following the audit trail to the bottom. The mapper's view list for courtyard
+camera 1, sorted by file name, is:
+
+```
+view  0..6  = DSC_0286 .. DSC_0292   (consecutive)
+view  7..11 = DSC_0302 .. DSC_0306   (consecutive)
+```
+
+There is a **ten-frame gap in the capture** between views 6 and 7 — the rig
+skipped those frames, so every consecutive pair straddling that break is a pair
+of images ten frames apart.
+
+The matcher output for the mapper's exact view list, at the mapper's own
+settings (ratio 0.75 plus cross-check):
+
+| pair | frames | matches |
+| --- | --- | ---: |
+| (0,1) … (5,6) | consecutive | 890, 954, 1118, 1029, 967, 1078 |
+| **(6,7)** | **DSC_0292 → DSC_0302** | **97** |
+| (7,8) … (10,11) | consecutive | 506, 698, 626, 200 |
+
+That single row explains everything else in this investigation. The
+reconstruction covers DSC_0286–0292 and cannot cross a ten-frame hole; views 7+
+are on the other side of it. With the ground-truth pose of view 7, **0 of 5,139
+map landmarks project inside its image** (they land above the top edge, median
+y = −5973 for a height of 4135), while the control — a registered view — gives
+**76.7%** of landmarks within 4 px of a real keypoint. The map geometry is
+sound.
+
+So the mapper is behaving correctly and the 58% was never a matching,
+descriptor, ratio, pair-window or model-selection problem; all of those were
+measured and cleared on the way. It is a capture with a hole in it, handed to a
+mapper that does not bridge holes. Bridging needs either a pair window wide
+enough to propose across the gap — the pairs exist, they fail verification
+because the images are ten frames apart — or loop closure. visloc-rs's many-view
+ETH3D pipeline has both; we have neither, and that is the real distance to
+their 99.88%.
