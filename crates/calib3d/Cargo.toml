@@ -9,6 +9,7 @@ cv-core = { workspace = true }
 cv-imgproc = { workspace = true }
 cv-runtime = { workspace = true }
 cv-hal = { workspace = true }
+cv-math = { workspace = true }
 nalgebra = { workspace = true }
 image = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

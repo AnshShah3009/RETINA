@@ -9,8 +9,7 @@
 
 use cv_core::float::Float;
 use cv_core::tensor::{CpuTensor, TensorShape};
-use cv_core::Result;
-use rand::Rng;
+use cv_core::{Ransac, Result, RobustConfig, RobustModel};
 
 /// Estimate a 3x3 homography from at least 4 point correspondences using the
 /// Direct Linear Transform (DLT) algorithm with Hartley normalization.
@@ -114,6 +113,55 @@ pub fn find_homography(
     Ok(h_out)
 }
 
+/// A 2-D point correspondence, the datum consumed by the robust homography model.
+#[derive(Clone, Copy)]
+struct HomographyCorrespondence {
+    src: (f64, f64),
+    dst: (f64, f64),
+}
+
+/// [`RobustModel`] adapter that fits a homography with [`find_homography`] and
+/// scores correspondences by their Euclidean reprojection error.
+///
+/// This lets [`find_homography_ransac`] reuse the generic engine in
+/// [`cv_core::robust`] (`Ransac`/`LMedS`/`Prosac`) instead of carrying a private
+/// RANSAC loop, matching the way `cv-features` and `cv-registration` plug into
+/// the same engine.
+struct HomographyEstimator;
+
+impl RobustModel<HomographyCorrespondence> for HomographyEstimator {
+    type Model = [[f64; 3]; 3];
+
+    fn min_sample_size(&self) -> usize {
+        4
+    }
+
+    fn estimate(&self, data: &[&HomographyCorrespondence]) -> Option<Self::Model> {
+        if data.len() < 4 {
+            return None;
+        }
+        let src: Vec<(f64, f64)> = data.iter().map(|c| c.src).collect();
+        let dst: Vec<(f64, f64)> = data.iter().map(|c| c.dst).collect();
+        find_homography(&src, &dst).ok()
+    }
+
+    fn compute_error(&self, model: &Self::Model, data: &HomographyCorrespondence) -> f64 {
+        let (sx, sy) = data.src;
+        let (dx, dy) = data.dst;
+
+        let w = model[2][0] * sx + model[2][1] * sy + model[2][2];
+        if w.abs() < 1e-15 {
+            return f64::INFINITY;
+        }
+        let px = (model[0][0] * sx + model[0][1] * sy + model[0][2]) / w;
+        let py = (model[1][0] * sx + model[1][1] * sy + model[1][2]) / w;
+        // Euclidean (unsquared) reprojection error; the engine compares this
+        // directly against `threshold`, which is equivalent to the legacy
+        // `err_sq < threshold^2` test.
+        ((px - dx) * (px - dx) + (py - dy) * (py - dy)).sqrt()
+    }
+}
+
 /// RANSAC-based robust homography estimation.
 ///
 /// # Arguments
@@ -143,79 +191,43 @@ pub fn find_homography_ransac(
         ));
     }
 
-    let thresh_sq = threshold * threshold;
-    let mut best_inlier_count = 0usize;
-    let mut best_h = [[0.0f64; 3]; 3];
-    let mut best_mask = vec![false; n];
+    let data: Vec<HomographyCorrespondence> = src_points
+        .iter()
+        .zip(dst_points.iter())
+        .map(|(&src, &dst)| HomographyCorrespondence { src, dst })
+        .collect();
 
-    let mut rng = rand::rng();
+    let config = RobustConfig {
+        threshold,
+        max_iterations: max_iterations as usize,
+        confidence: 0.99,
+    };
+    let result = Ransac::new(config).run(&HomographyEstimator, &data);
 
-    for _ in 0..max_iterations {
-        // Pick 4 random distinct indices.
-        let mut sample = [0usize; 4];
-        let mut found = 0;
-        let mut attempts = 0;
-        while found < 4 && attempts < 100 {
-            let idx = rng.random_range(0..n);
-            if !sample[..found].contains(&idx) {
-                sample[found] = idx;
-                found += 1;
-            }
-            attempts += 1;
-        }
-        if found < 4 {
-            continue;
-        }
-
-        let s_pts: Vec<(f64, f64)> = sample.iter().map(|&i| src_points[i]).collect();
-        let d_pts: Vec<(f64, f64)> = sample.iter().map(|&i| dst_points[i]).collect();
-
-        let h = match find_homography(&s_pts, &d_pts) {
-            Ok(h) => h,
-            Err(_) => continue,
-        };
-
-        // Count inliers.
-        let mut inlier_count = 0;
-        let mut mask = vec![false; n];
-        for i in 0..n {
-            let (sx, sy) = src_points[i];
-            let (dx, dy) = dst_points[i];
-
-            let w = h[2][0] * sx + h[2][1] * sy + h[2][2];
-            if w.abs() < 1e-15 {
-                continue;
-            }
-            let px = (h[0][0] * sx + h[0][1] * sy + h[0][2]) / w;
-            let py = (h[1][0] * sx + h[1][1] * sy + h[1][2]) / w;
-            let err_sq = (px - dx) * (px - dx) + (py - dy) * (py - dy);
-            if err_sq < thresh_sq {
-                mask[i] = true;
-                inlier_count += 1;
-            }
-        }
-
-        if inlier_count > best_inlier_count {
-            best_inlier_count = inlier_count;
-            best_h = h;
-            best_mask = mask;
-        }
-    }
-
-    if best_inlier_count < 4 {
+    // The engine returns `Some` as soon as a single model scores at all, so the
+    // "enough inliers" check mirrors the legacy loop's `best_inlier_count < 4`.
+    if result.num_inliers < 4 {
         return Err(cv_core::Error::AlgorithmError(
             "RANSAC failed to find a valid homography with enough inliers".into(),
         ));
     }
+    let best_h = result.model.ok_or_else(|| {
+        cv_core::Error::AlgorithmError(
+            "RANSAC failed to find a valid homography with enough inliers".into(),
+        )
+    })?;
 
-    // Refine with all inliers.
-    let inlier_src: Vec<(f64, f64)> = best_mask
+    // Refine with all inliers. As before, the returned mask is the inlier set of
+    // the winning RANSAC model, while the returned H is refit on those inliers.
+    let inlier_src: Vec<(f64, f64)> = result
+        .inliers
         .iter()
         .enumerate()
         .filter(|(_, &is_in)| is_in)
         .map(|(i, _)| src_points[i])
         .collect();
-    let inlier_dst: Vec<(f64, f64)> = best_mask
+    let inlier_dst: Vec<(f64, f64)> = result
+        .inliers
         .iter()
         .enumerate()
         .filter(|(_, &is_in)| is_in)
@@ -223,10 +235,18 @@ pub fn find_homography_ransac(
         .collect();
 
     let refined = find_homography(&inlier_src, &inlier_dst).unwrap_or(best_h);
-    Ok((refined, best_mask))
+    Ok((refined, result.inliers))
 }
 
 /// Warp an image by a 3x3 homography using inverse mapping with bilinear interpolation.
+///
+/// Unlike [`crate::geometry::warp_perspective`], which warps a single-channel
+/// `GrayImage` (`u8`) and can offload to the HAL GPU shader, this variant works
+/// on a floating-point `CpuTensor<T>` with an arbitrary channel count and a
+/// `f64` homography. It is kept separate on purpose: routing the stitching path
+/// through the `GrayImage` implementation would quantise the float image to
+/// `u8` (clamped to `0..=255`), drop channels, and narrow the matrix to `f32` —
+/// a real regression for the float blending done by [`stitch_pair`].
 ///
 /// # Arguments
 /// * `image`       - Input image tensor (CHW layout).
@@ -585,6 +605,144 @@ mod tests {
 
         // Note: RANSAC is stochastic; homography accuracy depends on sample quality.
         // The key assertion is outlier rejection above — H accuracy varies by run.
+    }
+
+    /// The private RANSAC loop that [`find_homography_ransac`] used before it was
+    /// routed through [`cv_core::Ransac`]. Kept as a reference oracle so the
+    /// collapsed implementation can be shown to agree with the original.
+    fn legacy_find_homography_ransac(
+        src_points: &[(f64, f64)],
+        dst_points: &[(f64, f64)],
+        threshold: f64,
+        max_iterations: u32,
+    ) -> ([[f64; 3]; 3], Vec<bool>) {
+        use rand::Rng;
+        let n = src_points.len();
+        let thresh_sq = threshold * threshold;
+        let mut best_inlier_count = 0usize;
+        let mut best_h = [[0.0f64; 3]; 3];
+        let mut best_mask = vec![false; n];
+        let mut rng = rand::rng();
+
+        for _ in 0..max_iterations {
+            let mut sample = [0usize; 4];
+            let mut found = 0;
+            let mut attempts = 0;
+            while found < 4 && attempts < 100 {
+                let idx = rng.random_range(0..n);
+                if !sample[..found].contains(&idx) {
+                    sample[found] = idx;
+                    found += 1;
+                }
+                attempts += 1;
+            }
+            if found < 4 {
+                continue;
+            }
+
+            let s_pts: Vec<(f64, f64)> = sample.iter().map(|&i| src_points[i]).collect();
+            let d_pts: Vec<(f64, f64)> = sample.iter().map(|&i| dst_points[i]).collect();
+            let h = match find_homography(&s_pts, &d_pts) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+
+            let mut inlier_count = 0;
+            let mut mask = vec![false; n];
+            for i in 0..n {
+                let (sx, sy) = src_points[i];
+                let (dx, dy) = dst_points[i];
+                let w = h[2][0] * sx + h[2][1] * sy + h[2][2];
+                if w.abs() < 1e-15 {
+                    continue;
+                }
+                let px = (h[0][0] * sx + h[0][1] * sy + h[0][2]) / w;
+                let py = (h[1][0] * sx + h[1][1] * sy + h[1][2]) / w;
+                let err_sq = (px - dx) * (px - dx) + (py - dy) * (py - dy);
+                if err_sq < thresh_sq {
+                    mask[i] = true;
+                    inlier_count += 1;
+                }
+            }
+            if inlier_count > best_inlier_count {
+                best_inlier_count = inlier_count;
+                best_h = h;
+                best_mask = mask;
+            }
+        }
+
+        let inlier_src: Vec<(f64, f64)> = best_mask
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b)
+            .map(|(i, _)| src_points[i])
+            .collect();
+        let inlier_dst: Vec<(f64, f64)> = best_mask
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b)
+            .map(|(i, _)| dst_points[i])
+            .collect();
+        let refined = find_homography(&inlier_src, &inlier_dst).unwrap_or(best_h);
+        (refined, best_mask)
+    }
+
+    /// A well-conditioned synthetic set: 30 inliers on a grid under translation
+    /// (5,5), plus 3 gross outliers far from the consensus.
+    fn synthetic_correspondences() -> (Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<bool>) {
+        let mut src: Vec<(f64, f64)> = Vec::new();
+        for i in 0..6 {
+            for j in 0..5 {
+                src.push((i as f64 * 20.0, j as f64 * 20.0));
+            }
+        }
+        let n_inliers = src.len();
+        // Outliers: gross mismatches, far outside any plausible consensus.
+        src.push((300.0, 40.0));
+        src.push((360.0, 60.0));
+        src.push((420.0, 80.0));
+
+        let mut dst: Vec<(f64, f64)> = src[..n_inliers]
+            .iter()
+            .map(|&(x, y)| (x + 5.0, y + 5.0))
+            .collect();
+        dst.push((-5000.0, 5000.0));
+        dst.push((6000.0, -6000.0));
+        dst.push((-7000.0, -7000.0));
+
+        let mut expected = vec![true; n_inliers];
+        expected.extend([false, false, false]);
+        (src, dst, expected)
+    }
+
+    #[test]
+    fn ransac_new_path_agrees_with_legacy() {
+        let (src, dst, expected) = synthetic_correspondences();
+
+        let (h_new, mask_new) = find_homography_ransac(&src, &dst, 5.0, 2000).unwrap();
+        let (h_old, mask_old) = legacy_find_homography_ransac(&src, &dst, 5.0, 2000);
+
+        // Both converge on the known inlier set (the three outliers rejected).
+        assert_eq!(mask_new, expected, "new path inlier set");
+        assert_eq!(mask_old, expected, "legacy inlier set");
+        assert_eq!(mask_new, mask_old, "the two paths must agree on inliers");
+
+        // ... and therefore on the recovered homography (the ground-truth
+        // translation), up to numerical tolerance.
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (h_new[i][j] - h_old[i][j]).abs() < 1e-6,
+                    "H[{}][{}]: new {} vs legacy {}",
+                    i,
+                    j,
+                    h_new[i][j],
+                    h_old[i][j]
+                );
+            }
+        }
+        assert!((h_new[0][2] - 5.0).abs() < 1e-6, "tx = {}", h_new[0][2]);
+        assert!((h_new[1][2] - 5.0).abs() < 1e-6, "ty = {}", h_new[1][2]);
     }
 
     #[test]

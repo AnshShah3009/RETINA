@@ -94,6 +94,26 @@ localize to machine precision, noise degrades gracefully, non-overlapping
 queries return `None`). No real-dataset result is published, because none has
 been measured — see [docs/localization.md](docs/localization.md).
 
+## Performance
+
+Measured on 24 cores with an RTX 5070 Ti; see [docs/performance.md](docs/performance.md)
+for the commands and the full tables.
+
+| | before | after |
+| --- | ---: | ---: |
+| localization query, end to end | ~1650 ms | **441 ms** |
+| ORB detection, per frame | 40.4 ms | **26.4 ms** |
+| one bundle-adjustment solve (9 cameras, 1,002 points) | 35,000 ms | **286 ms** |
+
+`fast_detect` and ORB descriptor extraction were single-threaded and are now
+parallel and order-preserving; the bundle-adjustment Jacobian is analytic and its
+normal equations stay sparse.
+
+ORB is deliberately **not** on the GPU: after parallelising the CPU path a
+single-level scan is 0.79 ms while the irreducible upload cost is 0.08 ms, so a
+GPU kernel has a 10x-too-small budget to beat. The pipelines use no GPU at all;
+the candidates worth profiling next are PnP RANSAC and descriptor matching.
+
 ## Evaluation and benchmarking
 
 The library ships the measurement layer for localization/SfM/SLAM work, so

@@ -9,6 +9,7 @@ description = "Feature detection and description algorithms"
 cv-core = { workspace = true }
 cv-imgproc = { workspace = true }
 cv-hal = { workspace = true }
+cv-calib3d = { workspace = true }
 cv-runtime = { workspace = true, optional = true }
 nalgebra = { workspace = true }
 rayon = { workspace = true }

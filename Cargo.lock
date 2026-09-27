@@ -1673,6 +1673,7 @@ dependencies = [
  "cv-core",
  "cv-hal",
  "cv-imgproc",
+ "cv-math",
  "cv-runtime",
  "image",
  "nalgebra",
@@ -1762,6 +1763,7 @@ name = "cv-features"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "cv-calib3d",
  "cv-core",
  "cv-hal",
  "cv-imgproc",
@@ -1870,6 +1872,7 @@ version = "0.1.0"
 dependencies = [
  "cv-core",
  "cv-hal",
+ "cv-math",
  "faer",
  "nalgebra",
  "pollster",
@@ -1989,9 +1992,15 @@ dependencies = [
 name = "cv-sfm"
 version = "0.1.0"
 dependencies = [
+ "cv-calib3d",
  "cv-core",
+ "cv-eval",
+ "cv-features",
+ "cv-hal",
+ "cv-io",
  "cv-optimize",
  "cv-runtime",
+ "image",
  "nalgebra",
  "rayon",
  "thiserror 2.0.18",

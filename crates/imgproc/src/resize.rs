@@ -40,7 +40,14 @@ fn resize_cpu(src: &GrayImage, width: u32, height: u32, interpolation: Interpola
     }
     match interpolation {
         Interpolation::Nearest => resize_nearest(src, width, height),
-        Interpolation::Linear => resize_linear(src, width, height),
+        // Bilinear is owned by the HAL CPU backend (see `resize_cpu_hal`); there
+        // is exactly one bilinear implementation per backend, shared with the
+        // GPU resize shader.
+        Interpolation::Linear => match cv_hal::cpu::CpuBackend::new() {
+            Some(cpu) => resize_cpu_hal(&cpu, src, width, height)
+                .unwrap_or_else(|_| GrayImage::new(width, height)),
+            None => GrayImage::new(width, height),
+        },
         Interpolation::Cubic => resize_sampled(src, width, height, 2, cubic_weights),
         Interpolation::Lanczos => resize_sampled(src, width, height, 3, lanczos_weights),
     }
@@ -60,15 +67,62 @@ pub fn resize_ctx(
         return GrayImage::new(width, height);
     }
 
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if interpolation == Interpolation::Linear {
-            if let Ok(result) = resize_gpu(gpu, src, width, height) {
-                return result;
+    // Bilinear resizing is a single implementation per backend, both routed
+    // through the HAL: the CPU `ComputeContext::resize` and the GPU resize
+    // shader share the same align-corners bilinear mapping. Nearest/Cubic/
+    // Lanczos have no HAL equivalent and stay CPU-only below.
+    if interpolation == Interpolation::Linear {
+        if let Ok(device) = group.device() {
+            match device {
+                ComputeDevice::Gpu(gpu) => {
+                    if let Ok(result) = resize_gpu(gpu, src, width, height) {
+                        return result;
+                    }
+                }
+                ComputeDevice::Cpu(cpu) => {
+                    if let Ok(result) = resize_cpu_hal(cpu, src, width, height) {
+                        return result;
+                    }
+                }
+                ComputeDevice::Mlx(_) => {}
             }
         }
     }
 
     group.run(|| resize_cpu(src, width, height, interpolation))
+}
+
+/// Bilinear resize on the HAL CPU backend (the single CPU implementation).
+///
+/// The HAL computes the sample in `f32` and returns `f32`; the conversion back
+/// to `u8` rounds to nearest (`+ 0.5`) to match the historical CPU resampler.
+fn resize_cpu_hal(
+    cpu: &cv_hal::cpu::CpuBackend,
+    src: &GrayImage,
+    width: u32,
+    height: u32,
+) -> cv_hal::Result<GrayImage> {
+    use cv_core::storage::Storage;
+    use cv_hal::context::ComputeContext;
+
+    let src_f32: Vec<f32> = src.as_raw().iter().map(|&p| p as f32).collect();
+    let input = cv_core::CpuTensor::from_vec(
+        src_f32,
+        cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
+    )
+    .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
+
+    let output = cpu.resize(&input, (width as usize, height as usize))?;
+    let data: Vec<u8> = output
+        .storage
+        .as_slice()
+        .ok_or_else(|| cv_hal::Error::MemoryError("Output not on CPU".into()))?
+        .iter()
+        .map(|&v: &f32| (v + 0.5).clamp(0.0, 255.0) as u8)
+        .collect();
+
+    GrayImage::from_raw(width, height, data)
+        .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
 }
 
 fn resize_gpu(
@@ -126,57 +180,6 @@ fn resize_nearest(src: &GrayImage, width: u32, height: u32) -> GrayImage {
     dst
 }
 
-fn resize_linear(src: &GrayImage, width: u32, height: u32) -> GrayImage {
-    let mut dst = GrayImage::new(width, height);
-    let src_width = src.width() as f32 - 1.0;
-    let src_height = src.height() as f32 - 1.0;
-    // Guard against 1-pixel destinations: (n-1) would be zero and the
-    // coordinate mapping below would produce NaN (black output).
-    let dst_width = (width.max(2) - 1) as f32;
-    let dst_height = (height.max(2) - 1) as f32;
-
-    // Only an empty source has nothing to sample. A source with a single
-    // row/column (src_width or src_height == 0) is handled by the mapping
-    // below, which collapses that axis onto the single sample and therefore
-    // replicates it; a previous revision bailed out here and returned an
-    // all-zero image for 1-pixel sources.
-    if src.width() == 0 || src.height() == 0 {
-        return dst;
-    }
-
-    dst.as_mut()
-        .par_chunks_mut(width as usize)
-        .enumerate()
-        .for_each(|(y, row)| {
-            let y = y as u32;
-            for x in 0..width {
-                let fx = (x as f32 / dst_width) * src_width;
-                let fy = (y as f32 / dst_height) * src_height;
-
-                let x0 = fx as u32;
-                let y0 = fy as u32;
-                let x1 = (x0 + 1).min(src.width() - 1);
-                let y1 = (y0 + 1).min(src.height() - 1);
-
-                let dx = fx - x0 as f32;
-                let dy = fy - y0 as f32;
-
-                let v00 = src.get_pixel(x0, y0)[0] as f32;
-                let v10 = src.get_pixel(x1, y0)[0] as f32;
-                let v01 = src.get_pixel(x0, y1)[0] as f32;
-                let v11 = src.get_pixel(x1, y1)[0] as f32;
-
-                let v0 = v00 * (1.0 - dx) + v10 * dx;
-                let v1 = v01 * (1.0 - dx) + v11 * dx;
-                let v = v0 * (1.0 - dy) + v1 * dy;
-
-                row[x as usize] = (v + 0.5).clamp(0.0, 255.0) as u8;
-            }
-        });
-
-    dst
-}
-
 pub fn resize_rgb(
     src: &RgbImage,
     width: u32,
@@ -229,12 +232,12 @@ fn resize_rgb_linear(src: &RgbImage, width: u32, height: u32) -> RgbImage {
     let mut dst = RgbImage::new(width, height);
     let src_width = src.width() as f32 - 1.0;
     let src_height = src.height() as f32 - 1.0;
-    // Guard against 1-pixel destinations (see resize_linear).
+    // Guard against 1-pixel destinations (see `resize_cpu_hal`).
     let dst_width = (width.max(2) - 1) as f32;
     let dst_height = (height.max(2) - 1) as f32;
 
     // Only an empty source has nothing to sample; single-row/column sources
-    // are replicated by the mapping below (see resize_linear).
+    // are replicated by the mapping below (see `resize_cpu_hal`).
     if src.width() == 0 || src.height() == 0 {
         return dst;
     }
@@ -301,7 +304,7 @@ fn lanczos_weights(f: f32) -> Vec<f32> {
 
 /// Separable resampling of a `channels`-channel interleaved u8 buffer.
 ///
-/// The coordinate mapping matches `resize_linear`: the source spans
+/// The coordinate mapping matches the HAL bilinear resampler (`resize_cpu_hal`): the source spans
 /// `0 ..= len - 1` across the destination's `0 ..= len - 1`, so `Cubic` and
 /// `Lanczos` degrade gracefully to the same geometry as the bilinear path.
 /// Taps outside the source replicate the nearest edge sample.
@@ -538,5 +541,67 @@ mod tests {
         for y in 0..3 {
             assert_eq!(up.get_pixel(3, y)[0], img.get_pixel(3, 0)[0]);
         }
+    }
+
+    /// Reference copy of the resampler that `resize_cpu_hal` replaced, used to
+    /// show the HAL-routed bilinear path did not change results.
+    fn reference_resize_linear(src: &GrayImage, width: u32, height: u32) -> GrayImage {
+        let mut dst = GrayImage::new(width, height);
+        let src_width = src.width() as f32 - 1.0;
+        let src_height = src.height() as f32 - 1.0;
+        let dst_width = (width.max(2) - 1) as f32;
+        let dst_height = (height.max(2) - 1) as f32;
+        if src.width() == 0 || src.height() == 0 {
+            return dst;
+        }
+        for y in 0..height {
+            for x in 0..width {
+                let fx = (x as f32 / dst_width) * src_width;
+                let fy = (y as f32 / dst_height) * src_height;
+                let x0 = fx as u32;
+                let y0 = fy as u32;
+                let x1 = (x0 + 1).min(src.width() - 1);
+                let y1 = (y0 + 1).min(src.height() - 1);
+                let dx = fx - x0 as f32;
+                let dy = fy - y0 as f32;
+                let v00 = src.get_pixel(x0, y0)[0] as f32;
+                let v10 = src.get_pixel(x1, y0)[0] as f32;
+                let v01 = src.get_pixel(x0, y1)[0] as f32;
+                let v11 = src.get_pixel(x1, y1)[0] as f32;
+                let v0 = v00 * (1.0 - dx) + v10 * dx;
+                let v1 = v01 * (1.0 - dx) + v11 * dx;
+                let v = v0 * (1.0 - dy) + v1 * dy;
+                dst.put_pixel(x, y, Luma([(v + 0.5).clamp(0.0, 255.0) as u8]));
+            }
+        }
+        dst
+    }
+
+    #[test]
+    fn hal_linear_resize_matches_reference() {
+        // Deterministic textured source.
+        let src = GrayImage::from_fn(37, 29, |x, y| Luma([((x * 7 + y * 13) % 256) as u8]));
+
+        let mut max_diff = 0i32;
+        for &(w, h) in &[
+            (37u32, 29u32),
+            (74, 15),
+            (19, 58),
+            (64, 64),
+            (1, 1),
+            (5, 3),
+            (100, 7),
+        ] {
+            let new = resize(&src, w, h, Interpolation::Linear);
+            let reference = reference_resize_linear(&src, w, h);
+            assert_eq!(new.dimensions(), reference.dimensions());
+            for (a, b) in new.as_raw().iter().zip(reference.as_raw()) {
+                max_diff = max_diff.max((*a as i32 - *b as i32).abs());
+            }
+        }
+        assert_eq!(
+            max_diff, 0,
+            "HAL-routed bilinear differs from the reference by up to {max_diff}"
+        );
     }
 }

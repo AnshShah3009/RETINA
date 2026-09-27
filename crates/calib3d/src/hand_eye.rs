@@ -134,6 +134,9 @@ fn gamma_to_rotation(gamma: &Vector3<f64>) -> Option<Matrix3<f64>> {
 
 /// Dense normal-equations solve for min ‖Ax − b‖².
 /// `rows` are the stacked 3-wide rows of A; `rhs` holds one scalar per row.
+///
+/// The 3x3 inverse is the shared [`cv_math::linalg::invert_square`] helper
+/// (previously an inline `Matrix3::try_inverse`).
 fn solve_least_squares_3n(rows: &[[f64; 3]], rhs: &[f64]) -> Option<Vector3<f64>> {
     if rows.is_empty() || rows.len() != rhs.len() {
         return None;
@@ -145,7 +148,7 @@ fn solve_least_squares_3n(rows: &[[f64; 3]], rhs: &[f64]) -> Option<Vector3<f64>
         ata += rv * rv.transpose();
         atb += rv * b;
     }
-    ata.try_inverse().map(|inv| inv * atb)
+    cv_math::linalg::invert_square(&ata).map(|inv| inv * atb)
 }
 
 /// Core AX=XB solver over relative motions.

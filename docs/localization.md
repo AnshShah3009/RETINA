@@ -160,8 +160,62 @@ the map from more viewpoints — or estimating the database poses instead of
 taking them from ground truth, which is what a real system must do — is the next
 piece of work. These numbers are the baseline it has to beat.
 
-## What is proven, and what is not
+## Mapping results
 
+`cv-sfm` builds a map from images with no ground-truth poses, and is scored with
+`cargo run --release -p cv-sfm --example tum_sfm -- --dir <dataset> --frames N
+--stride S --window W`. These are the measured numbers that established the
+performance work and the remaining gaps.
+
+| sequence | views | stride | window | registered | points | centre RMSE | rotation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| fr1_xyz | 14 | 10 | 3 | **100.0%** | 1,784 | 2.0 cm | 1.1° |
+| fr1_xyz | 60 | 5 | 3 | **73.3%** | 5,658 | 5.4 cm | 9.2° |
+| fr1_desk | 40 | 5 | 3 | 22.5% | — | — | — |
+| fr1_desk | 40 | 2 | 3 | **100.0%** | 5,490 | 7.7 cm | **2.7°** |
+| fr1_desk | 60 | 2 | 3 | **83.3%** | — | 6.9 cm | **3.3°** |
+| fr1_desk | 150 | 2 | 3 | 43.3% → **63.3%** | 16,631 | 13.0 → **5.8 cm** | 18.1 → **3.8°** |
+
+(The xyz rows predate the bundle-adjustment and local-BA work; the desk rows are
+after. The 150-view row shows the effect of local bundle adjustment, which was
+added after the original measurement.)
+
+**Frame spacing dominates the registration rate.** The same mapper, the same
+code, the same sequence: at stride 5 it registers 22.5% of 40 views, at stride 2
+it registers 100%. `fr1_desk` is a slow trajectory, so stride 5 samples frames
+that no longer overlap enough to seed or to support PnP — 35 of 60 views failed
+with "no 3D point visible in this view", the signature of a map that cannot grow
+past the seed neighbourhood. Widening the pair window (3 → 6 → 10) barely helps
+(15.0% → 16.7% → 16.7%): the limiting factor is inter-frame motion, not the pair
+graph. A production pipeline must choose the stride from the sequence, not fix it.
+
+**Two failures remain, and they are different problems.**
+
+1. *Coverage* — solved by adequate frame spacing, as above.
+2. *Drift* — local bundle adjustment after each registration addressed this. On
+   the 150-view run it took registration from 43.3% to 63.3%, camera-centre error
+   from 13.0 cm to 5.8 cm and rotation error from 18.1° to 3.8°, because an error
+   introduced at one view is now corrected where it happened rather than bending
+   the whole reconstruction at the next global pass. It costs a 7× wall-time
+   increase (53 s → 384 s) because the local window still goes through the
+   global solver; that is the obvious next optimisation.
+
+   Still short of a mature mapper, which additionally needs: a
+   homography-versus-essential model decision (the standard defence for
+   low-parallax and near-planar pairs, which this mapper has no answer for),
+   explicit gauge fixing in bundle adjustment, per-observation rather than
+   per-landmark outlier rejection, and track merging so the same physical point
+   triangulated from several pairs becomes one landmark.
+
+For reference, the mapper currently uses: 1.5 px / 500-iteration F-matrix RANSAC
+for pair verification, eight-point essential-matrix seeding from the best of 8
+hypotheses, 1° minimum parallax and 4 px reprojection for triangulation, and
+registration gated at ≥10 PnP inliers and ≥0.25 inlier ratio (the ratio is load
+-bearing — removing it registered one more view and cost an order of magnitude in
+accuracy). It has no homography-versus-essential model selection, no local BA, and
+no observation filtering.
+
+## What is proven, and what is not
 Proven by the test suite, on a deterministic synthetic scene:
 
 - a clean query localizes to machine precision (translation error ~3e-16 of a

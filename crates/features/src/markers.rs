@@ -3,7 +3,7 @@
 use crate::Result;
 use cv_core::Error;
 use image::{GrayImage, Luma};
-use nalgebra::{DMatrix, Matrix3, Point2, Vector3};
+use nalgebra::{Matrix3, Point2, Vector3};
 use std::collections::VecDeque;
 
 #[cfg(feature = "gpu")]
@@ -886,44 +886,14 @@ fn estimate_homography(src: &[Point2<f64>], dst: &[Point2<f64>]) -> Result<Matri
             "estimate_homography needs >=4 correspondences".to_string(),
         ));
     }
-    let n = src.len();
-    let mut a = DMatrix::<f64>::zeros(2 * n, 9);
-    for i in 0..n {
-        let x = src[i].x;
-        let y = src[i].y;
-        let u = dst[i].x;
-        let v = dst[i].y;
-        let r0 = 2 * i;
-        let r1 = r0 + 1;
-        a[(r0, 0)] = -x;
-        a[(r0, 1)] = -y;
-        a[(r0, 2)] = -1.0;
-        a[(r0, 6)] = u * x;
-        a[(r0, 7)] = u * y;
-        a[(r0, 8)] = u;
-        a[(r1, 3)] = -x;
-        a[(r1, 4)] = -y;
-        a[(r1, 5)] = -1.0;
-        a[(r1, 6)] = v * x;
-        a[(r1, 7)] = v * y;
-        a[(r1, 8)] = v;
-    }
-    let svd = a.svd(true, true);
-    let vt = svd
-        .v_t
-        .ok_or_else(|| Error::AlgorithmError("homography SVD failed".to_string()))?;
-    let h = vt.row(vt.nrows() - 1);
-    let mut m = Matrix3::<f64>::zeros();
-    for r in 0..3 {
-        for c in 0..3 {
-            m[(r, c)] = h[(0, r * 3 + c)];
-        }
-    }
-    let s = m[(2, 2)];
-    if s.abs() > 1e-12 {
-        m /= s;
-    }
-    Ok(m)
+    // Normalised DLT, shared with `cv-calib3d`. This used the raw (unnormalised)
+    // system, which is badly conditioned here because the board coordinates are
+    // O(1) while the image coordinates are O(1000) pixels.
+    let s: Vec<[f64; 2]> = src.iter().map(|p| [p.x, p.y]).collect();
+    let d: Vec<[f64; 2]> = dst.iter().map(|p| [p.x, p.y]).collect();
+    cv_calib3d::dlt::solve_dlt_homography(&s, &d).ok_or_else(|| {
+        Error::AlgorithmError("homography DLT failed (degenerate configuration)".to_string())
+    })
 }
 
 fn project_homography(h: &Matrix3<f64>, p: &Point2<f64>) -> Point2<f64> {

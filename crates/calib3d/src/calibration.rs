@@ -629,6 +629,9 @@ pub fn refine_camera_calibration_iterative_with_options(
 // ============================================================================
 
 /// Estimate homography using Direct Linear Transform (DLT)
+///
+/// Thin adapter over [`crate::dlt::solve_dlt_homography`], the single normalised
+/// DLT implementation in the workspace.
 fn estimate_homography_dlt(src: &[Point2<f64>], dst: &[Point2<f64>]) -> Result<Matrix3<f64>> {
     if src.len() != dst.len() || src.len() < 4 {
         return Err(cv_core::Error::AlgorithmError(
@@ -636,53 +639,11 @@ fn estimate_homography_dlt(src: &[Point2<f64>], dst: &[Point2<f64>]) -> Result<M
         ));
     }
 
-    let (src_n, ts) = normalize_points_hartley(src)?;
-    let (dst_n, td) = normalize_points_hartley(dst)?;
-    let n = src.len();
-    let mut a = DMatrix::<f64>::zeros(2 * n, 9);
-    for i in 0..n {
-        let x = src_n[i].x;
-        let y = src_n[i].y;
-        let u = dst_n[i].x;
-        let v = dst_n[i].y;
-        let r0 = 2 * i;
-        let r1 = r0 + 1;
-        a[(r0, 0)] = -x;
-        a[(r0, 1)] = -y;
-        a[(r0, 2)] = -1.0;
-        a[(r0, 6)] = u * x;
-        a[(r0, 7)] = u * y;
-        a[(r0, 8)] = u;
-
-        a[(r1, 3)] = -x;
-        a[(r1, 4)] = -y;
-        a[(r1, 5)] = -1.0;
-        a[(r1, 6)] = v * x;
-        a[(r1, 7)] = v * y;
-        a[(r1, 8)] = v;
-    }
-
-    let svd = a.svd(true, true);
-    let vt = svd.v_t.ok_or_else(|| {
+    let src: Vec<[f64; 2]> = src.iter().map(|p| [p.x, p.y]).collect();
+    let dst: Vec<[f64; 2]> = dst.iter().map(|p| [p.x, p.y]).collect();
+    crate::dlt::solve_dlt_homography(&src, &dst).ok_or_else(|| {
         cv_core::Error::AlgorithmError("SVD failed in estimate_homography_dlt".to_string())
-    })?;
-    let h = vt.row(vt.nrows() - 1);
-    let hn = Matrix3::new(
-        h[(0, 0)],
-        h[(0, 1)],
-        h[(0, 2)],
-        h[(0, 3)],
-        h[(0, 4)],
-        h[(0, 5)],
-        h[(0, 6)],
-        h[(0, 7)],
-        h[(0, 8)],
-    );
-    let mut hdenorm = td.try_inverse().unwrap_or(Matrix3::identity()) * hn * ts;
-    if hdenorm[(2, 2)].abs() > 1e-12 {
-        hdenorm /= hdenorm[(2, 2)];
-    }
-    Ok(hdenorm)
+    })
 }
 
 /// Compute intrinsic matrix from planar homographies
@@ -870,47 +831,4 @@ fn v_ij(h: &Matrix3<f64>, i: usize, j: usize) -> [f64; 6] {
         h[(2, i)] * h[(1, j)] + h[(1, i)] * h[(2, j)],
         h[(2, i)] * h[(2, j)],
     ]
-}
-
-/// Normalize points using Hartley normalization
-fn normalize_points_hartley(points: &[Point2<f64>]) -> Result<(Vec<Point2<f64>>, Matrix3<f64>)> {
-    if points.is_empty() {
-        return Err(cv_core::Error::AlgorithmError(
-            "normalize_points_hartley: empty points array".to_string(),
-        ));
-    }
-
-    let mean_x = points.iter().map(|p| p.x).sum::<f64>() / points.len() as f64;
-    let mean_y = points.iter().map(|p| p.y).sum::<f64>() / points.len() as f64;
-
-    let mean_dist = points
-        .iter()
-        .map(|p| ((p.x - mean_x).powi(2) + (p.y - mean_y).powi(2)).sqrt())
-        .sum::<f64>()
-        / points.len() as f64;
-
-    let scale = if mean_dist.abs() > 1e-18 {
-        std::f64::consts::SQRT_2 / mean_dist
-    } else {
-        1.0
-    };
-
-    let normalized = points
-        .iter()
-        .map(|p| Point2::new((p.x - mean_x) * scale, (p.y - mean_y) * scale))
-        .collect();
-
-    let t = Matrix3::new(
-        scale,
-        0.0,
-        -mean_x * scale,
-        0.0,
-        scale,
-        -mean_y * scale,
-        0.0,
-        0.0,
-        1.0,
-    );
-
-    Ok((normalized, t))
 }

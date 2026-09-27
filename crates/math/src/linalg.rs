@@ -17,7 +17,7 @@
 //! assert!((x[1] + 6.0).abs() < 1e-10);
 //! ```
 
-use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
+use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, SVector, Vector3};
 use num_traits::Float;
 
 // ---------------------------------------------------------------------------
@@ -518,6 +518,38 @@ pub fn solve(a: &DMatrix<f64>, b: &DVector<f64>) -> Result<DVector<f64>, String>
     } else {
         qr_solve(a, b)
     }
+}
+
+/// Solve a small, compile-time-sized square system `A x = b` via LU with
+/// partial pivoting.
+///
+/// This is the workspace-wide replacement for the ad-hoc fixed-size Gaussian
+/// elimination / Gauss-Jordan routines that were previously written next to the
+/// call sites. It works on `nalgebra::SMatrix`/`SVector`, so it stays on the
+/// stack (no heap allocation) and is therefore usable inside per-pixel loops.
+///
+/// Returns `None` when `A` is singular.
+pub fn solve_square<T: nalgebra::RealField, const N: usize>(
+    a: &SMatrix<T, N, N>,
+    b: &SVector<T, N>,
+) -> Option<SVector<T, N>>
+where
+    nalgebra::Const<N>: nalgebra::DimMin<nalgebra::Const<N>, Output = nalgebra::Const<N>>,
+{
+    a.clone().lu().solve(b)
+}
+
+/// Invert a small, compile-time-sized square matrix (`None` when singular).
+///
+/// Stack-allocated counterpart of [`inv`], used by the fixed-size call sites
+/// that previously hand-rolled Gauss-Jordan elimination.
+pub fn invert_square<T: nalgebra::RealField, const N: usize>(
+    a: &SMatrix<T, N, N>,
+) -> Option<SMatrix<T, N, N>>
+where
+    nalgebra::Const<N>: nalgebra::DimMin<nalgebra::Const<N>, Output = nalgebra::Const<N>>,
+{
+    a.clone().try_inverse()
 }
 
 /// Solve `A X = B` (multiple right-hand sides).
@@ -1054,6 +1086,54 @@ mod tests {
         for i in 0..2 {
             assert!(residual[i].abs() < 1e-10);
         }
+    }
+
+    #[test]
+    fn test_solve_square_and_invert_square() {
+        // 3x3 with a known solution.
+        let a = SMatrix::<f64, 3, 3>::new(2.0, 1.0, 1.0, 4.0, 3.0, 3.0, 8.0, 7.0, 9.0);
+        let b = SVector::<f64, 3>::new(1.0, 1.0, 1.0);
+        let x = solve_square(&a, &b).unwrap();
+        assert!((a * x - b).norm() < 1e-10);
+
+        // f32 6x6: the shape cv-video solves once per pixel. Build a symmetric
+        // positive-definite matrix from rank-1 updates so it is invertible.
+        let rows = [
+            [1.0f32, 0.5, 0.25, 0.125, 0.0, 1.0],
+            [0.0, 1.0, 0.5, 0.0, 0.25, 0.5],
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+        ];
+        let mut a6 = SMatrix::<f32, 6, 6>::zeros();
+        for r in rows.iter() {
+            let rv = SVector::<f32, 6>::from(*r);
+            a6 += rv * rv.transpose();
+        }
+        // Make it well conditioned (the normal-equations matrix of a per-pixel
+        // polynomial fit is diagonally dominant in the same way).
+        a6 += SMatrix::<f32, 6, 6>::identity() * 20.0;
+        let b6 = SVector::<f32, 6>::from([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let x6 = solve_square(&a6, &b6).unwrap();
+        assert!((a6 * x6 - b6).norm() < 1e-3, "6x6 f32 residual too large");
+
+        let inv6 = invert_square(&a6).unwrap();
+        let id6 = a6 * inv6;
+        for i in 0..6 {
+            for j in 0..6 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (id6[(i, j)] - expected).abs() < 1e-3,
+                    "A * A^-1 != I at ({i}, {j})"
+                );
+            }
+        }
+
+        // Singular systems report failure instead of returning garbage.
+        let sing = SMatrix::<f64, 2, 2>::new(1.0, 2.0, 2.0, 4.0);
+        assert!(invert_square(&sing).is_none());
+        assert!(solve_square(&sing, &SVector::<f64, 2>::new(1.0, 2.0)).is_none());
     }
 
     #[test]

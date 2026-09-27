@@ -137,8 +137,14 @@ pub fn recover_pose_from_essential(
         0.0, 0.0, 1.0, 0.0,
     );
 
+    // A decomposition is only valid if some points actually lie in front of
+    // both cameras. Scoring started at i32::MIN, so a candidate with *zero*
+    // positive-depth points still beat the initial value and could be returned:
+    // for a near-degenerate pair that is precisely the wrong one. Require real
+    // support, and prefer the most-supported candidate.
+    let min_support = ((norm1.len() / 2).max(1)) as i32;
     let mut best = None;
-    let mut best_score = i32::MIN;
+    let mut best_score = 0i32;
     for cand in candidates {
         let rot_mat = cand.rotation_matrix();
         let p2 = Matrix3x4::new(
@@ -173,13 +179,22 @@ pub fn recover_pose_from_essential(
                 score += 1;
             }
         }
+        if score < min_support {
+            continue;
+        }
         if score > best_score {
             best_score = score;
             best = Some(cand);
         }
     }
 
-    best.ok_or_else(|| cv_core::Error::AlgorithmError("No valid pose candidate found".to_string()))
+    best.ok_or_else(|| {
+        cv_core::Error::AlgorithmError(format!(
+            "No valid pose candidate found: none of the {} decompositions had at \
+             least {min_support} points in front of both cameras",
+            candidates.len()
+        ))
+    })
 }
 
 /// Linear Triangulation using the Direct Linear Transform (DLT) method.

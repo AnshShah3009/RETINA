@@ -29,26 +29,12 @@ impl RobustModel<MatchPair> for HomographyEstimator {
     }
 
     fn estimate(&self, data: &[&MatchPair]) -> Option<Self::Model> {
-        let mut a = vec![0.0f64; data.len() * 2 * 9];
-        for (i, m) in data.iter().enumerate() {
-            let (x1, y1) = m.src;
-            let (x2, y2) = m.dst;
-            let row1 = i * 2;
-            let row2 = i * 2 + 1;
-            a[row1 * 9] = -x1;
-            a[row1 * 9 + 1] = -y1;
-            a[row1 * 9 + 2] = -1.0;
-            a[row1 * 9 + 6] = x2 * x1;
-            a[row1 * 9 + 7] = x2 * y1;
-            a[row1 * 9 + 8] = x2;
-            a[row2 * 9 + 3] = -x1;
-            a[row2 * 9 + 4] = -y1;
-            a[row2 * 9 + 5] = -1.0;
-            a[row2 * 9 + 6] = y2 * x1;
-            a[row2 * 9 + 7] = y2 * y1;
-            a[row2 * 9 + 8] = y2;
-        }
-        solve_dlt_homography(&a, data.len() * 2)
+        let src: Vec<[f64; 2]> = data.iter().map(|m| [m.src.0, m.src.1]).collect();
+        let dst: Vec<[f64; 2]> = data.iter().map(|m| [m.dst.0, m.dst.1]).collect();
+        // Normalised DLT, shared with `cv-calib3d`. This estimator previously
+        // solved the raw (unnormalised) system, which loses accuracy for
+        // large pixel coordinates.
+        cv_calib3d::dlt::solve_dlt_homography(&src, &dst)
     }
 
     fn compute_error(&self, model: &Self::Model, data: &MatchPair) -> f64 {
@@ -75,21 +61,12 @@ impl RobustModel<MatchPair> for FundamentalEstimator {
     }
 
     fn estimate(&self, data: &[&MatchPair]) -> Option<Self::Model> {
-        let mut a = vec![0.0f64; data.len() * 9];
-        for (i, m) in data.iter().enumerate() {
-            let (x1, y1) = m.src;
-            let (x2, y2) = m.dst;
-            a[i * 9] = x2 * x1;
-            a[i * 9 + 1] = x2 * y1;
-            a[i * 9 + 2] = x2;
-            a[i * 9 + 3] = y2 * x1;
-            a[i * 9 + 4] = y2 * y1;
-            a[i * 9 + 5] = y2;
-            a[i * 9 + 6] = x1;
-            a[i * 9 + 7] = y1;
-            a[i * 9 + 8] = 1.0;
-        }
-        solve_dlt_fundamental(&a, data.len())
+        let pts1: Vec<[f64; 2]> = data.iter().map(|m| [m.src.0, m.src.1]).collect();
+        let pts2: Vec<[f64; 2]> = data.iter().map(|m| [m.dst.0, m.dst.1]).collect();
+        // Normalised 8-point algorithm, shared with `cv-calib3d` (this
+        // estimator previously solved the raw system and enforced rank 2 by
+        // recomposition).
+        cv_calib3d::dlt::solve_dlt_fundamental(&pts1, &pts2)
     }
 
     fn compute_error(&self, model: &Self::Model, data: &MatchPair) -> f64 {
@@ -145,58 +122,6 @@ pub fn estimate_fundamental(
 
     let ransac = Ransac::new(config.clone());
     ransac.run(&FundamentalEstimator, &data)
-}
-
-/// Solve DLT for homography using SVD
-fn solve_dlt_homography(a: &[f64], n_rows: usize) -> Option<Matrix3<f64>> {
-    let mut matrix = nalgebra::DMatrix::from_row_slice(n_rows, 9, a);
-
-    // If underdetermined, pad with zeros to ensure we get 9 singular vectors
-    if n_rows < 9 {
-        let mut padded = nalgebra::DMatrix::zeros(9, 9);
-        padded.view_mut((0, 0), (n_rows, 9)).copy_from(&matrix);
-        matrix = padded;
-    }
-
-    let svd = matrix.svd(false, true);
-    let v_t = svd.v_t?;
-    let h_vec = v_t.row(8);
-
-    Some(Matrix3::new(
-        h_vec[0], h_vec[1], h_vec[2], h_vec[3], h_vec[4], h_vec[5], h_vec[6], h_vec[7], h_vec[8],
-    ))
-}
-
-/// Solve DLT for fundamental matrix using SVD
-fn solve_dlt_fundamental(a: &[f64], n_rows: usize) -> Option<Matrix3<f64>> {
-    let mut matrix = nalgebra::DMatrix::from_row_slice(n_rows, 9, a);
-
-    // If underdetermined, pad with zeros to ensure we get 9 singular vectors
-    if n_rows < 9 {
-        let mut padded = nalgebra::DMatrix::zeros(9, 9);
-        padded.view_mut((0, 0), (n_rows, 9)).copy_from(&matrix);
-        matrix = padded;
-    }
-
-    let svd = matrix.svd(false, true);
-    let v_t = svd.v_t?;
-    let f_vec = v_t.row(8);
-
-    let f = Matrix3::new(
-        f_vec[0], f_vec[1], f_vec[2], f_vec[3], f_vec[4], f_vec[5], f_vec[6], f_vec[7], f_vec[8],
-    );
-
-    // Enforce rank-2 constraint for Fundamental matrix
-    let mut svd_f = f.svd(true, true);
-    svd_f.singular_values[2] = 0.0;
-
-    match svd_f.recompose() {
-        Ok(matrix) => Some(matrix),
-        Err(e) => {
-            tracing::warn!("Fundamental matrix rank-2 enforcement failed: {}", e);
-            None
-        }
-    }
 }
 
 /// Filter matches to keep only inliers
@@ -340,5 +265,90 @@ mod tests {
         // With identity homography and translation transformation,
         // we won't get perfect inliers but the pipeline should work
         // Just verify it runs without panicking
+    }
+
+    /// Two pinhole cameras looking at deterministic random 3D points.
+    fn synthetic_correspondences(n: usize) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+        use nalgebra::{Matrix3, Vector3};
+        let k = Matrix3::new(800.0, 0.0, 320.0, 0.0, 800.0, 240.0, 0.0, 0.0, 1.0);
+        let angle = 0.15f64;
+        let r = Matrix3::new(
+            angle.cos(),
+            0.0,
+            angle.sin(),
+            0.0,
+            1.0,
+            0.0,
+            -angle.sin(),
+            0.0,
+            angle.cos(),
+        );
+        let t = Vector3::new(-0.5, 0.0, 0.0);
+
+        let mut s = 7u64;
+        let mut next = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((s >> 11) as f64 / (1u64 << 53) as f64) - 0.5
+        };
+
+        let mut pts1 = Vec::new();
+        let mut pts2 = Vec::new();
+        let mut i = 0usize;
+        while pts1.len() < n && i < 10 * n {
+            i += 1;
+            let x = Vector3::new(next() * 4.0, next() * 4.0, 5.0 + next() * 3.0);
+            let y = r * x + t;
+            let u = k * x;
+            let v = k * y;
+            pts1.push((u[0] / u[2], u[1] / u[2]));
+            pts2.push((v[0] / v[2], v[1] / v[2]));
+        }
+        (pts1, pts2)
+    }
+
+    /// The three former copies of the 8-point solver (cv-calib3d's
+    /// `FundamentalSolver`, cv-calib3d's `find_fundamental_mat`, and this
+    /// crate's RANSAC estimator) must all return the same matrix up to sign and
+    /// scale.
+    #[test]
+    fn fundamental_solvers_agree_up_to_sign() {
+        let (pts1, pts2) = synthetic_correspondences(12);
+
+        let flat1: Vec<[f64; 2]> = pts1.iter().map(|p| [p.0, p.1]).collect();
+        let flat2: Vec<[f64; 2]> = pts2.iter().map(|p| [p.0, p.1]).collect();
+        let f_solver = cv_calib3d::fundamental::FundamentalSolver::estimate(&flat1, &flat2)
+            .expect("FundamentalSolver");
+
+        let p1: Vec<nalgebra::Point2<f64>> = pts1
+            .iter()
+            .map(|p| nalgebra::Point2::new(p.0, p.1))
+            .collect();
+        let p2: Vec<nalgebra::Point2<f64>> = pts2
+            .iter()
+            .map(|p| nalgebra::Point2::new(p.0, p.1))
+            .collect();
+        let f_free = cv_calib3d::find_fundamental_mat(&p1, &p2).expect("find_fundamental_mat");
+
+        let data: Vec<MatchPair> = pts1
+            .iter()
+            .zip(pts2.iter())
+            .map(|(a, b)| MatchPair { src: *a, dst: *b })
+            .collect();
+        let refs: Vec<&MatchPair> = data.iter().collect();
+        let f_ransac = FundamentalEstimator
+            .estimate(&refs)
+            .expect("RANSAC estimator");
+
+        let unit = |m: &Matrix3<f64>| m / m.norm();
+        for (name, other) in [("find_fundamental_mat", &f_free), ("ransac", &f_ransac)] {
+            let direct = (unit(&f_solver) - unit(other)).norm();
+            let flipped = (unit(&f_solver) + unit(other)).norm();
+            assert!(
+                direct < 1e-9 || flipped < 1e-9,
+                "FundamentalSolver and {name} disagree: {direct} / {flipped}"
+            );
+        }
     }
 }

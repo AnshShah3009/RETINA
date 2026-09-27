@@ -394,54 +394,6 @@ pub fn polygon_contains_polygon(outer: &Polygon, inner: &Polygon) -> bool {
 
 // ─── Boolean Operations ──────────────────────────────────────────────────────
 
-/// Sutherland-Hodgman polygon clipping: clips `subject` against `clip`.
-///
-/// Both polygons should be convex for correct results.  Vertices are given
-/// as open rings (no repeated closing vertex).
-fn sutherland_hodgman(subject: &[Point2D], clip: &[Point2D]) -> Vec<Point2D> {
-    let mut output = subject.to_vec();
-
-    let cn = clip.len();
-    if cn < 2 || output.is_empty() {
-        return output;
-    }
-
-    for i in 0..cn {
-        if output.is_empty() {
-            return output;
-        }
-        let edge_start = &clip[i];
-        let edge_end = &clip[(i + 1) % cn];
-        let input = output;
-        output = Vec::new();
-
-        let n = input.len();
-        if n == 0 {
-            break;
-        }
-        let mut s = &input[n - 1];
-        for e in &input {
-            let e_inside = cross2d(edge_start, edge_end, e) >= -EPS;
-            let s_inside = cross2d(edge_start, edge_end, s) >= -EPS;
-
-            if e_inside {
-                if !s_inside {
-                    if let Some(p) = line_intersection(edge_start, edge_end, s, e) {
-                        output.push(p);
-                    }
-                }
-                output.push(e.clone());
-            } else if s_inside {
-                if let Some(p) = line_intersection(edge_start, edge_end, s, e) {
-                    output.push(p);
-                }
-            }
-            s = e;
-        }
-    }
-    output
-}
-
 /// Intersection of infinite lines through (a1,a2) and (b1,b2).
 fn line_intersection(a1: &Point2D, a2: &Point2D, b1: &Point2D, b2: &Point2D) -> Option<Point2D> {
     let dax = a2.x - a1.x;
@@ -479,73 +431,32 @@ fn close_ring(ring: &mut Vec<Point2D>) {
     }
 }
 
-/// Compute the intersection of two polygons.
-///
-/// Uses Sutherland-Hodgman for convex polygons.  For general (non-convex) polygons
-/// the result is approximate.
-pub fn polygon_intersection(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
-    let sa = open_ring(&a.exterior);
-    let sb = open_ring(&b.exterior);
-    // Sutherland-Hodgman's inside test assumes CCW clip orientation; a CW
-    // wound (but otherwise identical) ring previously returned an empty
-    // intersection. Normalize both rings first.
-    let sa = if ring_signed_area(&sa) < 0.0 {
-        sa.into_iter().rev().collect()
-    } else {
-        sa
-    };
-    let sb = if ring_signed_area(&sb) < 0.0 {
-        sb.into_iter().rev().collect()
-    } else {
-        sb
-    };
-    let mut result = sutherland_hodgman(&sa, &sb);
-    if result.len() < 3 {
-        return vec![];
-    }
-    close_ring(&mut result);
-    vec![Polygon::new(result, vec![])]
+/// Convert a polygon into the `geo` representation used by the boolean ops.
+/// Rings are opened (the closing point removed) because `geo` closes them.
+fn to_geo_polygon(p: &Polygon) -> geo::Polygon<f64> {
+    use geo::{Coord, LineString};
+
+    let exterior: Vec<Coord<f64>> = open_ring(&p.exterior)
+        .iter()
+        .map(|pt| Coord { x: pt.x, y: pt.y })
+        .collect();
+    let interiors: Vec<LineString<f64>> = p
+        .holes
+        .iter()
+        .map(|h| {
+            LineString::from(
+                h.iter()
+                    .map(|pt| Coord { x: pt.x, y: pt.y })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    geo::Polygon::new(LineString::from(exterior), interiors)
 }
 
-/// Compute the union of two polygons.
-///
-/// Simplified approach: if they don't intersect, return both as separate polygons.
-/// If they do, compute a combined convex hull as an approximation.
-/// Compute the union of two polygons using exact boolean operations
-/// (via the `geo` crate's polygon clipping). A previous revision returned
-/// the convex hull of both inputs — a very lossy approximation for concave
-/// shapes.
-///
-/// Holes of the inputs participate in the operation. Returns every ring of
-/// the result as separate polygons (exteriors only).
-pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
-    use geo::algorithm::bool_ops::OpType;
-    use geo::BooleanOps;
-    use geo::{Coord, LineString, Polygon as GeoPolygon};
-
-    fn to_geo(p: &Polygon) -> GeoPolygon<f64> {
-        let exterior: Vec<Coord<f64>> = open_ring(&p.exterior)
-            .iter()
-            .map(|pt| Coord { x: pt.x, y: pt.y })
-            .collect();
-        let interiors: Vec<LineString<f64>> = p
-            .holes
-            .iter()
-            .map(|h| {
-                LineString::from(
-                    h.iter()
-                        .map(|pt| Coord { x: pt.x, y: pt.y })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect();
-        GeoPolygon::new(LineString::from(exterior), interiors)
-    }
-
-    let ga = to_geo(a);
-    let gb = to_geo(b);
-    let result = ga.boolean_op(&gb, OpType::Union);
-
+/// Convert the output of a `geo` boolean op back into this crate's polygons,
+/// closing rings and dropping degenerate holes.
+fn from_geo_multi_polygon(result: &geo::MultiPolygon<f64>) -> Vec<Polygon> {
     let mut out = Vec::new();
     for poly in result.0.iter() {
         let mut exterior: Vec<Point2D> = poly
@@ -567,6 +478,48 @@ pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
         holes.retain(|h| h.len() >= 4);
         out.push(Polygon::new(exterior, holes));
     }
+    out
+}
+
+/// Compute the intersection of two polygons.
+///
+/// Uses the `geo` crate's boolean operations, so the result is exact for
+/// concave polygons and holes; a previous revision clipped with
+/// Sutherland-Hodgman, which is only correct when the clip ring is convex and
+/// silently returned a wrong area otherwise (the winding normalisation it
+/// needed is gone with it). Returns every ring of the result as separate
+/// polygons.
+pub fn polygon_intersection(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
+    use geo::algorithm::bool_ops::OpType;
+    use geo::BooleanOps;
+
+    let ga = to_geo_polygon(a);
+    let gb = to_geo_polygon(b);
+    let result = ga.boolean_op(&gb, OpType::Intersection);
+
+    let out = from_geo_multi_polygon(&result);
+    if out.is_empty() {
+        return vec![];
+    }
+    out
+}
+
+/// Compute the union of two polygons.
+///
+/// Uses the `geo` crate's boolean operations. A previous revision returned the
+/// convex hull of both inputs — a very lossy approximation for concave shapes.
+///
+/// Holes of the inputs participate in the operation. Returns every ring of
+/// the result as separate polygons (exteriors only).
+pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
+    use geo::algorithm::bool_ops::OpType;
+    use geo::BooleanOps;
+
+    let ga = to_geo_polygon(a);
+    let gb = to_geo_polygon(b);
+    let result = ga.boolean_op(&gb, OpType::Union);
+
+    let mut out = from_geo_multi_polygon(&result);
     if out.is_empty() {
         out.push(Polygon::new(vec![], vec![]));
     }
@@ -1595,6 +1548,45 @@ mod tests {
         // Intersection of (0,0)-(2,2) and (1,1)-(3,3) = (1,1)-(2,2) = area 1
         let area: f64 = result.iter().map(|p| p.area()).sum();
         assert!((area - 1.0).abs() < 0.1);
+    }
+
+    /// Pins the results the local Sutherland-Hodgman clipper produced, so that
+    /// the delegation to `cv-math`'s `geo`-backed clipping cannot silently
+    /// change them: convex/convex, a concave subject against a convex clip, and
+    /// a clockwise-wound clip ring.
+    #[test]
+    fn test_polygon_intersection_matches_previous_implementation() {
+        let area = |polys: &[Polygon]| polys.iter().map(|p| p.area()).sum::<f64>();
+
+        // (a) Convex ∩ convex.
+        let a = square(0.0, 0.0, 2.0);
+        let b = square(1.0, 1.0, 2.0);
+        assert!((area(&polygon_intersection(&a, &b)) - 1.0).abs() < 1e-9);
+
+        // (b) Concave subject clipped by a convex ring: the L (area 7) inside
+        // (0,0)-(3,3) leaves both bars, overlapping in the unit square: 3+3-1.
+        let l = Polygon::new(
+            vec![
+                Point2D::new(0.0, 0.0),
+                Point2D::new(4.0, 0.0),
+                Point2D::new(4.0, 1.0),
+                Point2D::new(1.0, 1.0),
+                Point2D::new(1.0, 4.0),
+                Point2D::new(0.0, 4.0),
+            ],
+            vec![],
+        );
+        let clip = square(0.0, 0.0, 3.0);
+        assert!((area(&polygon_intersection(&l, &clip)) - 5.0).abs() < 1e-9);
+        // A concave ring intersected with itself is the ring itself (area 7).
+        assert!((area(&polygon_intersection(&l, &l)) - 7.0).abs() < 1e-9);
+
+        // (c) Clockwise-wound clip ring must give the same result as CCW.
+        let cw = Polygon::new(a.exterior.iter().rev().cloned().collect(), vec![]);
+        let r_ccw = polygon_intersection(&a, &a.clone());
+        let r_cw = polygon_intersection(&a, &cw);
+        assert!((area(&r_ccw) - 4.0).abs() < 1e-9);
+        assert!((area(&r_cw) - area(&r_ccw)).abs() < 1e-9);
     }
 
     // ── Delaunay triangulation ───────────────────────────────────────────
