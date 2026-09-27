@@ -610,3 +610,35 @@ is the same limit found independently on TUM fr1_desk, and it is the concrete
 work item that stands between this mapper and a many-view ETH3D number
 comparable to visloc-rs's. It is recorded in full here so the next attempt starts
 from measurements rather than from a guess.
+
+### The cause, and it is not a bug
+
+Median 16x16 block standard deviation across the 12 chain frames, in chain order:
+
+| frame | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| block std | 1.98 | 2.13 | 2.27 | 3.01 | 2.93 | 3.34 | 3.72 | 3.25 | 4.12 | 4.33 | 4.98 | 5.37 |
+
+Correlation with position: **0.97**.
+
+The chain starts at the dimmest end of the sequence and walks into better light.
+The frames that match badly - views 0 and 1, 9-10 mean matches - are exactly the
+frames with block std around 2.0, against 5.37 by the end. For comparison TUM
+fr1_xyz, which registers 45/45, sits at 6.2 throughout.
+
+So the "9 matches" frames are not broken. They are nearly featureless, and no
+threshold, window or seed setting can manufacture detail that is not in the
+image. This also explains the fr1_desk result in one stroke: that sequence sits
+at 2.7 for the same reason, and lowering the FAST threshold there only added
+corners in flat regions that do not repeat under motion.
+
+Two consequences follow, and they point the same way:
+
+- **Chain start.** The greedy chain is seeded to maximise length, which starts it
+  at the dim end. A chain seeded by *texture* would begin where features exist
+  and register far more of the capture. This is a cheap change with a measurable
+  payoff, and it is the next thing to try.
+- **ETH3D specifically.** These DSLR frames are undistorted but not
+  photometrically normalised, and a capture this dim will stay hard regardless of
+  seeding. A capture-wide exposure or contrast normalisation is the standard
+  remedy and is worth measuring before concluding the scene is unusable.
