@@ -352,3 +352,45 @@ On TUM fr1_desk, which revisits more aggressively, 0 loops fire at all and both
 settings give 9/40 — that sequence stalls earlier for an unrelated reason.
 
 `--loop-closure` enables it; `--loop-max-px` and `--loop-min-gap` tune it.
+
+## Pair window, and why the seed decides the run
+
+The mapper pairs each view with the next `--window` views in time. A window of 3
+is too tight for a fast-moving handheld camera, and it was the single biggest
+quality lever found:
+
+| window | fr1_xyz (45 views) | fr1_desk (40 views) |
+| --- | --- | --- |
+| 3 | 44/45 — 97.8% | 9/40 — 22.5% |
+| 5 | **45/45 — 100%** | **25/40 — 62.5%** |
+| 8 | — | 25/40 — 62.5% |
+
+The default is now 5.
+
+### The feature-count sweep is not monotone, and that is the real finding
+
+At window 5 on fr1_desk, registration by feature count:
+
+| features | 800 | 1200 | 1500 | 2000 | 3000 |
+| --- | --- | --- | --- | --- | --- |
+| registered | 12/40 | 25/40 | 9/40 | 17/40 | 28/40 |
+
+A tuning curve that goes 12 -> 25 -> 9 -> 17 -> 28 is not a tuning problem. The
+cause is the seed: changing the feature count changes which pair is ranked best,
+and the chosen seeds differ completely — `(14, 16)` at 1200 features, `(24, 26)`
+at 1500 and 3000. One seed leads somewhere and another strands the run, and the
+result is decided before any view registers.
+
+The seed metric cannot see this. `seed_from_pair` counts the points that
+triangulate correctly *from that pair alone* — positive depth in both cameras,
+parallax above threshold, reprojection under `max_reproj_px`. It is a purely
+local measure, so a pair that is locally excellent and sits at a dead end of the
+sequence outranks a pair that would have carried the whole trajectory. Raising
+`--seed-hypotheses` from 8 to 32 changes nothing (25/40 either way), because the
+surplus hypotheses are ranked below the same local winner, not alongside a better
+one.
+
+What is needed is a seed metric with lookahead — a pair that also has verified
+neighbours on both sides is the one that can start a chain. Until then, fr1_desk's
+62.5% is a floor imposed by initialization, not by PnP, matching the 15
+"PnP RANSAC failed" and 14 "too few inliers" in the breakdown.
