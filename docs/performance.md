@@ -552,3 +552,61 @@ views. The 2D-3D associations are wrong, and neither the seed, the window, the
 ratio, the threshold, the resolution, nor the solver is responsible. That is the
 same descriptor-quality limit found on TUM fr1_desk, and it needs a
 descriptor-side fix rather than parameter tuning.
+
+## Where ETH3D actually stops, measured all the way down
+
+electro, 12 contiguous views, 45 candidate pairs, 5,000 features, window 5,
+f-threshold 4. The pipeline loses views at two distinct stages, and the first is
+the one that matters.
+
+### Stage 1: 7 of 45 pairs verify
+
+Match counts per candidate pair, after the ratio test and cross-check:
+
+| | min | p25 | median | max |
+| --- | ---: | ---: | ---: | ---: |
+| matches | 6 | 17 | **37** | 358 |
+
+A median of 37 matches across pairs spanning a contiguous DSLR capture is very
+low. Grouped by the pair's first view, the spread is not random:
+
+| first view | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| mean matches | 10 | 9 | **152** | 91 | 44 | 32 | 94 | 53 | 47 | 58 |
+
+Views 0 and 1 yield 9-10 matches while view 2 yields 152 - a 15x difference for
+frames that are adjacent in the same capture. That asymmetry is the signature of
+a problem with those specific frames, not of the matcher or the scene.
+
+Ruled out for these frames:
+
+- **Not intrinsics.** The loader restricts to the largest single-camera group
+  (camera 0, 16 of 45 views) and camera 0 is 6205x4134, which matches the image
+  files exactly. The other five DSLRs differ (6192x4121, 6172x4118, 6203x4134,
+  6198x4132, 6198x4130), so mixing them would matter - and it is not happening.
+- **Not resolution or feature count.** Native resolution beats every downscale
+  (201, 62, 13, 2 points), and 2,000 -> 10,000 features moves registration not
+  at all (3/12 in each case) while growing the map 201 -> 783 points.
+- **Not the RANSAC threshold.** 1.5, 4 and 8 px verify 7, 7 and 8 pairs.
+- **Not the seed.** The best seed is 0.031 deg from ground truth.
+
+### Stage 2: of the views that do get correspondences, PnP finds no consensus
+
+One view solves 39/41 inliers (95%). The rest score exactly 0/45, 0/47, 0/38,
+0/32 across 2,000 deterministic samples, with no solver errors and 27-47
+correspondences each - against a minimum of 6. The solver is not at fault; the
+2D-3D associations built from the map's descriptor table are wrong.
+
+### What this means
+
+The pipeline is not misconfigured. Every threshold, window, ratio, resolution and
+seed has been swept and each is already at or near its best. The two losses are
+1. a handful of frames in the capture contribute almost no matches, and
+2. map-based 2D-3D association produces wrong pairs on this rig.
+
+Both are the same underlying cause - ORB descriptors are not discriminative enough
+here - and both need a descriptor-side or association-side fix, not tuning. This
+is the same limit found independently on TUM fr1_desk, and it is the concrete
+work item that stands between this mapper and a many-view ETH3D number
+comparable to visloc-rs's. It is recorded in full here so the next attempt starts
+from measurements rather than from a guess.
