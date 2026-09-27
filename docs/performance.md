@@ -471,3 +471,54 @@ starved, and adding more detected corners actively harms it. The limit is
 repeatability under motion, which needs a better descriptor or a multi-hypothesis
 geometric check, not a lower threshold. The `--fast-threshold` knob was not
 shipped, since every value other than the existing default was worse.
+
+## Contiguous view selection had no traversal to find
+
+`--contiguous` is meant to walk a capture the way the camera moved, rather than
+sampling by image name. It sorted frames by name and then looked for chains
+whose neighbouring camera centres were within `--contiguous-radius` - but name
+order is not capture order for a multi-body rig. ETH3D interleaves up to six
+DSLRs, so the "neighbours" in name order are metres apart, and the search found
+chains of 2 views where 16 shared one camera:
+
+| radius | 0.5 m | 1.0 m | 2.0 m | 4.0 m |
+| --- | --- | --- | --- | --- |
+| views before | 2 | 2 | 4 | 5 |
+| views after | 2 | 2 | **12** | 15 |
+
+Selection now orders frames by greedy nearest-neighbour chaining, trying every
+possible start and keeping the longest chain, with ties broken by image name so
+it stays deterministic. A single greedy walk is not enough: seeded from the view
+nearest the centroid of all camera centres it ordered 4 of 16 frames, because it
+ran into a corner from which the rest of the scene was out of range.
+
+### What the larger ETH3D chain exposed
+
+With 12 views instead of 2, electro registers 3/12, and the reason is not the
+chain. Camera centres along the chain stay within one DSLR, so the intrinsics are
+right, and the seed pair is near-perfect (0.031 deg rotation error against ground
+truth). But PnP cannot find consensus:
+
+    [pnp] best over 2000 iters:  0/45 inliers (0%)
+    [pnp] best over 2000 iters: 39/41 inliers (95%)
+    [pnp] best over 2000 iters:  0/47 inliers (0%)
+    [pnp] best over 2000 iters:  0/38 inliers (0%)
+    [pnp] best over 2000 iters:  0/32 inliers (0%)
+
+One view solves almost perfectly; the rest find no consensus whatsoever across
+2,000 deterministic samples, with 27-47 correspondences each - far more than the
+6 a minimal solve needs, and with no DLT errors. The solver is not the problem.
+**The 2D-3D correspondences are wrong**: they come from the map's descriptor
+table, and at 25 MP on this rig the descriptors do not match reliably at all.
+
+That is consistent with the fr1_desk finding, and it is the same limitation at a
+different scale. It also explains why the reconstruction rate *falls* as the
+chain lengthens (2/5 at radius 2 m, 3/12 at 4 m, 3/15 at 6 m): each additional
+view is another chance for a bad descriptor match to enter the map, and the
+descriptors are not discriminative enough at this resolution to survive the
+ratio test.
+
+What is needed is descriptor-side: an ORB configuration suited to 25 MP imagery
+(a larger patch, more features per view, or a scale-aware descriptor), or a
+geometric check that rejects a 2D-3D association before it is used. Not another
+threshold. Everything measured here is in the commit history for the chain fix.
