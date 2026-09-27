@@ -155,7 +155,7 @@ pub fn bessel_j0(x: f64) -> f64 {
         let q = -0.1562499995e-1
             + y * (0.1430488765e-3
                 + y * (-0.6911147651e-5 + y * (0.7621095161e-6 + y * -0.934945152e-7)));
-        (0.636619772 / ax).sqrt() * (xx.cos() * p - z * xx.sin() * q)
+        (std::f64::consts::FRAC_2_PI / ax).sqrt() * (xx.cos() * p - z * xx.sin() * q)
     }
 }
 
@@ -195,7 +195,7 @@ pub fn bessel_j1(x: f64) -> f64 {
         let q = 0.04687499995
             + y * (-0.2002690873e-3
                 + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
-        let r = (0.636619772 / ax).sqrt() * (xx.cos() * p - z * xx.sin() * q);
+        let r = (std::f64::consts::FRAC_2_PI / ax).sqrt() * (xx.cos() * p - z * xx.sin() * q);
         if x < 0.0 {
             -r
         } else {
@@ -301,7 +301,7 @@ pub fn bessel_y0(x: f64) -> f64 {
         ] {
             den = den * y + c;
         }
-        num / den + 0.636619772 * bessel_j0(x) * x.ln()
+        num / den + std::f64::consts::FRAC_2_PI * bessel_j0(x) * x.ln()
     } else {
         let z = 8.0 / x;
         let y = z * z;
@@ -312,7 +312,7 @@ pub fn bessel_y0(x: f64) -> f64 {
         let q = -0.1562499995e-1
             + y * (0.1430488765e-3
                 + y * (-0.6911147651e-5 + y * (0.7621095161e-6 + y * -0.934945152e-7)));
-        (0.636619772 / x).sqrt() * (xx.sin() * p + z * xx.cos() * q)
+        (std::f64::consts::FRAC_2_PI / x).sqrt() * (xx.sin() * p + z * xx.cos() * q)
     }
 }
 
@@ -350,7 +350,7 @@ pub fn bessel_y1(x: f64) -> f64 {
         for i in (0..6).rev() {
             d_val = d_val * y + sv[i];
         }
-        x * (n_val / d_val) + 0.636619772 * (bessel_j1(x) * x.ln() - 1.0 / x)
+        x * (n_val / d_val) + std::f64::consts::FRAC_2_PI * (bessel_j1(x) * x.ln() - 1.0 / x)
     } else {
         let z = 8.0 / x;
         let y = z * z;
@@ -361,7 +361,7 @@ pub fn bessel_y1(x: f64) -> f64 {
         let q = 0.04687499995
             + y * (-0.2002690873e-3
                 + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
-        (0.636619772 / x).sqrt() * (xx.sin() * p + z * xx.cos() * q)
+        (std::f64::consts::FRAC_2_PI / x).sqrt() * (xx.sin() * p + z * xx.cos() * q)
     }
 }
 
@@ -590,7 +590,7 @@ mod numeric_reference_tests {
         // scipy.special.gammaln
         assert!(close(log_gamma(0.5), 0.57236494292470008, 1e-12));
         assert!(close(log_gamma(1.0), 0.0, 1e-14));
-        assert!(close(log_gamma(3.0), 0.69314718055994529, 1e-12));
+        assert!(close(log_gamma(3.0), std::f64::consts::LN_2, 1e-12));
         assert!(close(log_gamma(10.0), 12.801827480081469, 1e-12));
     }
 

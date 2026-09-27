@@ -386,7 +386,7 @@ mod tests {
         index.build(&train);
 
         // Create a query that's identical to one in the training set
-        let query: Vec<u8> = (0..32).map(|j| ((0 * 7 + j * 3) % 256) as u8).collect();
+        let query: Vec<u8> = (0..32).map(|j| ((7 + j * 3) % 256) as u8).collect();
         let results = index.search_knn(&query, 3);
 
         assert!(!results.is_empty(), "Should find nearest neighbors");
@@ -408,7 +408,7 @@ mod tests {
         let mut index = FlannIndex::new(8, 4);
         index.build(&train);
 
-        let query: Vec<u8> = (0..32).map(|j| ((0 * 7 + j * 3) % 256) as u8).collect();
+        let query: Vec<u8> = (0..32).map(|j| ((7 + j * 3) % 256) as u8).collect();
         let results = index.search_knn(&query, 4);
 
         assert!(results.len() >= 2, "expected multiple neighbors");
