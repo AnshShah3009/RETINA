@@ -433,3 +433,41 @@ either a stronger descriptor or a geometric consistency check across multiple
 hypotheses, not parameter tuning - the sweep has now ruled that out. fr1_xyz
 registers 45/45 at the same settings, so this is specific to the sequence's
 motion and texture rather than a general mapper fault.
+
+### The texture hypothesis, and why lowering the FAST threshold does not fix it
+
+fr1_desk is visibly flatter than fr1_xyz, and that is measurable. 16x16 block
+standard deviation, sampled mid-sequence:
+
+| sequence | image std | median block std | 10th pct block std |
+| --- | ---: | ---: | ---: |
+| fr1_xyz | 100.0 | 6.2 | 0.7 |
+| fr1_desk | 64.0 | 2.7 | 1.4 |
+
+fr1_desk has 2.3x less local texture — a dim sequence of plain surfaces. That is
+the obvious explanation for a map that stalls around 2,700 landmarks, and the
+obvious fix is to detect more corners.
+
+It does not work. Sweeping the FAST threshold on fr1_desk (40 views, window 5,
+1200 features) while varying the feature budget did nothing of the sort:
+
+| FAST threshold | 20 (default) | 12 | 8 | 5 |
+| --- | --- | --- | --- | --- |
+| registered | **23/40** | 9/40 | 23/40 | 9/40 |
+| 3D points | **2,712** | 725 | 2,684 | 786 |
+
+Lowering the threshold makes it *worse* and produces a *smaller* map, not a larger
+one — 725 and 786 landmarks against 2,712 at the default. The extra corners are
+in flat regions, so they are not repeatable under the camera's motion, they do not
+survive matching or the fundamental-matrix test, and they crowd the map's
+descriptor table. The default of 20 is already the best of the four, and the
+sweep also costs a great deal of runtime (a 45-view fr1_xyz run at threshold 12
+did not finish inside 600 s).
+
+So the texture measurement explains *why* the sequence is hard but does not yield
+a fix by itself. What the sweep does establish is that the map is not limited by
+corner *supply* — 2,712 landmarks from a 40-view sequence is not obviously
+starved, and adding more detected corners actively harms it. The limit is
+repeatability under motion, which needs a better descriptor or a multi-hypothesis
+geometric check, not a lower threshold. The `--fast-threshold` knob was not
+shipped, since every value other than the existing default was worse.
