@@ -324,14 +324,14 @@ mod tests {
     fn euroc_read_groundtruth_normalises_quaternion() {
         let dir = TempDir::new("euroc_gt_quat");
         // 90 deg about z as a non-unit quaternion (scale 2).
-        let s = 0.7071067811865476_f64 * 2.0;
+        let s = std::f64::consts::FRAC_1_SQRT_2 * 2.0;
         let content = format!("0,0,0,0,{s},0,0,{s},0,0,0,0,0,0,0,0,0\n");
         let path = dir.write("data.csv", &content);
 
         let states = read_groundtruth(&path).expect("parse groundtruth");
         let rot = states[0].pose.rotation;
-        assert!((rot.w - 0.7071067811865476).abs() < 1e-12);
-        assert!((rot.k - 0.7071067811865476).abs() < 1e-12);
+        assert!((rot.w - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        assert!((rot.k - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
         // Applying the rotation to +x must land on +y.
         let rotated = rot * Vector3::new(1.0, 0.0, 0.0);
         assert!((rotated.y - 1.0).abs() < 1e-12);

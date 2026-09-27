@@ -308,3 +308,47 @@ What is still missing relative to their pipeline, in order:
 3. **Many-view evaluation.** Every number above is tens of views. Their claims are
    on 1,000-10,000 image scenes. Until we run one of those, "par or better" is
    an untested claim rather than a measured one.
+
+## Loop closure
+
+A sequential mapper only ever matches a view to its temporal neighbours, so a
+trajectory that returns to somewhere it has already been leaves the second visit
+as a separate island. `close_loops` reconnects them: after a view registers, every
+earlier view beyond `--loop-min-gap` is matched and verified with the same bar a
+temporal pair must clear, and a verified pair is fused into the track graph.
+
+Fusing is gated on consistency. Once both endpoints have poses, each landmark the
+pair shares is projected into the other view and compared with the observation
+the loop claims; a loop is accepted when the median residual is inside
+`--loop-max-px` and at least half the observations agree. A loop that only agrees
+after discarding most of its matches is the wrong epipolar hypothesis wearing a
+confident inlier count.
+
+### It does not pay for itself, and defaults off
+
+Measured on TUM fr1_xyz, 45 views, `--window 3 --features 1200`:
+
+| | registered | closures | centre RMSE | pose-aware rotation |
+| --- | --- | ---: | ---: | ---: |
+| loop closure off | **44/45 (97.8%)** | 0 | 0.0461 m | **1.62°** |
+| gate at 1.0 px | 44/45 (97.8%) | 1 | 0.0890 m | — |
+| gate at 2.5 px | 39/45 (86.7%) | 5 | 0.0489 m | — |
+| gate at 4.0 px | 41/45 (91.1%) | 18 | 0.0673 m | 2.39° |
+| gate at 12.0 px | 38/45 (84.4%) | 22 | **0.0286 m** | — |
+| no gate | 42/45 (93.3%) | 25 | 0.0339 m | 2.30° |
+
+Centre error falls monotonically as more loops fuse — 4.6 cm down to 2.9 cm — and
+the map grows from 6,438 to 11,060 points, so the *geometry* the loops add is
+genuinely good. But registration falls with it, and no configuration recovered the
+44/45 baseline.
+
+The cause is ordering, not the loops. Fusion extends tracks and moves landmarks,
+which invalidates poses that PnP had already estimated; nothing re-registers them,
+so the loss compounds along the sequence. Fusing is correct; fusing *and then
+re-optimising globally* is what is missing. Until that exists, enabling it trades
+real accuracy for a registration count that is only a proxy.
+
+On TUM fr1_desk, which revisits more aggressively, 0 loops fire at all and both
+settings give 9/40 — that sequence stalls earlier for an unrelated reason.
+
+`--loop-closure` enables it; `--loop-max-px` and `--loop-min-gap` tune it.

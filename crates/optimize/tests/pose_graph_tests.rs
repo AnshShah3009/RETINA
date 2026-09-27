@@ -36,12 +36,15 @@ fn test_pose_graph_rotation() {
     // Initial guess is identity
     graph.add_node(1, Isometry3::identity());
 
-    let measurement = Isometry3::new(Vector3::new(1.0, 1.0, 0.0), Vector3::new(0.0, 0.0, 1.5708));
+    let measurement = Isometry3::new(
+        Vector3::new(1.0, 1.0, 0.0),
+        Vector3::new(0.0, 0.0, std::f64::consts::FRAC_PI_2),
+    );
     graph.add_edge(0, 1, measurement, Matrix6::identity());
 
     graph.optimize(20).unwrap();
 
     let pose1 = graph.nodes[&1];
     assert!((pose1.translation.vector.x - 1.0).abs() < 1e-2);
-    assert!((pose1.rotation.scaled_axis().z - 1.5708).abs() < 1e-2);
+    assert!((pose1.rotation.scaled_axis().z - std::f64::consts::FRAC_PI_2).abs() < 1e-2);
 }

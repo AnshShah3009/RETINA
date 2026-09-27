@@ -65,6 +65,15 @@ OPTIONS:
                           i+1..=i+W                             [default: 3]
     --f-threshold <P>     fundamental RANSAC Sampson threshold, px
                           [default: 1.5]
+    --loop-closure        reconnect a registered view to earlier views it
+                          revisits (default: on; use --no-loop-closure to
+                          disable)
+    --loop-min-gap <N>    minimum index separation for a revisit to count as
+                          a loop [default: 10]
+    --loop-max-px <P>     reprojection budget for accepting a loop, px
+                          [default: 4.0]
+    --no-loop-gnc         fuse every verified loop, without the consistency
+                          check (default: check on)
     --h-threshold <P>     homography RANSAC transfer threshold, px [default: 1.5]
     --h-iters <N>         homography RANSAC iterations           [default: 500]
     --planar-margin <S>   homography-vs-essential score margin
@@ -121,6 +130,10 @@ after applying that alignment's rotation.
 struct Args {
     dir: PathBuf,
     format_name: String,
+    loop_closure: bool,
+    loop_min_gap: usize,
+    loop_max_px: f64,
+    loop_gnc: bool,
     contiguous: bool,
     contiguous_radius: f64,
     frames: usize,
@@ -263,6 +276,10 @@ fn run(args: &mut Args) -> Result<(), String> {
             },
         },
         f_ransac_threshold_px: args.f_ransac_threshold_px,
+        loop_closure: args.loop_closure,
+        loop_closure_min_gap: args.loop_min_gap,
+        loop_closure_gnc: args.loop_gnc,
+        loop_closure_max_px: args.loop_max_px,
         h_ransac_threshold_px: args.h_ransac_threshold_px,
         h_ransac_iters: args.h_ransac_iters,
         planar_score_margin: args.planar_score_margin,
@@ -481,6 +498,11 @@ fn print_config(
         args.h_ransac_threshold_px, args.h_ransac_iters, args.planar_score_margin
     );
     println!("  max-dt             : {:.4} s", args.max_dt);
+    println!(
+        "  loop closure       : {} (min gap {} views)",
+        if args.loop_closure { "on" } else { "OFF" },
+        args.loop_min_gap
+    );
     // State the hardware so a result can be attributed to a device. The mapper
     // itself is CPU-only, but the ORB extraction and any HAL call in the same
     // process may bind a GPU, and a number without its device is not
@@ -571,6 +593,10 @@ fn print_report(mapping: &Mapping, ground_truth: &[Pose], views: &[View], args: 
     println!("  mean track length  : {:.3}", report.mean_track_length);
     println!("  local BA           : {} accepted", report.local_ba_runs);
     println!("  global BA          : {} accepted", report.ba_runs);
+    println!(
+        "  loop closures      : {} views reconnected",
+        report.loop_closures
+    );
 
     // Failure breakdown.
     let mut unreachable = 0usize;
@@ -1146,6 +1172,10 @@ fn extract_view(dir: &Path, filename: &str, features: usize) -> Result<View, Str
 fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut dir: Option<PathBuf> = None;
     let mut format_name: String = String::from("auto");
+    let mut loop_closure = false;
+    let mut loop_min_gap = 10usize;
+    let mut loop_max_px = 4.0f64;
+    let mut loop_gnc = true;
     let mut contiguous = false;
     let mut contiguous_radius = 1.0f64;
     let mut frames = 60usize;
@@ -1189,6 +1219,12 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         match flag {
             "--dir" => dir = Some(PathBuf::from(take(argv, &mut i, flag)?)),
             "--format" => format_name = take(argv, &mut i, flag)?,
+            "--loop-closure" => loop_closure = true,
+            "--no-loop-closure" => loop_closure = false,
+            "--loop-min-gap" => loop_min_gap = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--loop-max-px" => loop_max_px = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--loop-gnc" => loop_gnc = true,
+            "--no-loop-gnc" => loop_gnc = false,
             "--contiguous" => contiguous = true,
             "--contiguous-radius" => contiguous_radius = parse(&take(argv, &mut i, flag)?, flag)?,
             "--frames" => frames = parse(&take(argv, &mut i, flag)?, flag)?,
@@ -1295,6 +1331,10 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     Ok(Args {
         dir,
         format_name,
+        loop_closure,
+        loop_min_gap,
+        loop_max_px,
+        loop_gnc,
         contiguous,
         contiguous_radius,
         frames,

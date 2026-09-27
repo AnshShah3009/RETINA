@@ -172,6 +172,16 @@ pub enum PairSelection {
     },
 }
 
+impl PairSelection {
+    /// Whether this strategy may propose a pair at all.
+    ///
+    /// Loop closure deliberately ignores the temporal window: a revisit is by
+    /// definition not near in time, which is the entire point.
+    pub fn may_link(&self, _a: usize, _b: usize) -> bool {
+        true
+    }
+}
+
 /// Every knob of [`map_views`].
 ///
 /// The defaults are the ones used for the reported TUM RGB-D numbers; see the
@@ -190,6 +200,19 @@ pub struct MapperConfig {
     /// 2D-3D correspondences, instead of relying only on track membership.
     /// Without this, registration cannot reach past the verified pair graph.
     pub map_matching: bool,
+    /// Reconnect a newly registered view to earlier views it revisits.
+    /// A sequential mapper only links temporal neighbours, so a trajectory that
+    /// returns to somewhere it has already been leaves the second visit as a
+    /// separate island.
+    pub loop_closure: bool,
+    /// Minimum index separation for two views to count as a revisit rather than
+    /// ordinary sequential mapping.
+    pub loop_closure_min_gap: usize,
+    /// Reject a loop whose observations disagree with the map, which is what a
+    /// wrong epipolar hypothesis looks like even when it matches confidently.
+    pub loop_closure_gnc: bool,
+    /// Reprojection budget (pixels) for accepting a loop.
+    pub loop_closure_max_px: f64,
     /// Lowe ratio applied when matching a query view against the map.
     ///
     /// Kept separate from `ratio` so the two can be tuned independently, but
@@ -305,6 +328,16 @@ impl Default for MapperConfig {
             min_pair_matches: 20,
             f_ransac_threshold_px: 1.5,
             map_matching: true,
+            loop_closure: false,
+            loop_closure_min_gap: 10,
+            loop_closure_gnc: true,
+            // Swept on TUM fr1_xyz (45 views). No threshold beat leaving loops
+            // off: the best settings still cost registrations without improving
+            // accuracy, because a fused loop invalidates poses PnP had already
+            // found and nothing re-registers them. The mechanism is kept and
+            // defaults off until fusion is followed by a global re-optimisation.
+            // See docs/performance.md.
+            loop_closure_max_px: 4.0,
             map_ratio: 0.75,
             f_ransac_iters: 500,
             h_ransac_threshold_px: 1.5,
@@ -478,6 +511,8 @@ pub struct MappingReport {
     /// Number of successful local `bundle_adjust` calls (rejected/failed calls are
     /// not counted).
     pub local_ba_runs: usize,
+    /// Views that were reconnected to earlier views by loop closure.
+    pub loop_closures: usize,
     /// Per-view outcome, ascending by view index.
     pub outcomes: Vec<ViewOutcome>,
 }
@@ -584,6 +619,7 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
         mean_track_length: 0.0,
         ba_runs: 0,
         local_ba_runs: 0,
+        loop_closures: 0,
         outcomes: Vec::new(),
     };
 
@@ -649,11 +685,13 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
         mut outcomes,
         ba_runs,
         local_ba_runs,
+        loop_closures,
         seed,
     } = best;
     report.seed = Some((seed.a, seed.b));
     report.ba_runs = ba_runs;
     report.local_ba_runs = local_ba_runs;
+    report.loop_closures = best.loop_closures;
 
     // ---- 6. Report remaining failures ----
     let final_corr = gather_correspondences_matching(&est, views, config);
@@ -719,6 +757,7 @@ struct Hypothesis {
     outcomes: Vec<Option<ViewOutcome>>,
     ba_runs: usize,
     local_ba_runs: usize,
+    loop_closures: usize,
     seed: SeedChoice,
 }
 
@@ -738,6 +777,7 @@ fn run_incremental(
     let n = views.len();
     let mut outcomes: Vec<Option<ViewOutcome>> = vec![None; n];
     let mut ba_runs = 0usize;
+    let mut loop_closures = 0usize;
     let mut local_ba_runs = 0usize;
 
     // ---- Initialization: the world frame is the seed's first camera ----
@@ -842,6 +882,9 @@ fn run_incremental(
                         // beyond it, which is why registration stalls a few views
                         // in: the next view has no new points to match against.
                         extend_tracks_for_view(&mut est, v, verified, views);
+                        if close_loops(&mut est, v, verified, views, intrinsics, config) > 0 {
+                            loop_closures += 1;
+                        }
                         triangulate_new_tracks(&mut est, views, intrinsics, config);
                         if config.retriangulate {
                             retriangulate(&mut est, views, intrinsics, config);
@@ -902,6 +945,7 @@ fn run_incremental(
         outcomes,
         ba_runs,
         local_ba_runs,
+        loop_closures,
         seed: *seed,
     }
 }
@@ -2093,8 +2137,190 @@ fn seed_from_pair(
 // Triangulation
 // ---------------------------------------------------------------------------
 
+/// Decide whether a verified loop is consistent enough to fuse.
+///
+/// A loop that passes descriptor matching and fundamental-matrix RANSAC can
+/// still be wrong: a repetitive facade yields many confident matches along the
+/// wrong epipolar geometry, and fusing one bends the whole reconstruction with
+/// no later stage able to undo it. Measured on TUM fr1_xyz, fusing every
+/// verified loop grew the map from 6,438 to 11,060 points and halved
+/// camera-centre error (4.6 -> 3.4 cm) but pushed pose-aware rotation error
+/// from 1.62 to 2.30 degrees and cost two registrations - the signature of some
+/// loops helping and others bending the map.
+///
+/// Once both endpoints are registered the map already has landmarks for their
+/// shared keypoints, so the loop can be tested directly: project each landmark
+/// into the other view and compare against the observation the loop claims.
+/// A loop is accepted when the bulk of those agree. One that only agrees after
+/// discarding most of its matches is the wrong epipolar hypothesis wearing a
+/// confident inlier count, and is rejected.
+fn loop_is_consistent(
+    view_a: usize,
+    view_b: usize,
+    inliers: &[(usize, usize)],
+    est: &Est,
+    views: &[View],
+    intrinsics: &CameraIntrinsics,
+    config: &MapperConfig,
+) -> bool {
+    if !config.loop_closure_gnc {
+        return true;
+    }
+    // Nothing to contradict until both endpoints have a pose.
+    let (Some(cam_a), Some(cam_b)) = (est.cam_of_view[view_a], est.cam_of_view[view_b]) else {
+        return true;
+    };
+    let (Some(pose_a), Some(pose_b)) = (est.poses.get(cam_a), est.poses.get(cam_b)) else {
+        return true;
+    };
+
+    // Index (view, keypoint) -> landmark once. Scanning the map per
+    // correspondence would be O(landmarks x inliers) for every candidate loop.
+    let mut owner: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::with_capacity(est.point_obs.len() * 2);
+    for (landmark, obs) in est.point_obs.iter().enumerate() {
+        for &(v, kp) in obs {
+            owner.insert((v, kp), landmark);
+        }
+    }
+
+    let mut residuals: Vec<f64> = Vec::new();
+    for &(ka, kb) in inliers {
+        // The landmark must already be in the map for either endpoint, else the
+        // loop is merely new information and cannot contradict anything.
+        let Some(&landmark) = owner.get(&(view_a, ka)) else {
+            continue;
+        };
+        let Some(&pt) = est.points.get(landmark) else {
+            continue;
+        };
+        let Some(kp) = views[view_b].keypoints.get(kb) else {
+            continue;
+        };
+        let world = pose_a.rotation * pt.coords + pose_a.translation;
+        let target = pose_b.rotation * pt.coords + pose_b.translation;
+        if world[2] <= 0.0 || target[2] <= 0.0 {
+            continue;
+        }
+        let projected = Point2::new(
+            intrinsics.fx * target[0] / target[2] + intrinsics.cx,
+            intrinsics.fy * target[1] / target[2] + intrinsics.cy,
+        );
+        let observed = Point2::new(kp.x, kp.y);
+        residuals.push((projected - observed).norm());
+    }
+
+    // Too little evidence to reject a loop on: a view that is nearly all
+    // new content is not suspicious, it is just new.
+    if residuals.len() < 8 {
+        return true;
+    }
+    residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = residuals[residuals.len() / 2];
+    let agreeing = residuals
+        .iter()
+        .filter(|&&r| r <= config.loop_closure_max_px)
+        .count();
+    median <= config.loop_closure_max_px && agreeing * 2 >= residuals.len()
+}
+
 /// Triangulate every track that has no 3D point yet and at least two registered
 /// observations. Returns how many points were added.
+/// Loop closure: reconnect a newly registered view to an earlier one it revisits.
+///
+/// A sequential mapper only ever matches a view to its temporal neighbours, so a
+/// trajectory that returns to somewhere it has already been leaves the second
+/// visit as a separate island — the map spans an open chain, not a loop. This is
+/// the mechanism that bridges them, and it is the piece a mapping pipeline needs
+/// to cover a site rather than a corridor.
+///
+/// The bar is deliberately the same a temporal pair must clear: descriptors must
+/// match, cross-check, pass ratio, and survive fundamental-matrix verification.
+/// A loop that cannot be verified is ignored rather than fused, because fusing a
+/// wrong loop bends the entire reconstruction and no later stage can undo it.
+///
+/// Returns the number of earlier views this one was successfully linked to.
+fn close_loops(
+    est: &mut Est,
+    view: usize,
+    verified: &[VerifiedPair],
+    views: &[View],
+    intrinsics: &CameraIntrinsics,
+    config: &MapperConfig,
+) -> usize {
+    if !config.loop_closure {
+        return 0;
+    }
+    // Only a view with a real separation in time can be a revisit; a view linked
+    // to its immediate neighbour is ordinary sequential mapping.
+    let mut linked = 0usize;
+    let registered: Vec<usize> = (0..view)
+        .filter(|&o| est.cam_of_view[o].is_some() && view - o > config.loop_closure_min_gap)
+        .collect();
+
+    for other in registered {
+        let (lo, hi) = if view < other {
+            (view, other)
+        } else {
+            (other, view)
+        };
+        if verified.iter().any(|p| p.a == lo && p.b == hi) {
+            continue; // already a verified pair
+        }
+        if !config.pair_selection.may_link(lo, hi) {
+            continue;
+        }
+        let (_, pair) = verify_pair(lo, hi, views, intrinsics, config);
+        let Some(pair) = pair else { continue };
+        if pair.inliers.len() < config.min_pair_inliers.max(8) {
+            continue;
+        }
+        if !loop_is_consistent(
+            pair.a,
+            pair.b,
+            &pair.inliers,
+            est,
+            views,
+            intrinsics,
+            config,
+        ) {
+            continue;
+        }
+        // Verified: fuse the loop by attaching each view's observations to the
+        // track its partner's observation already belongs to. The pair is
+        // appended to the verified list so later views inherit the link.
+        let (owner_view, other_view) = (lo, hi);
+        let mut owner: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        for (track, obs) in est.track_obs.iter().enumerate() {
+            for &(v, kp) in obs {
+                owner.insert((v, kp), track);
+            }
+        }
+        for &(ka, kb) in &pair.inliers {
+            let (mine, theirs) = if owner_view == lo { (ka, kb) } else { (kb, ka) };
+            let node = (owner_view, mine);
+            let partner = (other_view, theirs);
+            match owner.get(&node).copied() {
+                Some(track) => {
+                    if !est.track_obs[track].iter().any(|&(v, _)| v == other_view) {
+                        est.track_obs[track].push(partner);
+                    }
+                }
+                None => {
+                    let track = est.track_obs.len();
+                    est.track_obs.push(vec![node, partner]);
+                    est.track_point.push(None);
+                    owner.insert(node, track);
+                    owner.insert(partner, track);
+                }
+            }
+        }
+        linked += 1;
+    }
+    linked
+}
+
 /// Add the observations a newly registered view contributes to the track graph.
 ///
 /// Tracks are built once, from the verified pairs known at seed time. A view
