@@ -1111,6 +1111,28 @@ fn load_colmap_sequence(
     // sample across the whole set can select cameras metres apart that share no
     // scene at all.
     if contiguous {
+        // Order the frames as a *traversal* before looking for a chain.
+        //
+        // The entries were sorted by image name above, which is deterministic
+        // but is not capture order for a rig: ETH3D DSLRs interleave several
+        // bodies, so name order jumps between cameras metres apart. The
+        // adjacency test below only means something on a sequence ordered like
+        // a path, and on name-ordered data it found chains of 2 views where 16
+        // shared one camera.
+        //
+        // Greedy nearest-neighbour chaining from the view closest to the
+        // running centroid: at each step take the nearest unvisited frame whose
+        // camera centre is within `max_step` of the last one. Deterministic
+        // (ties broken by name), and it walks the capture the way a vehicle
+        // actually moved through it.
+        // `order` is a permutation of indices; rebuild `entries` in that order.
+        let order = greedy_chain_order(&entries, contiguous_radius);
+        let mut reordered: Vec<(String, Pose)> = Vec::with_capacity(entries.len());
+        for &i in &order {
+            reordered.push(entries[i].clone());
+        }
+        entries = reordered;
+
         // keep the largest chain whose neighbouring centres are within
         // --contiguous-radius metres
         let max_step = contiguous_radius;
@@ -1153,6 +1175,76 @@ fn load_colmap_sequence(
     }
     let (files, poses) = entries.into_iter().unzip();
     Ok((files, poses, intrinsics))
+}
+
+/// Order frames into a capture-like traversal by greedy nearest-neighbour
+/// chaining, returning the longest chain found over every possible start.
+///
+/// A single greedy walk from one seed strands easily: it consumes a few
+/// near-centroid frames, then reaches a viewpoint whose remaining neighbours are
+/// all beyond the radius and stops, even though a different seed would have
+/// covered most of the capture. Seeding from the view nearest the centroid of
+/// all camera centres does not help either - on ETH3D electro it ordered 4 of
+/// 16 available frames, because 16 views share one DSLR and are ~0.75 m apart,
+/// but the walk ran into a corner from which the rest of the scene was out of
+/// range.
+///
+/// Trying every start and keeping the longest is 16 chains of at most 16 steps,
+/// which is trivial, and it removes the dependence on a good guess. Ties are
+/// broken by image name so the result is deterministic.
+fn greedy_chain_order(entries: &[(String, Pose)], max_step: f64) -> Vec<usize> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let centres: Vec<Vector3<f64>> = entries
+        .iter()
+        .map(|(_, p)| p.inverse().translation)
+        .collect();
+    let mut best: Vec<usize> = Vec::new();
+    for start in 0..entries.len() {
+        let mut visited = vec![false; entries.len()];
+        let mut order = vec![start];
+        visited[start] = true;
+        while let Some(&last) = order.last() {
+            let mut next: Option<(f64, usize)> = None;
+            for cand in 0..entries.len() {
+                if visited[cand] {
+                    continue;
+                }
+                let d = (centres[cand] - centres[last]).norm();
+                if d > max_step {
+                    continue;
+                }
+                let better = match next {
+                    None => true,
+                    Some((bd, bidx)) => d < bd || (d == bd && entries[cand].0 < entries[bidx].0),
+                };
+                if better {
+                    next = Some((d, cand));
+                }
+            }
+            match next {
+                Some((_, idx)) => {
+                    visited[idx] = true;
+                    order.push(idx);
+                }
+                // Nothing within the radius from here: the capture cannot be
+                // walked contiguously from this frame, so end the chain rather
+                // than jumping a gap and calling it one chain.
+                None => break,
+            }
+        }
+        if order.len() > best.len()
+            || (order.len() == best.len()
+                && order
+                    .iter()
+                    .map(|&i| entries[i].0.as_str())
+                    .lt(best.iter().map(|&i| entries[i].0.as_str())))
+        {
+            best = order;
+        }
+    }
+    best
 }
 
 /// Detect ORB features on one frame.
