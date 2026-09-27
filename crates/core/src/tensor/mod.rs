@@ -140,8 +140,13 @@ mod tests {
             // Regression: only `.end` was validated, so a reversed range
             // (start > end) or an out-of-range `.start` passed validation and
             // then panicked on indexing / usize underflow.
-            assert!(tensor.slice(0..1, 5..2, 0..10).is_err());
-            assert!(tensor.slice(0..1, 0..10, 8..3).is_err());
+            // A start past the end, so the lint cannot see it is empty at compile time.
+            let start = 5;
+            let end = 2;
+            assert!(tensor.slice(0..1, start..end, 0..10).is_err());
+            let start = 8;
+            let end = 3;
+            assert!(tensor.slice(0..1, 0..10, start..end).is_err());
             assert!(tensor.slice(0..1, 12..12, 0..10).is_err());
             assert!(tensor.slice(0..1, 0..10, 3..12).is_err());
         }
