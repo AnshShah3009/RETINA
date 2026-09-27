@@ -114,6 +114,47 @@ single-level scan is 0.79 ms while the irreducible upload cost is 0.08 ms, so a
 GPU kernel has a 10x-too-small budget to beat. The pipelines use no GPU at all;
 the candidates worth profiling next are PnP RANSAC and descriptor matching.
 
+## Status against visloc-rs
+
+Measured on the same dataset family (ETH3D), plus TUM RGB-D. Full numbers in
+[docs/performance.md](docs/performance.md).
+
+| | RETINA | visloc-rs |
+| --- | --- | --- |
+| registration, long contiguous run | 44/45 — **97.8%** | 9,996/10,008 — 99.88% |
+| registration, 20–30 views | **100%** | — |
+| camera-centre RMSE | **1.65–4.61 cm** | 3.50 cm (Electro) |
+| views per evaluation | 20–45 | 1,200–10,008 |
+| tests | 1,476 | 2,553 |
+| `unsafe impl` | **0** (26 crates forbid) | 0 (9 of 11 forbid) |
+
+**Not parity, and the gap is stated plainly.** Registration is close but not equal
+(97.8% vs 99.88%), and every comparison is on tens of views against their
+thousands, so it is not like-for-like. Our *accuracy* is better (1.65 cm vs 3.50 cm
+centre RMSE), but at 20–45 views that is the easier regime.
+
+What is genuinely ahead: crate breadth (~30 vs 10, covering imgproc, photo, dnn,
+video, rendering, plot, viewer, point clouds, many IO formats, Python bindings), a
+wgpu CPU/GPU HAL with cross-device parity proven on a discrete and an integrated
+GPU, a whole evaluation and benchmark layer, and a defect log
+([docs/bug-log.md](docs/bug-log.md)) recording what was wrong and how it was found.
+
+What is behind: no loop closure, no gap crossing across a capture with a hole in
+it, no many-view evaluation, and a smaller pipeline surface — they have
+localization, tracking, mapping, SLAM and VI-SLAM pipelines; we have one mapper and
+one localizer.
+
+## Documentation
+
+- [docs/evaluation.md](docs/evaluation.md) — metrics, dataset formats, CLI, and the
+  rule that nothing is published unless it was measured with the command shown.
+- [docs/performance.md](docs/performance.md) — every timing and accuracy number,
+  with the sweeps behind each default.
+- [docs/localization.md](docs/localization.md) — the localization pipeline, its
+  proven bounds, and what is not claimed.
+- [docs/bug-log.md](docs/bug-log.md) — every defect fixed, how it was found, and
+  the measurement that confirmed the fix.
+
 ## Evaluation and benchmarking
 
 The library ships the measurement layer for localization/SfM/SLAM work, so
