@@ -522,3 +522,33 @@ What is needed is descriptor-side: an ORB configuration suited to 25 MP imagery
 (a larger patch, more features per view, or a scale-aware descriptor), or a
 geometric check that rejects a 2D-3D association before it is used. Not another
 threshold. Everything measured here is in the commit history for the chain fix.
+
+### Resolution is not the cause either
+
+ORB's patch is a fixed number of pixels, so it covers a vanishing fraction of a
+61 MP frame: 0.007% of a 6198x4132 ETH3D DSLR image against 0.1% at 1600 px,
+while TUM fr1_xyz is 640x480. That makes capping the working resolution the
+obvious next lever. It is the wrong one:
+
+| max dimension | native (0) | 3200 px | 1600 px | 800 px |
+| --- | --- | --- | --- | --- |
+| registered | **3/12** | 2/12 | 2/12 | 2/12 |
+| 3D points | **201** | 62 | 13 | 2 |
+
+Downscaling loses points roughly geometrically - 201, 62, 13, 2 - rather than
+converging to a stable configuration. If resolution were the constraint, a
+moderate cap would plateau; instead every reduction throws away matches, so the
+full-resolution detections were already the good ones and the extra detail is
+carrying the map. Native resolution is the best measured value and stays the
+default.
+
+`--max-dimension` is exposed so this is reproducible, and the negative result is
+recorded because "just downscale it" is the obvious suggestion and it is wrong.
+
+After the chain fix, the camera-space distribution on ETH3D electro is: a correct
+seed (0.031 deg), correct intrinsics (one DSLR), plenty of correspondences
+(27-47 against a minimum of 6), no solver errors, and still 0% consensus for most
+views. The 2D-3D associations are wrong, and neither the seed, the window, the
+ratio, the threshold, the resolution, nor the solver is responsible. That is the
+same descriptor-quality limit found on TUM fr1_desk, and it needs a
+descriptor-side fix rather than parameter tuning.

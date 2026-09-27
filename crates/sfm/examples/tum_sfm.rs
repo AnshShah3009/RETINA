@@ -67,6 +67,9 @@ OPTIONS:
                           [default: 1.5]
     --map-ratio <R>       Lowe ratio test for query-to-landmark map matching
                           [default: 0.75]
+    --max-dimension <PX>  downscale frames so the longest side is at most PX
+                          pixels before feature detection (0 = native
+                          resolution, the default and the best measured value)
     --loop-closure        reconnect a registered view to earlier views it
                           revisits (default: on; use --no-loop-closure to
                           disable)
@@ -137,6 +140,7 @@ struct Args {
     loop_max_px: f64,
     loop_gnc: bool,
     map_ratio: f32,
+    max_dimension: u32,
     contiguous: bool,
     contiguous_radius: f64,
     frames: usize,
@@ -257,7 +261,12 @@ fn run(args: &mut Args) -> Result<(), String> {
     let extract_started = Instant::now();
     let mut views: Vec<View> = Vec::with_capacity(indices.len());
     for &index in &indices {
-        views.push(extract_view(&args.dir, &files[index], args.features)?);
+        views.push(extract_view(
+            &args.dir,
+            &files[index],
+            args.features,
+            args.max_dimension,
+        )?);
     }
     let extract_time = extract_started.elapsed();
 
@@ -1248,11 +1257,30 @@ fn greedy_chain_order(entries: &[(String, Pose)], max_step: f64) -> Vec<usize> {
 }
 
 /// Detect ORB features on one frame.
-fn extract_view(dir: &Path, filename: &str, features: usize) -> Result<View, String> {
+fn extract_view(
+    dir: &Path,
+    filename: &str,
+    features: usize,
+    max_dimension: u32,
+) -> Result<View, String> {
     let path = dir.join(filename);
     let image =
         image::open(&path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
-    let gray = image.to_luma8();
+    // Cap the working resolution. ORB's patch is a fixed number of pixels, so at
+    // 6198x4132 it covers 0.007% of the image and the descriptor carries almost
+    // no local context; at 1600px it covers 0.1%, an order of magnitude more.
+    // ETH3D DSLR frames are 61 MP against 0.3 MP for TUM, so without this the
+    // same ORB configuration is being asked to do 200x more work per feature.
+    let gray = if max_dimension > 0 && image.width().max(image.height()) > max_dimension {
+        image.resize(
+            max_dimension,
+            max_dimension,
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        image
+    }
+    .to_luma8();
     let (width, height) = (gray.width(), gray.height());
     let (_keypoints, descriptors) = orb_detect_and_compute(&gray, features.max(1));
     // Rebuild the keypoint list from the descriptors so the two stay parallel
@@ -1273,6 +1301,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut loop_max_px = 2.0f64;
     let mut loop_gnc = true;
     let mut map_ratio = 0.75f32;
+    let mut max_dimension = 0u32;
     let mut contiguous = false;
     let mut contiguous_radius = 1.0f64;
     let mut frames = 60usize;
@@ -1325,6 +1354,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--loop-min-gap" => loop_min_gap = parse(&take(argv, &mut i, flag)?, flag)?,
             "--loop-max-px" => loop_max_px = parse(&take(argv, &mut i, flag)?, flag)?,
             "--map-ratio" => map_ratio = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--max-dimension" => max_dimension = parse(&take(argv, &mut i, flag)?, flag)?,
             "--loop-gnc" => loop_gnc = true,
             "--no-loop-gnc" => loop_gnc = false,
             "--contiguous" => contiguous = true,
@@ -1438,6 +1468,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         loop_max_px,
         loop_gnc,
         map_ratio,
+        max_dimension,
         contiguous,
         contiguous_radius,
         frames,
