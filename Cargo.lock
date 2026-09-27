@@ -1559,6 +1559,7 @@ dependencies = [
  "cv-runtime",
  "image",
  "nalgebra",
+ "pollster",
  "rayon",
  "thiserror 2.0.18",
 ]

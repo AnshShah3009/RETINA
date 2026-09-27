@@ -600,3 +600,170 @@ fn test_threshold_parity<T: cv_core::float::Float + bytemuck::Pod>(
     }
     println!("  ✓ Threshold parity passed for {}", gpu_name);
 }
+
+/// The device selector must resolve every GPU class the machine has, and a
+/// selector matching nothing must fail rather than silently fall back to
+/// another device — a run that believes it measured the iGPU while actually
+/// using the dGPU is worse than a run that failed outright.
+#[test]
+fn test_device_selector_resolves_each_gpu_class() {
+    let adapters = block_on(GpuContext::describe_adapters());
+    println!("adapters: {adapters:?}");
+    if adapters.is_empty() {
+        println!("no adapters; selector resolution not exercised");
+        return;
+    }
+
+    use cv_hal::gpu::DeviceSelector;
+
+    assert!(
+        block_on(GpuContext::select_adapter(&DeviceSelector::Default)).is_ok(),
+        "the default selector must resolve when an adapter exists"
+    );
+
+    // Discrete/Integrated fall back to the other class, so a single-GPU machine
+    // still resolves rather than failing.
+    for selector in [DeviceSelector::Discrete, DeviceSelector::Integrated] {
+        match block_on(GpuContext::select_adapter(&selector)) {
+            Ok(a) => println!("{selector:?} resolved to {}", a.get_info().name),
+            Err(e) => panic!("{selector:?} should resolve on a machine with a GPU: {e}"),
+        }
+    }
+
+    // A name that does not exist is an error, and the message lists what exists.
+    let bogus = block_on(GpuContext::select_adapter(&DeviceSelector::NameContains(
+        "no-such-gpu-name".into(),
+    )));
+    assert!(
+        bogus.is_err(),
+        "a selector matching nothing must not silently succeed"
+    );
+    let err = bogus.err().map(|e| e.to_string()).unwrap_or_default();
+    println!("bogus selector error: {err}");
+    assert!(
+        err.contains("no-such-gpu-name") || err.contains("available"),
+        "the error should name the selector or list the adapters, got: {err}"
+    );
+
+    // A real name resolves.
+    let token: String = adapters[0]
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect();
+    if !token.is_empty() {
+        match block_on(GpuContext::select_adapter(&DeviceSelector::NameContains(
+            token.to_ascii_lowercase(),
+        ))) {
+            Ok(a) => println!("name selector matched {}", a.get_info().name),
+            Err(e) => println!("name selector for {token:?} did not match: {e}"),
+        }
+    }
+}
+
+/// Every GPU must agree with the CPU, and with the others, on the operations the
+/// pipelines use. Device-to-device agreement is the point: a result that varies
+/// by device is not reproducible.
+#[test]
+fn test_all_gpus_agree_with_cpu_and_each_other() {
+    let cpu = CpuBackend::new().expect("CPU backend unavailable");
+    let adapters = block_on(GpuContext::enumerate_adapters());
+    if adapters.is_empty() {
+        println!("no GPU adapters; skipping");
+        return;
+    }
+
+    let mut contexts: Vec<(String, GpuContext)> = Vec::new();
+    for adapter in adapters {
+        let info = adapter.get_info();
+        if info.backend != wgpu::Backend::Vulkan || info.device_type == wgpu::DeviceType::Cpu {
+            continue;
+        }
+        let name = info.name.clone();
+        if let Ok(ctx) = block_on(GpuContext::from_adapter(adapter)) {
+            contexts.push((name, ctx));
+        }
+    }
+    println!(
+        "comparing {} GPU(s) against the CPU: {:?}",
+        contexts.len(),
+        contexts.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()
+    );
+    if contexts.is_empty() {
+        return;
+    }
+
+    let shape = TensorShape::new(1, 192, 256);
+    let data: Vec<f32> = (0..shape.len()).map(|i| ((i * 37) % 251) as f32).collect();
+    let input_cpu: CpuTensor<f32> = Tensor::from_vec(data, shape).unwrap();
+
+    let rgb_shape = TensorShape::new(3, 96, 128);
+    let rgb_data: Vec<f32> = (0..rgb_shape.len())
+        .map(|i| ((i * 53) % 241) as f32)
+        .collect();
+    let rgb_cpu: CpuTensor<f32> = Tensor::from_vec(rgb_data, rgb_shape).unwrap();
+
+    let mut results: Vec<(String, Vec<f32>)> = Vec::new();
+    for (name, gpu) in &contexts {
+        let t = input_cpu.to_gpu_ctx(gpu).unwrap();
+        let thr = gpu
+            .threshold(&t, 128.0, 255.0, ThresholdType::Binary)
+            .unwrap()
+            .to_cpu_ctx(gpu)
+            .unwrap();
+        let resized = gpu.resize(&t, (96, 128)).unwrap().to_cpu_ctx(gpu).unwrap();
+        let rgb = rgb_cpu.to_gpu_ctx(gpu).unwrap();
+        let gray = gpu
+            .cvt_color(&rgb, ColorConversion::RgbToGray)
+            .unwrap()
+            .to_cpu_ctx(gpu)
+            .unwrap();
+
+        let mut all = thr.storage.as_slice().unwrap().to_vec();
+        all.extend_from_slice(resized.storage.as_slice().unwrap());
+        all.extend_from_slice(gray.storage.as_slice().unwrap());
+        results.push((name.clone(), all));
+    }
+
+    let cpu_thr = cpu
+        .threshold(&input_cpu, 128.0, 255.0, ThresholdType::Binary)
+        .unwrap();
+    let cpu_resized = cpu.resize(&input_cpu, (96, 128)).unwrap();
+    let cpu_gray = cpu.cvt_color(&rgb_cpu, ColorConversion::RgbToGray).unwrap();
+    let mut cpu_all = cpu_thr.storage.as_slice().unwrap().to_vec();
+    cpu_all.extend_from_slice(cpu_resized.storage.as_slice().unwrap());
+    cpu_all.extend_from_slice(cpu_gray.storage.as_slice().unwrap());
+
+    for (name, got) in &results {
+        assert_eq!(
+            got.len(),
+            cpu_all.len(),
+            "{name}: result length differs from the CPU reference"
+        );
+        let mut diffs = 0usize;
+        let mut worst = 0.0f32;
+        for (a, b) in got.iter().zip(cpu_all.iter()) {
+            let d = (a - b).abs();
+            if d > worst {
+                worst = d;
+            }
+            if d > 1.0 {
+                diffs += 1;
+            }
+        }
+        assert_eq!(
+            diffs, 0,
+            "{name}: {diffs} values differ from the CPU by more than 1.0 (worst {worst})"
+        );
+        println!("  {name}: matches the CPU (worst difference {worst:.3})");
+    }
+
+    for pair in results.windows(2) {
+        let (an, a) = &pair[0];
+        let (bn, b) = &pair[1];
+        for (x, y) in a.iter().zip(b.iter()) {
+            assert!((x - y).abs() <= 1.0, "{an} and {bn} disagree: {x} vs {y}");
+        }
+        println!("  {an} and {bn} agree");
+    }
+}

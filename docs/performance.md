@@ -277,3 +277,34 @@ enough to propose across the gap — the pairs exist, they fail verification
 because the images are ten frames apart — or loop closure. visloc-rs's many-view
 ETH3D pipeline has both; we have neither, and that is the real distance to
 their 99.88%.
+
+## Long contiguous runs: the number that matters
+
+The courtyard result is bounded by a hole in the capture, so it understates the
+mapper. On a trajectory that actually moves through the scene - TUM RGB-D
+fr1_xyz, contiguous selection, 640x480 - registration is essentially complete:
+
+| views | registered | points | centre RMSE | rotation |
+| ---: | ---: | ---: | ---: | ---: |
+| 20 | **100.0%** (20/20) | 3,944 | 1.65 cm | 0.70 deg |
+| 30 | **100.0%** (30/30) | - | 2.63 cm | - |
+| 45 | **97.8%** (44/45) | 6,438 | 4.61 cm | 1.62 deg |
+
+That is the same order as visloc-rs's 99.88%, on a different dataset and with
+far fewer images (tens of views here, thousands in their ETH3D runs). The honest
+claim is that incremental registration is close to saturated on a well-captured
+trajectory, and that the courtyard figure was a property of its capture rather
+than of the algorithm.
+
+What is still missing relative to their pipeline, in order:
+
+1. **Loop closure.** On courtyard it would not have helped - the far side never
+   returns (nearest earlier view is 2.07 m, 9.29 m across the hole), so there is
+   no loop to close. A sequence that genuinely revisits is the case to test next.
+2. **Gap crossing.** A 9.3 m baseline on a cluttered courtyard yields 97
+   descriptor matches where adjacent frames yield ~1000. Proposing and verifying
+   such pairs is a different problem from ordinary pair selection, and nothing
+   here attempts it.
+3. **Many-view evaluation.** Every number above is tens of views. Their claims are
+   on 1,000-10,000 image scenes. Until we run one of those, "par or better" is
+   an untested claim rather than a measured one.
