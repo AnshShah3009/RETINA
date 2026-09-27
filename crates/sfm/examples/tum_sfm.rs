@@ -65,6 +65,8 @@ OPTIONS:
                           i+1..=i+W                             [default: 3]
     --f-threshold <P>     fundamental RANSAC Sampson threshold, px
                           [default: 1.5]
+    --map-ratio <R>       Lowe ratio test for query-to-landmark map matching
+                          [default: 0.75]
     --loop-closure        reconnect a registered view to earlier views it
                           revisits (default: on; use --no-loop-closure to
                           disable)
@@ -134,6 +136,7 @@ struct Args {
     loop_min_gap: usize,
     loop_max_px: f64,
     loop_gnc: bool,
+    map_ratio: f32,
     contiguous: bool,
     contiguous_radius: f64,
     frames: usize,
@@ -279,6 +282,7 @@ fn run(args: &mut Args) -> Result<(), String> {
         loop_closure: args.loop_closure,
         loop_closure_min_gap: args.loop_min_gap,
         loop_closure_gnc: args.loop_gnc,
+        map_ratio: args.map_ratio,
         loop_closure_max_px: args.loop_max_px,
         h_ransac_threshold_px: args.h_ransac_threshold_px,
         h_ransac_iters: args.h_ransac_iters,
@@ -1176,6 +1180,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut loop_min_gap = 10usize;
     let mut loop_max_px = 4.0f64;
     let mut loop_gnc = true;
+    let mut map_ratio = 0.75f32;
     let mut contiguous = false;
     let mut contiguous_radius = 1.0f64;
     let mut frames = 60usize;
@@ -1227,6 +1232,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--no-loop-closure" => loop_closure = false,
             "--loop-min-gap" => loop_min_gap = parse(&take(argv, &mut i, flag)?, flag)?,
             "--loop-max-px" => loop_max_px = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--map-ratio" => map_ratio = parse(&take(argv, &mut i, flag)?, flag)?,
             "--loop-gnc" => loop_gnc = true,
             "--no-loop-gnc" => loop_gnc = false,
             "--contiguous" => contiguous = true,
@@ -1339,6 +1345,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         loop_min_gap,
         loop_max_px,
         loop_gnc,
+        map_ratio,
         contiguous,
         contiguous_radius,
         frames,

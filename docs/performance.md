@@ -394,3 +394,49 @@ What is needed is a seed metric with lookahead — a pair that also has verified
 neighbours on both sides is the one that can start a chain. Until then, fr1_desk's
 62.5% is a floor imposed by initialization, not by PnP, matching the 15
 "PnP RANSAC failed" and 14 "too few inliers" in the breakdown.
+
+### What the fr1_desk sweep actually showed, and what it did not
+
+The non-monotonicity is real and reproducible, but the obvious explanations are
+all wrong, and establishing that is most of the finding.
+
+**Not the seed.** Forcing `--seed-pair 14 16`, `24 26`, `0 5` and `5 10` at 1200
+features each give *exactly* the same result. With the seed pinned, the feature
+sweep still swings. The seed is not the variable.
+
+**Not the FAST response.** `corner_score` clamped its response to `u8`, so every
+keypoint above the threshold tied at 255 and ORB's top-N cut kept an arbitrary
+subset. That was a genuine bug and is fixed (the score is now the excess at full
+`f64` range). The sweep is still non-monotone, so it was not the cause either.
+
+**It is the map matching, and loosening it does not help.** Instrumenting the
+2D-3D correspondences for the views that fail to register on fr1_desk:
+
+| view | map table | matches at ratio 0.75 | 0.95 | 0.99 |
+| --- | ---: | ---: | ---: | ---: |
+| 36 | 2712 | 35 | 601 | 1028 |
+| 37 | 2712 | 43 | 598 | 1058 |
+| 38 | 2712 | 44 | 561 | 1003 |
+| 39 | 2712 | 28 | 600 | 1006 |
+
+A 2,712-landmark table that yields only ~35 matches at the working ratio, and
+~1,000 at 0.99, is the anomaly. But raising the ratio makes registration
+*worse*, not better:
+
+| map ratio | 0.60 | 0.70 | 0.75 | 0.80 | 0.90 | 0.95 | 0.99 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| registered | 23/40 | 23/40 | 23/40 | 23/40 | 14/40 | 14/40 | 14/40 |
+
+So the ~1,000 additional candidates are predominantly *wrong*, and PnP cannot
+find consensus among them - 14/40 instead of 23/40. The ratio test is doing its
+job; the map's descriptors simply are not discriminative enough at this scale to
+reliably add more landmarks. 0.75 is already optimal, and 0.6-0.8 are identical.
+
+**Where this leaves fr1_desk.** The remaining 17 failures are a descriptor-
+matching quality problem on a fast handheld-motion sequence, not a threshold, a
+seed, or a PnP defect. The PnP RANSAC itself is deterministic
+(`sample_unique_indices(n, 6, i + 11)`) and is not implicated. Progress needs
+either a stronger descriptor or a geometric consistency check across multiple
+hypotheses, not parameter tuning - the sweep has now ruled that out. fr1_xyz
+registers 45/45 at the same settings, so this is specific to the sequence's
+motion and texture rather than a general mapper fault.
