@@ -481,6 +481,31 @@ fn print_config(
         args.h_ransac_threshold_px, args.h_ransac_iters, args.planar_score_margin
     );
     println!("  max-dt             : {:.4} s", args.max_dt);
+    // State the hardware so a result can be attributed to a device. The mapper
+    // itself is CPU-only, but the ORB extraction and any HAL call in the same
+    // process may bind a GPU, and a number without its device is not
+    // reproducible on a multi-GPU machine.
+    match pollster::block_on(cv_hal::gpu::GpuContext::describe_adapters()) {
+        adapters if adapters.is_empty() => {
+            println!("  devices           : CPU only (no GPU adapter)")
+        }
+        adapters => {
+            let gpus: Vec<String> = adapters
+                .iter()
+                .filter(|a| !a.contains("(Other"))
+                .cloned()
+                .collect();
+            println!(
+                "  devices           : CPU + {} GPU(s): {}",
+                gpus.len(),
+                if gpus.is_empty() {
+                    "none".to_string()
+                } else {
+                    gpus.join(" | ")
+                }
+            );
+        }
+    }
     println!("  min-seed-inliers   : {}", args.min_seed_inliers);
     println!("  seed-hypotheses    : {}", args.seed_hypotheses);
     println!(

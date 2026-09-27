@@ -15,6 +15,32 @@ static GLOBAL_CONTEXT: OnceLock<crate::Result<GpuContext>> = OnceLock::new();
 static GLOBAL_INIT_LOCK: Mutex<()> = Mutex::new(());
 static NEXT_GPU_ID: AtomicU32 = AtomicU32::new(1);
 
+/// Which adapter to initialise the global context on.
+///
+/// `GpuContext::new` and `init_global` take whatever wgpu picks as the
+/// default adapter, which on a machine with more than one GPU is not
+/// controllable — a discrete GPU and an integrated one are both present,
+/// and results then depend on enumeration order. This makes the choice
+/// explicit so a run can be pinned to a named device and reproduced.
+///
+/// Selection is by substring of the adapter name, matched
+/// case-insensitively; a name that matches nothing is an error rather than a
+/// silent fallback, so a typo cannot quietly measure the wrong device.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum DeviceSelector {
+    /// Let wgpu choose (the historical behaviour).
+    #[default]
+    Default,
+    /// A discrete GPU.
+    Discrete,
+    /// An integrated GPU.
+    Integrated,
+    /// The first adapter whose name contains this substring.
+    NameContains(String),
+    /// The n-th adapter in enumeration order (0-based).
+    Index(usize),
+}
+
 /// Shared GPU Context containing Device and Queue.
 #[derive(Debug, Clone)]
 pub struct GpuContext {
@@ -398,6 +424,117 @@ impl GpuContext {
         instance.enumerate_adapters(Backends::all()).await
     }
 
+    /// Resolve a selector to a concrete adapter.
+    ///
+    /// Falls back through the classes the selector allows, so a machine with
+    /// only an integrated GPU still resolves `Discrete`-typed intent to the
+    /// integrated one rather than failing — unless the caller asked for a
+    /// specific name, which must match exactly.
+    pub async fn select_adapter(selector: &DeviceSelector) -> crate::Result<wgpu::Adapter> {
+        let adapters = Self::enumerate_adapters().await;
+        if adapters.is_empty() {
+            return Err(crate::Error::InitError(
+                "no GPU adapter available for selection".into(),
+            ));
+        }
+        let described: Vec<(wgpu::Adapter, String, wgpu::DeviceType)> = adapters
+            .into_iter()
+            .map(|a| {
+                let info = a.get_info();
+                let name = info.name.clone();
+                let kind = info.device_type;
+                (a, name, kind)
+            })
+            .collect();
+
+        let pick = match selector {
+            DeviceSelector::Default => described.first().map(|(a, _, _)| a.clone()),
+            DeviceSelector::Discrete => described
+                .iter()
+                .find(|(_, _, k)| *k == wgpu::DeviceType::DiscreteGpu)
+                .or_else(|| {
+                    described
+                        .iter()
+                        .find(|(_, _, k)| *k == wgpu::DeviceType::IntegratedGpu)
+                })
+                .map(|(a, _, _)| a.clone()),
+            DeviceSelector::Integrated => described
+                .iter()
+                .find(|(_, _, k)| *k == wgpu::DeviceType::IntegratedGpu)
+                .or_else(|| {
+                    described
+                        .iter()
+                        .find(|(_, _, k)| *k == wgpu::DeviceType::DiscreteGpu)
+                })
+                .map(|(a, _, _)| a.clone()),
+            DeviceSelector::NameContains(needle) => {
+                let lower = needle.to_ascii_lowercase();
+                described
+                    .iter()
+                    .find(|(_, n, _)| n.to_ascii_lowercase().contains(&lower))
+                    .map(|(a, _, _)| a.clone())
+            }
+            DeviceSelector::Index(i) => described.get(*i).map(|(a, _, _)| a.clone()),
+        };
+
+        pick.ok_or_else(|| {
+            let available: Vec<String> = described
+                .iter()
+                .map(|(_, n, k)| format!("{n} ({k:?})"))
+                .collect();
+            crate::Error::InitError(format!(
+                "no adapter matched {selector:?}; available: {}",
+                available.join(", ")
+            ))
+        })
+    }
+
+    /// Initialise the global context on a specific adapter.
+    ///
+    /// The selector is honoured on the first call only, exactly as
+    /// [`Self::init_global`] caches its result; a later call with a different
+    /// selector returns the already-initialised context rather than rebuilding,
+    /// so a run cannot believe it switched device mid-flight.
+    pub async fn init_global_on(selector: &DeviceSelector) -> crate::Result<&'static GpuContext> {
+        if let Some(existing) = GLOBAL_CONTEXT.get() {
+            return existing
+                .as_ref()
+                .map_err(|e| crate::Error::InitError(e.to_string()));
+        }
+        let adapter = Self::select_adapter(selector).await?;
+        let created = futures::executor::block_on(Self::from_adapter(adapter));
+
+        let _guard = GLOBAL_INIT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(res) = GLOBAL_CONTEXT.get() {
+            return res
+                .as_ref()
+                .map_err(|e| crate::Error::InitError(e.to_string()));
+        }
+        let ctx = created?;
+        let _ = GLOBAL_CONTEXT.set(Ok(ctx));
+        GLOBAL_CONTEXT
+            .get()
+            .expect("GLOBAL_CONTEXT set above")
+            .as_ref()
+            .map_err(|e| crate::Error::InitError(e.to_string()))
+    }
+
+    /// A human-readable description of every adapter the selector can see.
+    ///
+    /// Used by reports so a result states which device produced it.
+    pub async fn describe_adapters() -> Vec<String> {
+        Self::enumerate_adapters()
+            .await
+            .into_iter()
+            .map(|a| {
+                let i = a.get_info();
+                format!("{} ({:?}, {:?})", i.name, i.device_type, i.backend)
+            })
+            .collect()
+    }
+
     /// Get reference to device (convenience method)
     pub fn device(&self) -> &Device {
         &self.device
@@ -558,5 +695,46 @@ mod tests {
             "Too many differences between GPU and CPU blur: {}",
             diff_count
         );
+    }
+}
+
+#[cfg(test)]
+mod selector_tests {
+    use super::*;
+
+    /// A name matching nothing must fail, not fall back: a run that believes it
+    /// measured the integrated GPU while actually using the discrete one
+    /// produces numbers nobody can reproduce.
+    #[test]
+    fn name_selector_that_matches_nothing_is_an_error() {
+        let err = futures::executor::block_on(GpuContext::select_adapter(
+            &DeviceSelector::NameContains("definitely-not-a-real-adapter".into()),
+        ))
+        .err()
+        .map(|e| e.to_string())
+        .expect("a name matching no adapter must fail");
+        assert!(err.contains("definitely-not-a-real-adapter"), "{err}");
+    }
+
+    #[test]
+    fn selector_variants_are_comparable() {
+        assert_ne!(DeviceSelector::Discrete, DeviceSelector::Integrated);
+        assert_eq!(DeviceSelector::default(), DeviceSelector::Default);
+        // Case-insensitivity is a property of resolution, not of the value, so
+        // assert it there: a lower-case and an upper-case needle naming the same
+        // adapter must both resolve.
+        let adapters = futures::executor::block_on(GpuContext::enumerate_adapters());
+        if let Some(first) = adapters.first() {
+            let lower = first.get_info().name.to_ascii_lowercase();
+            if !lower.is_empty() {
+                let a = futures::executor::block_on(GpuContext::select_adapter(
+                    &DeviceSelector::NameContains(lower.clone()),
+                ));
+                let b = futures::executor::block_on(GpuContext::select_adapter(
+                    &DeviceSelector::NameContains(lower.to_uppercase()),
+                ));
+                assert!(a.is_ok() && b.is_ok(), "both cases must resolve");
+            }
+        }
     }
 }
