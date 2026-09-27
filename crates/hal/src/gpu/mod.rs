@@ -707,6 +707,20 @@ mod selector_tests {
     /// produces numbers nobody can reproduce.
     #[test]
     fn name_selector_that_matches_nothing_is_an_error() {
+        let adapters = futures::executor::block_on(GpuContext::enumerate_adapters());
+        if adapters.is_empty() {
+            // No GPU on this machine (CI): selection cannot be exercised, and
+            // the failure it would produce is "no adapter available" rather
+            // than a name mismatch. Assert only that it does not succeed.
+            let err = futures::executor::block_on(GpuContext::select_adapter(
+                &DeviceSelector::NameContains("definitely-not-a-real-adapter".into()),
+            ))
+            .err()
+            .map(|e| e.to_string())
+            .expect("selection must fail when there is no adapter");
+            assert!(err.contains("no GPU adapter"), "{err}");
+            return;
+        }
         let err = futures::executor::block_on(GpuContext::select_adapter(
             &DeviceSelector::NameContains("definitely-not-a-real-adapter".into()),
         ))
@@ -714,6 +728,10 @@ mod selector_tests {
         .map(|e| e.to_string())
         .expect("a name matching no adapter must fail");
         assert!(err.contains("definitely-not-a-real-adapter"), "{err}");
+        assert!(
+            err.contains("available"),
+            "the error should list the adapters: {err}"
+        );
     }
 
     #[test]
