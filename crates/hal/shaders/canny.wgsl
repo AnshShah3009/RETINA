@@ -5,7 +5,13 @@ struct Params {
     high_threshold: f32,
 }
 
-@group(0) @binding(0) var<storage, read> input_data: array<u32>;
+// The host uploads the image as f32 (`canny_gpu` in cv-imgproc converts u8
+// pixels to f32 before dispatch, because the gradient stage needs float
+// arithmetic). It was declared `array<u32>` and read four packed bytes per word,
+// which is not the layout it receives: the low byte of an f32 is 0x00 for every
+// whole-number value, so essentially every pixel read as 0, every Sobel sample
+// was 0, and the whole edge map came back black with no error raised.
+@group(0) @binding(0) var<storage, read> input_data: array<f32>;
 @group(0) @binding(1) var<storage, read_write> mag_data: array<f32>;
 @group(0) @binding(2) var<storage, read_write> dir_data: array<u32>;
 @group(0) @binding(3) var<uniform> params: Params;
@@ -16,16 +22,15 @@ fn get_pixel(x: i32, y: i32) -> f32 {
     let ix = clamp(x, 0, w - 1);
     let iy = clamp(y, 0, h - 1);
     let idx = u32(iy * w + ix);
-    let combined = input_data[idx / 4u];
-    return f32((combined >> ((idx % 4u) * 8u)) & 0xFFu);
+    return input_data[idx];
 }
 
-// TODO: This GPU Canny implementation applies Sobel directly to the raw input
-// without a Gaussian blur pre-smoothing pass. Standard Canny edge detection
-// requires Gaussian smoothing first to reduce noise before gradient computation.
-// A proper fix requires a multi-pass pipeline (blur then Canny) which cannot be
-// done within a single shader. Callers should pre-blur the input on the host side
-// or via a separate Gaussian blur dispatch before invoking this shader.
+// The host blurs before dispatching this shader, matching the CPU backend, which
+// runs `gaussian_blur(sigma = 1.4, ksize = 5)` and then takes gradients of the
+// blurred image. Skipping it made the two backends disagree on any noisy input -
+// Sobel on raw pixels amplifies sensor noise into gradients, so the GPU returned
+// edges the CPU did not, and a threshold tuned against the CPU failed silently
+// on the GPU.
 
 // Pass 1: Gradients and Directions
 @compute @workgroup_size(16, 16)

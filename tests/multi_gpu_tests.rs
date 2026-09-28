@@ -767,3 +767,70 @@ fn test_all_gpus_agree_with_cpu_and_each_other() {
         println!("  {an} and {bn} agree");
     }
 }
+
+/// Canny must actually produce edges on the GPU.
+///
+/// The GPU shader declared its input `array<u32>` and read four packed bytes per
+/// word, but the host uploads f32. The low byte of an f32 is 0x00 for every
+/// whole-number value, so essentially every pixel read as zero, every Sobel
+/// sample was zero, and the edge map came back uniformly black - with no error
+/// anywhere, because the only guard was a clamp on the way out. The existing
+/// parity tests did not cover Canny, which is why it survived.
+///
+/// This asserts the edge is found at all, on every GPU and on the CPU, rather
+/// than only that the two agree - agreeing on all-zero is the failure mode.
+#[test]
+fn test_canny_finds_edges_on_every_device() {
+    use cv_core::{CpuTensor, Storage, Tensor, TensorShape};
+
+    let (w, h) = (64u32, 64u32);
+    // Left half black, right half white: one strong vertical edge at x = 32.
+    let mut data = vec![0f32; (w * h) as usize];
+    for y in 0..h {
+        for x in 32..w {
+            data[(y * w + x) as usize] = 255.0;
+        }
+    }
+    let shape = TensorShape::new(1, h as usize, w as usize);
+    let input: CpuTensor<f32> = Tensor::from_vec(data, shape).unwrap();
+
+    let count_nonzero = |t: &cv_core::CpuTensor<f32>| -> usize {
+        t.storage
+            .as_slice()
+            .unwrap()
+            .iter()
+            .filter(|&&v| v > 0.0)
+            .count()
+    };
+
+    let cpu = CpuBackend::new().expect("CPU backend unavailable");
+    let cpu_edges = count_nonzero(&cpu.canny(&input, 50.0_f32, 150.0_f32).unwrap());
+    assert!(
+        cpu_edges > 0,
+        "the CPU reference itself found no edges, so the test input is wrong"
+    );
+    println!("  CPU: {cpu_edges} edge pixels");
+
+    for adapter in block_on(GpuContext::enumerate_adapters()) {
+        let info = adapter.get_info();
+        if info.backend != wgpu::Backend::Vulkan || info.device_type == wgpu::DeviceType::Cpu {
+            continue;
+        }
+        let name = info.name.clone();
+        let Ok(gpu) = block_on(GpuContext::from_adapter(adapter)) else {
+            continue;
+        };
+        let on_gpu = input.to_gpu_ctx(&gpu).unwrap();
+        let out = gpu
+            .canny(&on_gpu, 50.0_f32, 150.0_f32)
+            .unwrap_or_else(|e| panic!("{name}: canny failed: {e}"));
+        let back = out.to_cpu_ctx(&gpu).unwrap();
+        let edges = count_nonzero(&back);
+        assert!(
+            edges > 0,
+            "{name}: canny returned an all-zero edge map - the shader is reading the \
+             input with the wrong element type"
+        );
+        println!("  {name}: {edges} edge pixels");
+    }
+}

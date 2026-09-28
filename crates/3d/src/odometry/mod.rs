@@ -444,14 +444,15 @@ fn compute_hybrid(
     _intrinsics: &crate::tsdf::CameraIntrinsics,
     _width: usize,
     _height: usize,
-    init_transform: &Matrix4<f32>,
+    _init_transform: &Matrix4<f32>,
 ) -> Option<OdometryResult> {
-    // Placeholder - would combine point-to-plane and intensity
-    Some(OdometryResult {
-        transformation: *init_transform,
-        fitness: 0.0,
-        inlier_rmse: 0.0,
-    })
+    // Not implemented. It previously returned `Some` with the identity
+    // transform and a fabricated `fitness: 0.0`, so a caller selecting
+    // `OdometryMethod::Hybrid` got a successful-looking answer containing no
+    // information - worse than a failure, because nothing downstream could tell
+    // it apart from a real result. `compute_intensity` already returns `None`
+    // for the same reason; this now matches it.
+    None
 }
 
 /// Downsample depth image
