@@ -122,7 +122,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **60+** |
-| Commits | 441 |
-| Tests | 1,476 (from 1,267) |
+| Defects fixed | **62+** |
+| Commits | 460+ |
+| Tests | 1,478 (from 1,267) |
 | Duplicate implementations removed | 12 |
