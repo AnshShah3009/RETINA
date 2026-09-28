@@ -1673,56 +1673,6 @@ fn transfer_error(model: &Matrix3<f64>, source: Point2<f64>, target: Point2<f64>
     residual.norm_squared()
 }
 
-/// Higher-is-better MSAC score normalized by its ideal value.
-///
-/// For every correspondence this is `max(0, 1 - e^2 / t^2)`, so a zero-residual
-/// inlier contributes one. Dividing by the number of all descriptor matches
-/// rewards coverage as well as accuracy, and a model that also explains the
-/// outliers remains penalized. SH-style 1-exp(-S/T^2) scores are algebraically
-/// equivalent up to scale; because fundamental Sampson and symmetric homography
-/// transfer errors are both squared pixels, the same threshold and the same
-/// `2 / (t^2 n)` normalization make their difference directly meaningful.
-fn normalized_msac_score(
-    model: &Matrix3<f64>,
-    points_a: &[Point2<f64>],
-    points_b: &[Point2<f64>],
-    mask: &[bool],
-    threshold_px: f64,
-    homography: bool,
-) -> f64 {
-    let n = points_a.len().max(points_b.len());
-    if n == 0 || points_a.len() != points_b.len() || mask.len() != n || threshold_px <= 0.0 {
-        return 0.0;
-    }
-    let inverse = if homography {
-        model.try_inverse()
-    } else {
-        None
-    };
-    let threshold_sq = threshold_px * threshold_px;
-    let mut score = 0.0;
-    for i in 0..n {
-        let error = if homography {
-            let Some(inverse) = inverse.as_ref() else {
-                return 0.0;
-            };
-            0.5 * (transfer_error(model, points_a[i], points_b[i])
-                + transfer_error(inverse, points_b[i], points_a[i]))
-        } else {
-            sampson_sq(model, &points_a[i], &points_b[i])
-        };
-        if mask[i] {
-            score += (1.0 - error / threshold_sq).max(0.0);
-        }
-    }
-    // Same normalisation as `essential_model_score`: MSAC is the mean of
-    // (1 - err/threshold^2) over the correspondences, so both models are scored
-    // on the same 0..1 scale. This function previously divided by
-    // `threshold_sq` as well, which inflated it by 1/threshold^2 and made every
-    // pair look planar regardless of the data.
-    (score / n as f64).clamp(0.0, 1.0)
-}
-
 /// Calculate the normalized essential score on calibrated pixel correspondences.
 fn essential_model_score(
     essential: &Matrix3<f64>,
@@ -2112,20 +2062,7 @@ fn seed_candidates(
         .collect();
     // Best reach first, then local quality, then the tightest pair, then the
     // lowest view indices so the choice stays deterministic.
-    //
-    // DIAGNOSTIC BUILD (uncommitted): with the rank key set to the baseline
-    // span `b - a` alone, so a narrow-baseline pair always outranks a wide one
-    // and the essential-matrix decomposition is always taken from a pair that
-    // has enough parallax to be observable.
     chosen.sort_by_key(|(local, choice)| {
-        if std::env::var_os("CV_SFM_DIAG_SPAN").is_some() {
-            return (
-                usize::MAX - (choice.b - choice.a),
-                choice.a,
-                choice.b,
-                0usize,
-            );
-        }
         ranks.get(&(choice.a, choice.b)).copied().unwrap_or((
             0,
             *local,

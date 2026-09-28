@@ -22,13 +22,18 @@ pub fn compute_normals_morton_gpu_or_cpu(
     normals_cpu_analytic(points, k as usize)
 }
 
+/// Approximate normals by PCA over each point's k nearest neighbours.
+///
+/// Not implemented. This is the CPU fallback reached when the GPU context is
+/// unavailable, and it previously returned a zero vector per point - so a
+/// caller who lost the GPU got silently wrong normals rather than an error. A
+/// full implementation lives in `cv-3d`; returning an empty vector here makes
+/// the absence visible instead of returning fabricated data.
 pub fn normals_cpu_analytic(
     points: &[nalgebra::Vector3<f32>],
     _k: usize,
 ) -> Vec<nalgebra::Vector3<f32>> {
-    // In HAL we don't have scientific/KdTree, so we return default normals.
-    // Full CPU implementation is in cv-3d.
-    vec![nalgebra::Vector3::z(); points.len()]
+    Vec::new()
 }
 
 pub fn compute_normals(

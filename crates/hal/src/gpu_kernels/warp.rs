@@ -117,7 +117,14 @@ pub fn warp(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (dst_w as u32).div_ceil(4).div_ceil(16);
+        // One invocation per destination pixel: `warp.wgsl` uses a 16x16
+        // workgroup and indexes `x_dst = global_id.x` with no 4-pixels-per-thread
+        // packing (unlike `canny.wgsl` and `morphology.wgsl`, which do). The
+        // extra div_ceil(4) therefore covered only a quarter of the destination
+        // width, leaving the rest at whatever the pooled buffer happened to
+        // contain. For a 64-wide destination that is a single workgroup, so only
+        // the first 16 columns were written at all.
+        let x = (dst_w as u32).div_ceil(16);
         let y = (dst_h as u32).div_ceil(16);
         pass.dispatch_workgroups(x, y, 1);
     }

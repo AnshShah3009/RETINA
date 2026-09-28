@@ -81,8 +81,23 @@ impl Matcher {
 
                     if let Some(threshold) = self.ratio_threshold {
                         if let Some(second) = second_best {
-                            let ratio = distance as f32 / second as f32;
-                            if ratio > threshold {
+                            // A zero second-best distance means the match is
+                            // ambiguous: two train descriptors are identical, or
+                            // as close as the encoding allows. That is the most
+                            // ambiguous case the ratio test exists to reject, and
+                            // it is exactly the one `0/0` fails on - IEEE-754
+                            // gives NaN, and `NaN > threshold` is false, so the
+                            // match would be *kept*.
+                            //
+                            // Such matches are common wherever an image has
+                            // repeated texture, and each one that survives flows
+                            // into track building and PnP looking confident.
+                            let rejected = if second == 0 {
+                                true
+                            } else {
+                                distance as f32 / second as f32 > threshold
+                            };
+                            if rejected {
                                 keep_match = false;
                             }
                         }

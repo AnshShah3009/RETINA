@@ -60,6 +60,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         src_y = (matrix[0][1] * f32(x_dst) + matrix[1][1] * f32(y_dst) + matrix[2][1]) * inv_w;
     }
 
-    output_data[y_dst * params.dst_w + x_dst] =
-        clamp(get_pixel_bilinear(src_x, src_y), 0.0, 255.0);
+    // No clamp: the CPU backend samples identically and writes the value
+    // unclamped, so clamping here made an f32 warp of any tensor with values
+    // outside [0, 255] return different data depending on the backend. f32 is
+    // the only dtype this path supports, so that is the normal case for anything
+    // that is not a u8 image.
+    output_data[y_dst * params.dst_w + x_dst] = get_pixel_bilinear(src_x, src_y);
 }

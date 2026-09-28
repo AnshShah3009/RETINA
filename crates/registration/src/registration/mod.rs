@@ -180,12 +180,23 @@ pub fn registration_icp_point_to_plane(
         let mut atb = nalgebra::Vector6::<f32>::zeros();
         let mut total_residual = 0.0;
 
+        // Correspondences that actually contribute geometry. A target without
+        // normals gives none, and the accumulation below is skipped for every
+        // one - leaving `ata` a zero matrix, so `try_inverse()` returns `None`,
+        // the update is silently skipped, and the function used to go on to
+        // report the caller's initial transform with `fitness: 1.0` and
+        // `inlier_rmse: 0.0`. A perfect score from a result that never moved.
+        // A target cloud with no normals is the *normal* case, since `PointCloud`
+        // makes the field optional.
+        let mut n_used = 0usize;
+
         for (src_idx, tgt_idx, _) in &correspondences {
             let src_point = source.points[*src_idx];
             let tgt_point = target.points[*tgt_idx];
             let tgt_normal = target.normals.as_ref().map(|n| &n[*tgt_idx]);
 
             if let Some(normal) = tgt_normal {
+                n_used += 1;
                 let transformed = transformation.transform_point(&src_point);
                 let diff = transformed - tgt_point;
                 let residual = diff.dot(normal);
@@ -212,12 +223,27 @@ pub fn registration_icp_point_to_plane(
             transformation = update * transformation;
         }
 
+        // No usable geometry: a point-to-plane residual needs at least three
+        // independent constraints. Returning `None` says "this registration did
+        // not happen", which is the truth. Returning the input transform with a
+        // perfect score is a lie a caller cannot detect.
+        if n_used < 3 {
+            return None;
+        }
+
         let source_len = source.points.len();
         if correspondences.is_empty() || source_len == 0 {
             return None;
         }
 
-        let rmse = (total_residual / correspondences.len() as f32).sqrt();
+        // Divided by the number of correspondences that actually contributed a
+        // residual, not the number offered. `total_residual` accumulated only
+        // from those, so dividing by the full count understated the error
+        // whenever some had no normal - the same class of quiet wrongness as
+        // the update being skipped.
+        let rmse = (total_residual / n_used as f32).sqrt();
+        // Fraction of the source that found a correspondence, which is what
+        // fitness means here and is independent of `n_used`.
         let fitness = correspondences.len() as f32 / source_len as f32;
 
         if fitness > best_fitness {
@@ -512,3 +538,122 @@ pub fn evaluate_registration(
     (fitness, rmse)
 }
 mod mod_test;
+
+#[cfg(test)]
+mod point_to_plane_no_normals {
+    use super::*;
+    use nalgebra::Point3;
+
+    fn cloud(points: Vec<[f32; 3]>, normals: Option<Vec<[f32; 3]>>) -> PointCloud {
+        let pts: Vec<Point3<f32>> = points
+            .iter()
+            .map(|p| Point3::new(p[0], p[1], p[2]))
+            .collect();
+        let nrm = normals.map(|ns| {
+            ns.iter()
+                .map(|n| nalgebra::Vector3::new(n[0], n[1], n[2]))
+                .collect::<Vec<_>>()
+        });
+        PointCloud {
+            points: pts,
+            colors: None,
+            normals: nrm,
+        }
+    }
+
+    /// A non-coplanar point set, so a 6-DOF transform is actually constrained.
+    ///
+    /// A flat square is degenerate: the normal equations are rank-deficient and
+    /// even a correct implementation cannot resolve motion in every axis. The
+    /// guard under test is about a *missing normal*, not about degeneracy, so the
+    /// control case has to be one that genuinely registers.
+    fn cube_points() -> Vec<[f32; 3]> {
+        let mut v = Vec::new();
+        for &x in &[0.0f32, 0.5, 1.0] {
+            for &y in &[0.0f32, 0.5, 1.0] {
+                for &z in &[0.0f32, 0.5, 1.0] {
+                    v.push([x, y, z]);
+                }
+            }
+        }
+        v
+    }
+
+    /// A non-planar target with outward face normals, so point-to-plane
+    /// residuals actually constrain translation in all three axes.
+    ///
+    /// A set of points that all share one +z normal cannot observe motion along
+    /// z at all - the residual is identically zero for any z offset - so the
+    /// control case has to be a volume, not a plane.
+    fn cube_with_normals() -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+        let mut pts = Vec::new();
+        let mut nrm = Vec::new();
+        for (axis, sign) in [
+            (0usize, 0.0f32),
+            (0, 1.0),
+            (1, 0.0),
+            (1, 1.0),
+            (2, 0.0),
+            (2, 1.0),
+        ] {
+            for a in [0.0f32, 0.34, 0.67, 1.0] {
+                for b in [0.0f32, 0.34, 0.67, 1.0] {
+                    let mut p = [0.0f32; 3];
+                    p[axis] = sign;
+                    p[(axis + 1) % 3] = a;
+                    p[(axis + 2) % 3] = b;
+                    let mut n = [0.0f32; 3];
+                    n[axis] = sign * 2.0 - 1.0;
+                    pts.push(p);
+                    nrm.push(n);
+                }
+            }
+        }
+        (pts, nrm)
+    }
+
+    /// A target with no normals must not produce a perfect-looking result.
+    ///
+    /// The point-to-plane residual is undefined without a target normal, so the
+    /// accumulation was skipped for every correspondence, `ata` stayed a zero
+    /// matrix, `try_inverse()` returned `None` and the update was silently
+    /// skipped - after which the function reported the caller's initial
+    /// transform with `fitness: 1.0` and `inlier_rmse: 0.0`. A perfect score
+    /// from a result that never moved, which is the worst possible failure for a
+    /// caller: nothing about it looks wrong.
+    ///
+    /// This is not an exotic input: `PointCloud` makes `normals` optional.
+    #[test]
+    fn normal_less_target_reports_failure_not_a_perfect_score() {
+        let (square, normals) = cube_with_normals();
+        // Source offset 2cm along y: a registration has real work to do, and the
+        // y-offset is observable because the cube has faces whose normals are
+        // not perpendicular to y.
+        let source = cloud(
+            square.iter().map(|p| [p[0], p[1] + 0.02, p[2]]).collect(),
+            Some(normals.clone()),
+        );
+        let target_no_normals = cloud(square.clone(), None);
+        let target = cloud(square, Some(normals));
+
+        let identity = Matrix4::identity();
+
+        let without =
+            registration_icp_point_to_plane(&source, &target_no_normals, 1.0, &identity, 20);
+        assert!(
+            without.is_none(),
+            "a target with no normals must report failure, not a result: got {:?}",
+            without.map(|r| (r.fitness, r.inlier_rmse))
+        );
+
+        // With normals the same call does register, so the guard is not simply
+        // rejecting everything.
+        let with = registration_icp_point_to_plane(&source, &target, 1.0, &identity, 20)
+            .expect("the same registration must succeed once normals are present");
+        assert!(
+            with.transformation[(1, 3)].abs() > 1e-4,
+            "with normals the pose should have moved in y, got {:?}",
+            with.transformation
+        );
+    }
+}

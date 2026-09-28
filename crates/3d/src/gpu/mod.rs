@@ -690,12 +690,18 @@ pub mod point_cloud {
         compute_normals(points, 30)
     }
 
+    /// Transfer voxel normals onto the points that fall in each voxel.
+    ///
+    /// Not implemented. It previously returned a zero vector per point, which is
+    /// a valid-length result carrying no information - a caller had no way to
+    /// distinguish "no normals" from "normals are zero". It is a public API, so
+    /// the honest signal is an empty result rather than fabricated normals.
     pub fn voxel_to_point_normal_transfer(
         points: &[Point3<f32>],
         _normals: &[Vector3<f32>],
         _voxel_size: f32,
     ) -> Vec<Vector3<f32>> {
-        vec![Vector3::z(); points.len()]
+        Vec::new()
     }
 
     pub fn approximate_normals_simple(
