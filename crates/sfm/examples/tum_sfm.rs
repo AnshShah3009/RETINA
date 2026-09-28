@@ -25,7 +25,7 @@
 
 use cv_core::{CameraIntrinsics, Pose};
 use cv_eval::{Alignment, Trajectory};
-use cv_features::orb::orb_detect_and_compute;
+use cv_features::orb::{orb_detect_and_compute, orb_detect_and_compute_scale_aware};
 use cv_io::datasets::tum;
 use cv_sfm::mapper::{map_views, MapperConfig, Mapping, PairSelection, View};
 use nalgebra::{Point3, UnitQuaternion, Vector3};
@@ -141,6 +141,7 @@ struct Args {
     loop_gnc: bool,
     map_ratio: f32,
     max_dimension: u32,
+    scale_aware: bool,
     contiguous: bool,
     contiguous_radius: f64,
     frames: usize,
@@ -266,6 +267,7 @@ fn run(args: &mut Args) -> Result<(), String> {
             &files[index],
             args.features,
             args.max_dimension,
+            args.scale_aware,
         )?);
     }
     let extract_time = extract_started.elapsed();
@@ -1316,6 +1318,7 @@ fn extract_view(
     filename: &str,
     features: usize,
     max_dimension: u32,
+    scale_aware: bool,
 ) -> Result<View, String> {
     let path = dir.join(filename);
     let image =
@@ -1336,7 +1339,11 @@ fn extract_view(
     }
     .to_luma8();
     let (width, height) = (gray.width(), gray.height());
-    let (_keypoints, descriptors) = orb_detect_and_compute(&gray, features.max(1));
+    let (_keypoints, descriptors) = if scale_aware {
+        orb_detect_and_compute_scale_aware(&gray, features.max(1))
+    } else {
+        orb_detect_and_compute(&gray, features.max(1))
+    };
     // Rebuild the keypoint list from the descriptors so the two stay parallel
     // even though ORB drops border keypoints with no descriptor.
     let keypoints = descriptors.iter().map(|d| d.keypoint).collect();
@@ -1356,6 +1363,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     let mut loop_gnc = true;
     let mut map_ratio = 0.75f32;
     let mut max_dimension = 0u32;
+    let mut scale_aware = false;
     let mut contiguous = false;
     let mut contiguous_radius = 1.0f64;
     let mut frames = 60usize;
@@ -1409,6 +1417,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             "--loop-max-px" => loop_max_px = parse(&take(argv, &mut i, flag)?, flag)?,
             "--map-ratio" => map_ratio = parse(&take(argv, &mut i, flag)?, flag)?,
             "--max-dimension" => max_dimension = parse(&take(argv, &mut i, flag)?, flag)?,
+            "--scale-aware-descriptor" => scale_aware = true,
             "--loop-gnc" => loop_gnc = true,
             "--no-loop-gnc" => loop_gnc = false,
             "--contiguous" => contiguous = true,
@@ -1523,6 +1532,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         loop_gnc,
         map_ratio,
         max_dimension,
+        scale_aware,
         contiguous,
         contiguous_radius,
         frames,

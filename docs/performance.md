@@ -1158,3 +1158,49 @@ different descriptor, or an association method that verifies geometrically
 before committing - and both are substantial work rather than a configuration
 change. The eighteen measurements above are what narrow it to those two, and
 they are the reason to stop sweeping parameters.
+
+## A real bug that the sweep found: the pyramid scale was discarded
+
+`Orb::detect` stores each keypoint's pyramid level scale in `kp.size` -
+`patch_size * scale` for the level that found it. That value was then never
+read. `compute_orb_descriptor` took `patch_size` as a parameter and sampled a
+fixed-size pattern against a fixed half-patch, so a corner found at level 0 (a
+31px patch on the full-resolution image) and the same corner found at level 5 (a
+55px patch spanning more of it) produced **bit-identical descriptions**.
+
+That defeats the pyramid entirely. Scale-space detection is only useful if the
+descriptor is measured at the scale the keypoint was found at; otherwise the
+pyramid detects at eight scales and describes all eight identically, and
+matching between an image and a half-size copy of it cannot work.
+
+Making the pattern scale-aware is a one-line change to the sampling. Measured:
+
+| sequence | fixed patch | scale-aware |
+| --- | --- | --- |
+| TUM fr1_xyz | 45/45 — 1.36 cm | 45/45 — 2.03 cm |
+| TUM fr1_desk | 23/40 — 2,712 pts | **24/40 — 3,373 pts** |
+| ETH3D electro, 5 views | 3/5 — 455 pts | **4/5 — 927 pts** |
+| ETH3D electro, 12 views | 3/12 — 242 pts | **4/12 — 950 pts** |
+| ETH3D courtyard, 8 views | **7/8 — 3,115 pts** | 6/8 — 4,468 pts |
+
+This is the **first change in eighteen that improves the sequences this work has
+been trying to improve**: fr1_desk gains a view, both electro configurations gain
+a view, and the landmark count roughly doubles in every case - the landmark
+count rising while registrations hold is the opposite of the signature every
+previous intervention showed.
+
+The cost is real. ETH3D courtyard loses a view and TUM fr1_xyz's camera-centre
+error rises from 1.36 to 2.03 cm. The reason is the same trade visible elsewhere
+in this file: on a well-exposed frame the coarse levels contribute keypoints
+whose scaled patch no longer fits inside the frame, and those are dropped. A
+test that started out asserting the descriptor *count* was unchanged failed with
+149 against 6 on a 200x160 frame, which is the mechanism made visible - coarse
+levels need proportionally larger patches, so border keypoints lose their
+descriptor entirely. The test now asserts what is actually required: detection
+is unchanged, the count can only fall, and the descriptor data must differ.
+
+Shipped as `Orb::with_scale_aware_descriptor` and `--scale-aware-descriptor`,
+**off by default**. Every gain is on a low-texture sequence and every loss is on
+one that already worked, so making it the default would trade a working case for
+a broken one to buy a marginal one. Left opt-in, it is available for exactly the
+captures where it was measured to help.
