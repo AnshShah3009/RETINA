@@ -30,8 +30,15 @@ fn get_tsdf(p: vec3<f32>) -> f32 {
     let y = i32(floor(p.y / params.voxel_size));
     let z = i32(floor(p.z / params.voxel_size));
 
+    // Outside the volume is *empty space*, so 1.0 - the far side of the
+    // truncation band, which is what the CPU backend returns here. Returning
+    // 0.0 is not a neutral choice: 0.0 is exactly the iso-surface, so a ray
+    // leaving the volume satisfied the crossing predicate and reported a
+    // surface hit on the volume boundary, with a normal taken from the gradient
+    // of whatever was there. Any partially-observed volume - the normal case
+    // for a partial scan - got a shell of phantom depth along its border.
     if (x < 0 || x >= i32(params.vol_x) || y < 0 || y >= i32(params.vol_y) || z < 0 || z >= i32(params.vol_z)) {
-        return 0.0;
+        return 1.0;
     }
 
     let idx = u32(z) * params.vol_x * params.vol_y + u32(y) * params.vol_x + u32(x);

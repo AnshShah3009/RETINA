@@ -169,3 +169,35 @@ fn layout_prerequisites_for_the_casts() {
     );
     assert_ne!(std::any::TypeId::of::<f32>(), std::any::TypeId::of::<f64>());
 }
+
+/// `fast_detect` must not read out of bounds on an image smaller than the 7px
+/// border it needs.
+///
+/// The row guard was `y >= h - 3` on a `usize`, which wraps to a huge value when
+/// `h < 3`, so the guard never fired and the loop indexed past the end of the
+/// source. A 1x1 or 2-pixel frame - a degenerate crop, or a failed decode - was
+/// enough. The correct answer there is an all-zero response map.
+#[test]
+fn fast_detect_handles_images_smaller_than_its_border() {
+    use cv_core::{CpuTensor, Storage, Tensor, TensorShape};
+    use cv_hal::context::ComputeContext;
+    use cv_hal::cpu::CpuBackend;
+
+    let cpu = CpuBackend::new().unwrap();
+    for (h, w) in [(1usize, 1usize), (1, 8), (2, 2), (3, 3), (6, 6), (2, 20)] {
+        let data: Vec<f32> = (0..(h * w)).map(|i| (i % 256) as f32).collect();
+        let input: CpuTensor<f32> = Tensor::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+        let out = cpu
+            .fast_detect(&input, 20.0_f32, true)
+            .unwrap_or_else(|e| panic!("fast_detect failed on {h}x{w}: {e}"));
+        assert_eq!(
+            out.storage.as_slice().unwrap().len(),
+            h * w,
+            "fast_detect returned the wrong size for {h}x{w}"
+        );
+        assert!(
+            out.storage.as_slice().unwrap().iter().all(|&v| v == 0.0),
+            "an image smaller than the 7px border cannot contain a FAST corner"
+        );
+    }
+}

@@ -71,12 +71,22 @@ pub fn lucas_kanade(
             usage,
         });
 
+    // `points_next` is read by the shader as the starting guess for each point
+    // (`var p_next = points_next[idx]`), and the comment there says so, but the
+    // buffer was created uninitialised and never seeded. The first iteration
+    // therefore sampled the gradient at whatever the allocator happened to hand
+    // back, and the result was uninitialised memory - in practice zeros, so the
+    // GPU returned the input points unchanged while the CPU tracked them.
+    // Seeding with the initial points is what both the comment and the CPU path
+    // (`cpu/compute_context_impl.rs`) already assume.
     let buffer_b = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("LK Points B"),
         size: buffer_size,
         usage,
         mapped_at_creation: false,
     });
+    ctx.queue
+        .write_buffer(&buffer_b, 0, bytemuck::cast_slice(&initial_points));
 
     let shader_source = include_str!("../../shaders/lucas_kanade.wgsl");
     let pipeline = ctx.create_compute_pipeline(shader_source, "main");

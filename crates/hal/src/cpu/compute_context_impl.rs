@@ -3671,10 +3671,23 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
         let mut output_storage = S::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
+        // `h - 3` and `w - 3` are usize: for a dimension below 3 they wrap to a
+        // huge value, the row guard never fires, and the loop reads past the end
+        // of the source. A 1x1 or 2-pixel-wide frame - a degenerate crop, or a
+        // failed decode - is enough to trigger it. The detector needs a 7px
+        // border, so below that the correct answer is an all-zero response map
+        // rather than an out-of-bounds read.
+        if h < 7 || w < 7 {
+            return Ok(Tensor {
+                storage: output_storage,
+                shape: input.shape,
+                dtype: input.dtype,
+                _phantom: std::marker::PhantomData,
+            });
+        }
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
-
         dst.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
             if y < 3 || y >= h - 3 {
                 return;

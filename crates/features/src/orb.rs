@@ -14,12 +14,13 @@ use cv_imgproc::convolve::gaussian_blur;
 use image::GrayImage;
 use rayon::prelude::*;
 
-// Two further parameters of a spec-compliant ORB are not implemented and are
-// not carried here: `first_level` (the pyramid's base octave) and WTA test-all
-// hashing. Both were previously present as dead fields, which read as supported
-// configuration. See docs/performance.md for the measurement of the hashing
-// variant, which is correct in principle and a regression in practice under
-// Hamming-distance matching.
+// Three parameters of a spec-compliant ORB are not implemented and are not
+// carried here: `first_level` (the pyramid's base octave), `edge_threshold`, and
+// `wta_k` (test-all hashing). All three were previously present as dead fields
+// carrying `#[allow(dead_code)]`, which read as supported configuration that
+// silently did nothing. See docs/performance.md for the measurement of the
+// hashing variant, which is correct in principle and a regression in practice
+// under Hamming-distance matching.
 //
 // Learned rBRIEF pattern from OpenCV's ORB implementation (`bit_pattern_31_`).
 /// 256 test pairs, each with 4 values: (x1, y1, x2, y2) relative to patch center.
@@ -99,10 +100,6 @@ pub struct Orb {
     n_features: usize,
     scale_factor: f32,
     n_levels: usize,
-    #[allow(dead_code)]
-    edge_threshold: i32,
-    #[allow(dead_code)]
-    wta_k: i32,
     score_type: ScoreType,
     /// Measure the BRIEF pattern at each keypoint's own pyramid scale.
     ///
@@ -133,8 +130,6 @@ impl Default for Orb {
             n_features: 500,
             scale_factor: 1.2,
             n_levels: 8,
-            edge_threshold: 31,
-            wta_k: 2,
             score_type: ScoreType::Harris,
             scale_aware_descriptor: false,
             patch_size: 31,
