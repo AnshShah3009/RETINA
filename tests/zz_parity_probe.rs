@@ -66,7 +66,9 @@ fn probe_sift_extrema() {
     let cur = mk(b.clone(), 1, h, w);
     let next = mk(c2.clone(), 1, h, w);
 
-    let cres = cpu_ctx.sift_extrema(&prev, &cur, &next, 0.01, 10.0).unwrap();
+    let cres = cpu_ctx
+        .sift_extrema(&prev, &cur, &next, 0.01, 10.0)
+        .unwrap();
     let csl = cres.storage.as_slice().unwrap().to_vec();
     let ccount = csl.iter().filter(|&&v| v == 1).count();
 
@@ -77,7 +79,13 @@ fn probe_sift_extrema() {
     let gsl = gres.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
     let gcount = gsl.iter().filter(|&&v| v == 1).count();
 
-    println!("SIFT cpu_len={} gpu_len={} cpu_hits={} gpu_hits={}", csl.len(), gsl.len(), ccount, gcount);
+    println!(
+        "SIFT cpu_len={} gpu_len={} cpu_hits={} gpu_hits={}",
+        csl.len(),
+        gsl.len(),
+        ccount,
+        gcount
+    );
 }
 
 #[test]
@@ -95,8 +103,13 @@ fn probe_gray_to_rgb() {
         Ok(r) => {
             let gs = r.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
             let n = cs.len().min(gs.len());
-            let worst = (0..n).map(|i| (cs[i]-gs[i]).abs()).fold(0.0f32, f32::max);
-            println!("GRAY2RGB ok cpu_len={} gpu_len={} worst={}", cs.len(), gs.len(), worst);
+            let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
+            println!(
+                "GRAY2RGB ok cpu_len={} gpu_len={} worst={}",
+                cs.len(),
+                gs.len(),
+                worst
+            );
         }
         Err(e) => println!("GRAY2RGB Err: {e}  (CPU returns len {})", cs.len()),
     }
@@ -126,12 +139,18 @@ fn probe_threshold_binary_exact() {
     let (w, h) = (16usize, 16usize);
     let cpu = mk((0..(w * h)).map(|i| i as f32).collect(), 1, h, w);
     for t in [100.0f32, 100.5] {
-        let cr = cpu_ctx.threshold(&cpu, t, 255.0, cv_hal::context::ThresholdType::Binary).unwrap();
+        let cr = cpu_ctx
+            .threshold(&cpu, t, 255.0, cv_hal::context::ThresholdType::Binary)
+            .unwrap();
         let cs = cr.storage.as_slice().unwrap().to_vec();
         let gt = cpu.to_gpu_ctx(g).unwrap();
-        let gr = g.threshold(&gt, t, 255.0, cv_hal::context::ThresholdType::Binary).unwrap();
+        let gr = g
+            .threshold(&gt, t, 255.0, cv_hal::context::ThresholdType::Binary)
+            .unwrap();
         let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
-        let d = (0..cs.len()).map(|i| (cs[i]-gs[i]).abs()).fold(0.0f32, f32::max);
+        let d = (0..cs.len())
+            .map(|i| (cs[i] - gs[i]).abs())
+            .fold(0.0f32, f32::max);
         println!("THRESH t={t} worst={d} cpu[99..103]={:?}", &cs[99..103]);
     }
 }
@@ -148,8 +167,13 @@ fn probe_resize_multichannel() {
     let gr = g.resize(&gt, (17, 13)).unwrap();
     let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
     let n = cs.len().min(gs.len());
-    let worst = (0..n).map(|i| (cs[i]-gs[i]).abs()).fold(0.0f32, f32::max);
-    println!("RESIZE3 cpu_len={} gpu_len={} worst={}", cs.len(), gs.len(), worst);
+    let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
+    println!(
+        "RESIZE3 cpu_len={} gpu_len={} worst={}",
+        cs.len(),
+        gs.len(),
+        worst
+    );
 }
 
 #[test]
@@ -164,8 +188,13 @@ fn probe_gaussian_blur_multichannel() {
     let gr = g.gaussian_blur(&gt, 1.4, 5).unwrap();
     let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
     let n = cs.len().min(gs.len());
-    let worst = (0..n).map(|i| (cs[i]-gs[i]).abs()).fold(0.0f32, f32::max);
-    println!("GBLUR3 cpu_len={} gpu_len={} worst={}", cs.len(), gs.len(), worst);
+    let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
+    println!(
+        "GBLUR3 cpu_len={} gpu_len={} worst={}",
+        cs.len(),
+        gs.len(),
+        worst
+    );
     if worst > 1e-3 {
         println!("GBLUR3 cpu[0..12]={:?}", &cs[..12]);
         println!("GBLUR3 gpu[0..12]={:?}", &gs[..12]);
@@ -192,13 +221,23 @@ fn probe_stereo_borders() {
     let gr = g.stereo_match(&gl, &gr2, &p).unwrap();
     let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
     let n = cs.len().min(gs.len());
-    let worst = (0..n).map(|i| (cs[i]-gs[i]).abs()).fold(0.0f32, f32::max);
-    let ndiff = (0..n).filter(|&i| (cs[i]-gs[i]).abs() > 1e-4).count();
-    println!("STEREO cpu_len={} gpu_len={} worst={} ndiff={}", cs.len(), gs.len(), worst, ndiff);
+    let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
+    let ndiff = (0..n).filter(|&i| (cs[i] - gs[i]).abs() > 1e-4).count();
+    println!(
+        "STEREO cpu_len={} gpu_len={} worst={} ndiff={}",
+        cs.len(),
+        gs.len(),
+        worst,
+        ndiff
+    );
     // per-row summary of the last few rows (border behaviour)
     for y in [h - 4, h - 3, h - 2, h - 1] {
         let row_c: Vec<f32> = cs[y * w..(y + 1) * w].to_vec();
         let row_g: Vec<f32> = gs[y * w..(y + 1) * w].to_vec();
-        println!("STEREO y={y} cpu_tail={:?} gpu_tail={:?}", &row_c[w.saturating_sub(6)..], &row_g[w.saturating_sub(6)..]);
+        println!(
+            "STEREO y={y} cpu_tail={:?} gpu_tail={:?}",
+            &row_c[w.saturating_sub(6)..],
+            &row_g[w.saturating_sub(6)..]
+        );
     }
 }

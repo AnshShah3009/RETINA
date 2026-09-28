@@ -62,6 +62,13 @@ pub fn chamfer_distance(a: &[[f64; 3]], b: &[[f64; 3]]) -> f64 {
 ///
 /// Returns `0.0` when the combination is degenerate.
 pub fn f_score(precision: f64, recall: f64, beta: f64) -> f64 {
+    // A non-finite input makes the whole expression NaN, and this module
+    // documents itself as total: "empty inputs yield 0.0 instead of panicking or
+    // returning NaN". `precision = inf` gives `inf / inf` here, which slipped
+    // through the `denominator <= 0.0` guard because `inf` is not <= 0.
+    if !precision.is_finite() || !recall.is_finite() || !beta.is_finite() {
+        return 0.0;
+    }
     let beta_sq = beta * beta;
     let denominator = beta_sq * precision + recall;
     if denominator <= 0.0 {
