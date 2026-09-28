@@ -94,6 +94,13 @@ pub fn canny<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
     );
 
+    // Blur first, exactly as the CPU backend does. The CPU path is
+    // `gaussian_blur(1.4, 5)` then Sobel on the result; without this the two
+    // backends disagree on any noisy input, because Sobel on unblurred pixels
+    // amplifies sensor noise into gradients. A threshold tuned against the CPU
+    // then fails silently on the GPU.
+    let blurred = crate::gpu_kernels::convolve::gaussian_blur(ctx, input, T::from_f32(1.4), 5)?;
+
     let params = CannyParams {
         width: w as u32,
         height: h as u32,
@@ -146,7 +153,7 @@ pub fn canny<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: input.storage.buffer().as_entire_binding(),
+                resource: blurred.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,

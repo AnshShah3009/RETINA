@@ -2112,20 +2112,7 @@ fn seed_candidates(
         .collect();
     // Best reach first, then local quality, then the tightest pair, then the
     // lowest view indices so the choice stays deterministic.
-    //
-    // DIAGNOSTIC BUILD (uncommitted): with the rank key set to the baseline
-    // span `b - a` alone, so a narrow-baseline pair always outranks a wide one
-    // and the essential-matrix decomposition is always taken from a pair that
-    // has enough parallax to be observable.
     chosen.sort_by_key(|(local, choice)| {
-        if std::env::var_os("CV_SFM_DIAG_SPAN").is_some() {
-            return (
-                usize::MAX - (choice.b - choice.a),
-                choice.a,
-                choice.b,
-                0usize,
-            );
-        }
         ranks.get(&(choice.a, choice.b)).copied().unwrap_or((
             0,
             *local,
