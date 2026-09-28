@@ -835,3 +835,30 @@ controlled camera motion with near-frontal view overlap, while both ETH3D scenes
 are handheld and oblique, so the descriptor has to survive viewpoint change as
 well as low contrast. That is consistent with everything else measured here, and
 it is the honest limit of what the current measurements support.
+
+### And the reason name order was the wrong order
+
+The scrambled ordering is not a curiosity - it is measurable. Consecutive
+rotation between same-camera frames, in the order the images sort by name:
+
+| | |
+| --- | --- |
+| consecutive pairs under 30 deg | **6 of 15** |
+| mean | 59 deg |
+| worst | 179 deg |
+
+179 degrees between nominally adjacent frames is not a camera that moved; it is a
+sort that put two unrelated viewpoints next to each other. The file names make
+the cause obvious once listed - `DSC_9278, 9277, 9275, 9272, 9271, 9268, 9258,
+9259, ...` - the capture runs *down* to 9258 and then turns around, and a
+lexicographic sort interleaves the outbound and return legs.
+
+This is the same defect the contiguous-selection fix addressed, now confirmed
+from the ground-truth poses rather than inferred: 40% of name-adjacent pairs are
+not adjacent at all. The chain ordering in the CLI is not a convenience, it is
+what makes the sequence a sequence.
+
+It also means any earlier measurement taken with name ordering - including the
+TUM results, where filenames increase monotonically along the capture and the
+problem does not arise - is unaffected. The bug is specific to captures that turn
+around, which is exactly what a rig circling a building does.
