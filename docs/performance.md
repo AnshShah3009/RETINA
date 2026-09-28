@@ -1057,3 +1057,51 @@ as a settled result. The correlation is across four sequences and there is
 confounding - fr1_desk is also a fast-motion handheld sequence, and electro is
 also handheld and oblique. Isolating noise from motion would need sequences that
 vary one at a time, which is not something the available data allows.
+
+### Testing the noise hypothesis directly, and it fails too
+
+The ratio above suggested an obvious remedy: suppress noise while preserving the
+low-frequency structure a descriptor needs, which is what an edge-preserving
+filter does and the opposite of what a Gaussian blur does. Measured on fr1_desk,
+a median filter does exactly what the prediction said it would:
+
+| filter | Laplacian / contrast | block std |
+| --- | ---: | ---: |
+| raw | 1.68 | 2.73 |
+| median 3 | 1.49 | 2.54 |
+| median 5 | 1.33 | 2.31 |
+| median 7 | **1.17** | 2.16 |
+
+The noise ratio falls by a third and the contrast is largely retained - precisely
+the trade the hypothesis called for. A size-7 median was implemented in the
+pipeline and measured:
+
+| median size | 0 (off) | 3 | 5 |
+| --- | --- | --- | --- |
+| registered | **23/40** | 9/40 | 8/40 |
+| 3D points | **2,712** | 745 | 555 |
+
+It fails, and in the same way every other intervention failed: the map *shrinks*.
+23/40 to 8/40, 2,712 landmarks down to 555.
+
+This is now a strong and repeated result. Every attempt to improve the input -
+more features, more scale levels, a deeper pyramid, contrast normalisation,
+smoothing the moments, edge-preserving noise removal - reduces the number of
+landmarks and the number of registrations together. Whatever these sequences are
+short of, it is not pixel-level SNR, and the Laplacian ratio is correlated with
+the outcome without being the thing that fixes it.
+
+The likely reading is that the ratio is a *proxy* for something else that these
+four sequences vary together: the handheld ETH3D and fr1_desk captures are fast
+and oblique, while fr1_xyz is slow and near-frontal. Low measured contrast,
+high measured noise ratio, large viewpoint change, and weak repeatability are all
+downstream of "the camera moved a long way between frames on a scene with little
+to go on", and any of these interventions removes real structure along with the
+noise, because at this signal level structure and noise are not separable by a
+local filter.
+
+So the unifying statement in the previous section needs narrowing: the ratio is
+the best predictor found, but it is a proxy for capture difficulty rather than a
+cause, and the cause remains unisolated. Closing this needs either a descriptor
+that survives a large viewpoint change, or sequences that vary one factor at a
+time - and the data needed to separate the factors is not available here.
