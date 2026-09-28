@@ -917,3 +917,49 @@ for viewpoint change - it can only rescale, not re-orient.
 That is a substantial piece of work, not a configuration change, which is why it
 is stated as the next step rather than attempted. The ten measurements above are
 what narrow it to there.
+
+## WTA hashing: correct, implemented, and measurably worse
+
+`Orb` declares `wta_k`, `edge_threshold` and `first_level`. All three are dead -
+declared, defaulted, and never read; there is no setter for any of them. Two are
+cosmetic, but one pointed at a genuine fidelity gap.
+
+ORB's steered BRIEF applies *test-all* hashing: when a test pair's intensity
+difference is below the noise floor, the bit is set pseudo-randomly rather than
+left at zero. This implementation left it at zero, so an unmeasurable test was
+indistinguishable from a genuine `val1 < val2`. Every out-of-bounds test
+contributed a spurious 0 - and at a 31x31 patch on a 6205x4134 frame, image
+border keypoints hit that case often, and those spurious zeros match every other
+keypoint's spurious zeros.
+
+Implemented properly: a test with `|val1 - val2| < 1.0` now takes a bit from a
+Wang-mix hash of its sampling coordinates, deterministic per keypoint and
+uncorrelated between them. This is closer to OpenCV's behaviour than what it
+replaced, and the out-of-bounds case is no longer a shared constant.
+
+Measured on all four sequences:
+
+| sequence | before | after |
+| --- | --- | --- |
+| TUM fr1_xyz | 44/45 — 1.64 cm | 45/45 — **5.20 cm** |
+| TUM fr1_desk | 23/40 | **15/40** |
+| ETH3D courtyard | 7/8 | 6/8 |
+| ETH3D electro | 3/5 | 3/5 |
+
+Two of four got worse, and fr1_desk lost 40% of its registrations. The fr1_xyz
+result is the interesting one: it reached full registration but at four times the
+camera-centre error, meaning the extra views registered from poorer poses.
+
+Why this can backfire: the hash makes each unmeasurable test independent, so it
+also removes the accidental agreement that low-contrast patches were getting.
+Where a correct association depended on a handful of low-contrast tests happening
+to resolve the same way in both frames, it now resolves them independently and the
+match is lost. Randomising a weak measurement is only an improvement if the
+downstream matcher can tell a random bit from a meaningful one, and a 256-bit
+BRIEF distance test cannot.
+
+Reverted. The original code is wrong in principle and this is a measured
+regression, and the resolution is to fix it at the point where the matcher can
+weight it - not to scatter noise into descriptors that are then compared by
+Hamming distance. Recorded because "leave it zero" looks like an oversight and
+needs the measurement to show it is not a free fix.
