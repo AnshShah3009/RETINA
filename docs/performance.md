@@ -1226,15 +1226,39 @@ improve.
 Recorded so the next person does not rediscover them. None is reachable from the
 SfM, localization or evaluation paths today.
 
-**`Orb::detect_ctx` does not match `Orb::detect`.** The CPU path runs FAST, then
-non-maximum suppression, then re-scores every survivor with Harris. The ctx path
-runs FAST and sorts, with neither. So the same `Orb` on the same pixels returns
-different keypoint sets and `response` values on two scales - Harris energy on
-one, raw score-map value on the other - and the top-N truncation then keeps a
-different subset. `detect_ctx` has no callers in the tree, so nothing depends on
-it today; it is left alone rather than given an untested implementation of the
-missing stages. It is a public API, so a caller switching backends would be
-surprised, and the module documentation should say so.
+**`Orb::detect_ctx` does not match `Orb::detect`, and the gap is larger than it
+first appears.** The CPU path runs FAST, then non-maximum suppression, then
+re-scores every survivor with Harris, and truncates once at the very end. The
+ctx path ran FAST and sorted, with none of the other three stages, and truncated
+to `2 * n_features` *before* any of them.
+
+Correcting the missing stages is not sufficient, which is worth recording because
+the obvious fix looks complete and is not. Adding suppression and Harris
+re-scoring to the ctx path still leaves the two disagreeing, for two reasons
+found only by writing the equivalence test:
+
+- **The two paths resample differently.** The CPU pyramid calls
+  `scale_image`, which uses the `Triangle` filter. The ctx path resizes through
+  the HAL, whose `resize` takes no filter argument and does a plain bilinear
+  sample. Different resampling of a level image produces different corners
+  regardless of what happens downstream, so matching the post-processing cannot
+  match the keypoints.
+- **The coordinate convention bites.** The shared `to_gray` helper reads
+  `shape.hw()` as `(w, h)`, but `hw()` returns `(height, width)`. That transposes
+  the image, and the test caught it as an out-of-bounds panic in
+  `non_max_suppression` - a keypoint at x=127 on an image 99 pixels wide - before
+  it ever got as far as a wrong answer.
+
+Making the ctx path bit-identical to the CPU path therefore needs the HAL resize
+to take a filter, or the ctx pyramid to resample on the host with `scale_image`
+like the CPU does. Neither is a small change and neither is verifiable without a
+GPU in CI, so it is left as a known divergence rather than half-fixed. It is
+reachable: `detect_and_compute_ctx` falls back to `detect_ctx` whenever the GPU
+upload fails, and `cv-slam`'s tracker calls that function.
+
+`cv-hal::ComputeContext::resize` also having no filter argument is the root of
+half of this, and is worth addressing in its own right - it is a public API that
+cannot express a resampling choice.
 
 **`hamming_distance` truncates on a length mismatch.** It `zip`s the two byte
 slices, so an 8-byte descriptor compared against a 32-byte one examines only the
