@@ -804,3 +804,61 @@ from 44/45 at 4.61 cm to 45/45 at 1.30 cm via the pair-window widening, and
 loop closure then held it at 45/45 while improving the residual further. It
 currently reports 44/45 because loop closure fuses a loop that costs one view at
 this window setting; `--no-loop-closure` gives 45/45.
+
+## The texture diagnosis, confirmed across both ETH3D scenes
+
+The two ETH3D scenes differ in exactly the way the diagnosis predicts. Median
+16x16 block standard deviation over the first 10 frames of each:
+
+| scene | mean | range | best registration |
+| --- | ---: | --- | --- |
+| courtyard | **23.4** | 21.4 - 26.2 | 7/8 — 87.5% |
+| electro | **11.6** | 7.0 - 16.4 | 3/12 — 25% |
+| TUM fr1_xyz (reference) | 6.2 | - | 45/45 - 100% |
+| TUM fr1_desk (reference) | 2.7 | - | 23/40 - 57.5% |
+
+courtyard has roughly twice electro's contrast and registers at 87.5% where
+electro manages 25% on a comparable chain - the same mapper, the same
+configuration, the same rig.
+
+This is worth stating carefully, because it is not a clean ordering: TUM fr1_xyz
+has the *lowest* texture of the four and registers 45/45. So texture alone does
+not determine the result, and it would be wrong to present it as a sufficient
+condition. What it does explain is the ETH3D split, where two scenes of the same
+dataset, same cameras and same capture style differ by 3.5x in registration rate
+and 2x in contrast.
+
+The honest statement is that texture is a strong predictor *within* ETH3D and
+across the TUM pair, but fr1_xyz is a counterexample that keeps it from being a
+rule. Something else is also in play - most likely that fr1_xyz is a slow,
+controlled camera motion with near-frontal view overlap, while both ETH3D scenes
+are handheld and oblique, so the descriptor has to survive viewpoint change as
+well as low contrast. That is consistent with everything else measured here, and
+it is the honest limit of what the current measurements support.
+
+### And the reason name order was the wrong order
+
+The scrambled ordering is not a curiosity - it is measurable. Consecutive
+rotation between same-camera frames, in the order the images sort by name:
+
+| | |
+| --- | --- |
+| consecutive pairs under 30 deg | **6 of 15** |
+| mean | 59 deg |
+| worst | 179 deg |
+
+179 degrees between nominally adjacent frames is not a camera that moved; it is a
+sort that put two unrelated viewpoints next to each other. The file names make
+the cause obvious once listed - `DSC_9278, 9277, 9275, 9272, 9271, 9268, 9258,
+9259, ...` - the capture runs *down* to 9258 and then turns around, and a
+lexicographic sort interleaves the outbound and return legs.
+
+This is the same defect the contiguous-selection fix addressed, now confirmed
+from the ground-truth poses rather than inferred: 40% of name-adjacent pairs are
+not adjacent at all. The chain ordering in the CLI is not a convenience, it is
+what makes the sequence a sequence.
+
+It also means any earlier measurement taken with name ordering - including the
+TUM results, where filenames increase monotonically along the capture and the
+problem does not arise - is unaffected. The bug is specific to captures that turn
+around, which is exactly what a rig circling a building does.
