@@ -764,3 +764,43 @@ measured against a sequence that already works. That is the useful result: the
 limit is genuinely at the descriptor, the straightforward mitigations do not
 reach it, and a fix needs to be either a scale-appropriate descriptor or an
 association method that does not depend on descriptor discriminability at all.
+
+## Benchmark sweep, all datasets
+
+Every dataset and configuration available locally, run with the shipped
+defaults. Registration is views recovered against ground truth; centre RMSE and
+rotation error are after the usual SE(3)/Sim(3) alignment.
+
+| dataset | registered | 3D points | centre RMSE | rotation |
+| --- | --- | ---: | ---: | ---: |
+| TUM fr1_xyz (45 views) | **44/45 — 97.8%** | 9,225 | 1.64 cm | 0.86 deg |
+| TUM fr1_desk (40 views) | 23/40 — 57.5% | 2,712 | 1.39 cm | 1.24 deg |
+| ETH3D courtyard (r4, 8 views) | **7/8 — 87.5%** | 2,991 | 0.15 cm | 0.07 deg |
+| ETH3D electro (r1.5, 5 views) | 3/5 — 60% | 455 | 0.03 cm | 0.01 deg |
+| ETH3D electro (r4, 12 views) | 3/12 — 25% | 242 | 0.02 cm | 0.01 deg |
+| ETH3D courtyard (r8, 17 views) | 7/17 — 41.2% | 3,115 | 0.13 cm | 0.08 deg |
+
+Reproduce with:
+
+    ./target/release/examples/tum_sfm --dir <dataset> [options]
+
+Reading the table:
+
+- **Accuracy is uniformly excellent.** Every reconstruction is at 0.02-1.64 cm
+  centre error and 0.01-1.24 degrees rotation. The ETH3D figures are so small
+  because a DSLR rig is near-stationary over a short capture, so camera-centre
+  RMSE is not very demanding there - registration *rate* is the meaningful
+  number on ETH3D, not the residual.
+- **The two long sequences are the weak point**, and for the reasons measured
+  above: fr1_desk stalls at 57.5% and the long electro chain at 25%, both on
+  descriptor quality at low texture. courtyard, which is well exposed, manages
+  87.5% over 8 views.
+- **Chain length matters on ETH3D** in the direction measured earlier: courtyard
+  7/8 at a 4 m radius falls to 7/17 at 8 m, and electro 3/5 at 1.5 m falls to
+  3/12 at 4 m. Extending into poorly-exposed frames loses registrations.
+
+The one number that changed for the better during this work: TUM fr1_xyz went
+from 44/45 at 4.61 cm to 45/45 at 1.30 cm via the pair-window widening, and
+loop closure then held it at 45/45 while improving the residual further. It
+currently reports 44/45 because loop closure fuses a loop that costs one view at
+this window setting; `--no-loop-closure` gives 45/45.
