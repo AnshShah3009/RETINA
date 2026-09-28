@@ -1159,7 +1159,10 @@ mod tests {
             "descriptor count must be stable across identical runs"
         );
         for (a, b) in desc.descriptors.iter().zip(desc2.descriptors.iter()) {
-            assert_eq!(a.data, b.data, "descriptor extraction must be deterministic");
+            assert_eq!(
+                a.data, b.data,
+                "descriptor extraction must be deterministic"
+            );
         }
     }
 

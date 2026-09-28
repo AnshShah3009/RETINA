@@ -40,7 +40,8 @@ test, and the "found by" column says which.
 | ORB's `detect_ctx` fed a `[0,1]`-normalised tensor to FAST with a 0..255 threshold, so no corner could ever score | audit | Thresholds now in the same units as the data |
 | `orb_detect_and_compute` returned the full detection list beside a shorter descriptor list — a 31x31 patch reaching past the frame is dropped by `extract`, so on a 160x120 test frame 216 keypoints came back against 154 descriptors, and every index past the first drop referred to a different keypoint | audit, after the `wta_k` investigation turned up three dead ORB fields | Returns the descriptors' own keypoints, so the two are index-parallel by contract; two tests pin it, one of which fails on the old code with exactly this 216-vs-154 mismatch |
 | `Orb` declared `wta_k`, `edge_threshold` and `first_level` as fields with no setter and no reader, so the struct read as supported configuration that did nothing | same audit | `first_level` removed; a comment states plainly which spec behaviour is not implemented, with the measurement behind it |
-| ORB's pyramid scale was computed, stored in `kp.size`, and then never read — the descriptor sampled a fixed 31x31 pattern regardless of the level, so a corner found at level 0 and at level 5 produced bit-identical descriptions and the pyramid bought nothing | audit of `kp.size` after the dead-field sweep | `Orb::with_scale_aware_descriptor` scales the sampling to each keypoint's own level; fr1_desk 23 -> 24 of 40, ETH3D electro 3/5 -> 4/5 and 3/12 -> 4/12, landmark counts roughly doubling. Opt-in, because it costs courtyard a view |
+| ORB's pyramid scale was computed, stored in `kp.size`, and then never read — the descriptor sampled a fixed 31x31 pattern regardless of the level, so a corner found at level 0 and at level 5 produced bit-identical descriptions and the pyramid bought nothing | audit of `kp.size` after the dead-field sweep | `Orb::with_scale_aware_descriptor` scales the sampling to each keypoint's own level. Opt-in, since on corrected measurement it helps only ETH3D electro (3/5 -> 4/5) and costs courtyard a view |
+| The half-extent in that fix was computed as `round(patch_size * level_scale)` — 31 for the base case rather than 15 — silently tightening the border test by sixteen pixels and dropping a ring of keypoints **with the feature flag off**. TUM fr1_desk fell 23/40 -> 8/40 on a clean tree, deterministically, and read as a property of the data | re-running the full sweep after the descriptor work, and noticing a number had moved with no command change | Corrected to integer division of the diameter; pinned by a regression test asserting the default path is unaffected |
 
 ## Math and geometry
 
@@ -125,5 +126,5 @@ test, and the "found by" column says which.
 | --- | ---: |
 | Defects fixed | **63+** |
 | Commits | 460+ |
-| Tests | 1,479 (from 1,267) |
+| Tests | 1,480 (from 1,267) |
 | Duplicate implementations removed | 12 |

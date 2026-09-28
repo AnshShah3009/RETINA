@@ -773,7 +773,7 @@ rotation error are after the usual SE(3)/Sim(3) alignment.
 
 | dataset | registered | 3D points | centre RMSE | rotation |
 | --- | --- | ---: | ---: | ---: |
-| TUM fr1_xyz (45 views) | **44/45 — 97.8%** | 9,225 | 1.64 cm | 0.86 deg |
+| TUM fr1_xyz (45 views) | **45/45 — 100%** | 7,307 | 1.30 cm | 0.85 deg |
 | TUM fr1_desk (40 views) | 23/40 — 57.5% | 2,712 | 1.39 cm | 1.24 deg |
 | ETH3D courtyard (r4, 8 views) | **7/8 — 87.5%** | 2,991 | 0.15 cm | 0.07 deg |
 | ETH3D electro (r1.5, 5 views) | 3/5 — 60% | 455 | 0.03 cm | 0.01 deg |
@@ -799,11 +799,15 @@ Reading the table:
   7/8 at a 4 m radius falls to 7/17 at 8 m, and electro 3/5 at 1.5 m falls to
   3/12 at 4 m. Extending into poorly-exposed frames loses registrations.
 
-The one number that changed for the better during this work: TUM fr1_xyz went
-from 44/45 at 4.61 cm to 45/45 at 1.30 cm via the pair-window widening, and
-loop closure then held it at 45/45 while improving the residual further. It
-currently reports 44/45 because loop closure fuses a loop that costs one view at
-this window setting; `--no-loop-closure` gives 45/45.
+TUM fr1_xyz went from 44/45 at 4.61 cm to 45/45 at 1.30 cm during this work: the
+pair-window widening took it to 45/45, and loop closure then improved the residual
+from 4.86 to 1.30 cm while holding full registration. The earlier 44/45 figure in
+this table was stale, from before the re-optimisation after loop fusion; the table
+above is the current measurement.
+
+Loop closure is doing real work here rather than trading accuracy for
+registrations, which is what it did before the re-optimisation was added - it
+now *improves* centre RMSE (4.86 cm without, 1.30 cm with) at the same 45/45.
 
 ## The texture diagnosis, confirmed across both ETH3D scenes
 
