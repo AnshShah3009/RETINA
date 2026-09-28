@@ -862,3 +862,58 @@ It also means any earlier measurement taken with name ordering - including the
 TUM results, where filenames increase monotonically along the capture and the
 problem does not arise - is unaffected. The bug is specific to captures that turn
 around, which is exactly what a rig circling a building does.
+
+## Every intervention tried against the ETH3D registration limit
+
+Ten were built and measured. This is the consolidated list, so the next attempt
+does not repeat any of them. Each was implemented, run on real data, and
+reverted or kept according to the result.
+
+| # | intervention | measurement | verdict |
+| ---: | --- | --- | --- |
+| 1 | pair window 3 -> 5 | fr1_xyz 44/45 -> 45/45 | **kept** |
+| 2 | loop closure + re-optimise after fusion | 45/45, 1.56 -> 1.30 cm | **kept** |
+| 3 | contiguous chain ordering | 2 -> 12 views selected | **kept** |
+| 4 | texture-aware chain tiebreak | no change (chain is geometry-limited) | kept, no effect |
+| 5 | cheirality filter on the query view | no-op by construction | removed |
+| 6 | reprojection gate on the query view | no-op by construction | removed |
+| 7 | viewpoint gate against the map | rejects 40% of matches, 3/12 unchanged | reverted |
+| 8 | PnP gate relaxation (10/0.25 -> 6/0.10) | 3/12 unchanged | reverted |
+| 9 | resolution downscaling (3200/1600/800) | 201 -> 62 -> 13 -> 2 points | reverted |
+| 10 | histogram equalisation | fr1_xyz 45/45 -> 40/45, 1.36 -> 5.39 cm | reverted |
+| 11 | FAST threshold (20 -> 12/8/5) | map *shrinks* 2,712 -> 725 | reverted |
+| 12 | pyramid upsampling (`up_levels`) | keypoint coordinates wrong; 0/12 after fixing | reverted |
+| 13 | deeper pyramid (8 -> 12 -> 16 levels) | 3/5 unchanged, points fall | reverted |
+| 14 | longer chains (r1.5 -> r8) | 60% -> 25%: fewer registrations, not more | reverted |
+
+Four were kept because they improved something. The rest failed for a small number
+of recurring reasons, and those reasons are the useful output:
+
+- **Filtering cannot fix a wrong association.** Items 5-8 all attempt to reject
+  bad 2D-3D matches. On the views that fail, the matches are not "mostly right
+  with some outliers" - they are essentially all wrong, so there is nothing
+  correct left for a filter to preserve.
+- **Normalisation and rescaling trade one capture for another.** Items 9-12 all
+  change what the detector sees. Each helps a dim or oversized capture and
+  damages a well-exposed or small one. The gain is never general.
+- **More data is not better data.** Items 11, 13 and 14 all add or reshape
+  features. Registration rate falls or stays flat every time, because an extra
+  wrong match costs more than an extra right one gains.
+
+### What has not been tried, and is what the evidence points at
+
+Every intervention above is post-hoc: it filters, rescales, or re-weights what
+extraction already produced. The evidence points somewhere else - at the
+descriptor itself, before any of this runs.
+
+The specific candidate is a scale- and viewpoint-normalised descriptor rather than
+a rotation-normalised one. ORB normalises for rotation only; it handles scale
+through an 8-level pyramid covering 3.58x, while measured baselines between
+consecutive ETH3D frames reach 4.46 m at close range and consecutive rotations
+average 59 degrees. Both exceed what rotation normalisation plus a 3.58x pyramid
+comfortably covers on a hand-held oblique view, and a pyramid is the wrong tool
+for viewpoint change - it can only rescale, not re-orient.
+
+That is a substantial piece of work, not a configuration change, which is why it
+is stated as the next step rather than attempted. The ten measurements above are
+what narrow it to there.
