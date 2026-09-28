@@ -1005,3 +1005,55 @@ target. Matching OpenCV is a reasonable default and it was the right call for
 most of the pipeline, but "the moments should be taken on the same image as the
 descriptor" is an assumption, not a requirement, and here it is measurably
 false.
+
+## The two variables that actually predict the result
+
+Contrast alone does not separate the outcomes - TUM fr1_xyz has the lowest
+block standard deviation of the four and registers 45/45. What does separate them
+is how much of the local variation is *signal* rather than noise: the mean
+absolute Laplacian (a high-frequency measure) divided by the local contrast.
+
+| sequence | block std | Laplacian / contrast | registered |
+| --- | ---: | ---: | --- |
+| TUM fr1_xyz | 14.2 | **0.57** | 45/45 - 100% |
+| ETH3D courtyard | 26.7 | **0.62** | 7/8 - 87.5% |
+| ETH3D electro | 7.6 | **1.24** | 3/12 - 25% |
+| TUM fr1_desk | 3.0 | **1.59** | 23/40 - 57.5% |
+
+The two sequences that work sit near 0.6; the two that do not sit above 1.2. The
+split is clean, it is independent of contrast (electro has 7.6 and fr1_xyz has
+14.2, yet fr1_xyz is the one that registers), and it explains why several
+plausible fixes backfired.
+
+A Laplacian-to-contrast ratio this high means a frame whose pixel-to-pixel
+variation is mostly sensor noise rather than structure. That is the correct
+picture of the problem:
+
+- **It explains the smoothing result.** Blurring a noise-dominated frame averages
+  noise down but also flattens the weak real structure that orientation needs,
+  so smoothing the moments removes more signal than it removes noise. On
+  fr1_xyz, whose ratio is 0.57, the same change costs only accuracy.
+- **It explains why lowering the FAST threshold failed.** Corners detected in
+  noise do not repeat under camera motion, so they add landmarks that are wrong
+  rather than right - the map shrank from 2,712 to 725 landmarks.
+- **It explains why every post-hoc filter failed.** A descriptor formed from
+  noise-dominated patches is mostly noise, and a 256-bit Hamming distance over
+  mostly-noise bits is mostly noise, so filtering the correspondence set cannot
+  recover a match that was never in the descriptor.
+- **It explains why equalisation hurt.** Stretching the histogram of a
+  noise-dominated frame amplifies the noise along with the signal, and ORB's
+  Harris response then ranks noise corners highly.
+
+So the single unifying measurement across seventeen interventions is the ratio
+above, and it says the bottleneck is **sensor noise, not descriptor capacity**.
+That is a different conclusion from the one this work started with, and it
+points at a different remedy: noise reduction before detection, chosen to
+suppress noise while preserving the low-frequency structure the descriptor needs -
+which is the opposite of what a Gaussian blur does. A bilateral or non-local
+means filter is the natural candidate, and it has not been tried.
+
+This is stated as the best-supported hypothesis from the measurements so far, not
+as a settled result. The correlation is across four sequences and there is
+confounding - fr1_desk is also a fast-motion handheld sequence, and electro is
+also handheld and oblique. Isolating noise from motion would need sequences that
+vary one at a time, which is not something the available data allows.
