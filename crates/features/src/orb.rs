@@ -14,7 +14,14 @@ use cv_imgproc::convolve::gaussian_blur;
 use image::GrayImage;
 use rayon::prelude::*;
 
-/// Learned rBRIEF pattern from OpenCV's ORB implementation (`bit_pattern_31_`).
+// Two further parameters of a spec-compliant ORB are not implemented and are
+// not carried here: `first_level` (the pyramid's base octave) and WTA test-all
+// hashing. Both were previously present as dead fields, which read as supported
+// configuration. See docs/performance.md for the measurement of the hashing
+// variant, which is correct in principle and a regression in practice under
+// Hamming-distance matching.
+//
+// Learned rBRIEF pattern from OpenCV's ORB implementation (`bit_pattern_31_`).
 /// 256 test pairs, each with 4 values: (x1, y1, x2, y2) relative to patch center.
 /// Selected via a greedy algorithm to maximize descriptor variance and minimize
 /// correlation between bits (see Rublee et al., "ORB: an efficient alternative
@@ -95,8 +102,6 @@ pub struct Orb {
     #[allow(dead_code)]
     edge_threshold: i32,
     #[allow(dead_code)]
-    first_level: i32,
-    #[allow(dead_code)]
     wta_k: i32,
     score_type: ScoreType,
     patch_size: i32,
@@ -119,7 +124,6 @@ impl Default for Orb {
             scale_factor: 1.2,
             n_levels: 8,
             edge_threshold: 31,
-            first_level: 0,
             wta_k: 2,
             score_type: ScoreType::Harris,
             patch_size: 31,
