@@ -128,11 +128,11 @@ Measured on the same dataset family (ETH3D), plus TUM RGB-D. Full numbers in
 | loop closure | yes, gated + re-optimised | yes |
 | tests | **1,480** | 2,553 |
 | views per evaluation | 20–45 | 1,200–10,008 |
-| tests | 1,476 | 2,553 |
 | `unsafe impl` | **0** (26 crates forbid) | 0 (9 of 11 forbid) |
 
-**Not parity, and the gap is stated plainly.** fr1_xyz now registers every view,
-but fr1_desk reaches only 62.5%, and every comparison is on tens of views against
+**Not parity, and the gap is stated plainly.** fr1_xyz registers every view and
+beats their centre RMSE by 2.7x, but fr1_desk reaches only 57.5%, and every
+comparison is on tens of views against
 their thousands, so it is not like-for-like. Our *accuracy* is better (1.39 cm vs
 3.50 cm centre RMSE), but at 20–45 views that is the easier regime.
 
