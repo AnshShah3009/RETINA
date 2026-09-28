@@ -41,6 +41,14 @@ test, and the "found by" column says which.
 | `orb_detect_and_compute` returned the full detection list beside a shorter descriptor list — a 31x31 patch reaching past the frame is dropped by `extract`, so on a 160x120 test frame 216 keypoints came back against 154 descriptors, and every index past the first drop referred to a different keypoint | audit, after the `wta_k` investigation turned up three dead ORB fields | Returns the descriptors' own keypoints, so the two are index-parallel by contract; two tests pin it, one of which fails on the old code with exactly this 216-vs-154 mismatch |
 | `Orb` declared `wta_k`, `edge_threshold` and `first_level` as fields with no setter and no reader, so the struct read as supported configuration that did nothing | same audit | `first_level` removed; a comment states plainly which spec behaviour is not implemented, with the measurement behind it |
 | ORB's pyramid scale was computed, stored in `kp.size`, and then never read — the descriptor sampled a fixed 31x31 pattern regardless of the level, so a corner found at level 0 and at level 5 produced bit-identical descriptions and the pyramid bought nothing | audit of `kp.size` after the dead-field sweep | `Orb::with_scale_aware_descriptor` scales the sampling to each keypoint's own level. Opt-in, since on corrected measurement it helps only ETH3D electro (3/5 -> 4/5) and costs courtyard a view |
+| GPU `warp` dispatched `dst_w.div_ceil(4).div_ceil(16)` while the shader indexes one pixel per invocation with 16-wide workgroups — a quarter of the destination width was never written, and for a 64-wide destination only the first 16 columns were | review of the HAL GPU dispatch arithmetic | `div_ceil(16)` |
+| GPU `warp` clamped output to [0, 255]; the CPU backend does not, so an f32 warp of any tensor outside that range returned different data per backend | same review | clamp removed |
+| GPU `optical_flow_lk` read its initial guess from a buffer created with `create_buffer` and never seeded, sampling gradients at uninitialised coordinates and in practice returning the input points unchanged | same review | buffer seeded from the initial points, matching the CPU and the shader's own comment |
+| GPU `tsdf_raycast` returned 0.0 outside the volume where the CPU returns 1.0 — 0.0 is the iso-surface, so a ray leaving the volume reported a surface hit on the boundary, putting a shell of phantom depth around any partially-observed volume | same review | returns 1.0, matching the CPU |
+| `fast_detect` guarded rows with `y >= h - 3` on a `usize`, which wraps below 3 so the guard never fired and the loop read past the end of the source; any frame under 7px triggered it | same review | returns an all-zero response map, covered by a new test |
+| `compute_hybrid`, `voxel_to_point_normal_transfer` and `normals_cpu_analytic` returned fabricated results — identity pose with `fitness: 0.0`, zero vectors per point, and zero normals from the *only* CPU fallback — where a caller had no way to tell absence from data | same review | all three report absence now |
+| The Lowe ratio test kept the most ambiguous matches: `0.0/0.0` is NaN and `NaN > threshold` is false, so a zero second-best distance — exactly the duplicate-descriptor case the test exists to reject — was kept and flowed into track building and PnP | review of the feature pipeline | a zero second-best distance is rejected explicitly |
+| A `CV_SFM_DIAG_SPAN` environment variable left over from my own diagnostics changed seed ranking, contradicting the module's documented determinism guarantee | the same review | removed; the tree was audited for the pattern and the remaining env vars are legitimate configuration |
 | The half-extent in that fix was computed as `round(patch_size * level_scale)` — 31 for the base case rather than 15 — silently tightening the border test by sixteen pixels and dropping a ring of keypoints **with the feature flag off**. TUM fr1_desk fell 23/40 -> 8/40 on a clean tree, deterministically, and read as a property of the data | re-running the full sweep after the descriptor work, and noticing a number had moved with no command change | Corrected to integer division of the diameter; pinned by a regression test asserting the default path is unaffected |
 
 ## Math and geometry
@@ -124,7 +132,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **63+** |
+| Defects fixed | **72+** |
 | Commits | 460+ |
-| Tests | 1,480 (from 1,267) |
+| Tests | 1,482 (from 1,267) |
 | Duplicate implementations removed | 12 |
