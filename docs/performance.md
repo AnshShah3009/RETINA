@@ -1005,3 +1005,103 @@ target. Matching OpenCV is a reasonable default and it was the right call for
 most of the pipeline, but "the moments should be taken on the same image as the
 descriptor" is an assumption, not a requirement, and here it is measurably
 false.
+
+## The two variables that actually predict the result
+
+Contrast alone does not separate the outcomes - TUM fr1_xyz has the lowest
+block standard deviation of the four and registers 45/45. What does separate them
+is how much of the local variation is *signal* rather than noise: the mean
+absolute Laplacian (a high-frequency measure) divided by the local contrast.
+
+| sequence | block std | Laplacian / contrast | registered |
+| --- | ---: | ---: | --- |
+| TUM fr1_xyz | 14.2 | **0.57** | 45/45 - 100% |
+| ETH3D courtyard | 26.7 | **0.62** | 7/8 - 87.5% |
+| ETH3D electro | 7.6 | **1.24** | 3/12 - 25% |
+| TUM fr1_desk | 3.0 | **1.59** | 23/40 - 57.5% |
+
+The two sequences that work sit near 0.6; the two that do not sit above 1.2. The
+split is clean, it is independent of contrast (electro has 7.6 and fr1_xyz has
+14.2, yet fr1_xyz is the one that registers), and it explains why several
+plausible fixes backfired.
+
+A Laplacian-to-contrast ratio this high means a frame whose pixel-to-pixel
+variation is mostly sensor noise rather than structure. That is the correct
+picture of the problem:
+
+- **It explains the smoothing result.** Blurring a noise-dominated frame averages
+  noise down but also flattens the weak real structure that orientation needs,
+  so smoothing the moments removes more signal than it removes noise. On
+  fr1_xyz, whose ratio is 0.57, the same change costs only accuracy.
+- **It explains why lowering the FAST threshold failed.** Corners detected in
+  noise do not repeat under camera motion, so they add landmarks that are wrong
+  rather than right - the map shrank from 2,712 to 725 landmarks.
+- **It explains why every post-hoc filter failed.** A descriptor formed from
+  noise-dominated patches is mostly noise, and a 256-bit Hamming distance over
+  mostly-noise bits is mostly noise, so filtering the correspondence set cannot
+  recover a match that was never in the descriptor.
+- **It explains why equalisation hurt.** Stretching the histogram of a
+  noise-dominated frame amplifies the noise along with the signal, and ORB's
+  Harris response then ranks noise corners highly.
+
+So the single unifying measurement across seventeen interventions is the ratio
+above, and it says the bottleneck is **sensor noise, not descriptor capacity**.
+That is a different conclusion from the one this work started with, and it
+points at a different remedy: noise reduction before detection, chosen to
+suppress noise while preserving the low-frequency structure the descriptor needs -
+which is the opposite of what a Gaussian blur does. A bilateral or non-local
+means filter is the natural candidate, and it has not been tried.
+
+This is stated as the best-supported hypothesis from the measurements so far, not
+as a settled result. The correlation is across four sequences and there is
+confounding - fr1_desk is also a fast-motion handheld sequence, and electro is
+also handheld and oblique. Isolating noise from motion would need sequences that
+vary one at a time, which is not something the available data allows.
+
+### Testing the noise hypothesis directly, and it fails too
+
+The ratio above suggested an obvious remedy: suppress noise while preserving the
+low-frequency structure a descriptor needs, which is what an edge-preserving
+filter does and the opposite of what a Gaussian blur does. Measured on fr1_desk,
+a median filter does exactly what the prediction said it would:
+
+| filter | Laplacian / contrast | block std |
+| --- | ---: | ---: |
+| raw | 1.68 | 2.73 |
+| median 3 | 1.49 | 2.54 |
+| median 5 | 1.33 | 2.31 |
+| median 7 | **1.17** | 2.16 |
+
+The noise ratio falls by a third and the contrast is largely retained - precisely
+the trade the hypothesis called for. A size-7 median was implemented in the
+pipeline and measured:
+
+| median size | 0 (off) | 3 | 5 |
+| --- | --- | --- | --- |
+| registered | **23/40** | 9/40 | 8/40 |
+| 3D points | **2,712** | 745 | 555 |
+
+It fails, and in the same way every other intervention failed: the map *shrinks*.
+23/40 to 8/40, 2,712 landmarks down to 555.
+
+This is now a strong and repeated result. Every attempt to improve the input -
+more features, more scale levels, a deeper pyramid, contrast normalisation,
+smoothing the moments, edge-preserving noise removal - reduces the number of
+landmarks and the number of registrations together. Whatever these sequences are
+short of, it is not pixel-level SNR, and the Laplacian ratio is correlated with
+the outcome without being the thing that fixes it.
+
+The likely reading is that the ratio is a *proxy* for something else that these
+four sequences vary together: the handheld ETH3D and fr1_desk captures are fast
+and oblique, while fr1_xyz is slow and near-frontal. Low measured contrast,
+high measured noise ratio, large viewpoint change, and weak repeatability are all
+downstream of "the camera moved a long way between frames on a scene with little
+to go on", and any of these interventions removes real structure along with the
+noise, because at this signal level structure and noise are not separable by a
+local filter.
+
+So the unifying statement in the previous section needs narrowing: the ratio is
+the best predictor found, but it is a proxy for capture difficulty rather than a
+cause, and the cause remains unisolated. Closing this needs either a descriptor
+that survives a large viewpoint change, or sequences that vary one factor at a
+time - and the data needed to separate the factors is not available here.
