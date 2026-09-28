@@ -277,7 +277,25 @@ impl FisheyeDistortionF32 {
                 + 5.0 * self.k2 * theta4
                 + 7.0 * self.k3 * theta6
                 + 9.0 * self.k4 * theta8;
-            theta -= f / df;
+            // Same guards the f64 version carries, for the same reason: strong
+            // distortion coefficients drive `df` toward zero, and `f / df` then
+            // steps theta to inf or NaN. The loop has no recovery from that, and
+            // `tan()` of a NaN is NaN, so the caller silently receives a NaN ray
+            // where the f64 path returns the input unchanged.
+            if !df.is_finite() || df.abs() < 1e-6 || !f.is_finite() {
+                break;
+            }
+            let step = f / df;
+            if !step.is_finite() {
+                break;
+            }
+            theta -= step;
+        }
+
+        // A non-finite theta would poison tan() and the returned ray, so leave
+        // the input unchanged rather than emitting NaN.
+        if !theta.is_finite() {
+            return (x, y);
         }
 
         let r = theta.tan();
@@ -332,6 +350,70 @@ impl From<FisheyeDistortionF32> for FisheyeDistortion {
             k2: d.k2 as f64,
             k3: d.k3 as f64,
             k4: d.k4 as f64,
+        }
+    }
+}
+
+#[cfg(test)]
+mod fisheye_f32_guards {
+    use super::*;
+
+    /// The f32 fisheye must not emit NaN where the f64 version returns its input.
+    ///
+    /// Strong distortion coefficients drive `df` toward zero, so the Newton step
+    /// `f / df` becomes inf or NaN. The f32 version had no guard and fed that
+    /// straight into `tan()`, so the caller silently received a NaN ray; the f64
+    /// version has guarded this since it was written and returns the input
+    /// unchanged.
+    #[test]
+    fn extreme_coefficients_do_not_produce_nan() {
+        // df = 1 + 3*k1*theta^2 reaches zero at theta^2 = -1/(3*k1). For
+        // k1 = -1 that is theta = 1/sqrt(3) = 0.5774, and `remove` starts Newton
+        // from theta = r_d, so a point at exactly that radius puts the very first
+        // step on the singularity and `f / df` is inf. A blunter choice of
+        // coefficients does not exercise this: a large k1 puts the singularity at
+        // a radius a typical pixel never reaches, which is why the first version
+        // of this test passed against the unguarded code.
+        let d = FisheyeDistortionF32 {
+            k1: -1.0,
+            k2: 0.0,
+            k3: 0.0,
+            k4: 0.0,
+        };
+        let r = 1.0f32 / 3.0f32.sqrt();
+        for &(x, y) in &[(r, 0.0f32), (0.0, r), (r * 0.5, r * 0.5), (-r, r * 0.5)] {
+            let (ox, oy) = d.remove(x, y);
+            assert!(
+                ox.is_finite() && oy.is_finite(),
+                "remove(({x}, {y})) returned ({ox}, {oy}); the f32 path lost the \\
+                 guards the f64 path has"
+            );
+        }
+    }
+
+    /// The two precisions must agree on a well-conditioned model.
+    #[test]
+    fn f32_and_f64_agree_on_ordinary_coefficients() {
+        let k1 = 0.02f32;
+        let d32 = FisheyeDistortionF32 {
+            k1,
+            k2: 0.001,
+            k3: 0.0,
+            k4: 0.0,
+        };
+        let d64 = FisheyeDistortion {
+            k1: k1 as f64,
+            k2: 0.001,
+            k3: 0.0,
+            k4: 0.0,
+        };
+        for &(x, y) in &[(0.3f32, 0.4f32), (-0.2, 0.5), (0.6, -0.1)] {
+            let (ax, ay) = d32.remove(x, y);
+            let (bx, by) = d64.remove(x as f64, y as f64);
+            assert!(
+                (ax as f64 - bx).abs() < 1e-3 && (ay as f64 - by).abs() < 1e-3,
+                "remove(({x}, {y})): f32 gave ({ax}, {ay}), f64 gave ({bx}, {by})"
+            );
         }
     }
 }
