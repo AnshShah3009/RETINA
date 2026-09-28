@@ -1177,30 +1177,42 @@ Making the pattern scale-aware is a one-line change to the sampling. Measured:
 
 | sequence | fixed patch | scale-aware |
 | --- | --- | --- |
-| TUM fr1_xyz | 45/45 — 1.36 cm | 45/45 — 2.03 cm |
-| TUM fr1_desk | 23/40 — 2,712 pts | **24/40 — 3,373 pts** |
-| ETH3D electro, 5 views | 3/5 — 455 pts | **4/5 — 927 pts** |
-| ETH3D electro, 12 views | 3/12 — 242 pts | **4/12 — 950 pts** |
-| ETH3D courtyard, 8 views | **7/8 — 3,115 pts** | 6/8 — 4,468 pts |
+| TUM fr1_xyz | 45/45 — 1.67 cm | 45/45 — 2.03 cm |
+| TUM fr1_desk | **23/40 — 2,712 pts** | 21/40 — 3,597 pts |
+| ETH3D electro, 5 views | 3/5 — 455 pts | **4/5 — 946 pts** |
+| ETH3D courtyard, 8 views | **7/8 — 3,115 pts** | 3/8 — 1,694 pts |
 
-This is the **first change in eighteen that improves the sequences this work has
-been trying to improve**: fr1_desk gains a view, both electro configurations gain
-a view, and the landmark count roughly doubles in every case - the landmark
-count rising while registrations hold is the opposite of the signature every
-previous intervention showed.
+Re-measured after the off-by-one below was fixed, so these supersede the first
+version of this table. Only ETH3D electro improves, and it is the weakest
+sequence here, so the trade is one low-texture sequence for three that already
+worked. The landmark count still rises substantially where the flag is on
+(2,712 -> 3,597 on fr1_desk, 455 -> 946 on electro), which is the direction
+this work has been trying to move and the only one of the nineteen
+interventions that achieves it.
 
-The cost is real. ETH3D courtyard loses a view and TUM fr1_xyz's camera-centre
-error rises from 1.36 to 2.03 cm. The reason is the same trade visible elsewhere
-in this file: on a well-exposed frame the coarse levels contribute keypoints
-whose scaled patch no longer fits inside the frame, and those are dropped. A
-test that started out asserting the descriptor *count* was unchanged failed with
-149 against 6 on a 200x160 frame, which is the mechanism made visible - coarse
-levels need proportionally larger patches, so border keypoints lose their
-descriptor entirely. The test now asserts what is actually required: detection
-is unchanged, the count can only fall, and the descriptor data must differ.
+### The off-by-one that this nearly shipped
+
+The first version of that table was wrong, and wrongly optimistic. Measuring it
+surfaced a regression: fr1_desk had gone from 23/40 to **8/40** on a clean tree,
+deterministically, across repeated runs. It was not the data.
+
+The half-extent was computed as `round(patch_size * level_scale)`, which is 31
+for the base case rather than 15 - integer division of an odd width, which the
+original code got right. The border test was therefore sixteen pixels stricter in
+each axis, silently dropping a ring of keypoints **with the flag off**, so a
+behaviour change had altered the default path. The failure mode was nasty: it
+was reproducible, deterministic, plausible as a property of the data, and only
+visible by comparing the default path against the pre-change build.
+
+Fixed, and pinned by `default_path_is_unchanged_by_the_scale_aware_flag`, which
+asserts that most descriptors lie well inside the frame and that extraction is
+byte-identical across runs. The corrected table is above; the first one is
+recorded here because the optimistic numbers were written down first, and a
+result that has to be retracted is worth keeping the retraction for.
 
 Shipped as `Orb::with_scale_aware_descriptor` and `--scale-aware-descriptor`,
-**off by default**. Every gain is on a low-texture sequence and every loss is on
-one that already worked, so making it the default would trade a working case for
-a broken one to buy a marginal one. Left opt-in, it is available for exactly the
-captures where it was measured to help.
+**off by default**. On the corrected measurement it helps one weak sequence and
+hurts three that already worked, which is a poor default trade. It stays
+available because the landmark-count increase is the only one seen, and because
+electro's gain is on precisely the sequence class this work has been trying to
+improve.
