@@ -825,11 +825,24 @@ fn compute_harris_response(image: &GrayImage, x: i32, y: i32) -> f64 {
 }
 
 /// Detect ORB keypoints and compute descriptors on the CPU.
+/// Detect ORB features and compute their descriptors.
+///
+/// The returned keypoints and descriptors are **parallel and equal in length**:
+/// a keypoint whose patch would fall outside the image has no descriptor and is
+/// not returned at all. Callers that index one by the index of the other are
+/// correct with this contract, and pairing them against a longer detection list
+/// would silently mismatch every entry after the first dropped border keypoint.
 pub fn orb_detect_and_compute(image: &GrayImage, n_features: usize) -> (KeyPoints, Descriptors) {
     let orb = Orb::new().with_n_features(n_features);
     let mut keypoints = orb.detect(image);
     orb.compute_orientations(image, &mut keypoints);
     let descriptors = orb.extract(image, &keypoints);
+    // `extract` skips keypoints whose patch reaches outside the frame, so the
+    // descriptor list can be shorter than the detection list. Return the
+    // descriptors' own keypoints, which are the ones the two indices refer to.
+    let keypoints = KeyPoints {
+        keypoints: descriptors.descriptors.iter().map(|d| d.keypoint).collect(),
+    };
     (keypoints, descriptors)
 }
 
@@ -918,6 +931,70 @@ mod tests {
     }
 
     #[test]
+    /// The keypoints and descriptors returned together must be index-parallel.
+    ///
+    /// A keypoint whose patch would reach outside the frame has no descriptor
+    /// and is dropped by `extract`, so the detection list can be longer than
+    /// the descriptor list. Returning both unpaired means every index past the
+    /// first dropped border keypoint refers to different keypoints - which is
+    /// silent, and produces plausible-looking but wrong correspondences rather
+    /// than an error.
+    #[test]
+    fn detect_and_compute_returns_parallel_keypoints_and_descriptors() {
+        let (w, h) = (160u32, 120u32);
+        let mut img = image::GrayImage::new(w, h);
+        // A textured frame with corners right at the border, so the drop
+        // condition is actually exercised.
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 7 + y * 13) % 256) as u8;
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+        let (keypoints, descriptors) = orb_detect_and_compute(&img, 2000);
+        assert_eq!(
+            keypoints.keypoints.len(),
+            descriptors.descriptors.len(),
+            "keypoints and descriptors must be index-parallel"
+        );
+        for (i, (kp, desc)) in keypoints
+            .keypoints
+            .iter()
+            .zip(descriptors.descriptors.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                (kp.x, kp.y, kp.angle),
+                (desc.keypoint.x, desc.keypoint.y, desc.keypoint.angle),
+                "keypoint {i} does not match its descriptor"
+            );
+        }
+    }
+
+    /// Every returned keypoint must have its patch fully inside the frame, since
+    /// anything else is what `extract` drops.
+    #[test]
+    fn returned_keypoints_have_complete_patches() {
+        let (w, h) = (160u32, 120u32);
+        let mut img = image::GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 11 + y * 5) % 256) as u8;
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+        let (keypoints, _) = orb_detect_and_compute(&img, 2000);
+        let half = (Orb::new().patch_size / 2) as f64;
+        for kp in &keypoints.keypoints {
+            assert!(
+                kp.x >= half && kp.x < w as f64 - half && kp.y >= half && kp.y < h as f64 - half,
+                "keypoint at ({}, {}) has a patch outside the {w}x{h} frame",
+                kp.x,
+                kp.y
+            );
+        }
+    }
+
     fn test_orb_detect_and_compute() {
         // Use a larger image so most keypoints are far enough from edges
         // to get a valid descriptor.
