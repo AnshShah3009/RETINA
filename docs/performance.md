@@ -1220,3 +1220,62 @@ hurts three that already worked, which is a poor default trade. It stays
 available because the landmark-count increase is the only one seen, and because
 electro's gain is on precisely the sequence class this work has been trying to
 improve.
+
+## Known remaining gaps
+
+Recorded so the next person does not rediscover them. None is reachable from the
+SfM, localization or evaluation paths today.
+
+**`Orb::detect_ctx` does not match `Orb::detect`, and the gap is larger than it
+first appears.** The CPU path runs FAST, then non-maximum suppression, then
+re-scores every survivor with Harris, and truncates once at the very end. The
+ctx path ran FAST and sorted, with none of the other three stages, and truncated
+to `2 * n_features` *before* any of them.
+
+Correcting the missing stages is not sufficient, which is worth recording because
+the obvious fix looks complete and is not. Adding suppression and Harris
+re-scoring to the ctx path still leaves the two disagreeing, for two reasons
+found only by writing the equivalence test:
+
+- **The two paths resample differently.** The CPU pyramid calls
+  `scale_image`, which uses the `Triangle` filter. The ctx path resizes through
+  the HAL, whose `resize` takes no filter argument and does a plain bilinear
+  sample. Different resampling of a level image produces different corners
+  regardless of what happens downstream, so matching the post-processing cannot
+  match the keypoints.
+- **The coordinate convention bites.** The shared `to_gray` helper reads
+  `shape.hw()` as `(w, h)`, but `hw()` returns `(height, width)`. That transposes
+  the image, and the test caught it as an out-of-bounds panic in
+  `non_max_suppression` - a keypoint at x=127 on an image 99 pixels wide - before
+  it ever got as far as a wrong answer.
+
+Making the ctx path bit-identical to the CPU path therefore needs the HAL resize
+to take a filter, or the ctx pyramid to resample on the host with `scale_image`
+like the CPU does. Neither is a small change and neither is verifiable without a
+GPU in CI, so it is left as a known divergence rather than half-fixed. It is
+reachable: `detect_and_compute_ctx` falls back to `detect_ctx` whenever the GPU
+upload fails, and `cv-slam`'s tracker calls that function.
+
+`cv-hal::ComputeContext::resize` also having no filter argument is the root of
+half of this, and is worth addressing in its own right - it is a public API that
+cannot express a resampling choice.
+
+**`hamming_distance` truncates on a length mismatch.** It `zip`s the two byte
+slices, so an 8-byte descriptor compared against a 32-byte one examines only the
+first 8 bytes and can report distance 0 for descriptors that differ in the rest.
+Everything in the ORB pipeline produces 32-byte descriptors, so this cannot fire
+there, but BRIEF is parameterised by descriptor length and a pipeline mixing
+detectors would get confident zero-distance matches between incomparable
+descriptors. Returning a sentinel that fails the ratio test would be safer.
+
+**`Descriptor::hamming_distance` and the ratio test together make an
+all-ties match count as a real match** in the specific case of a query with only
+one train descriptor in range; that is correct behaviour rather than a defect,
+and is noted only because the zero-second-best rejection added alongside it
+depends on there being a second best.
+
+**`stereo_match` leaves a zero-disparity border.** The CPU path returns early for
+rows and `continue`s for columns, and the destination is zero-initialised, so a
+`half_block`-wide band reads as "matched at infinity". Correct as a "no match"
+signal, but a caller that treats 0 as a valid disparity sees a false border band.
+The GPU path was not compared against it.

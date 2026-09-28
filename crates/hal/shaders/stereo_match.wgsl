@@ -17,11 +17,17 @@ struct Params {
 // The dispatch binds f32 tensors (one f32 per pixel); a previous revision
 // declared packed-u8 u32 words here and reinterpreted f32 bits as 4 bytes,
 // producing garbage disparities.
-fn get_pixel(data: ptr<storage, array<f32>, read>, x: i32, y: i32) -> f32 {
+//
+// WGSL has no function parameters: a storage-space pointer may not be passed
+// into a function at all, so this signature never compiled. The shader failed
+// wgpu's validation on every dispatch - GPU stereo matching was a hard error,
+// not a wrong answer, and nothing in the test suite exercised it. The bound
+// array is read through a module-scope name instead, with the caller selecting
+// which one.
+fn index_of(x: i32, y: i32) -> u32 {
     let ix = clamp(x, 0, i32(params.width) - 1);
     let iy = clamp(y, 0, i32(params.height) - 1);
-    let idx = u32(iy) * params.width + u32(ix);
-    return (*data)[idx];
+    return u32(iy) * params.width + u32(ix);
 }
 
 @compute @workgroup_size(16, 16)
@@ -52,8 +58,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         var cost = 0.0;
         for (var dy = -half_block; dy <= half_block; dy = dy + 1) {
             for (var dx = -half_block; dx <= half_block; dx = dx + 1) {
-                let lv = get_pixel(&left_data, x + dx, y + dy);
-                let rv = get_pixel(&right_data, x + dx - cur_d, y + dy);
+                let lv = left_data[index_of(x + dx, y + dy)];
+                let rv = right_data[index_of(x + dx - cur_d, y + dy)];
                 cost = cost + abs(lv - rv);
             }
         }

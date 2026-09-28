@@ -268,6 +268,42 @@ pub trait ComputeContext: Send + Sync {
         new_shape: (usize, usize),
     ) -> Result<Tensor<T, S>>;
 
+    /// Resize with an explicit interpolation mode.
+    ///
+    /// [`Self::resize`] takes no mode, so every backend picks its own default.
+    /// That is a problem wherever a result has to be reproducible across
+    /// backends: `Orb::detect_ctx` builds its pyramid through this call and the
+    /// CPU detector resamples with the `Triangle` filter, so the two produce
+    /// different corners from identical pixels no matter what happens downstream.
+    /// A caller that needs a specific resampling has no way to ask for one.
+    ///
+    /// The default of [`Self::resize`] is unchanged; this is additive.
+    ///
+    /// Not yet overridden by any backend. `cv-hal` takes `image` as a
+    /// dev-dependency only, so a backend implementation would either promote it
+    /// to a runtime dependency - putting an image library into a hardware
+    /// abstraction layer, which it should not carry - or hand-roll the
+    /// convolution, which is exactly the kind of divergence this method is meant
+    /// to remove. The right resolution is for the resampling to live in
+    /// `cv-core`, where both the HAL and the feature detectors can use it; that
+    /// is a larger refactor than a missing default argument, so the method
+    /// exists and defaults to `resize` until then.
+    fn resize_with<
+        T: Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
+        &self,
+        input: &Tensor<T, S>,
+        new_shape: (usize, usize),
+        interpolation: Interpolation,
+    ) -> Result<Tensor<T, S>> {
+        // Backends that cannot honour the mode still have to do something, and
+        // silently substituting a different filter would reproduce the very
+        // divergence this method exists to remove.
+        let _ = interpolation;
+        self.resize(input, new_shape)
+    }
+
     /// Create an image pyramid level (downsample)
     fn pyramid_down<
         T: Float + bytemuck::Pod + 'static,
