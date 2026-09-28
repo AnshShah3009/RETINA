@@ -1105,3 +1105,56 @@ the best predictor found, but it is a proxy for capture difficulty rather than a
 cause, and the cause remains unisolated. Closing this needs either a descriptor
 that survives a large viewpoint change, or sequences that vary one factor at a
 time - and the data needed to separate the factors is not available here.
+
+## FAST scoring: the same signature again
+
+`Orb` has a `ScoreType` enum with a `Fast` variant, and no setter for it, so
+Harris is the only reachable option. Harris is a second-derivative corner
+response over a window - a gradient of gradients - and on a frame whose
+pixel-to-pixel variation is mostly noise it ranks noise highly and confidently,
+since noise differentiates to exactly the pattern Harris looks for. FAST asks a
+more structural question: is a contiguous 9-pixel arc of the Bresenham circle all
+brighter than the centre by a threshold.
+
+A setter and a CLI flag were added and it measured worse on the noisiest
+sequence:
+
+| score | registered | 3D points |
+| --- | --- | ---: |
+| Harris (default) | **23/40** | **2,712** |
+| FAST | 8/40 | 718 |
+
+Reverted, and `with_score_type` reverted with it.
+
+### The pattern across eighteen interventions
+
+Every attempt to change *what the detector sees* has produced the same pair of
+movements, together: fewer landmarks and fewer registrations. Not one has
+decoupled them.
+
+| change | landmarks | registrations |
+| --- | --- | --- |
+| FAST threshold 20 -> 5 | 2,712 -> 786 | 23/40 -> 9/40 |
+| median filter 7 | 2,712 -> 555 | 23/40 -> 8/40 |
+| FAST scoring | 2,712 -> 718 | 23/40 -> 8/40 |
+| pyramid 8 -> 16 levels | 455 -> 411 | 3/5 -> 3/5 |
+| histogram equalisation | 455 -> 245 | 3/5 -> 3/5 |
+| smoothing the moments | - | 23/40 -> 8/40 |
+
+If the bottleneck were supply of corners, adding or sharpening them would raise
+the landmark count and the registration count together. Instead the two move
+down in lockstep, which means the pipeline is not corner-starved: it is
+producing corners that do not repeat, and every intervention removes some real
+ones along with the spurious ones without finding new repeatable ones.
+
+That reframes what is left. The map does not need more features; it needs
+features that survive a large viewpoint change between frames. The measurements
+put that change at up to 4.46 m of baseline and 59 degrees of mean rotation on a
+handheld oblique view, which is well past what rotation-normalised BRIEF over a
+3.58x pyramid is designed for.
+
+Nothing further in this family is worth trying. The remaining options are a
+different descriptor, or an association method that verifies geometrically
+before committing - and both are substantial work rather than a configuration
+change. The eighteen measurements above are what narrow it to those two, and
+they are the reason to stop sweeping parameters.
