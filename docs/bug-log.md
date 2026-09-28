@@ -40,7 +40,9 @@ test, and the "found by" column says which.
 | ORB's `detect_ctx` fed a `[0,1]`-normalised tensor to FAST with a 0..255 threshold, so no corner could ever score | audit | Thresholds now in the same units as the data |
 | `orb_detect_and_compute` returned the full detection list beside a shorter descriptor list — a 31x31 patch reaching past the frame is dropped by `extract`, so on a 160x120 test frame 216 keypoints came back against 154 descriptors, and every index past the first drop referred to a different keypoint | audit, after the `wta_k` investigation turned up three dead ORB fields | Returns the descriptors' own keypoints, so the two are index-parallel by contract; two tests pin it, one of which fails on the old code with exactly this 216-vs-154 mismatch |
 | Point-to-plane ICP reported the caller's initial transform with `fitness: 1.0` and `inlier_rmse: 0.0` whenever the target cloud had no normals: the accumulation body was skipped for every correspondence, `ata` stayed a zero matrix, the update was silently skipped — and a target without normals is the ordinary case, since `PointCloud` makes the field optional | review of the registration crate | counts the correspondences that contributed geometry and returns `None` below three; RMSE divided by that count rather than the number offered |
-| Colored ICP's photometric Jacobian ignored all three arguments and returned a constant, so `lambda_geometric = 0` made the normal equations rank-1 and the solver never moved — while still returning a success | same review | **not yet fixed**, recorded below |
+| Colored ICP's photometric Jacobian ignored all three arguments and returned a constant, so its `J Jᵀ` block was rank 1 and the normal equations singular for any `lambda < 1` — the solver never moved while the function reported success | same review | derived from the point's coordinates scaled by the luma difference, so the block is full rank |
+| A singular `ata` in colored ICP was handled by `if let Some(..) = ata.try_inverse()`, so the update was silently skipped and the initial transform was returned with `fitness: 1.0` | same | returns `None`; the step is solved by QR least squares, since a Gauss-Newton step is `A⁻¹b` only when well-conditioned and `try_inverse` rejects merely ill-conditioned matrices |
+| Colored ICP normalised a possibly-zero difference vector to get a fallback normal, giving NaN that propagated through the whole Jacobian; a zero difference is what an already-aligned pair produces | same | `try_normalize` with a zero fallback |
 | `f_score` returned `NaN` for `precision = inf` (`inf / inf`), which passed its `denominator <= 0.0` guard and contradicted the module's claim that it is total | same review | non-finite inputs yield 0.0 |
 | `Orb` declared `wta_k`, `edge_threshold` and `first_level` as fields with no setter and no reader, so the struct read as supported configuration that did nothing | same audit | `first_level` removed; a comment states plainly which spec behaviour is not implemented, with the measurement behind it |
 | ORB's pyramid scale was computed, stored in `kp.size`, and then never read — the descriptor sampled a fixed 31x31 pattern regardless of the level, so a corner found at level 0 and at level 5 produced bit-identical descriptions and the pyramid bought nothing | audit of `kp.size` after the dead-field sweep | `Orb::with_scale_aware_descriptor` scales the sampling to each keypoint's own level. Opt-in, since on corrected measurement it helps only ETH3D electro (3/5 -> 4/5) and costs courtyard a view |
@@ -138,7 +140,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **78+** |
+| Defects fixed | **81+** |
 | Commits | 460+ |
-| Tests | 1,495 (from 1,267) |
+| Tests | 1,496 (from 1,267) |
 | Duplicate implementations removed | 12 |
