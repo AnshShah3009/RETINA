@@ -104,6 +104,16 @@ pub struct Orb {
     #[allow(dead_code)]
     wta_k: i32,
     score_type: ScoreType,
+    /// Measure the BRIEF pattern at each keypoint's own pyramid scale.
+    ///
+    /// Measured, and not simply better: it helps the low-texture sequences
+    /// (TUM fr1_desk 23 -> 24 of 40, ETH3D electro 3/5 -> 4/5 and 3/12 -> 4/12,
+    /// with landmark counts roughly doubling in each case) and costs the
+    /// well-exposed ones (ETH3D courtyard 7/8 -> 6/8, TUM fr1_xyz camera-centre
+    /// error 1.36 -> 2.03 cm). Every gain is on the sequences this work has been
+    /// trying to improve and every loss is on one that already worked, so it is
+    /// opt-in rather than the default. See docs/performance.md.
+    pub scale_aware_descriptor: bool,
     patch_size: i32,
     fast_threshold: u8,
 }
@@ -126,6 +136,7 @@ impl Default for Orb {
             edge_threshold: 31,
             wta_k: 2,
             score_type: ScoreType::Harris,
+            scale_aware_descriptor: false,
             patch_size: 31,
             fast_threshold: 20,
         }
@@ -139,6 +150,14 @@ impl Orb {
     }
 
     /// Set the maximum number of keypoints to retain.
+    /// Measure the BRIEF pattern at each keypoint's own pyramid scale.
+    ///
+    /// See [`Orb::scale_aware_descriptor`] for the measurement behind this.
+    pub fn with_scale_aware_descriptor(mut self, scale_aware: bool) -> Self {
+        self.scale_aware_descriptor = scale_aware;
+        self
+    }
+
     pub fn with_n_features(mut self, n: usize) -> Self {
         self.n_features = n;
         self
@@ -678,7 +697,15 @@ impl DescriptorExtractor for Orb {
         let kp_list = &keypoints.keypoints;
         let computed: Vec<_> = kp_list
             .par_iter()
-            .filter_map(|kp| compute_orb_descriptor(&smoothed, kp, &pattern, self.patch_size))
+            .filter_map(|kp| {
+                compute_orb_descriptor(
+                    &smoothed,
+                    kp,
+                    &pattern,
+                    self.patch_size,
+                    self.scale_aware_descriptor,
+                )
+            })
             .collect();
         let mut descriptors = descriptors;
         for d in computed {
@@ -714,13 +741,37 @@ fn compute_orb_descriptor(
     kp: &KeyPoint,
     pattern: &[(f32, f32, f32, f32)],
     patch_size: i32,
+    scale_aware: bool,
 ) -> Option<Descriptor> {
     let width = image.width() as i32;
     let height = image.height() as i32;
     let cx = kp.x as i32;
     let cy = kp.y as i32;
 
-    let half_patch = patch_size / 2;
+    // Scale the sampling to the keypoint's own detection scale.
+    //
+    // The pyramid stores each keypoint's level scale in `kp.size` (patch_size
+    // times the level's scale factor), and that value was being computed and
+    // then discarded: every keypoint was described with a fixed-size pattern
+    // against a fixed half-patch, so a corner found at level 0 (a 31px patch on
+    // the full-resolution image) and the same corner found at level 5 (a 55px
+    // patch spanning more of it) produced bit-identical descriptions.
+    //
+    // That defeats the pyramid entirely. Scale-space detection is only useful if
+    // the descriptor is measured at the scale the keypoint was found at, which
+    // is what makes an ORB descriptor comparable between an image and a
+    // half-size copy of it. `pattern` arrives pre-scaled to `patch_size`, so it
+    // is scaled here by the keypoint's own factor relative to the base.
+    let level_scale = if scale_aware {
+        (kp.size / patch_size as f64) as f32
+    } else {
+        1.0
+    };
+    let half_patch = ((patch_size as f32) * level_scale).round() as i32;
+    if half_patch < 2 {
+        return None;
+    }
+    // Nothing else to do for a degenerate scale.
     if cx < half_patch || cx >= width - half_patch || cy < half_patch || cy >= height - half_patch {
         return None;
     }
@@ -734,10 +785,15 @@ fn compute_orb_descriptor(
     let mut byte_idx = 0;
 
     for &(x1, y1, x2, y2) in pattern {
-        let rx1 = cos_a * x1 - sin_a * y1;
-        let ry1 = sin_a * x1 + cos_a * y1;
-        let rx2 = cos_a * x2 - sin_a * y2;
-        let ry2 = sin_a * x2 + cos_a * y2;
+        // `pattern` is in base-patch units; scale to this keypoint's patch.
+        let sx1 = x1 * level_scale;
+        let sy1 = y1 * level_scale;
+        let sx2 = x2 * level_scale;
+        let sy2 = y2 * level_scale;
+        let rx1 = cos_a * sx1 - sin_a * sy1;
+        let ry1 = sin_a * sx1 + cos_a * sy1;
+        let rx2 = cos_a * sx2 - sin_a * sy2;
+        let ry2 = sin_a * sx2 + cos_a * sy2;
 
         let px1 = (cx as f32 + rx1) as i32;
         let py1 = (cy as f32 + ry1) as i32;
@@ -832,6 +888,22 @@ fn compute_harris_response(image: &GrayImage, x: i32, y: i32) -> f64 {
 /// not returned at all. Callers that index one by the index of the other are
 /// correct with this contract, and pairing them against a longer detection list
 /// would silently mismatch every entry after the first dropped border keypoint.
+pub fn orb_detect_and_compute_scale_aware(
+    image: &GrayImage,
+    n_features: usize,
+) -> (KeyPoints, Descriptors) {
+    let orb = Orb::new()
+        .with_n_features(n_features)
+        .with_scale_aware_descriptor(true);
+    let mut keypoints = orb.detect(image);
+    orb.compute_orientations(image, &mut keypoints);
+    let descriptors = orb.extract(image, &keypoints);
+    let keypoints = KeyPoints {
+        keypoints: descriptors.descriptors.iter().map(|d| d.keypoint).collect(),
+    };
+    (keypoints, descriptors)
+}
+
 pub fn orb_detect_and_compute(image: &GrayImage, n_features: usize) -> (KeyPoints, Descriptors) {
     let orb = Orb::new().with_n_features(n_features);
     let mut keypoints = orb.detect(image);
@@ -969,6 +1041,65 @@ mod tests {
                 "keypoint {i} does not match its descriptor"
             );
         }
+    }
+
+    /// The scale-aware flag must actually change what is measured.
+    ///
+    /// `kp.size` carries the pyramid level's scale, and it was computed and then
+    /// discarded: every keypoint was described with the same fixed-size pattern,
+    /// so a corner found at level 0 and the same corner found at level 5
+    /// produced bit-identical descriptions and the pyramid bought nothing. This
+    /// pins that the flag is wired to the behaviour rather than merely stored.
+    ///
+    /// The descriptor *count* is expected to fall, because a coarse level needs
+    /// a proportionally larger patch and keypoints without one fully inside the
+    /// frame are dropped. That is inherent to describing at the keypoint's own
+    /// scale rather than a defect in the wiring.
+    #[test]
+    fn scale_aware_descriptor_changes_the_result() {
+        let (w, h) = (200u32, 160u32);
+        let mut img = image::GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 7 + y * 13) % 256) as u8;
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+        let fixed = Orb::new().with_n_features(300);
+        let scaled = Orb::new()
+            .with_n_features(300)
+            .with_scale_aware_descriptor(true);
+        let mut fixed_kps = fixed.detect(&img);
+        fixed.compute_orientations(&img, &mut fixed_kps);
+        let fixed_desc = fixed.extract(&img, &fixed_kps);
+        let mut scaled_kps = scaled.detect(&img);
+        scaled.compute_orientations(&img, &mut scaled_kps);
+        let scaled_desc = scaled.extract(&img, &scaled_kps);
+        // Detection is unaffected - only the description changes.
+        assert_eq!(fixed_kps.keypoints.len(), scaled_kps.keypoints.len());
+        // The flag legitimately changes which keypoints get a descriptor: a
+        // coarser level needs a proportionally larger patch, so keypoints near
+        // the frame edge no longer have one fully inside the image and are
+        // dropped. It must not change *which keypoints are detected*, though.
+        assert_eq!(
+            fixed_kps.keypoints.len(),
+            scaled_kps.keypoints.len(),
+            "the flag must not change detection"
+        );
+        assert!(
+            scaled_desc.descriptors.len() <= fixed_desc.descriptors.len(),
+            "a larger patch can only drop keypoints, never add them"
+        );
+        let differing = fixed_desc
+            .descriptors
+            .iter()
+            .zip(scaled_desc.descriptors.iter())
+            .filter(|(a, b)| a.data != b.data)
+            .count();
+        assert!(
+            differing > 0,
+            "scale_aware_descriptor had no effect on the descriptors"
+        );
     }
 
     /// Every returned keypoint must have its patch fully inside the frame, since
