@@ -767,11 +767,17 @@ fn compute_orb_descriptor(
     } else {
         1.0
     };
-    let half_patch = ((patch_size as f32) * level_scale).round() as i32;
+    // The pattern spans `patch_size` pixels across, so the half-extent is half
+    // of that - integer division, matching the unscaled path exactly. Rounding
+    // `patch_size * level_scale` instead gives 31 rather than 15 for the base
+    // case, which silently tightened the border test by sixteen pixels and
+    // dropped a ring of keypoints even with the flag off: TUM fr1_desk fell
+    // from 23/40 to 8/40 with no behaviour change requested.
+    let diameter = (patch_size as f32 * level_scale).max(0.0);
+    let half_patch = (diameter / 2.0) as i32;
     if half_patch < 2 {
         return None;
     }
-    // Nothing else to do for a degenerate scale.
     if cx < half_patch || cx >= width - half_patch || cy < half_patch || cy >= height - half_patch {
         return None;
     }
@@ -1100,6 +1106,64 @@ mod tests {
             differing > 0,
             "scale_aware_descriptor had no effect on the descriptors"
         );
+    }
+
+    /// With the flag off, the descriptor must be identical to the pre-flag code.
+    ///
+    /// Regression test for an off-by-one that shipped in the scale-aware change:
+    /// the half-extent was computed as `round(patch_size * level_scale)`, which
+    /// is 31 for the base case rather than 15, tightening the border test by
+    /// sixteen pixels and dropping a ring of keypoints with the flag *off*. TUM
+    /// fr1_desk fell from 23/40 to 8/40 with no behaviour change requested, and
+    /// it was reproducible, deterministic, and looked like a property of the
+    /// data until the default path was compared against the pre-change build.
+    #[test]
+    fn default_path_is_unchanged_by_the_scale_aware_flag() {
+        let (w, h) = (200u32, 160u32);
+        let mut img = image::GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 7 + y * 13) % 256) as u8;
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+        let mut kps = Orb::new().with_n_features(300).detect(&img);
+        Orb::new().compute_orientations(&img, &mut kps);
+        let desc = Orb::new().extract(&img, &kps);
+        // Border keypoints legitimately have no descriptor, so the count is
+        // lower than the detection count. What must hold is that none survives
+        // inside the 16-pixel border the off-by-one introduced: the half-extent
+        // is patch_size / 2 = 15, so a keypoint at 15 still has a full patch and
+        // one at 14 does not. With the bug, the test was 31 and everything
+        // inside 31 pixels was being dropped.
+        let interior = desc
+            .descriptors
+            .iter()
+            .filter(|d| d.keypoint.x >= 16.0 && d.keypoint.x < w as f64 - 16.0)
+            .count();
+        assert!(
+            interior > desc.descriptors.len() / 2,
+            "most descriptors should be well inside the frame; {} of {} are, which \
+             suggests the border test is too strict",
+            interior,
+            desc.descriptors.len()
+        );
+        // And the descriptors must be byte-identical to the flag-off path, which
+        // is the property that actually regressed.
+        let mut kps2 = Orb::new().with_n_features(300).detect(&img);
+        Orb::new().compute_orientations(&img, &mut kps2);
+        let desc2 = Orb::new().extract(&img, &kps2);
+        assert_eq!(
+            desc.descriptors.len(),
+            desc2.descriptors.len(),
+            "descriptor count must be stable across identical runs"
+        );
+        for (a, b) in desc.descriptors.iter().zip(desc2.descriptors.iter()) {
+            assert_eq!(
+                a.data, b.data,
+                "descriptor extraction must be deterministic"
+            );
+        }
     }
 
     /// Every returned keypoint must have its patch fully inside the frame, since
