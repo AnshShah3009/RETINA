@@ -1,4 +1,25 @@
-// TEMPORARY parity probe - DELETE BEFORE FINISHING
+// Cross-backend parity tests for GPU operations the main parity suite omits.
+//
+// `multi_gpu_tests.rs` covers threshold, resize, colour conversion, bilateral,
+// FAST, matching and ICP. Nothing exercised pyramid downsampling, multichannel
+// blur, stereo matching, SIFT extrema, or the NMS border cases, and three real
+// defects were hiding in exactly that gap:
+//
+//   - the stereo shader never compiled. WGSL forbids passing a storage-space
+//     pointer into a function, and `get_pixel(data: ptr<storage, ...>, ...)`
+//     did exactly that, so every GPU stereo dispatch was a hard validation
+//     failure rather than a wrong answer.
+//   - the separable blur had no channel concept at all, indexing
+//     `y * width + x`. A 3-channel image was blurred as one long row and each
+//     output pixel averaged values from all three planes: 26% mean relative
+//     error against the CPU, and over 100% on some pixels.
+//   - fixing that, the blur still wrote only the first plane, because the
+//     invocation index was mapped to (x, channel) in the wrong order for a
+//     channels-innermost layout.
+//
+// Each test runs the same input on both backends and reports the worst absolute
+// difference, so a regression is visible rather than silent. They skip cleanly
+// when no GPU is present, which is every CI runner.
 use cv_core::storage::Storage;
 use cv_core::{CpuTensor, Tensor, TensorShape};
 use cv_hal::context::ComputeContext;
@@ -214,12 +235,12 @@ fn probe_stereo_borders() {
         num_disparities: 8,
         method: cv_hal::context::StereoMatchMethod::BlockMatching,
     };
-    let cr = cpu_ctx.stereo_match(&l, &r, &p).unwrap();
-    let cs = cr.storage.as_slice().unwrap().to_vec();
+    let cr: CpuTensor<f32> = cpu_ctx.stereo_match(&l, &r, &p).unwrap();
+    let cs: Vec<f32> = cr.storage.as_slice().unwrap().to_vec();
     let gl = l.to_gpu_ctx(g).unwrap();
     let gr2 = r.to_gpu_ctx(g).unwrap();
-    let gr = g.stereo_match(&gl, &gr2, &p).unwrap();
-    let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
+    let gr: cv_hal::GpuTensor<f32> = g.stereo_match(&gl, &gr2, &p).unwrap();
+    let gs: Vec<f32> = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
     let n = cs.len().min(gs.len());
     let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
     let ndiff = (0..n).filter(|&i| (cs[i] - gs[i]).abs() > 1e-4).count();

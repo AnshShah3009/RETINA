@@ -104,6 +104,8 @@ pub fn convolve_2d<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
+        // One invocation per (pixel, channel); the shader recovers the channel
+        // index from x, so the dispatch covers `width * channels` columns.
         let wg_x = (w as u32).div_ceil(16);
         let wg_y = (h as u32).div_ceil(16);
         pass.dispatch_workgroups(wg_x, wg_y, 1);
@@ -126,7 +128,10 @@ struct SeparableParams {
     kernel_size: u32,
     is_vertical: u32,
     border_mode: u32,
-    padding: u32,
+    /// Interleaved planes. 1 for greyscale. The shader needs it because the
+    /// tensors are laid out `(c, h, w)` with the channels innermost, so a
+    /// 3-channel image is 3 interleaved images rather than one long row.
+    channels: u32,
 }
 
 /// Convert a `BorderMode` to its integer representation for GPU shaders.
@@ -164,6 +169,7 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
     }
 
     let (h, w) = input.shape.hw();
+    let c = input.shape.channels;
     let kernel_1d = crate::cpu::gaussian_kernel_1d(sigma.to_f32(), k_size);
 
     let output_size = input.shape.len();
@@ -202,7 +208,7 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
         kernel_size: k_size as u32,
         is_vertical: 0,
         border_mode: border_int,
-        padding: 0,
+        channels: c as u32,
     };
     let h_params_buf = ctx
         .device
@@ -240,7 +246,7 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
         kernel_size: k_size as u32,
         is_vertical: 1,
         border_mode: border_int,
-        padding: 0,
+        channels: c as u32,
     };
     let v_params_buf = ctx
         .device
@@ -275,7 +281,11 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    let wg_x = (w as u32).div_ceil(16);
+    // One invocation per (pixel, channel); the shader recovers the channel index
+    // from x, so the dispatch has to cover `width * channels` columns. With only
+    // `width` the extra planes were never blurred at all and kept their input
+    // values.
+    let wg_x = (w as u32 * c as u32).div_ceil(16);
     let wg_y = (h as u32).div_ceil(16);
 
     {
