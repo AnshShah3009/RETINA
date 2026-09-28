@@ -38,6 +38,8 @@ test, and the "found by" column says which.
 | Device limits were chosen by wgpu, so a multi-GPU machine's device was not controllable or attributable | reproducibility audit | `DeviceSelector` (Default/Discrete/Integrated/name/index); a non-matching name errors rather than falling back |
 | `pointer_safety_tests.rs` transmuted `f32`→`f32` and never touched the code it was named after, so it could not catch a removed guard | code review | Rewritten to drive the real entry points and assert `NotSupported` for non-`f32` |
 | ORB's `detect_ctx` fed a `[0,1]`-normalised tensor to FAST with a 0..255 threshold, so no corner could ever score | audit | Thresholds now in the same units as the data |
+| `orb_detect_and_compute` returned the full detection list beside a shorter descriptor list — a 31x31 patch reaching past the frame is dropped by `extract`, so on a 160x120 test frame 216 keypoints came back against 154 descriptors, and every index past the first drop referred to a different keypoint | audit, after the `wta_k` investigation turned up three dead ORB fields | Returns the descriptors' own keypoints, so the two are index-parallel by contract; two tests pin it, one of which fails on the old code with exactly this 216-vs-154 mismatch |
+| `Orb` declared `wta_k`, `edge_threshold` and `first_level` as fields with no setter and no reader, so the struct read as supported configuration that did nothing | same audit | `first_level` removed; a comment states plainly which spec behaviour is not implemented, with the measurement behind it |
 
 ## Math and geometry
 
