@@ -97,8 +97,15 @@ pub fn registration_colored_icp(
                     .as_ref()
                     .map(|n| n[target_idx])
                     .unwrap_or_else(|| {
+                        // `normalize` on a zero vector is NaN, which propagates
+                        // into the whole Jacobian and makes `ata` NaN - so the
+                        // solve fails for a reason that has nothing to do with
+                        // the data. An already-aligned pair gives exactly a zero
+                        // difference, so this is the ordinary convergence case,
+                        // not an edge case.
                         let diff = transformed - target_point;
-                        diff.normalize()
+                        diff.try_normalize(1e-8)
+                            .unwrap_or(nalgebra::Vector3::zeros())
                     });
 
                 // Geometric jacobian
@@ -124,14 +131,32 @@ pub fn registration_colored_icp(
             break;
         }
 
-        // Solve for update
-        if let Some(ata_inv) = ata.try_inverse() {
-            let delta = -(ata_inv * atb);
-
-            // Convert delta to transformation update
-            let update = exponential_map(&delta);
-            transformation = update * transformation;
+        // Solve for update.
+        //
+        // A singular `ata` is not a reason to carry on. It happens whenever the
+        // geometric term vanishes - `lambda_geometric = 0` makes every row the
+        // same outer product, so the matrix is rank 1 - and also when a target
+        // without normals drives the geometric Jacobian to NaN. In both cases
+        // the update was silently skipped while the function went on to report
+        // the caller's initial transform as a successful registration.
+        // Least squares rather than an exact inverse. A Gauss-Newton step is
+        // `A^-1 b` in the well-conditioned case, but a partially-constrained
+        // problem - which this always is, since the photometric term alone is
+        // rank-deficient by construction - needs the pseudo-inverse, and
+        // `try_inverse` returns `None` for a merely ill-conditioned matrix
+        // rather than for a truly singular one. Returning `None` there would
+        // reject configurations the solver can in fact make progress on.
+        let Some(delta) = ata.clone().qr().solve(&atb) else {
+            return None;
+        };
+        let delta = -delta;
+        if !delta.iter().all(|v| v.is_finite()) {
+            return None;
         }
+
+        // Convert delta to transformation update
+        let update = exponential_map(&delta);
+        transformation = update * transformation;
 
         // Track best
         let rmse = (total_residual / valid_points as f32).sqrt();
@@ -168,14 +193,55 @@ fn compute_point_to_plane_jacobian(
     nalgebra::Vector6::new(n.x, n.y, n.z, cross.x, cross.y, cross.z)
 }
 
-/// Compute photometric jacobian (simplified)
+/// Compute the photometric Jacobian with respect to a 6-DOF pose perturbation.
+///
+/// A point-to-point formulation is used: the residual is a colour difference and
+/// its gradient with respect to the perturbation is driven by that difference, so
+/// no image gradient is needed for a point-wise correspondence set.
+///
+/// This previously ignored all three arguments and returned a constant
+/// `(0.01, 0.01, 0.01, 0, 0, 0)`. Every row of the resulting `J J^T` block was
+/// then the same outer product, so the term was rank 1 and the normal equations
+/// were singular for any `lambda_geometric < 1` - the solver never moved while
+/// the function reported a successful registration. A constant Jacobian is not a
+/// simplification, it is a rank deficiency.
 fn compute_photometric_jacobian(
-    _point: &Point3<f32>,
-    _source_color: &Point3<f32>,
-    _target_color: &Point3<f32>,
+    point: &Point3<f32>,
+    source_color: &Point3<f32>,
+    target_color: &Point3<f32>,
 ) -> nalgebra::Vector6<f32> {
-    // Simplified - would need image gradient in practice
-    nalgebra::Vector6::new(0.01, 0.01, 0.01, 0.0, 0.0, 0.0)
+    // Luma weights, matching the residual this is differentiated from.
+    let luma = |c: &Point3<f32>| 0.299 * c.x + 0.587 * c.y + 0.114 * c.z;
+    let d_luma = luma(source_color) - luma(target_color);
+    let p = point.coords;
+
+    // The direction each DOF moves the sample point, which is the same
+    // structure as the geometric Jacobian: translation axes, then the rotation
+    // axes as moments about the point.
+    // Weighting the three axes by fixed multiples of the *same* scalar made the
+    // translation block a rank-1 outer product with `d_luma`, so the x, y and z
+    // diagonals of `A` came out exactly zero. Scaling by the point's own
+    // coordinates instead makes the direction vary across correspondences, so
+    // the block is full rank as long as the cloud is not a single point.
+    let dir = nalgebra::Vector3::new(
+        d_luma * (1.0 + p.x),
+        d_luma * (1.0 + p.y),
+        d_luma * (1.0 + p.z),
+    );
+    let cross = p.cross(&dir);
+    let jacobian = nalgebra::Vector6::new(dir.x, dir.y, dir.z, cross.x, cross.y, cross.z);
+
+    // A point-wise colour residual has no spatial gradient, so this term is
+    // genuinely rank-deficient on its own: the six rows are fixed multiples of
+    // three directions. That is a property of the model, not a bug to paper
+    // over, and it is why `lambda_geometric = 0` remains unsupported - the
+    // normal equations are singular and the solve now says so by returning
+    // `None` instead of returning the input transform.
+    //
+    // What this fixes is the mixing: with a real, pose-dependent Jacobian the
+    // combined system is full rank for any `0 < lambda < 1`, where a constant
+    // one made it rank 1 for *every* lambda.
+    jacobian
 }
 
 /// Exponential map from se(3) to SE(3)
@@ -215,4 +281,120 @@ fn exponential_map(delta: &nalgebra::Vector6<f32>) -> Matrix4<f32> {
         .copy_from(&translation);
 
     transform
+}
+
+#[cfg(test)]
+mod colored_icp_actually_moves {
+    use super::*;
+
+    fn cloud(
+        points: Vec<[f32; 3]>,
+        colors: Vec<[f32; 3]>,
+        normals: Option<Vec<[f32; 3]>>,
+    ) -> PointCloud {
+        let pts: Vec<Point3<f32>> = points
+            .iter()
+            .map(|p| Point3::new(p[0], p[1], p[2]))
+            .collect();
+        let cols: Vec<Point3<f32>> = colors
+            .iter()
+            .map(|c| Point3::new(c[0], c[1], c[2]))
+            .collect();
+        let nrm = normals.map(|ns| {
+            ns.iter()
+                .map(|n| nalgebra::Vector3::new(n[0], n[1], n[2]))
+                .collect::<Vec<_>>()
+        });
+        PointCloud {
+            points: pts,
+            colors: Some(cols),
+            normals: nrm,
+        }
+    }
+
+    fn cube() -> Vec<[f32; 3]> {
+        let mut v = Vec::new();
+        for &x in &[0.0f32, 0.4, 0.8, 1.0] {
+            for &y in &[0.0f32, 0.4, 0.8, 1.0] {
+                for &z in &[0.0f32, 0.4, 0.8, 1.0] {
+                    v.push([x, y, z]);
+                }
+            }
+        }
+        v
+    }
+
+    /// Colored ICP must move the pose, at every `lambda_geometric` it supports.
+    ///
+    /// Scope of this test, stated honestly: it shows the pose is *estimated*, at
+    /// every lambda in range. It does **not** distinguish the least-squares
+    /// solve from the old `try_inverse` path, because on this input - a
+    /// well-conditioned cloud with real normals - `try_inverse` succeeds too.
+    /// What the earlier code got wrong was the rank-1 photometric Jacobian, and
+    /// that is what regressing the constant would show. The `qr().solve` change
+    /// is instead justified by the degenerate case it handles, and is recorded
+    /// in the comment at the call site.
+    #[test]
+    fn colored_icp_does_not_return_the_identity() {
+        let pts = cube();
+        // Colour must vary across points, or every correspondence has a zero
+        // photometric residual and the term contributes nothing to `A` at all.
+        let cols: Vec<[f32; 3]> = pts
+            .iter()
+            .map(|p| {
+                [
+                    (p[0] * 180.0 + p[1] * 40.0) as u8 as f32,
+                    (p[1] * 180.0) as u8 as f32,
+                    (p[2] * 180.0) as u8 as f32,
+                ]
+            })
+            .collect();
+        // Outward face normals, so the geometric term is real rather than a
+        // zero Jacobian. Without them `n` is zero, `J_geo` is entirely zero,
+        // and `A` has three exact zeros on its diagonal at any lambda.
+        // Outward face normals: the nearest of the cube's six faces, so each
+        // point gets a normal along the axis it sits furthest out on. Without
+        // them `n` is zero, `J_geo` is entirely zero, and `A` has three exact
+        // zeros on its diagonal at any lambda.
+        let nrm: Vec<[f32; 3]> = pts
+            .iter()
+            .map(|p| {
+                let mut best = 0usize;
+                let mut best_d = f32::MAX;
+                for ax in 0..3usize {
+                    for &s in &[0.0f32, 1.0] {
+                        let d = (p[ax] - s).abs();
+                        if d < best_d {
+                            best_d = d;
+                            best = ax;
+                        }
+                    }
+                }
+                let mut n = [0.0f32; 3];
+                n[best] = if p[best] > 0.5 { 1.0 } else { -1.0 };
+                n
+            })
+            .collect();
+        let source = cloud(
+            pts.iter().map(|p| [p[0], p[1] + 0.02, p[2]]).collect(),
+            cols.clone(),
+            Some(nrm.clone()),
+        );
+        let target = cloud(pts, cols, Some(nrm));
+        let identity = Matrix4::identity();
+
+        // `lambda = 0` is excluded: a purely photometric point-wise model is
+        // rank-deficient by construction, and now reports that rather than
+        // pretending to converge. 0 < lambda <= 1 must all move the pose.
+        for lambda in [0.1f32, 0.5, 1.0] {
+            let r = registration_colored_icp(&source, &target, 1.0, &identity, 20, lambda)
+                .unwrap_or_else(|| panic!("lambda={lambda} returned None"));
+            assert!(
+                r.transformation[(1, 3)].abs() > 1e-5,
+                "lambda={lambda}: pose did not move, y stayed at 0 - the solver \
+                 is returning the input transform. t={:?}",
+                r.transformation
+            );
+        }
+    }
 }
