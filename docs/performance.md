@@ -963,3 +963,45 @@ regression, and the resolution is to fix it at the point where the matcher can
 weight it - not to scatter noise into descriptors that are then compared by
 Hamming distance. Recorded because "leave it zero" looks like an oversight and
 needs the measurement to show it is not a free fix.
+
+## Smoothing before orientation: matching OpenCV, and much worse
+
+ORB computes each keypoint's steering angle from intensity moments over a
+circular patch, then steers the BRIEF pattern by that angle. OpenCV smooths the
+image once (sigma 2) and uses it for *both* the moments and the descriptor
+sampling. This implementation smooths for the descriptor but takes the moments
+from the raw image - an inconsistency with the reference implementation, and
+apparently a bug.
+
+Fixing it to match makes things substantially worse:
+
+| sequence | before | after |
+| --- | --- | --- |
+| TUM fr1_xyz | 45/45 — 1.36 cm | 45/45 — **4.84 cm** |
+| TUM fr1_desk | **23/40** | **8/40** |
+| ETH3D courtyard | **7/8** | **4/8** |
+| ETH3D electro | 3/5 | 3/5 |
+
+Registration collapses on exactly the sequences this work has been trying to
+improve. Reverted.
+
+The reason is that the two consumers want different things from the image, and
+the reference implementation's choice is not the right one here. The moments
+`m01` and `m10` are unweighted sums of `intensity * dx` over the disc. Blurring
+before summing spreads each pixel's energy over its neighbours, which
+low-amplitude, low-frequency structure - exactly the signal a dim frame has and
+exactly what needs orienting - into a flatter, noisier estimate. The dominant
+axis then becomes less determined, and a steering angle that is slightly wrong
+rotates the whole 31x31 sampling pattern the wrong way, which is far worse than
+an orientation computed from slightly noisier but higher-contrast pixels.
+
+On a well-exposed frame, where the raw moments are already dominated by real
+structure, blurring only removes signal. That is why fr1_xyz still reaches 45/45
+but with camera-centre error up 3.6x: the poses are still found, from worse
+orientations.
+
+This is worth recording as a case where the reference implementation is not the
+target. Matching OpenCV is a reasonable default and it was the right call for
+most of the pipeline, but "the moments should be taken on the same image as the
+descriptor" is an assumption, not a requirement, and here it is measurably
+false.
