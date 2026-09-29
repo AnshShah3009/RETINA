@@ -4345,6 +4345,19 @@ impl ComputeContext for CpuBackend {
                 let src_idx = src_idx as usize;
                 let tgt_idx = tgt_idx as usize;
 
+                // The correspondence indices come from the correspondence
+                // search, which counts points from the tensor it was handed.
+                // If the two were built from different clouds - or the search
+                // ran against a different tensor than this accumulate - the
+                // indices run past the end and the indexing below panics with
+                // "index out of bounds". Skip rather than read past the buffer;
+                // a bad correspondence costs an inlier, not the whole call.
+                let src_ok = src_idx.saturating_mul(4).saturating_add(3) < src_f32.len();
+                let tgt_ok = tgt_idx.saturating_mul(4).saturating_add(3) < tgt_f32.len();
+                if !src_ok || !tgt_ok {
+                    continue;
+                }
+
                 let p_src = nalgebra::Point3::new(
                     src_f32[src_idx * 4],
                     src_f32[src_idx * 4 + 1],

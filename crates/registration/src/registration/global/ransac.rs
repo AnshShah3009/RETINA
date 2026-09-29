@@ -164,12 +164,23 @@ pub fn registration_fgr_based_on_feature_matching(
     option: FastGlobalRegistrationOption,
 ) -> Result<GlobalRegistrationResult> {
     // --- 1. Feature matching: parallel nearest neighbour in feature space ---
+    // Nearest neighbour with a Lowe ratio test.
+    //
+    // Without the ratio, a target set whose histograms are all alike - which is
+    // what an un-trained or low-information FPFH set looks like - gives every
+    // source point the same nearest target, so the whole set collapses to
+    // `(i, 0)`. That is not a weak correspondence set, it is a physically
+    // impossible one, and it went straight into the graduated solver, which
+    // returned `Ok` with a transform derived from it. The sibling RANSAC entry
+    // point in this file already validates; this one did not.
+    let ratio = (option.tuple_scale.clamp(0.0, 1.0)) as f32;
     let correspondences: Vec<(usize, usize)> = source_features
         .par_iter()
         .enumerate()
-        .map(|(i, sf)| {
-            let mut min_dist = f32::MAX;
-            let mut min_idx = 0;
+        .filter_map(|(i, sf)| {
+            let mut best = f32::MAX;
+            let mut second = f32::MAX;
+            let mut best_idx = None;
             for (j, tf) in target_features.iter().enumerate() {
                 let dist: f32 = sf
                     .histogram
@@ -178,18 +189,30 @@ pub fn registration_fgr_based_on_feature_matching(
                     .map(|(a, b)| (a - b).powi(2))
                     .sum::<f32>()
                     .sqrt();
-                if dist < min_dist {
-                    min_dist = dist;
-                    min_idx = j;
+                if dist < best {
+                    second = best;
+                    best = dist;
+                    best_idx = Some(j);
+                } else if dist < second {
+                    second = dist;
                 }
             }
-            (i, min_idx)
+            let idx = best_idx?;
+            // No second candidate, or the best is not clearly better than the
+            // runner-up: the match is ambiguous and is dropped rather than
+            // guessed.
+            if second.is_finite() && (best > ratio * second || best == second) {
+                return None;
+            }
+            Some((i, idx))
         })
         .collect();
 
     if correspondences.len() < 3 {
         return Err(Error::RuntimeError(
-            "Insufficient feature correspondences for FGR".to_string(),
+            "Insufficient feature correspondences for FGR: the matches are ambiguous, \
+             which usually means the FPFH features are not discriminative"
+                .to_string(),
         ));
     }
 
@@ -372,13 +395,25 @@ fn compute_weighted_transformation(
 }
 
 /// Options for Fast Global Registration
+/// Options for fast global registration.
+///
+/// Every field here is read. `maximum_iterations` used to sit alongside
+/// `iteration_number` and was read by neither, so tightening it had no effect
+/// whatsoever; it is gone rather than left looking like supported configuration.
 #[derive(Debug, Clone)]
 pub struct FastGlobalRegistrationOption {
+    /// Correspondences further apart than this are discarded.
     pub maximum_correspondence_distance: f64,
+    /// Outer iterations of the graduated optimisation, which sharpens the robust
+    /// kernel by shrinking `mu`. This is the loop bound.
     pub iteration_number: usize,
+    /// Upper bound on how many correspondences the solver considers.
     pub maximum_tuple_count: usize,
+    /// Lowe ratio threshold on the feature match: a match is kept only when the
+    /// best distance is clearly better than the runner-up. Without it, a target
+    /// set whose features are all alike collapses every source point onto the
+    /// same target and the solver returns a transform built from that.
     pub tuple_scale: f64,
-    pub maximum_iterations: usize,
 }
 
 impl Default for FastGlobalRegistrationOption {
@@ -388,7 +423,6 @@ impl Default for FastGlobalRegistrationOption {
             iteration_number: 64,
             maximum_tuple_count: 1000,
             tuple_scale: 0.95,
-            maximum_iterations: 1000,
         }
     }
 }
@@ -509,4 +543,72 @@ fn random_sample(n: usize, max: usize) -> Vec<usize> {
     }
 
     indices.into_iter().collect()
+}
+
+#[cfg(test)]
+mod fgr_rejects_degenerate_matching {
+    use super::*;
+
+    fn feature(v: f32) -> FPFHFeature {
+        FPFHFeature { histogram: [v; 33] }
+    }
+
+    fn cloud(n: usize) -> PointCloud {
+        PointCloud {
+            points: (0..n)
+                .map(|i| nalgebra::Point3::new(i as f32, 0.0, 0.0))
+                .collect(),
+            colors: None,
+            normals: None,
+        }
+    }
+
+    /// Identical target features must produce an error, not a transform.
+    ///
+    /// With no ratio test, every source point's nearest target is the same one
+    /// and the entire correspondence set collapses to `(i, 0)` - a physically
+    /// impossible mapping that the graduated solver then turned into a result.
+    /// The function returned `Ok` with `fitness = 0.6` from that set.
+    #[test]
+    fn identical_target_features_are_rejected() {
+        let n = 8;
+        let source = cloud(n);
+        let target = cloud(n);
+        // Every target feature identical: nothing is discriminative.
+        let source_features: Vec<FPFHFeature> = (0..n).map(|i| feature(i as f32)).collect();
+        let target_features: Vec<FPFHFeature> = (0..n).map(|_| feature(0.5)).collect();
+
+        let r = registration_fgr_based_on_feature_matching(
+            &source,
+            &target,
+            &source_features,
+            &target_features,
+            FastGlobalRegistrationOption::default(),
+        );
+        assert!(
+            r.is_err(),
+            "indistinguishable target features must be an error, not a transform: got {:?}",
+            r.map(|v| (v.fitness, v.inlier_rmse))
+        );
+    }
+
+    /// Distinct features must still register, so the guard is not a blanket reject.
+    #[test]
+    fn discriminative_features_still_register() {
+        let n = 8;
+        let source = cloud(n);
+        let target = cloud(n);
+        // Each feature distinct, so the best match is unambiguous.
+        let source_features: Vec<FPFHFeature> = (0..n).map(|i| feature(i as f32)).collect();
+        let target_features: Vec<FPFHFeature> = (0..n).map(|i| feature(i as f32)).collect();
+
+        let r = registration_fgr_based_on_feature_matching(
+            &source,
+            &target,
+            &source_features,
+            &target_features,
+            FastGlobalRegistrationOption::default(),
+        );
+        assert!(r.is_ok(), "distinct features should register: {r:?}");
+    }
 }
