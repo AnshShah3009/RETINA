@@ -126,7 +126,7 @@ Measured on the same dataset family (ETH3D), plus TUM RGB-D. Full numbers in
 | registration, TUM fr1_desk (40 views) | 23/40 — 57.5% | — |
 | registration, ETH3D electro (5 views) | 3/5 — 60% | — |
 | loop closure | yes, gated + re-optimised | yes |
-| tests | **1,498** | 2,553 |
+| tests | **1,500** | 2,553 |
 | views per evaluation | 20–45 | 1,200–10,008 |
 | `unsafe impl` | **0** (26 crates forbid) | 0 (9 of 11 forbid) |
 
