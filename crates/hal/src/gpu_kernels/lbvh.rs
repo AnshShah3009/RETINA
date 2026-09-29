@@ -76,10 +76,16 @@ pub fn build_lbvh(
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-    let shader_source = include_str!("../../shaders/lbvh_build.wgsl");
-    let pipeline_init = ctx.create_compute_pipeline(shader_source, "init_nodes");
-    let pipeline_tree = ctx.create_compute_pipeline(shader_source, "build_radix_tree");
-    let pipeline_aabb = ctx.create_compute_pipeline(shader_source, "compute_aabbs");
+    // Two modules rather than one. WGSL derives a bind group layout per module,
+    // not per entry point, and the device allows four storage buffers per stage:
+    // the combined file declared five, so no pipeline in it could be created.
+    // The tree phase needs two buffers and the AABB phase four, so splitting
+    // them puts each at or under the limit.
+    let tree_source = include_str!("../../shaders/lbvh_build.wgsl");
+    let aabb_source = include_str!("../../shaders/lbvh_aabb.wgsl");
+    let pipeline_init = ctx.create_compute_pipeline(tree_source, "init_nodes");
+    let pipeline_tree = ctx.create_compute_pipeline(tree_source, "build_radix_tree");
+    let pipeline_aabb = ctx.create_compute_pipeline(aabb_source, "compute_aabbs");
 
     // Init/Tree Bind Group (uses 2, 3, 5) - we reuse the same layout
     let bg_tree = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -87,15 +93,40 @@ pub fn build_lbvh(
         layout: &pipeline_tree.get_bind_group_layout(0),
         entries: &[
             wgpu::BindGroupEntry {
-                binding: 2,
+                binding: 0,
                 resource: morton_codes.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 3,
+                binding: 1,
                 resource: nodes_tensor.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 5,
+                binding: 2,
+                resource: params_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    // `init_nodes` and `build_radix_tree` are in the same module but are
+    // different pipelines, and wgpu keys a bind group to the exact pipeline it
+    // was built against - sharing one across both is rejected with "Exclusive
+    // pipelines don't match". Their layouts are identical, but the objects are
+    // not, so each gets its own.
+    // `init_nodes` never reads `morton_codes`, and wgpu derives the layout from
+    // what the entry point actually references, so this group supplies only the
+    // two it needs. Supplying all three is rejected: "Number of bindings in bind
+    // group descriptor (3) does not match the number of bindings defined in the
+    // bind group layout (2)".
+    let bg_init = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("LBVH Init Bind Group"),
+        layout: &pipeline_init.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: nodes_tensor.storage.buffer().as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
                 resource: params_buffer.as_entire_binding(),
             },
         ],
@@ -115,15 +146,15 @@ pub fn build_lbvh(
                 resource: sorted_indices.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 3,
+                binding: 2,
                 resource: nodes_tensor.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 4,
+                binding: 3,
                 resource: counters_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 5,
+                binding: 4,
                 resource: params_buffer.as_entire_binding(),
             },
         ],
@@ -146,7 +177,7 @@ pub fn build_lbvh(
 
         // 0. Initialize parent pointers to -1
         compute_pass.set_pipeline(&pipeline_init);
-        compute_pass.set_bind_group(0, &bg_tree, &[]); // Reuses bindings 3, 5
+        compute_pass.set_bind_group(0, &bg_init, &[]);
         compute_pass.dispatch_workgroups(num_nodes.div_ceil(256), 1, 1);
 
         // 1. Build tree structure

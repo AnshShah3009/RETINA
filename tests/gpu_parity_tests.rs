@@ -467,3 +467,43 @@ fn every_shader_compiles() {
         }
     }
 }
+
+/// The LBVH build must run.
+///
+/// `lbvh_build.wgsl` declared five storage bindings against this device's limit
+/// of four, so no pipeline in the file could be created. Because WGSL derives
+/// one bind group layout per *module* rather than per entry point, the binding
+/// only `compute_aabbs` touches was counted against `init_nodes` and
+/// `build_radix_tree` too. The phases are now separate modules: the tree needs
+/// two buffers, the AABB four.
+#[test]
+fn probe_lbvh_builds() {
+    use cv_core::TensorShape;
+    use cv_hal::gpu_kernels::lbvh::build_lbvh;
+
+    let Some(g) = gpu() else { return };
+    let n = 64usize;
+    let flat: Vec<f32> = (0..n)
+        .flat_map(|i| [i as f32 * 0.1, (i % 8) as f32, (i % 5) as f32])
+        .collect();
+    let pts: CpuTensor<f32> = cv_core::Tensor::from_vec(flat, TensorShape::new(3, n, 1)).unwrap();
+    let si: CpuTensor<u32> =
+        cv_core::Tensor::from_vec((0..n as u32).collect(), TensorShape::new(1, n, 1)).unwrap();
+    let mc: CpuTensor<u32> = cv_core::Tensor::from_vec(
+        (0..n as u32).map(|i| i.wrapping_mul(7)).collect(),
+        TensorShape::new(1, n, 1),
+    )
+    .unwrap();
+
+    let pts_g = pts.to_gpu_ctx(g).unwrap();
+    let si_g = si.to_gpu_ctx(g).unwrap();
+    let mc_g = mc.to_gpu_ctx(g).unwrap();
+
+    let nodes = build_lbvh(g, &pts_g, &si_g, &mc_g)
+        .expect("LBVH build must succeed on a device with the 4-buffer limit");
+    assert!(
+        nodes.shape.len() > 0,
+        "LBVH produced no nodes for {n} points"
+    );
+    println!("  LBVH: {} nodes for {n} points", nodes.shape.len());
+}
