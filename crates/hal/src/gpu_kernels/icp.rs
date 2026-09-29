@@ -19,8 +19,17 @@ pub fn icp_correspondences(
     tgt: &Tensor<f32, GpuStorage<f32>>,
     max_dist: f32,
 ) -> Result<Vec<(usize, usize, f32)>> {
-    let num_src = src.shape.height;
-    let num_tgt = tgt.shape.height;
+    // Point count, not a single dimension. `shape.height` happened to equal the
+    // count only because the caller packed points as (3, N, 1); for a (3, H, W)
+    // tensor it is H, so only H of the points were ever searched. Derived from
+    // the element count divided by the three components instead.
+    // Each point is packed as four floats `(x, y, z, 1)` in a `(1, N, 4)`
+    // tensor, so the element count is 4N and the point count is a quarter of
+    // it. Dividing by three - correct for a `(3, N, 1)` packing - searched 33%
+    // more points than exist, so the correspondence search read past the end and
+    // matched against whatever followed in memory.
+    let num_src = (src.shape.len() / 4) as u32;
+    let num_tgt = (tgt.shape.len() / 4) as u32;
 
     if num_src == 0 || num_tgt == 0 {
         return Ok(Vec::new());
@@ -136,18 +145,12 @@ pub fn icp_accumulate(
     let corr_data: Vec<[u32; 2]> = correspondences.iter().map(|&(s, t)| [s, t]).collect();
     let corr_buffer = create_buffer(&ctx.device, &corr_data, wgpu::BufferUsages::STORAGE);
 
+    // One accumulator buffer, not two: the shader binds 6 storage buffers and the
+    // device limit here is 4, so the pipeline could not be created at all. Slots
+    // [0, 36) hold JtJ and [36, 42) hold Jtr.
     let ata_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("AtA Accumulator"),
-        size: 36 * 4,
-        usage: wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    let atb_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Atb Accumulator"),
-        size: 6 * 4,
+        label: Some("AtA/Atb Accumulator"),
+        size: 42 * 4,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
@@ -159,7 +162,6 @@ pub fn icp_accumulate(
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     encoder.clear_buffer(&ata_buffer, 0, None);
-    encoder.clear_buffer(&atb_buffer, 0, None);
 
     let params = AccumulateParams {
         num_points: num_corr as u32,
@@ -167,6 +169,58 @@ pub fn icp_accumulate(
         transform: (*transform).into(),
     };
     let params_buffer = create_buffer(&ctx.device, &[params], wgpu::BufferUsages::UNIFORM);
+
+    // Interleave the source and target point arrays so they share one storage
+    // binding: `[2i]` is source point `i`, `[2i + 1]` is target point `i`. The
+    // device limit is four storage buffers per stage and this kernel needs five
+    // inputs otherwise, so the pipeline could not be created at all.
+    // The caller packs each point as four floats `(x, y, z, 1)` in a
+    // `(1, N, 4)` tensor, so the element count is 4N. Deriving the point count
+    // from the tensor as a whole read four times the buffer.
+    let n = (source.shape.len() / 4).min(target.shape.len() / 4);
+    let mut pairs: Vec<[f32; 4]> = Vec::with_capacity(n * 2);
+    {
+        // The inputs are already resident on the device, so `as_slice` is empty
+        // for them; they have to be read back rather than aliased on the host.
+        use cv_core::storage::Storage;
+        // Four f32 per point: the caller packs `(x, y, z, 1)`. Reading three and
+        // striding by three walked through the w-components, so every point after
+        // the first was assembled from the wrong offsets - which is why the pose
+        // overshot by roughly 3x and drifted the wrong way.
+        let stride = 4usize;
+        let bytes = n * stride * std::mem::size_of::<f32>();
+        let read = |t: &crate::GpuTensor<f32>| -> Vec<f32> {
+            pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer::<f32>(
+                ctx.device.clone(),
+                &ctx.queue,
+                t.storage.buffer(),
+                0,
+                bytes,
+            ))
+            .unwrap_or_default()
+        };
+        let s = read(source);
+        let tg = read(target);
+        for i in 0..n {
+            let (Some(&a), Some(&b), Some(&c)) = (
+                s.get(i * stride),
+                s.get(i * stride + 1),
+                s.get(i * stride + 2),
+            ) else {
+                break;
+            };
+            pairs.push([a, b, c, 1.0]);
+            let (Some(&a), Some(&b), Some(&c)) = (
+                tg.get(i * stride),
+                tg.get(i * stride + 1),
+                tg.get(i * stride + 2),
+            ) else {
+                break;
+            };
+            pairs.push([a, b, c, 1.0]);
+        }
+    }
+    let pairs_buffer = create_buffer(&ctx.device, &pairs, wgpu::BufferUsages::STORAGE);
 
     // 2. Pipeline & Bind Group
     let shader_source = include_str!("../../shaders/icp_accumulate.wgsl");
@@ -178,30 +232,22 @@ pub fn icp_accumulate(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: source.storage.buffer().as_entire_binding(),
+                resource: pairs_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: target.storage.buffer().as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
                 resource: target_normals.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 3,
+                binding: 2,
                 resource: corr_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 4,
+                binding: 3,
                 resource: ata_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 5,
-                resource: atb_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 6,
+                binding: 4,
                 resource: params_buffer.as_entire_binding(),
             },
         ],
@@ -227,16 +273,13 @@ pub fn icp_accumulate(
         &ctx.queue,
         &ata_buffer,
         0,
-        36 * 4,
+        42 * 4,
     ))?;
 
-    let atb_raw: Vec<u32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
-        ctx.device.clone(),
-        &ctx.queue,
-        &atb_buffer,
-        0,
-        6 * 4,
-    ))?;
+    // Jtr occupies the tail of the same buffer: slots [0, 36) are JtJ and
+    // [36, 42) are Jtr. Reading only 36 truncated the vector to six zeroes and
+    // then sliced past the end.
+    let atb_raw: Vec<u32> = ata_raw[36..42].to_vec();
 
     let mut ata = nalgebra::Matrix6::<f32>::zeros();
     for i in 0..6 {

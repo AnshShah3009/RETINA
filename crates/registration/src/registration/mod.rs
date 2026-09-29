@@ -341,7 +341,49 @@ pub fn registration_icp_point_to_plane_ctx(
         .ok_or_else(|| Error::RuntimeError("CPU fallback ICP failed to converge".to_string()));
     };
 
+    // The source as it stands under the current pose.
+    //
+    // The correspondence search has to see the *moved* source, or it recomputes
+    // the same untransformed associations every iteration: the source was
+    // uploaded once before the loop and passed unchanged, so the association set
+    // was a fixed point rather than an iteration, and the whole "ICP" was a
+    // single Gauss-Newton step with the update applied repeatedly to a
+    // correspondence set that never moved. The existing parity test takes the
+    // CPU early-return above and so never reached this.
+    let mut s_gpu = s_gpu;
+
     for iter in 0..max_iterations {
+        // Apply the running transform to the source before searching, so the
+        // correspondences reflect the pose reached so far.
+        if iter > 0 {
+            let moved: Vec<Point3<f32>> = source
+                .points
+                .iter()
+                .map(|p| {
+                    // `transform_point` is f64; the tensors are f32. The transform
+                    // itself is computed in f64 and narrowed on the way out, so no
+                    // precision is lost in the accumulation that follows.
+                    transformation.transform_point(&nalgebra::Point3::new(p.x, p.y, p.z))
+                })
+                .collect();
+            let mut flat: Vec<f32> = Vec::with_capacity(moved.len() * 3);
+            for p in &moved {
+                flat.extend_from_slice(&[p.x, p.y, p.z]);
+            }
+            let moved_tensor: cv_core::CpuTensor<f32> =
+                Tensor::from_vec(flat, cv_core::TensorShape::new(3, source.points.len(), 1))
+                    .map_err(|e| {
+                        Error::RuntimeError(format!("Failed to build moved source: {e:?}"))
+                    })?;
+            let gpu = match ctx {
+                cv_hal::compute::ComputeDevice::Gpu(g) => g,
+                _ => unreachable!("the CPU branch returns above"),
+            };
+            s_gpu = moved_tensor
+                .to_gpu_ctx(gpu)
+                .map_err(|e| Error::RuntimeError(format!("Failed to re-upload source: {e:?}")))?;
+        }
+
         // Find correspondences on device
         let correspondences_raw = ctx
             .icp_correspondences(&s_gpu, &t_gpu, max_correspondence_distance)
@@ -360,7 +402,17 @@ pub fn registration_icp_point_to_plane_ctx(
 
         // Accumulate Normal Equations on device
         let (ata, atb): (nalgebra::Matrix6<f32>, nalgebra::Vector6<f32>) = ctx
-            .icp_accumulate(&s_gpu, &t_gpu, &n_gpu, &correspondences, &transformation)
+            // `s_gpu` already holds the source moved by the running pose, so
+            // the shader is given identity - it multiplies the point by this
+            // matrix itself, and passing the pose as well would apply the
+            // motion twice per iteration.
+            .icp_accumulate(
+                &s_gpu,
+                &t_gpu,
+                &n_gpu,
+                &correspondences,
+                &Matrix4::identity(),
+            )
             .map_err(|e| {
                 Error::RuntimeError(format!("Failed to accumulate normal equations: {:?}", e))
             })?;
