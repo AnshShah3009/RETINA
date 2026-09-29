@@ -63,6 +63,8 @@ test, and the "found by" column says which.
 | CPU `icp_accumulate` indexed the point arrays with correspondence indices and no bounds check, panicking with "index out of bounds: the len is 12 but the index is 12" when the correspondences came from a different cloud | same | a bad correspondence costs an inlier rather than the whole call |
 | Fast global registration had no ratio test, so a target set whose FPFH histograms were all alike gave every source point the same nearest target and the correspondence set collapsed to `(i, 0)` — physically impossible, and returned as `Ok` with `fitness = 0.625, rmse = 0` | same | Lowe ratio test drops ambiguous matches; the sibling RANSAC entry point already validated, this one did not |
 | `FastGlobalRegistrationOption::maximum_iterations` was read by nothing, so tightening it had no effect; `tuple_scale` was equally dead | same | the first is removed, the second is now the ratio test, and every remaining field is documented and read |
+| The LBVH build declared five storage bindings against a device limit of four, so no pipeline in the file could be created. Because wgpu derives the layout per entry point, `compute_aabbs` pushed the two tree entry points over the limit even though neither touches three of the four buffers it needs | divergence probe | split into `lbvh_build.wgsl` (tree, two buffers) and `lbvh_aabb.wgsl` (AABB, four); each pipeline also needs its own bind group, since wgpu keys those to the exact pipeline |
+| `read_las`, the PLY reader and two PCD paths each reserved output memory using a count read from the file's own header, so a few bytes could request tens of gigabytes — `element vertex 40000000000` is about 300 GB, and one PCD header cost three separate allocations | IO audit | clamped to 200M, well above any real cloud and low enough to keep the reservation under ~2.4 GB; the vectors still grow for genuinely large files |
 | The half-extent in that fix was computed as `round(patch_size * level_scale)` — 31 for the base case rather than 15 — silently tightening the border test by sixteen pixels and dropping a ring of keypoints **with the feature flag off**. TUM fr1_desk fell 23/40 -> 8/40 on a clean tree, deterministically, and read as a property of the data | re-running the full sweep after the descriptor work, and noticing a number had moved with no command change | Corrected to integer division of the diameter; pinned by a regression test asserting the default path is unaffected |
 
 ## Math and geometry
@@ -146,7 +148,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **89+** |
+| Defects fixed | **92+** |
 | Commits | 460+ |
-| Tests | 1,500 (from 1,267) |
+| Tests | 1,502 (from 1,267) |
 | Duplicate implementations removed | 12 |
