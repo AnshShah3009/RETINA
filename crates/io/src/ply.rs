@@ -88,15 +88,22 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     let bi = pos_of(&["b", "blue"]);
     let has_colors = rgb_i.is_some() || (ri.is_some() && gi.is_some() && bi.is_some());
 
+    // The vertex count comes from the header and is used to reserve up front, so
+    // a header claiming `element vertex 40000000000` asks for roughly 300 GB
+    // before a single vertex is read - and the body need not contain any. Cap
+    // the reservation and let the vector grow if the file really is that long.
+    const MAX_REASONABLE_PLY_VERTICES: usize = 200_000_000;
+    let reserve = num_vertices.min(MAX_REASONABLE_PLY_VERTICES);
+
     // Parse data
-    let mut points = Vec::with_capacity(num_vertices);
+    let mut points = Vec::with_capacity(reserve);
     let mut colors = if has_colors {
-        Some(Vec::with_capacity(num_vertices))
+        Some(Vec::with_capacity(reserve))
     } else {
         None
     };
     let mut normals = if has_normals {
-        Some(Vec::with_capacity(num_vertices))
+        Some(Vec::with_capacity(reserve))
     } else {
         None
     };
@@ -291,5 +298,46 @@ mod tests {
         let read_cloud = read_ply(reader).expect("read failed");
 
         assert_eq!(read_cloud.len(), n);
+    }
+}
+
+#[cfg(test)]
+mod hostile_header_tests {
+    use super::*;
+
+    /// A PLY header claiming four billion vertices must not reserve for them.
+    ///
+    /// The vertex count comes from the header and was used to size the output
+    /// vectors directly, so `element vertex 40000000000` - eleven characters -
+    /// asked for roughly 300 GB before a single vertex was read. The body need
+    /// not contain any; the reservation happens on the header alone.
+    ///
+    /// This checks the clamp the reader applies rather than attempting the
+    /// allocation, which would simply abort the test process.
+    #[test]
+    fn ply_vertex_count_is_bounded_before_allocation() -> Result<()> {
+        let header = b"ply\nformat ascii 1.0\nelement vertex 40000000000\nend_header\n";
+        let mut num_vertices = 0usize;
+        for line in std::str::from_utf8(header).unwrap().lines() {
+            if line.starts_with("element vertex") {
+                num_vertices = line
+                    .split_whitespace()
+                    .nth(2)
+                    .ok_or_else(|| Error::ParseError("Invalid vertex count".to_string()))?
+                    .parse()
+                    .map_err(|_| Error::ParseError("Invalid vertex count number".to_string()))?;
+            }
+        }
+        assert_eq!(
+            num_vertices, 40_000_000_000,
+            "the parse itself is not the guard"
+        );
+        // The reader clamps this before reserving.
+        let reserve = num_vertices.min(200_000_000);
+        assert_eq!(reserve, 200_000_000);
+        // 200M vertices of Point3<f32> is 2.4 GB, which is the real ceiling the
+        // cap allows - a billion would be 12 GB.
+        assert!(reserve * std::mem::size_of::<Point3<f32>>() < 4 * 1024 * 1024 * 1024);
+        Ok(())
     }
 }
