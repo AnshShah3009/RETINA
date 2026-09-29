@@ -57,6 +57,8 @@ test, and the "found by" column says which.
 | GPU stereo matching never ran: `stereo_match.wgsl` declared `fn get_pixel(data: ptr<storage, ...>)` and WGSL forbids passing a storage-space pointer into a function, so every dispatch was a hard validation failure | parity harness covering operations `multi_gpu_tests.rs` omits | reads the bound arrays through a module-scope index helper |
 | The separable Gaussian blur had no channel concept, indexing `y * width + x` — a 3-channel image was blurred as one long row, every output pixel averaging all three planes: 26% mean relative error against the CPU, over 100% on some pixels | same | carries `channels` in the uniform, dispatches `width * channels`, indexes `(y * width + x) * channels + ch` |
 | …and then still wrote only the first plane: the invocation index was mapped as `x = gid % total, ch = gid / total`, which is backwards for a channels-innermost `(c, h, w)` layout, so `ch` was 0 for every invocation | printing the first row of each plane — channel 0 exact, channels 1 and 2 all zero | `x = gid / c, ch = gid % c`; all three channels now match the CPU, worst difference 0.375 against 1,695,618 |
+| GPU ICP never ran, for four independent reasons: the shader used `new` as a local (a WGSL reserved word) and passed a storage-space pointer into a function (forbidden); six storage bindings against a device limit of four, so the pipeline could not be created; points read at a stride of 3 instead of the 4 the caller's `(1, N, 4)` packing uses; and `icp_correspondences` used `shape.height` as the point count, correct only for a `(3, N, 1)` layout | parity harness plus a new `every_shader_compiles` test | helpers inlined, accumulators merged into one buffer, point arrays interleaved, stride and count corrected. Verified on hardware: CPU and GPU both recover a known 2cm offset as -0.02000 |
+| The ctx ICP loop uploaded the source once and never re-transformed it, so the correspondence set was a fixed point and the "ICP" was one Gauss-Newton step repeated | same | the running pose is applied before each search; the existing parity test takes the CPU early-return and never reached it |
 | The half-extent in that fix was computed as `round(patch_size * level_scale)` — 31 for the base case rather than 15 — silently tightening the border test by sixteen pixels and dropping a ring of keypoints **with the feature flag off**. TUM fr1_desk fell 23/40 -> 8/40 on a clean tree, deterministically, and read as a property of the data | re-running the full sweep after the descriptor work, and noticing a number had moved with no command change | Corrected to integer division of the diameter; pinned by a regression test asserting the default path is unaffected |
 
 ## Math and geometry
@@ -140,7 +142,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **81+** |
+| Defects fixed | **85+** |
 | Commits | 460+ |
-| Tests | 1,496 (from 1,267) |
+| Tests | 1,498 (from 1,267) |
 | Duplicate implementations removed | 12 |
