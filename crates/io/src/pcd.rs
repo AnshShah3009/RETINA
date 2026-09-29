@@ -157,11 +157,26 @@ fn parse_header<R: BufRead>(reader: &mut R) -> Result<PcdHeader> {
     })
 }
 
+/// Clamp a header-declared point count to something a file can plausibly hold.
+///
+/// `POINTS` in a PCD header, like the vertex count in a PLY header, is a value
+/// the file controls and it is used to reserve before any data is read. A header
+/// claiming four billion points asks for ~48 GB on the strength of one line, and
+/// the body need not contain a single point. The cap is far above any real cloud
+/// - a billion points is already tens of gigabytes - and the vector still grows
+/// if a file genuinely holds more.
+const MAX_REASONABLE_PCD_POINTS: usize = 200_000_000;
+
+fn clamp_point_count(count: usize) -> usize {
+    count.min(MAX_REASONABLE_PCD_POINTS)
+}
+
 fn parse_pcd_ascii<I>(lines: I, count: usize, fields: &[String]) -> Result<PointCloud>
 where
     I: Iterator<Item = std::io::Result<String>>,
 {
-    let mut points = Vec::with_capacity(count);
+    let reserve = clamp_point_count(count);
+    let mut points = Vec::with_capacity(reserve);
     let mut normals: Option<Vec<Vector3<f32>>> = None;
     let mut colors: Option<Vec<Point3<f32>>> = None;
 
@@ -175,10 +190,10 @@ where
             && fields.contains(&"b".to_string()));
 
     if has_normals {
-        normals = Some(Vec::with_capacity(count));
+        normals = Some(Vec::with_capacity(reserve));
     }
     if has_colors {
-        colors = Some(Vec::with_capacity(count));
+        colors = Some(Vec::with_capacity(reserve));
     }
 
     // Get field indices
@@ -328,14 +343,19 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
         ))
     })?;
 
-    let mut points = Vec::with_capacity(count);
+    // `total_bytes` is already bounded above, so `count` is bounded too, but the
+    // reservation still goes through the same cap for consistency: the byte
+    // guard is about the read, this is about the three separate allocations it
+    // feeds, each of which would be count * sizeof(Point3).
+    let reserve = clamp_point_count(count);
+    let mut points = Vec::with_capacity(reserve);
     let mut normals: Option<Vec<Vector3<f32>>> = if has_normals {
-        Some(Vec::with_capacity(count))
+        Some(Vec::with_capacity(reserve))
     } else {
         None
     };
     let mut colors: Option<Vec<Point3<f32>>> = if has_colors {
-        Some(Vec::with_capacity(count))
+        Some(Vec::with_capacity(reserve))
     } else {
         None
     };

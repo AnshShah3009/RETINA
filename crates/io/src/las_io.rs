@@ -48,7 +48,14 @@ pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
 
     let header = reader.header();
     let bounds = header.bounds();
-    let num_points = header.number_of_points() as usize;
+    // The header's point count is a file-controlled u64. Reserving for it up
+    // front means a 4-byte field claiming four billion points commits ~48 GB
+    // before a single point has been read, and the file need not contain any -
+    // the allocation happens on the header alone. Cap the reservation at
+    // something plausible for a cloud and let the vector grow if the file turns
+    // out to be longer.
+    const MAX_REASONABLE_LAS_POINTS: usize = 200_000_000;
+    let num_points = (header.number_of_points() as usize).min(MAX_REASONABLE_LAS_POINTS);
 
     let mut points = Vec::with_capacity(num_points);
     let mut colors_vec: Vec<Point3<f32>> = Vec::new();
