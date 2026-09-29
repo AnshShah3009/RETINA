@@ -262,3 +262,208 @@ fn probe_stereo_borders() {
         );
     }
 }
+
+/// The GPU point-to-plane ICP must actually iterate.
+///
+/// The source tensor was uploaded once before the loop and passed to
+/// `icp_correspondences` unchanged, so the association set was identical on every
+/// iteration - a fixed point, not an iteration. The pose update was applied
+/// repeatedly to correspondences that had never been re-derived, which is a
+/// single Gauss-Newton step rather than ICP.
+///
+/// The CPU path returns early and is covered by its own tests; this is the
+/// branch the existing parity test never reached.
+#[test]
+fn probe_icp_iterates_on_gpu() {
+    let Some(g) = gpu() else { return };
+    let cpu_ctx = CpuBackend::new().unwrap();
+    let _ = &cpu_ctx;
+
+    fn cloud(pts: Vec<[f32; 3]>, nrm: Vec<[f32; 3]>) -> cv_core::PointCloud<f32> {
+        let points: Vec<nalgebra::Point3<f32>> = pts
+            .iter()
+            .map(|p| nalgebra::Point3::new(p[0], p[1], p[2]))
+            .collect();
+        let normals: Vec<nalgebra::Vector3<f32>> = nrm
+            .iter()
+            .map(|n| nalgebra::Vector3::new(n[0], n[1], n[2]))
+            .collect();
+        cv_core::PointCloud {
+            points,
+            colors: None,
+            normals: Some(normals),
+        }
+    }
+
+    let mut pts = Vec::new();
+    for &x in &[0.0f32, 0.5, 1.0] {
+        for &y in &[0.0f32, 0.5, 1.0] {
+            for &z in &[0.0f32, 0.5, 1.0] {
+                pts.push([x, y, z]);
+            }
+        }
+    }
+    // A cube's face normals, not a single +z for every point: a point-to-plane
+    // residual cannot observe motion along a direction every normal is
+    // perpendicular to, so with uniform normals a y-offset produces no residual
+    // at all and neither path moves. That is a property of the model, not a
+    // failure - but it makes the test meaningless, so the normals have to vary.
+    let nrm: Vec<[f32; 3]> = pts
+        .iter()
+        .map(|p| {
+            let mut best = 0usize;
+            let mut best_d = f32::MAX;
+            for ax in 0..3usize {
+                for &s in &[0.0f32, 1.0] {
+                    let d = (p[ax] - s).abs();
+                    if d < best_d {
+                        best_d = d;
+                        best = ax;
+                    }
+                }
+            }
+            let mut n = [0.0f32; 3];
+            n[best] = if p[best] > 0.5 { 1.0 } else { -1.0 };
+            n
+        })
+        .collect();
+    let source = cloud(
+        pts.iter().map(|p| [p[0], p[1] + 0.02, p[2]]).collect(),
+        nrm.clone(),
+    );
+    let target = cloud(pts, nrm);
+
+    let identity = nalgebra::Matrix4::identity();
+    let cpu =
+        cv_registration::registration_icp_point_to_plane(&source, &target, 0.1, &identity, 20)
+            .expect("CPU icp");
+    // The ctx entry point, driven with a GPU device so the branch under test is
+    // actually taken rather than the CPU early-return.
+    let gpu_dev = cv_hal::compute::ComputeDevice::Gpu(g);
+    let gpu = cv_registration::registration_icp_point_to_plane_ctx(
+        &source, &target, 0.1, &identity, 20, &gpu_dev,
+    )
+    .expect("ctx icp");
+
+    println!(
+        "ICP cpu ty={:.5}  ctx ty={:.5}",
+        cpu.transformation[(1, 3)],
+        gpu.transformation[(1, 3)]
+    );
+    // Both must move, and agree on where.
+    assert!(
+        cpu.transformation[(1, 3)].abs() > 1e-3,
+        "the CPU path did not move, so the reference is wrong"
+    );
+    assert!(
+        (cpu.transformation[(1, 3)] - gpu.transformation[(1, 3)]).abs() < 5e-3,
+        "the ctx path disagrees with the CPU: cpu ty={} ctx ty={}",
+        cpu.transformation[(1, 3)],
+        gpu.transformation[(1, 3)]
+    );
+}
+
+/// Every WGSL shader the HAL can dispatch must compile.
+///
+/// Two of them never did. `stereo_match.wgsl` passed a storage-space pointer
+/// into a function, which WGSL forbids, and `icp_accumulate.wgsl` used `new` as
+/// a local name, which is a reserved word. Both failed wgpu validation on every
+/// dispatch, so GPU stereo matching and GPU ICP were hard errors rather than
+/// wrong answers — and neither was covered, because `multi_gpu_tests.rs` does
+/// not reach them and a failed dispatch only surfaces when a caller actually
+/// invokes that path.
+///
+/// Compiling every shader up front turns "this feature is broken" into a test
+/// failure on any machine, GPU or not.
+#[test]
+fn every_shader_compiles() {
+    use cv_hal::gpu::GpuContext;
+
+    let shaders: &[(&str, &str)] = &[
+        (
+            "stereo_match",
+            include_str!("../crates/hal/shaders/stereo_match.wgsl"),
+        ),
+        (
+            "icp_accumulate",
+            include_str!("../crates/hal/shaders/icp_accumulate.wgsl"),
+        ),
+        (
+            "icp_correspondence",
+            include_str!("../crates/hal/shaders/icp_correspondence.wgsl"),
+        ),
+        (
+            "gaussian_blur",
+            include_str!("../crates/hal/shaders/gaussian_blur_separable.wgsl"),
+        ),
+        ("canny", include_str!("../crates/hal/shaders/canny.wgsl")),
+        ("warp", include_str!("../crates/hal/shaders/warp.wgsl")),
+        ("nms", include_str!("../crates/hal/shaders/nms.wgsl")),
+        (
+            "tsdf_raycast",
+            include_str!("../crates/hal/shaders/tsdf_raycast.wgsl"),
+        ),
+        (
+            "lucas_kanade",
+            include_str!("../crates/hal/shaders/lucas_kanade.wgsl"),
+        ),
+        ("remap", include_str!("../crates/hal/shaders/remap.wgsl")),
+        (
+            "undistort",
+            include_str!("../crates/hal/shaders/undistort.wgsl"),
+        ),
+    ];
+
+    // A shader can be rejected by naga's parser without a device, so check the
+    // reserved words that actually bit us. This runs everywhere; the device
+    // compilation below is stronger but needs a GPU.
+    const RESERVED: &[&str] = &[
+        "new", "sample", "filter", "typedef", "union", "shared", "common", "active", "binding",
+        "class", "enum", "handle", "layout", "resource", "signed", "unsigned",
+    ];
+    for (name, src) in shaders {
+        for (i, line) in src.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or("");
+            for w in RESERVED {
+                if code.contains(&format!("let {w} ")) || code.contains(&format!("var {w} ")) {
+                    panic!(
+                        "{name}.wgsl:{} uses `{w}` as an identifier, which is a WGSL \\
+                         reserved word: {line}",
+                        i + 1
+                    );
+                }
+            }
+        }
+    }
+
+    // A pointer to a *non-atomic* storage array may not be passed into a
+    // function either, though a pointer to `array<atomic<T>>` is legal - that
+    // distinction is why the stereo shader's signature was invalid while
+    // icp_accumulate's atomic helper is fine.
+    for (name, src) in shaders {
+        for (i, line) in src.lines().enumerate() {
+            if line.contains("atomic<") {
+                continue;
+            }
+            if line.contains("ptr<storage") && line.trim_start().starts_with("fn ") {
+                panic!(
+                    "{name}.wgsl:{} declares a function taking a non-atomic storage \
+                     pointer, which WGSL forbids: {line}",
+                    i + 1
+                );
+            }
+        }
+    }
+
+    // And on a machine with a GPU, compile for real.
+    if let Some(g) = gpu() {
+        for (name, src) in shaders {
+            // create_shader_module panics via the validation error on failure,
+            // which is what surfaces as the wgpu Validation Error above.
+            let _module = g.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl((*src).into()),
+            });
+        }
+    }
+}
