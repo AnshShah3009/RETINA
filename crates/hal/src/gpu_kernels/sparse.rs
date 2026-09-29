@@ -29,19 +29,42 @@ pub fn spmv(
         mapped_at_creation: false,
     });
 
-    let row_ptr_buf = ctx
+    // row_ptr and col_indices share one buffer: the device limit is four storage
+    // buffers per stage and this needed five, so the two u32 CSR arrays are
+    // concatenated - natural, since CSR is already flat.
+    let mut csr: Vec<u32> = Vec::with_capacity(row_ptr.len() + col_indices.len());
+    csr.extend_from_slice(row_ptr);
+    csr.extend_from_slice(col_indices);
+    let col_offset = row_ptr.len() as u32;
+    let row_ptr_len = row_ptr.len() as u32;
+    let csr_buf = ctx
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Row Ptr"),
-            contents: bytemuck::cast_slice(row_ptr),
+            label: Some("CSR row_ptr + col_indices"),
+            contents: bytemuck::cast_slice(&csr),
             usage: wgpu::BufferUsages::STORAGE,
         });
-    let col_indices_buf = ctx
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    pub struct SpmvParams {
+        pub row_ptr_len: u32,
+        pub col_offset: u32,
+        pub val_offset: u32,
+        pub vec_len: u32,
+    }
+    let spmv_params = SpmvParams {
+        row_ptr_len,
+        col_offset,
+        val_offset: 0,
+        vec_len: x.shape.len() as u32,
+    };
+    let params_buf = ctx
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Col Indices"),
-            contents: bytemuck::cast_slice(col_indices),
-            usage: wgpu::BufferUsages::STORAGE,
+            label: Some("SpMV Params"),
+            contents: bytemuck::bytes_of(&spmv_params),
+            usage: wgpu::BufferUsages::UNIFORM,
         });
     let values_buf = ctx
         .device
@@ -60,23 +83,23 @@ pub fn spmv(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: row_ptr_buf.as_entire_binding(),
+                resource: csr_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: col_indices_buf.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
                 resource: values_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 3,
+                binding: 2,
                 resource: x.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 4,
+                binding: 3,
                 resource: output_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: params_buf.as_entire_binding(),
             },
         ],
     });
