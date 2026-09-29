@@ -75,7 +75,8 @@ pub mod registration;
 
 pub use registration::{
     evaluate_registration, get_information_matrix_from_point_clouds,
-    registration_icp_point_to_plane, registration_multi_scale_icp, ICPResult,
+    registration_icp_point_to_plane, registration_icp_point_to_plane_ctx,
+    registration_multi_scale_icp, ICPResult,
 };
 
 pub use cv_core::RobustLoss;
