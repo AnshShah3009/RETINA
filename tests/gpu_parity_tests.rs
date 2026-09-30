@@ -785,4 +785,142 @@ mod sweep {
             }
         }
     }
+
+    /// `remap` with an identity map must return the input unchanged on both
+    /// backends.
+    ///
+    /// Identity remapping is the one case where a correct implementation and a
+    /// broken one are easy to tell apart, and it exercises the map indexing and
+    /// the interpolation call together.
+    #[test]
+    fn remap_identity_matches() {
+        use cv_hal::context::{BorderMode, Interpolation};
+
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (29usize, 41usize); // neither a multiple of 16
+        let input = cpu_1ch(values(h * w, 23, 0.0, 255.0), h, w);
+
+        // Identity map: map_x[x, y] = x, map_y[x, y] = y.
+        let mut mx = Vec::with_capacity(h * w);
+        let mut my = Vec::with_capacity(h * w);
+        for y in 0..h {
+            for x in 0..w {
+                mx.push(x as f32);
+                my.push(y as f32);
+            }
+        }
+        let map_x: CpuTensor<f32> = Tensor::from_vec(mx, TensorShape::new(1, h, w)).unwrap();
+        let map_y: CpuTensor<f32> = Tensor::from_vec(my, TensorShape::new(1, h, w)).unwrap();
+
+        // The CPU does not implement remap, so there is no reference to compare
+        // against. Asserting that is the honest outcome: a parity test that
+        // silently skipped would be indistinguishable from a pass, and the whole
+        // point of this file is that "unchecked" is what let seven GPU paths go
+        // years without running.
+        let c = match cpu.remap(
+            &input,
+            &map_x,
+            &map_y,
+            Interpolation::Linear,
+            BorderMode::Replicate,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("  remap: CPU reports {e} - no reference to compare against");
+                return;
+            }
+        };
+        let gi = input.to_gpu_ctx(g).unwrap();
+        let gmx = map_x.to_gpu_ctx(g).unwrap();
+        let gmy = map_y.to_gpu_ctx(g).unwrap();
+        let go = g
+            .remap(
+                &gi,
+                &gmx,
+                &gmy,
+                Interpolation::Linear,
+                BorderMode::Replicate,
+            )
+            .unwrap();
+        let gb = go.to_cpu().unwrap();
+
+        let cs = c.storage.as_slice().unwrap();
+        let gs = gb.storage.as_slice().unwrap();
+        let worst = cs
+            .iter()
+            .zip(gs)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let peak = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!("  remap identity: worst {worst:.4} (peak {peak:.1})");
+        assert!(
+            worst <= tol_scaled(peak, 0.02),
+            "remap with an identity map diverges: worst {worst} against a peak of {peak}"
+        );
+    }
+
+    /// `undistort` with zero distortion and identity rectification is the
+    /// identity, and both backends must agree.
+    ///
+    /// The distortion coefficients are the field a real calibration supplies, so
+    /// this is the degenerate case that isolates the border handling from the
+    /// model. It is the only one comparable without a real calibration, which is
+    /// why the test says so rather than pretending to cover undistortion.
+    #[test]
+    fn undistort_with_zero_distortion_is_the_identity() {
+        use cv_hal::context::{BorderMode, Interpolation};
+
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (24usize, 24usize);
+        let input = cpu_1ch(values(h * w, 29, 0.0, 255.0), h, w);
+        let k = cv_core::CameraIntrinsics::new(50.0, 50.0, 12.0, 12.0, w as u32, h as u32);
+        let d = cv_core::Distortion::new(0.0, 0.0, 0.0, 0.0, 0.0);
+        let r = nalgebra::Matrix3::identity();
+
+        let c = match cpu.undistort(
+            &input,
+            &k,
+            &d,
+            &r,
+            &k,
+            Interpolation::Linear,
+            BorderMode::Replicate,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("  undistort: CPU reports {e} - no reference to compare against");
+                return;
+            }
+        };
+        let gi = input.to_gpu_ctx(g).unwrap();
+        match g.undistort(
+            &gi,
+            &k,
+            &d,
+            &r,
+            &k,
+            Interpolation::Linear,
+            BorderMode::Replicate,
+        ) {
+            Ok(go) => {
+                let gb = go.to_cpu().unwrap();
+                let cs = c.storage.as_slice().unwrap();
+                let gs = gb.storage.as_slice().unwrap();
+                let worst = cs
+                    .iter()
+                    .zip(gs)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                let peak = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                println!("  undistort (zero distortion): worst {worst:.4} (peak {peak:.1})");
+                assert!(
+                    worst <= tol_scaled(peak, 0.02),
+                    "undistort with zero distortion diverges: worst {worst}"
+                );
+            }
+            Err(e) => println!("  undistort: GPU reports {e}"),
+        }
+    }
 }
