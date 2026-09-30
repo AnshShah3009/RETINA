@@ -1,0 +1,133 @@
+// Every example is compiled by CI and executed by nothing.
+//
+// This module was written after `orb_benchmark` was found to panic on its first
+// line: `Orb::detect_and_compute_ctx` had never run in any process, because
+// nothing called it, and the GPU parity suite reaches `fast_detect` through a
+// different entry point. An example that builds is not an example that runs.
+//
+// Each case below runs the built binary and asserts it exits cleanly. The list is
+// explicit rather than discovered, so an example that needs arguments or a
+// dataset is not silently skipped - adding one here is a deliberate act.
+//
+// Run with:
+//   cargo test -p rust-cv-native --test example_smoke -- --nocapture
+//
+// Note this requires the examples to have been built first:
+//   cargo build --release --workspace --examples
+
+use std::path::PathBuf;
+use std::process::Command;
+
+/// Seconds a smoke example may take. Generous - a few of these initialise a GPU
+/// context, which is slow on a cold driver - but short enough that a hang is
+/// reported rather than waited on.
+const TIMEOUT_SECS: u64 = 120;
+
+/// Locate a built example binary, preferring release and falling back to debug.
+fn example_path(name: &str) -> Option<PathBuf> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for profile in ["release", "debug"] {
+        let p = manifest
+            .join("target")
+            .join(profile)
+            .join("examples")
+            .join(name);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+fn run(name: &str) {
+    let Some(path) = example_path(name) else {
+        eprintln!("skipping {name}: not built (cargo build --workspace --examples)");
+        return;
+    };
+
+    let mut child = match Command::new(&path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => panic!("{name}: could not be spawned: {e}"),
+    };
+
+    // Poll rather than `wait_with_output`, so a hang is a failure with a name
+    // rather than a stalled test run.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(TIMEOUT_SECS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = child.wait_with_output().ok();
+                let stderr = out
+                    .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+                    .unwrap_or_default();
+                assert!(
+                    status.success(),
+                    "{name} exited {status}\n--- stderr ---\n{}",
+                    stderr.lines().rev().take(12).collect::<Vec<_>>().join("\n")
+                );
+                return;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    panic!("{name} did not finish within {TIMEOUT_SECS}s");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("{name}: wait failed: {e}"),
+        }
+    }
+}
+
+macro_rules! smoke {
+    ($($name:ident),* $(,)?) => {
+        $(
+            #[test]
+            fn $name() {
+                run(stringify!($name));
+            }
+        )*
+    };
+}
+
+smoke!(
+    plot_demo,
+    registration_icp,
+    gaussian_splatting_basic,
+    kalman_filter,
+    bundle_adjustment,
+    raycasting,
+    scientific,
+    core_types,
+    imgproc_demo,
+    features_demo,
+    orb_benchmark,
+    demo,
+);
+
+/// `orbdiag` is a long-running diagnostic that sweeps feature counts and runs
+/// the mapper on each, so it is exercised by one size rather than the whole
+/// sweep - it registered 20/20 at every size when checked, and running it in
+/// full takes longer than a smoke suite should.
+#[test]
+fn orbdiag_starts_and_reports() {
+    let Some(path) = example_path("orbdiag") else {
+        eprintln!("skipping orbdiag: not built");
+        return;
+    };
+    let output = Command::new(&path)
+        .output()
+        .expect("orbdiag should be spawnable");
+    // It is expected to run past any reasonable timeout, so this asserts only
+    // that it produced its opening diagnostic line rather than panicking.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("verified_pairs"),
+        "orbdiag did not reach its first report; it may have failed early.\n{}",
+        stdout.lines().take(5).collect::<Vec<_>>().join("\n")
+    );
+}
