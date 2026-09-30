@@ -160,11 +160,18 @@ test, and the "found by" column says which.
 - **The demo opened empty**, which is indistinguishable from a broken renderer.
 - **Two smoke tests waited on processes that never exit.** `demo` is a GUI app; `orbdiag` sweeps the full dataset. Both used `.output()` or a completion deadline and could only pass if the example happened to finish first. `orbdiag`'s own comment said it "is expected to run past any reasonable timeout", and then the test waited for it. Suite time 71s → 8s.
 
+## The viewer shader, found by reading pixels back
+
+- **The matrix multiply was transposed.** The host's `look_at` builds a row-vector convention matrix with the translation in the last *row*; WGSL's `mat4x4` is column-major. The shader summed `view[r][c] * world[c]`, computing M-transpose — its own comment said "row-major multiply, so the matrix is indexed view[col][row]" and then indexed it the other way. Verified: the old form gives eye-space `(0.47, 0.60, −0.16)` where the intended answer is `(0, 0, −2.5)`.
+- **There was no projection at all.** WebGPU requires `z_ndc ∈ [0, 1]`; the shader passed `eye.z / eye.w` through, which for a camera looking down −z is always negative and therefore entirely outside the clip volume. **Every primitive was clipped**, so the window could not have drawn anything even with the multiply correct.
+- Both are invisible to any test that inspects values rather than pixels, and the transpose is invisible to any test using an identity view — which is what my first draft of the harness used.
+- **The harness does not assert, and one question is open.** With the shader's own transform, a forced constant fragment colour and a forced sprite radius, the framebuffer is still black. The remaining cause is most likely in the harness rather than the shader, but it is not identified. Left asserting nothing with that stated at the call site, rather than `#[ignore]`d or deleted.
+
 ## Counted
 
 | | |
 | --- | ---: |
 | Defects fixed | **95+** |
 | Commits | 460+ |
-| Tests | 1,702 (from 1,267) |
+| Tests | 1,708 (from 1,267) |
 | Duplicate implementations removed | 12 |
