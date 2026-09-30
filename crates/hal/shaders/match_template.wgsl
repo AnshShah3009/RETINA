@@ -6,21 +6,23 @@ struct Params {
     method: u32, 
 }
 
-@group(0) @binding(0) var<storage, read> img_data: array<u32>;
-@group(0) @binding(1) var<storage, read> templ_data: array<u32>;
+// These are f32 buffers, not packed bytes. Declaring them `array<u32>` and
+// reassembling four bytes per word reads the low byte of each f32, which is 0x00
+// for any whole-number value - so the image and the template both came back as
+// mostly zeros and the squared difference was computed against the wrong data.
+// That is why the GPU's best match sat two pixels from the true one with a
+// score of 697464 where the CPU found 0.0.
+@group(0) @binding(0) var<storage, read> img_data: array<f32>;
+@group(0) @binding(1) var<storage, read> templ_data: array<f32>;
 @group(0) @binding(2) var<storage, read_write> score_map: array<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
 fn get_img_pixel(x: u32, y: u32) -> f32 {
-    let idx = y * params.img_w + x;
-    let combined = img_data[idx / 4u];
-    return f32((combined >> ((idx % 4u) * 8u)) & 0xFFu);
+    return img_data[y * params.img_w + x];
 }
 
 fn get_templ_pixel(x: u32, y: u32) -> f32 {
-    let idx = y * params.templ_w + x;
-    let combined = templ_data[idx / 4u];
-    return f32((combined >> ((idx % 4u) * 8u)) & 0xFFu);
+    return templ_data[y * params.templ_w + x];
 }
 
 @compute @workgroup_size(16, 16)

@@ -66,6 +66,7 @@ test, and the "found by" column says which.
 | The LBVH build declared five storage bindings against a device limit of four, so no pipeline in the file could be created. Because wgpu derives the layout per entry point, `compute_aabbs` pushed the two tree entry points over the limit even though neither touches three of the four buffers it needs | divergence probe | split into `lbvh_build.wgsl` (tree, two buffers) and `lbvh_aabb.wgsl` (AABB, four); each pipeline also needs its own bind group, since wgpu keys those to the exact pipeline |
 | `read_las`, the PLY reader and two PCD paths each reserved output memory using a count read from the file's own header, so a few bytes could request tens of gigabytes — `element vertex 40000000000` is about 300 GB, and one PCD header cost three separate allocations | IO audit | clamped to 200M, well above any real cloud and low enough to keep the reservation under ~2.4 GB; the vectors still grow for genuinely large files |
 | The CPU `warp` guarded its bilinear sample with `sx < w - 1`, excluding the last valid column, so the final column of every destination row was never written and kept the zero it was initialised with — while the GPU sampled it correctly. 89 of 1961 pixels on a 53-wide identity warp, and the CPU was the wrong one | table-driven CPU/GPU parity sweep | bound is inclusive, and `x1`/`y1` are clamped since `x0 + 1` would otherwise index past the row |
+| `hough.wgsl` and `hough_circles.wgsl` read their input with the packed-u8 idiom while the host binds a float tensor, so almost every pixel looked black and was skipped before voting | parity sweep | both shaders read `array<f32>` directly; this is the third instance of that class (after Canny and `match_template`) |
 | The half-extent in that fix was computed as `round(patch_size * level_scale)` — 31 for the base case rather than 15 — silently tightening the border test by sixteen pixels and dropping a ring of keypoints **with the feature flag off**. TUM fr1_desk fell 23/40 -> 8/40 on a clean tree, deterministically, and read as a property of the data | re-running the full sweep after the descriptor work, and noticing a number had moved with no command change | Corrected to integer division of the diameter; pinned by a regression test asserting the default path is unaffected |
 
 ## Math and geometry
@@ -149,7 +150,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **93+** |
+| Defects fixed | **95+** |
 | Commits | 460+ |
-| Tests | 1,507 (from 1,267) |
+| Tests | 1,512 (from 1,267) |
 | Duplicate implementations removed | 12 |
