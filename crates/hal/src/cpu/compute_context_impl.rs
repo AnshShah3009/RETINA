@@ -1697,16 +1697,26 @@ impl ComputeContext for CpuBackend {
                 let sx = (matrix[0][0] * fx + matrix[0][1] * fy + matrix[0][2]) / sw;
                 let sy = (matrix[1][0] * fx + matrix[1][1] * fy + matrix[1][2]) / sw;
 
+                // The bound is inclusive of the last valid column/row. It was
+                // `sx < w - 1`, which excluded column `w - 1` entirely, so the
+                // final column of every destination row was never written and
+                // kept the zero it was initialised with - while the GPU shader
+                // sampled it correctly. On a 53-wide identity warp that is 89 of
+                // 1961 pixels wrong, and the CPU is the wrong one.
+                //
+                // `x1`/`y1` are then clamped rather than trusted: with `sx`
+                // reaching `w - 1` the naive `x0 + 1` would index one past the
+                // end of the row.
                 if sx >= T::ZERO
-                    && sx < T::from_f32((w - 1) as f32)
+                    && sx <= T::from_f32((w - 1) as f32)
                     && sy >= T::ZERO
-                    && sy < T::from_f32((h - 1) as f32)
+                    && sy <= T::from_f32((h - 1) as f32)
                 {
                     // Bilinear interpolation
                     let x0 = sx.to_f32() as usize;
                     let y0 = sy.to_f32() as usize;
-                    let x1 = x0 + 1;
-                    let y1 = y0 + 1;
+                    let x1 = (x0 + 1).min(w - 1);
+                    let y1 = (y0 + 1).min(h - 1);
                     let dx = sx - T::from_f32(x0 as f32);
                     let dy = sy - T::from_f32(y0 as f32);
                     let one = T::ONE;
