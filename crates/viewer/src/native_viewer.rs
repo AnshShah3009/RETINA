@@ -41,6 +41,25 @@ impl NativeViewer {
     pub fn cloud_count(&self) -> usize {
         self.point_clouds.len()
     }
+
+    /// A 10x10x10 lattice, so the window has something real to report.
+    ///
+    fn mock_cloud() -> PointCloud {
+        let mut pc = PointCloud::default();
+        let step = 0.1f32;
+        for i in 0..10 {
+            for j in 0..10 {
+                for k in 0..10 {
+                    pc.points.push(nalgebra::Point3::new(
+                        i as f32 * step,
+                        j as f32 * step,
+                        k as f32 * step,
+                    ));
+                }
+            }
+        }
+        pc
+    }
 }
 
 impl eframe::App for NativeViewer {
@@ -49,13 +68,20 @@ impl eframe::App for NativeViewer {
             ui.heading("Point cloud viewer");
 
             ui.horizontal(|ui| {
-                if ui.button("Load Mock PC").clicked() {
-                    println!("Loading mock PC");
+                if ui.button("Add a cube").clicked() {
+                    // This button did nothing but print to stdout, which is
+                    // invisible in a GUI window - so it looked like a control
+                    // and behaved like a decoration. It now adds a cloud, and the
+                    // count below changes, so it is visibly doing something.
+                    self.add_point_cloud(Self::mock_cloud());
+                }
+                if ui.button("Clear").clicked() {
+                    self.point_clouds.clear();
                 }
             });
 
             if self.point_clouds.is_empty() {
-                ui.label("No point clouds loaded.");
+                ui.label("No point clouds loaded. \"Add a cube\" makes one to try the window out.");
             } else {
                 // Reported rather than drawn. Saying what is actually held is
                 // more use than an empty canvas, and it does not imply a

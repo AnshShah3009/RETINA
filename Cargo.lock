@@ -1617,6 +1617,7 @@ dependencies = [
  "cv-core",
  "eframe",
  "egui",
+ "nalgebra",
 ]
 
 [[package]]

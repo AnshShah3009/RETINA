@@ -69,15 +69,33 @@ pub mod point_cloud {
     fn compute_normals_gpu_with_ctx(
         points: &[Point3<f32>],
         k: usize,
-        _gpu: &cv_hal::gpu::GpuContext,
+        gpu: &cv_hal::gpu::GpuContext,
     ) -> Vec<Vector3<f32>> {
         eprintln!(
             "[GPU] compute_normals_gpu_with_ctx: {} points - using hybrid path (CPU kNN + GPU PCA)",
             points.len()
         );
-        // Full GPU path (Morton + LBVH) has bind group layout issues.
-        // Use hybrid path: CPU voxel-hash kNN + GPU batch PCA
-        compute_normals_hybrid(points, k)
+        // The hybrid path is used rather than Morton + LBVH: CPU voxel-hash kNN,
+        // then GPU batch PCA. (The LBVH's bind group layout was a real problem
+        // and has since been fixed - it declared five storage bindings against a
+        // device limit of four - but wiring it into this path is separate work,
+        // and the hybrid path is correct as it stands.)
+        //
+        // The `gpu` argument is used for the PCA step. It was previously
+        // underscore-prefixed and ignored, with the context looked up globally
+        // instead - so a caller that passed one device could have had another
+        // used, and on a machine with more than one GPU the two disagree. The
+        // kNN step is CPU and is documented as such above.
+        match cv_hal::gpu_kernels::pointcloud::compute_normals_from_covariances_gpu(
+            gpu,
+            &compute_covariances_parallel(points, k),
+        ) {
+            Ok(normals) => normals,
+            Err(e) => {
+                warn!("GPU PCA failed: {:?}, falling back to CPU", e);
+                compute_normals_hybrid(points, k)
+            }
+        }
     }
 
     /// Estimate normals using tiled GPU brute-force kNN + analytic PCA.
