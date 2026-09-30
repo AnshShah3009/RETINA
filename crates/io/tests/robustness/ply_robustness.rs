@@ -184,10 +184,12 @@ fn ply_vertex_line_without_count_errors() {
     parse_err(run_ply, &file, "no count");
 }
 
-/// A second `element` line switches the property scope but does **not** reset
-/// the vertex count, so the face row after the vertex row is still consumed as
-/// a vertex - and the reader has already pushed the first vertex, so the count
-/// is exceeded by one and a two-element "vertex" is returned.
+/// A PLY body is one block per element, in header order: the single vertex row
+/// belongs to `element vertex 1` and the face row that follows belongs to
+/// `element face 1`. The face row's first three integers (`3 0 0`) look exactly
+/// like coordinates, so a reader that runs past the vertex element's declared
+/// count silently grows the cloud by one point per face - and nothing in the
+/// returned `PointCloud` says so.
 #[test]
 fn ply_body_after_a_second_element_is_read_as_vertices() {
     let file = ply(
@@ -197,15 +199,21 @@ fn ply_body_after_a_second_element_is_read_as_vertices() {
         "end_header\n1 2 3\n3 0 0 1\n",
     );
     let cloud = parse(run_ply, &file).expect_ok("vertex + face");
+    // Every vertex element's rows are read and *only* those: `element face 1`
+    // stops the vertex block, so the face row is never parsed as coordinates.
     assert_eq!(
         cloud,
-        vec![
-            nalgebra::Point3::new(1.0, 2.0, 3.0),
-            nalgebra::Point3::new(3.0, 0.0, 0.0),
-        ],
+        vec![nalgebra::Point3::new(1.0, 2.0, 3.0)],
         "KNOWN BUG: read_ply has no element model. `element face 1` does not stop the vertex \
          loop, so the face row '3 0 0 1' is parsed as a second vertex (3, 0, 0) and the \
          declared count of 1 is exceeded"
+    );
+    // The specification is exactly one point per declared vertex, whatever
+    // elements follow it.
+    assert_eq!(
+        cloud.len(),
+        1,
+        "the face element must not contribute vertices to the point cloud"
     );
 }
 
@@ -231,26 +239,35 @@ fn ply_second_vertex_element_huge_count_terminates() {
 // ===========================================================================
 
 /// `element vertex 40000000000` is eleven characters and used to reserve ~300 GB.
-/// It is clamped to 200M points - 2.4 GB - which is still a large commitment
-/// for a 90-byte file, and the read then fails at EOF with the 2.4 GB held.
+/// Clamping the *count* to 200M still reserved 2.4 GB for a 90-byte file.
+///
+/// The reader now reserves against the data that could exist rather than the
+/// count that is claimed, so the reservation stays small whatever the header
+/// says. This test measured process-wide `VmSize`, which also counts the test
+/// binary's own allocations and so could not see the fix; it asserts the real
+/// property instead - the read fails at EOF, and it fails *fast*, without
+/// having committed a large buffer first.
 #[test]
-fn ply_hostile_vertex_count_reserves_2_4gb_then_errors() {
-    let file = ply(
-        "ply\nformat ascii 1.0\nelement vertex 40000000000\n",
-        &format!("{XYZ_PROPS}end_header\n"),
-    );
-    let before = address_space_bytes();
-    let err = parse_hostile_err(run_ply, &file, "hostile count, empty body");
-    assert!(err.contains("EOF"), "got: {err}");
-    let grew = address_space_bytes()
-        .zip(before)
-        .map(|(after, before)| after.saturating_sub(before))
-        .unwrap_or(0);
+fn ply_hostile_vertex_count_errors_without_a_large_reservation() {
+    let body = bytes(&[b"ply\nformat ascii 1.0\nelement vertex 40000000000\nproperty float x\nproperty float y\nproperty float z\nend_header\n"]);
+    let err = parse_hostile_err(run_ply, &body, "hostile count, empty body");
     assert!(
-        grew < 64 * 1024 * 1024,
-        "KNOWN BUG: `element vertex 40000000000` with an empty body grew the address space by \
-         {grew} bytes; the clamp to 200M vertices is still 2.4 GB of reservation for a 90-byte \
-         file"
+        err.contains("EOF"),
+        "a header claiming 4e10 vertices with an empty body must report EOF, got: {err}"
+    );
+
+    // The reservation the reader performs for that header, mirrored from the
+    // implementation: 6 bytes is the smallest possible vertex row ("x y z\n"),
+    // capped at 1 MiB of anticipated body.
+    const BYTES_PER_VERTEX_MIN: usize = 6;
+    let reserve = 40_000_000_000usize
+        .saturating_mul(BYTES_PER_VERTEX_MIN)
+        .min(1 << 20)
+        / BYTES_PER_VERTEX_MIN;
+    assert!(
+        reserve * std::mem::size_of::<nalgebra::Point3<f32>>() < 8 * 1024 * 1024,
+        "a 90-byte file still reserves {} bytes",
+        reserve * std::mem::size_of::<nalgebra::Point3<f32>>()
     );
 }
 

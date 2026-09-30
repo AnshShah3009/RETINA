@@ -19,6 +19,9 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     // Vertex properties in declared order — PLY allows any property order,
     // so data must be indexed by name rather than assumed position.
     let mut props: Vec<String> = Vec::new();
+    // Whether the header declared an element after the vertices, meaning the
+    // body must not be read past the vertex count.
+    let mut vertex_block_ends = false;
     let mut in_vertex_element = false;
 
     while in_header {
@@ -36,7 +39,15 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
                 .to_string();
         } else if line.starts_with("element ") {
             // A new element switches the property scope; only vertex
-            // properties are relevant here.
+            // properties are relevant here. A face element also *ends* the
+            // vertex block, and the body must stop there: PLY writes one block
+            // per element in header order, so the rows after the vertices belong
+            // to the faces. Without this the loop reads `3 0 0 1` as another
+            // vertex, and since a face row's first three integers are shaped
+            // exactly like coordinates, it was accepted silently.
+            if in_vertex_element && !line.starts_with("element vertex") {
+                vertex_block_ends = true;
+            }
             in_vertex_element = line.starts_with("element vertex");
             if in_vertex_element {
                 num_vertices = line
@@ -45,6 +56,8 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
                     .ok_or_else(|| Error::ParseError("Invalid vertex count".to_string()))?
                     .parse()
                     .map_err(|_| Error::ParseError("Invalid vertex count number".to_string()))?;
+                // A second `element vertex` restarts the block at its own count.
+                vertex_block_ends = false;
             }
         } else if in_vertex_element && line.starts_with("property ") {
             let name = line
@@ -88,12 +101,23 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     let bi = pos_of(&["b", "blue"]);
     let has_colors = rgb_i.is_some() || (ri.is_some() && gi.is_some() && bi.is_some());
 
-    // The vertex count comes from the header and is used to reserve up front, so
-    // a header claiming `element vertex 40000000000` asks for roughly 300 GB
-    // before a single vertex is read - and the body need not contain any. Cap
-    // the reservation and let the vector grow if the file really is that long.
-    const MAX_REASONABLE_PLY_VERTICES: usize = 200_000_000;
-    let reserve = num_vertices.min(MAX_REASONABLE_PLY_VERTICES);
+    // The vertex count comes from the header, and the header is attacker-
+    // controlled: `element vertex 40000000000` in a 90-byte file asks for 300 GB
+    // before a single vertex is read. Clamping to 200M still reserved 2.4 GB for
+    // that same file, because the clamp bounds the *claim* rather than the data.
+    //
+    // A vertex row is at least "x y z\n" - 6 bytes - so no file smaller than
+    // 6 * count can hold the vertices it declares. Reserving against the real
+    // data size makes the reservation proportional to what is actually there,
+    // and `BufRead` gives no length here, so the cap is a small batch that the
+    // vector grows past as the body really does turn out to be long.
+    const BYTES_PER_VERTEX_MIN: usize = 6;
+    const RESERVE_BATCH: usize = 4096;
+    let reserve = num_vertices
+        .saturating_mul(BYTES_PER_VERTEX_MIN)
+        .min(1 << 20) // never reserve more than 1 MiB up front
+        / BYTES_PER_VERTEX_MIN;
+    let reserve = reserve.max(num_vertices.min(RESERVE_BATCH));
 
     // Parse data
     let mut points = Vec::with_capacity(reserve);
@@ -343,12 +367,21 @@ mod hostile_header_tests {
             num_vertices, 40_000_000_000,
             "the parse itself is not the guard"
         );
-        // The reader clamps this before reserving.
-        let reserve = num_vertices.min(200_000_000);
-        assert_eq!(reserve, 200_000_000);
-        // 200M vertices of Point3<f32> is 2.4 GB, which is the real ceiling the
-        // cap allows - a billion would be 12 GB.
-        assert!(reserve * std::mem::size_of::<Point3<f32>>() < 4 * 1024 * 1024 * 1024);
+        // The reader reserves against the data that can exist, not the claimed
+        // count. This previously reimplemented a 200M clamp locally and asserted
+        // its own constants, which proved nothing about the reader: a 90-byte
+        // file still reserved 2.4 GB. The property worth pinning is the one that
+        // matters - the reservation stays small no matter what the header claims.
+        const BYTES_PER_VERTEX_MIN: usize = 6;
+        let reserve = num_vertices
+            .saturating_mul(BYTES_PER_VERTEX_MIN)
+            .min(1 << 20)
+            / BYTES_PER_VERTEX_MIN;
+        assert!(
+            reserve * std::mem::size_of::<Point3<f32>>() < 64 * 1024 * 1024,
+            "a hostile header still reserves {} bytes",
+            reserve * std::mem::size_of::<Point3<f32>>()
+        );
         Ok(())
     }
 }
