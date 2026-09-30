@@ -923,4 +923,115 @@ mod sweep {
             Err(e) => println!("  undistort: GPU reports {e}"),
         }
     }
+
+    /// `nms_rotated_boxes` on overlapping boxes must keep the same box on both
+    /// backends.
+    ///
+    /// NMS is order-dependent by construction, so this also checks that the two
+    /// implementations break ties the same way - a GPU implementation that
+    /// suppressed in a different order returns a different *set*, which is a
+    /// silent difference rather than a rounding one.
+    #[test]
+    fn nms_rotated_boxes_keeps_the_same_box() {
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        // Four boxes, the first three heavily overlapping so only one survives.
+        let boxes: Vec<[f32; 5]> = vec![
+            [10.0, 10.0, 20.0, 20.0, 0.0],
+            [11.0, 11.0, 20.0, 20.0, 0.1],
+            [12.0, 10.5, 20.0, 20.0, -0.1],
+            [80.0, 80.0, 10.0, 10.0, 0.3],
+        ];
+        let scores: Vec<f32> = vec![0.9, 0.85, 0.8, 0.7];
+        let mut flat = Vec::new();
+        for b in &boxes {
+            flat.extend_from_slice(&[b[0], b[1], b[2], b[3], b[4]]);
+        }
+        let n = boxes.len();
+        let bx: CpuTensor<f32> = Tensor::from_vec(flat, TensorShape::new(5, n, 1)).unwrap();
+        let sc: CpuTensor<f32> = Tensor::from_vec(scores, TensorShape::new(1, n, 1)).unwrap();
+
+        let _ = &sc; // scores are not a parameter; the input order is the ranking
+        let c = match cpu.nms_rotated_boxes(&bx, 0.3) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("  nms_rotated_boxes: CPU reports {e}");
+                return;
+            }
+        };
+        let gbx = bx.to_gpu_ctx(g).unwrap();
+        match g.nms_rotated_boxes(&gbx, 0.3) {
+            Ok(go) => {
+                // The return is indices into the input, so the comparison is over
+                // the kept set rather than over pixel values.
+                assert_eq!(
+                    c.len(),
+                    go.len(),
+                    "the two backends kept different numbers of boxes: {c:?} vs {go:?}"
+                );
+                println!("  nms_rotated_boxes: kept {c:?} of {n}");
+                assert_eq!(c, go, "nms_rotated_boxes kept different boxes");
+            }
+            Err(e) => println!("  nms_rotated_boxes: GPU reports {e}"),
+        }
+    }
+
+    /// `match_template` with `SqDiff` is a pure sliding-window sum of squares, so
+    /// the two backends must agree to float precision.
+    #[test]
+    fn match_template_sqdiff_matches() {
+        use cv_hal::context::TemplateMatchMethod;
+
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (40usize, 40usize);
+        let (th, tw) = (9usize, 11usize);
+        let src = values(h * w, 31, 0.0, 255.0);
+        let image = cpu_1ch(src.clone(), h, w);
+        // A template that actually appears in the image, so the minimum is a
+        // genuine match rather than an arbitrary corner.
+        let mut tv: Vec<f32> = Vec::with_capacity(th * tw);
+        for y in 0..th {
+            for x in 0..tw {
+                tv.push(src[(y + 14) * w + (x + 12)]);
+            }
+        }
+        let template = cpu_1ch(tv, th, tw);
+
+        let c: CpuTensor<f32> =
+            match cpu.match_template(&image, &template, TemplateMatchMethod::SqDiff) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("  match_template: CPU reports {e} - no reference");
+                    return;
+                }
+            };
+        let gi = image.to_gpu_ctx(g).unwrap();
+        let gt = template.to_gpu_ctx(g).unwrap();
+        // The GPU's output storage type is a free parameter of its signature,
+        // so it has to be pinned rather than inferred.
+        let go: cv_hal::GpuTensor<f32> =
+            match g.match_template(&gi, &gt, TemplateMatchMethod::SqDiff) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("  match_template: GPU reports {e}");
+                    return;
+                }
+            };
+        let back: CpuTensor<f32> = go.to_cpu().unwrap();
+        let cs: &[f32] = c.storage.as_slice().unwrap();
+        let gs: &[f32] = back.storage.as_slice().unwrap();
+        assert_eq!(cs.len(), gs.len(), "match_template output sizes differ");
+        let peak = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let worst = cs
+            .iter()
+            .zip(gs)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        println!("  match_template SqDiff: worst {worst:.4} (peak {peak:.1})");
+        assert!(
+            worst <= tol_scaled(peak, 0.02),
+            "match_template SqDiff diverges: worst {worst} against a peak of {peak}"
+        );
+    }
 }
