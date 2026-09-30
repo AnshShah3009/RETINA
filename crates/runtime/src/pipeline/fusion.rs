@@ -254,24 +254,19 @@ impl KernelFuser {
             optimized.push(node);
         }
 
-        for fused_kernel in fused_iter {
-            let last_fused = optimized.last().and_then(|n| {
-                if let PipelineNode::Kernel { name, .. } = n {
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            });
-
-            if last_fused.as_deref() != Some(fused_kernel.name.as_str()) {
-                optimized.push(PipelineNode::Kernel {
-                    name: fused_kernel.name,
-                    inputs: fused_kernel.inputs,
-                    outputs: fused_kernel.outputs,
-                    params: fused_kernel.combined_params,
-                });
-            }
-        }
+        // Note: there is deliberately no loop here to flush `fused_iter`.
+        //
+        // The main loop emits each fused kernel at the position of its *first*
+        // original node, which is what preserves producer/consumer order. A
+        // trailing flush would append whatever the loop had not yet reached at
+        // the *end* of the node list, so a fused kernel whose originals were
+        // interleaved with a consumer would be emitted after that consumer and
+        // read a buffer nothing had written. There was such a block here; it was
+        // unreachable in practice - a fusion's original nodes are contiguous by
+        // construction, so the main loop always consumes them - which made it
+        // worse rather than better: dead code that is wrong if it ever runs, and
+        // a second place to update when fusion changes. Removing it leaves one
+        // place that emits a fused kernel and therefore one ordering rule.
 
         Ok(optimized)
     }
@@ -795,5 +790,68 @@ mod tests {
         assert_eq!(fused[0].original_nodes, vec![0, 1]);
         assert_eq!(fused[0].inputs, vec![BufferId(0)]);
         assert_eq!(fused[0].outputs, vec![BufferId(2)]);
+    }
+}
+
+/// A fused kernel must appear in the node list at the position of its *first*
+/// original node, never appended at the end.
+///
+/// This is the invariant the removed trailing flush would have broken: a fused
+/// kernel whose originals were interleaved with a consumer would be emitted
+/// after that consumer, and would then read a buffer nothing had written. The
+/// block was unreachable - a fusion's originals are contiguous by construction -
+/// so nothing caught it, and it was a second place to update whenever fusion
+/// changed.
+#[test]
+fn fused_kernels_keep_producer_consumer_order() {
+    use super::*;
+
+    let fuser = KernelFuser::new();
+
+    // conv2d -> threshold is the fusable pair; a separate consumer follows.
+    let nodes = vec![
+        PipelineNode::Kernel {
+            name: "conv2d".into(),
+            inputs: vec![BufferId(0)],
+            outputs: vec![BufferId(1)],
+            params: vec![],
+        },
+        PipelineNode::Kernel {
+            name: "threshold".into(),
+            inputs: vec![BufferId(1)],
+            outputs: vec![BufferId(2)],
+            params: vec![],
+        },
+        PipelineNode::Kernel {
+            name: "relu".into(),
+            inputs: vec![BufferId(2)],
+            outputs: vec![BufferId(3)],
+            params: vec![],
+        },
+    ];
+
+    let optimized = fuser.optimize(nodes).expect("optimize");
+
+    // Whatever fusion did, the order must remain a valid program: every input
+    // buffer must be produced before it is consumed.
+    // BufferId(0) is the graph's input, not something a kernel produces, so it
+    // starts out available.
+    let mut produced: std::collections::HashSet<BufferId> = [BufferId(0)].into_iter().collect();
+    for node in &optimized {
+        let PipelineNode::Kernel {
+            inputs, outputs, ..
+        } = node
+        else {
+            continue;
+        };
+        for i in inputs {
+            assert!(
+                produced.contains(i),
+                "kernel reads buffer {i:?} before anything produces it; order was broken"
+            );
+        }
+        for o in outputs {
+            produced.insert(*o);
+        }
     }
 }
