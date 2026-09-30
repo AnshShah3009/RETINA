@@ -431,6 +431,19 @@ fn every_shader_compiles() {
             "threshold_bf16",
             include_str!("../crates/hal/shaders/threshold_bf16.wgsl"),
         ),
+        // The marching-cubes family, which had never been compiled by anything.
+        (
+            "marching_cubes",
+            include_str!("../crates/hal/shaders/marching_cubes.wgsl"),
+        ),
+        (
+            "marching_cubes_count",
+            include_str!("../crates/hal/shaders/marching_cubes_count.wgsl"),
+        ),
+        (
+            "marching_cubes_emit",
+            include_str!("../crates/hal/shaders/marching_cubes_emit.wgsl"),
+        ),
         ("nms", include_str!("../crates/hal/shaders/nms.wgsl")),
         (
             "tsdf_raycast",
@@ -1349,6 +1362,15 @@ fn shader_storage_element_types_match_their_hosts() {
         // is u8.
         ("matching.wgsl", &[(0, "u32"), (1, "u32")]),
         ("lanczos4.wgsl", &[(0, "f32"), (1, "f32")]),
+        // The marching-cubes family. `Voxel` is `{ tsdf: f32, weight: f32 }` in
+        // Rust and the same in WGSL, and the volume really is interleaved
+        // tsdf+weight per voxel - the CPU side documents it as
+        // `shape.channels = vol_z * 2` - so the struct view is correct rather
+        // than merely unchecked. `Vertex` is `[f32; 4]` twice, matching
+        // `vec4 + vec4`.
+        ("marching_cubes.wgsl", &[(4, "i32")]),
+        ("marching_cubes_count.wgsl", &[(1, "u32"), (3, "u32")]),
+        ("marching_cubes_emit.wgsl", &[(3, "i32"), (4, "u32")]),
         ("bilateral_f16.wgsl", &[(0, "f16")]),
         ("fast_f16.wgsl", &[(0, "f16")]),
         ("threshold_f16.wgsl", &[(0, "f16")]),
