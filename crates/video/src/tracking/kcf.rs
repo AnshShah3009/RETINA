@@ -163,8 +163,41 @@ impl KcfTracker {
             peak_c as f64
         };
 
-        self.bbox.x += dx;
-        self.bbox.y += dy;
+        // Peak-to-sidelobe ratio: is this peak actually distinguishable from the
+        // rest of the response?
+        //
+        // `extract_patch` clamps coordinates into the frame, so a box that drifts
+        // off-image keeps "tracking" against a smeared border column of the same
+        // pixel. The response peak then lands at offset 0 and the box sticks -
+        // confidently, and with no way for a caller to tell. `MosseTracker` has
+        // had a PSR gate for exactly this; KCF had none, despite
+        // `ObjectTracker::update_tracker` documenting that it "returns the
+        // updated bounding box, or `None` if lost".
+        let mean = response.iter().map(|r| r.0).sum::<f64>() / n as f64;
+        let var = response
+            .iter()
+            .map(|r| (r.0 - mean) * (r.0 - mean))
+            .sum::<f64>()
+            / n as f64;
+        let std = var.sqrt();
+        let psr = if std > 1e-12 {
+            (best_val - mean) / std
+        } else {
+            f64::INFINITY
+        };
+        if psr < 5.0 {
+            // A flat response means the model has no opinion. Treat it as lost
+            // rather than committing to an arbitrary peak.
+            return None;
+        }
+
+        // And refuse to move the box off the frame entirely.
+        let (nx, ny) = (self.bbox.x + dx, self.bbox.y + dy);
+        if nx < 0.0 || ny < 0.0 {
+            return None;
+        }
+        self.bbox.x = nx;
+        self.bbox.y = ny;
 
         // --- Training (model update) ---
         let mut new_patch = extract_patch(frame, self.bbox.cx(), self.bbox.cy(), cols, rows);

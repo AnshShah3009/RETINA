@@ -6,7 +6,7 @@
 //!
 //! - Line plots, scatter plots, bar charts, histograms
 //! - Multiple series, subplots
-//! - Export to SVG, HTML (interactive), PNG
+//! - Export to SVG and HTML (interactive)
 //! - 3D visualization for point clouds
 //!
 //! ## Quick Start
