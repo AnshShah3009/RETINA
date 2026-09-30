@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600">
+  <style>
+    .axis { font-family: Arial, sans-serif; font-size: 12px; fill: #333; }
+    .title { font-family: Arial, sans-serif; font-size: 16px; font-weight: bold; fill: #333; }
+    .label { font-family: Arial, sans-serif; font-size: 12px; fill: #666; }
+    .legend { font-family: Arial, sans-serif; font-size: 11px; fill: #333; }
+    .grid { stroke: #e0e0e0; stroke-width: 0.5; }
+  </style>
+  <text x="400" y="33" class="title" text-anchor="middle">Scatter Plot</text>
+  <line x1="60" y1="50" x2="60" y2="550" class="grid"/>
+  <line x1="202" y1="50" x2="202" y2="550" class="grid"/>
+  <line x1="344" y1="50" x2="344" y2="550" class="grid"/>
+  <line x1="486" y1="50" x2="486" y2="550" class="grid"/>
+  <line x1="628" y1="50" x2="628" y2="550" class="grid"/>
+  <line x1="770" y1="50" x2="770" y2="550" class="grid"/>
+  <line x1="60" y1="50" x2="770" y2="50" class="grid"/>
+  <line x1="60" y1="150" x2="770" y2="150" class="grid"/>
+  <line x1="60" y1="250" x2="770" y2="250" class="grid"/>
+  <line x1="60" y1="350" x2="770" y2="350" class="grid"/>
+  <line x1="60" y1="450" x2="770" y2="450" class="grid"/>
+  <line x1="60" y1="550" x2="770" y2="550" class="grid"/>
+  <line x1="60" y1="50" x2="60" y2="550" stroke="black" stroke-width="1"/>
+  <line x1="60" y1="550" x2="770" y2="550" stroke="black" stroke-width="1"/>
+  <circle cx="434.0147143872862" cy="478.3497214168125" r="3" fill="#1f77b4"/>
+  <circle cx="443.7421152493974" cy="474.6336167268354" r="3" fill="#1f77b4"/>
+  <circle cx="500.140971533793" cy="457.9891030432193" r="3" fill="#1f77b4"/>
+  <circle cx="361.42191784244176" cy="489.2100751387102" r="3" fill="#1f77b4"/>
+  <circle cx="137.87248287374254" cy="144.56574262570263" r="3" fill="#1f77b4"/>
+  <circle cx="366.8699358455513" cy="484.67379994383646" r="3" fill="#1f77b4"/>
+  <circle cx="560.8834228989401" cy="412.2650152143054" r="3" fill="#1f77b4"/>
+  <circle cx="628.1645443072051" cy="304.9081262964335" r="3" fill="#1f77b4"/>
+  <circle cx="196.1943306310562" cy="264.6483113607917" r="3" fill="#1f77b4"/>
+  <circle cx="119.16666666666666" cy="91.66666666666663" r="3" fill="#1f77b4"/>
+  <circle cx="678.0376580374433" cy="167.1022779556331" r="3" fill="#1f77b4"/>
+  <circle cx="421.7361583307718" cy="506.52691488582" r="3" fill="#1f77b4"/>
+  <circle cx="352.24522025104164" cy="473.77218046442357" r="3" fill="#1f77b4"/>
+  <circle cx="201.9708612709883" cy="280.52547079601266" r="3" fill="#1f77b4"/>
+  <circle cx="431.8979339002653" cy="508.33333333333337" r="3" fill="#1f77b4"/>
+  <circle cx="248.79484004737196" cy="370.79028860661424" r="3" fill="#1f77b4"/>
+  <circle cx="124.7866466563475" cy="117.13691243571463" r="3" fill="#1f77b4"/>
+  <circle cx="429.617429048974" cy="487.94342862290966" r="3" fill="#1f77b4"/>
+  <circle cx="147.4573320604806" cy="154.71192673640002" r="3" fill="#1f77b4"/>
+  <circle cx="506.1487189518592" cy="476.66982407069366" r="3" fill="#1f77b4"/>
+  <circle cx="626.0821580806455" cy="298.3332867999684" r="3" fill="#1f77b4"/>
+  <circle cx="416.66868798870456" cy="486.51132216241353" r="3" fill="#1f77b4"/>
+  <circle cx="421.6328393323588" cy="474.8659152172286" r="3" fill="#1f77b4"/>
+  <circle cx="152.40356458492573" cy="171.83210055437598" r="3" fill="#1f77b4"/>
+  <circle cx="328.39663883041" cy="456.20164173196565" r="3" fill="#1f77b4"/>
+  <circle cx="386.4854000159235" cy="489.5297028843226" r="3" fill="#1f77b4"/>
+  <circle cx="595.1538315438929" cy="331.40769116985246" r="3" fill="#1f77b4"/>
+  <circle cx="239.6673972281302" cy="369.54801742436825" r="3" fill="#1f77b4"/>
+  <circle cx="358.9019565039592" cy="476.49556368675627" r="3" fill="#1f77b4"/>
+  <circle cx="511.05225630059465" cy="441.20637187337263" r="3" fill="#1f77b4"/>
+  <circle cx="372.3027809657734" cy="490.3580809981814" r="3" fill="#1f77b4"/>
+  <circle cx="651.7692874478578" cy="253.50729668029743" r="3" fill="#1f77b4"/>
+  <circle cx="671.9146096792106" cy="207.58832877948026" r="3" fill="#1f77b4"/>
+  <circle cx="640.228707213658" cy="259.97156971127384" r="3" fill="#1f77b4"/>
+  <circle cx="507.6173789111992" cy="447.2785060530883" r="3" fill="#1f77b4"/>
+  <circle cx="250.03822229603148" cy="361.50034723371436" r="3" fill="#1f77b4"/>
+  <circle cx="464.38392006771863" cy="500.96678610006956" r="3" fill="#1f77b4"/>
+  <circle cx="351.9188710538084" cy="476.89069914793765" r="3" fill="#1f77b4"/>
+  <circle cx="157.359915490422" cy="176.97410193098204" r="3" fill="#1f77b4"/>
+  <circle cx="374.8750138900263" cy="463.727526374713" r="3" fill="#1f77b4"/>
+  <circle cx="710.8333333333333" cy="125.40652489469471" r="3" fill="#1f77b4"/>
+  <circle cx="482.6518820465877" cy="457.2965897779443" r="3" fill="#1f77b4"/>
+  <circle cx="389.5317502639569" cy="484.69486876893967" r="3" fill="#1f77b4"/>
+  <circle cx="134.19662876207659" cy="117.22853283318756" r="3" fill="#1f77b4"/>
+  <circle cx="209.9833192738124" cy="285.41549725671854" r="3" fill="#1f77b4"/>
+  <circle cx="348.5880011417237" cy="477.99056788423434" r="3" fill="#1f77b4"/>
+  <circle cx="412.8697635537053" cy="506.5506284195956" r="3" fill="#1f77b4"/>
+  <circle cx="700.0245566867318" cy="121.48854751075385" r="3" fill="#1f77b4"/>
+  <circle cx="629.3945527196934" cy="274.16424089065504" r="3" fill="#1f77b4"/>
+  <circle cx="445.5825534132819" cy="496.4610372437172" r="3" fill="#1f77b4"/>
+  <text x="400" y="590" class="label" text-anchor="middle">x</text>
+  <text x="15" y="300" class="label" text-anchor="middle" transform="rotate(-90, 15, 300)">y = x² + noise</text>
+  <rect x="670" y="60" width="12" height="12" fill="#1f77b4"/>
+  <text x="688" y="70" class="legend">Data points</text>
+</svg>
