@@ -1358,3 +1358,59 @@ compile produces a loud error and is found in minutes, while a shader that
 compiles and reads the wrong bytes produces a quiet wrong answer and survives
 indefinitely. The only defence is to run both backends on the same input and
 compare.
+
+## Open: `convolve_2d` border modes diverge from the CPU, and it is not where it looks
+
+Found by the parity sweep, and **not fixed**. Recorded here because the
+characterisation is sharp even though the cause is not.
+
+A 37x33 f32 image, a symmetric 5x5 Gaussian, the same input uploaded to both
+backends and verified identical after a round trip:
+
+| border mode | differing pixels | columns affected |
+| --- | ---: | --- |
+| `Constant(0.0)` | 0 / 1221 | - |
+| `Replicate` | 0 / 1221 | - |
+| `Reflect101` | 66 / 1221 | **2** (columns 0-1) |
+| `Reflect` | 136 / 1221 | **37** (every column) |
+| `Wrap` | 136 / 1221 | **37** (every column) |
+
+`Reflect101` is 66 = 2 columns x 33 rows, which is exactly the set of pixels
+whose kernel taps reach outside the frame on a 5-wide kernel. That is the
+behaviour a correct border mode should have, and it is a real divergence of
+magnitude 19.8, so `Reflect101` is *also* wrong - just wrong in a way that looks
+like a border bug.
+
+`Reflect` and `Wrap` affecting every column is the interesting part. A border
+mode cannot change a pixel whose 25 taps are all inside the image, so the
+difference is not localised to the frame. Something about those two mode values
+changes the result across the whole image.
+
+What has been ruled out, by measurement rather than by reading:
+
+- The two border formulas are textually identical. Both were extracted into a
+  standalone program and compared over `n` in 2, 3, 5, 33, 37 for coordinates
+  `-6..n+6`: zero differences.
+- `ConvolveParams` matches the WGSL `Params` field for field, is `#[repr(C)]`,
+  and is uploaded with `bytemuck::bytes_of`; the uniform layout is 24 bytes with
+  no padding shift.
+- `border_mode_to_int` maps Reflect to 2, Reflect101 to 4, Wrap to 3, matching
+  the shader's own comment.
+- The input and kernel round-trip through the GPU unchanged to within 1e-4.
+- The pipeline cache is keyed on shader source and entry point, and the border
+  mode is a uniform rather than a compile-time constant, so a stale pipeline
+  cannot be the cause. The params buffer is created per call, not pooled.
+- The GPU is demonstrably *distinguishing* the modes: the three non-clamping
+  modes give three different results, and none equals `Replicate`, so the
+  branches are being taken.
+
+An independent Python model of the whole convolution predicts the CPU's value at
+(0,0) to the last digit - 62.382217 - so the CPU is right. The GPU's 66.598694
+matches `Replicate` (61.69), `Wrap` (66.06) and `Reflect101` (65.79) equally
+little, which is the strongest single piece of evidence: the GPU is not applying
+*any* of the documented mappings to that pixel.
+
+The test reports the divergence rather than asserting it, so it stays green and
+the numbers stay visible. Turning it into a failure would mean freezing a
+characterisation that has not been explained, which would make the next person
+trust the test instead of the investigation.
