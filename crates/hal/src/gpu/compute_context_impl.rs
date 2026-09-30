@@ -1273,9 +1273,21 @@ impl ComputeContext for GpuContext {
                 max_iters,
             )?;
 
-            // Safety: T == f32 verified by TypeId check above. In debug builds, we assert this.
+            // Safety: the branch is only entered when every tensor downcast to
+            // `GpuStorage<f32>`, which is what establishes `T == f32` - the
+            // `debug_assert` above is documentation, not the proof. The cast is
+            // therefore a transmute only in the sense that the compiler cannot
+            // see it, so the element conversion is explicit and total: it maps
+            // f32 to T and cannot be misapplied to a different width, because
+            // the source type is named here rather than inferred.
             debug_assert_eq!(TypeId::of::<T>(), TypeId::of::<f32>());
-            let results_t: Vec<[T; 2]> = unsafe { std::mem::transmute(results) };
+            let results_t: Vec<[T; 2]> = results
+                .into_iter()
+                .map(|p| {
+                    let [x, y] = p;
+                    [T::from_f32(x), T::from_f32(y)]
+                })
+                .collect();
             Ok(results_t)
         } else {
             Err(crate::Error::NotSupported(
