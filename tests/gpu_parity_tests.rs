@@ -1342,6 +1342,18 @@ fn shader_storage_element_types_match_their_hosts() {
         ("sobel_f32.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("threshold_f32.wgsl", &[(0, "f32")]),
         ("vector_ops.wgsl", &[(0, "f32"), (1, "f32")]),
+        // u8 descriptor bytes packed four per word - correct here, because the
+        // host takes `Tensor<u8, GpuStorage<u8>>` and descriptor matching is
+        // inherently byte-oriented. This is the same shape as the Canny bug and
+        // is deliberately not one: the host element type is the check, and it
+        // is u8.
+        ("matching.wgsl", &[(0, "u32"), (1, "u32")]),
+        ("lanczos4.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("bilateral_f16.wgsl", &[(0, "f16")]),
+        ("fast_f16.wgsl", &[(0, "f16")]),
+        ("threshold_f16.wgsl", &[(0, "f16")]),
+        ("bilateral_bf16.wgsl", &[(0, "u32"), (1, "u32")]),
+        ("resize_bf16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("stereo_match.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("subtract.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("warp.wgsl", &[(0, "f32"), (1, "f32")]),
