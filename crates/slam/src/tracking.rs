@@ -65,15 +65,15 @@ impl Tracker {
         let mut tracked_indices = Vec::new();
 
         if !map.points.is_empty() {
-            let map_descs = map.get_descriptors();
-
+            // Cached on the map. This used to rebuild the whole map's descriptor
+            // tensor on every frame - a `flat_map` clone of every descriptor in
+            // the map, O(total map points) per frame - and the map only ever
+            // grows, so the cost was paid in full on every subsequent frame.
+            let n_points = map.points.len();
+            let map_desc_bytes = map.descriptor_bytes();
             let map_desc_tensor: Tensor<u8, CpuStorage<u8>> = Tensor::from_vec(
-                map_descs
-                    .descriptors
-                    .iter()
-                    .flat_map(|d| d.data.clone())
-                    .collect(),
-                cv_core::TensorShape::new(1, map_descs.len(), 32),
+                (*map_desc_bytes).clone(),
+                cv_core::TensorShape::new(1, n_points, 32),
             )
             .map_err(|e| e.to_string())?;
 
