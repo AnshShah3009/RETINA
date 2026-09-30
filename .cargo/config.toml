@@ -1,0 +1,52 @@
+# Keep builds and tests from exhausting the machine's memory.
+#
+# The box this repo is developed on has 30 GiB of RAM and 24 cores. Cargo
+# defaults to one rustc per core, each of which can reach a couple of GiB on the
+# larger crates, and nextest runs test binaries with several in flight at once.
+# That combination is enough to drive the machine into swap - which is what
+# happened once already, when a job that had already finished left a build
+# resident and a second one started alongside it.
+#
+# These are caps, not a suggestion: the jobs run with less parallelism, not the
+# same work more slowly, and a single job that genuinely needs more will fail
+# loudly rather than take the machine down with it.
+
+[build]
+# A handful of concurrent rustc processes, each capped. Eight jobs at 2 GiB is
+# 16 GiB of headroom for everything else on the machine.
+jobs = 8
+
+# Cap the debug info and codegen units so each rustc stays small. Debug info is
+# the dominant term for this workspace; the crates are libraries, not binaries
+# that need full debuginfo to be usable in a debugger.
+debug = 0
+incremental = true
+codegen-units = 16
+
+[profile.dev]
+# Test and example builds land here. `debug = 0` above already removes the
+# debuginfo; opt-level 1 keeps the pipeline benchmarks meaningful without the
+# cost of a full release build for every edit.
+opt-level = 1
+debug = 0
+incremental = true
+
+[profile.test]
+opt-level = 1
+debug = 0
+incremental = true
+
+[profile.dev.package."*"]
+# Dependencies are not edited by hand, so debug info for them is pure cost.
+opt-level = 2
+debug = 0
+incremental = true
+
+[env]
+# Rayon sizes its global pool from the core count by default, which on a
+# 24-core box means every parallel stage - feature extraction, matching, bundle
+# adjustment - runs 24-wide and peaks hard. Eight is enough to keep a 640x480
+# frame moving while leaving headroom.
+RUSTCV_CPU_THREADS = "8"
+# Same for the framework's own cap, read by cv-core.
+RAYON_NUM_THREADS = "8"
