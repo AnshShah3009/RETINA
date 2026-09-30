@@ -1452,3 +1452,38 @@ be falsified before the real shape emerged.
 
 The test still reports rather than asserts, the diagnostic probes are deleted, and
 this is left as a known defect with its shape documented.
+
+## `research/cubecl`: in sync, and functionally empty
+
+**Git parity: yes.** The branch is 0 commits behind `master` and carries 62 of its
+own. It builds and the whole workspace test suite passes on it.
+
+**Functional parity: no, because its own work does not function.** Three modules
+totalling 1,973 lines are committed and referenced by nothing:
+
+| file | lines | referenced by |
+| --- | ---: | --- |
+| `crates/hal/src/gpu_kernels/cubecl_backend.rs` | 526 | nothing |
+| `crates/hal/src/gpu_kernels/cubecl_advanced.rs` | 793 | nothing |
+| `crates/hal/src/gpu_kernels/cubecl_optimized.rs` | 654 | nothing |
+
+They are not declared in `gpu_kernels/mod.rs`, so they are not compiled, not
+tested, and not reachable from any API. Declaring them - three lines - does not
+compile: `cubecl_optimized.rs:565` has an unbalanced delimiter
+(`error: unexpected closing delimiter`), so these files have never been through a
+compiler at all. They were merged as text.
+
+`benches/cubecl_perf.rs`, added on the same branch, is a CPU-baseline
+criterion suite that does not reference the modules either, and
+`docs/GPU_BENCHMARK_RESULTS.md` reports matmul and voxel-downsampling speedups
+that no benchmark on the branch can produce. Those figures were measured on
+different hardware (the document says an Intel Meteor Lake iGPU; this machine has
+a Radeon 890M and an RTX 5070 Ti) and nothing in the tree reproduces them.
+
+So "the cubecl branch is in parity with master" is true of the commit graph and
+false of behaviour: the branch inherits everything master does, and adds code
+that does not run. The honest options are to make the three modules compile, test
+and benchmark them - in which case they are a real contribution - or to drop them
+and leave the branch as a tracking branch for CubeCL work. Carrying 2,000 lines
+of non-compiling code in a branch whose stated purpose is functional parity makes
+the branch harder to reason about than the empty alternative.

@@ -644,6 +644,8 @@ mod sweep {
             .fold(0.0f32, f32::max);
         let scale = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         println!("  sobel: worst abs {worst:.4} (peak {scale:.1})");
+        println!("  sobel cpu[0..8]={:?}", &cxs[..8.min(cxs.len())]);
+        println!("  sobel gpu[0..8]={:?}", &gxs[..8.min(gxs.len())]);
         assert!(
             worst <= tol_scaled(scale, 0.05),
             "sobel ksize=3 diverges: worst {worst} against a peak of {scale}"
