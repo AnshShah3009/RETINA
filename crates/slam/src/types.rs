@@ -52,6 +52,18 @@ impl KeyFrame {
 pub struct WorldMap {
     pub points: Vec<Arc<RwLock<MapPoint>>>,
     pub keyframes: Vec<Arc<RwLock<KeyFrame>>>,
+    /// Flattened descriptors for every map point, in `points` order.
+    ///
+    /// Cached because the tracker needs a contiguous descriptor tensor on every
+    /// frame and it was rebuilding one from the whole map each time - O(total map
+    /// points) per frame, with a full `flat_map` clone of every descriptor. The
+    /// map only ever grows by appending, so the cache is invalidated when the
+    /// length changes, which is the only way `points` can change through this
+    /// API.
+    pub(crate) descriptor_cache: Option<std::sync::Arc<Vec<u8>>>,
+    /// Number of points the cache was built from, so a stale cache is detectable
+    /// even after a push.
+    pub(crate) descriptor_cache_len: usize,
 }
 
 impl WorldMap {
