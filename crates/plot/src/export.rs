@@ -274,6 +274,24 @@ pub fn to_html(figure: &Figure) -> String {
 
 /// Save figure to SVG file
 pub fn save_svg(figure: &Figure, path: &str) -> Result<(), crate::PlotError> {
+    // A figure with no plottable points leaves the bounds at their sentinels, and
+    // `f64::MIN - f64::MAX` overflows to a range the axis code then treats as
+    // 1.0 - so the SVG comes out valid, with an empty plot area, and no error.
+    // `PlotError::InvalidData` exists and was never constructed; this is what it
+    // was added for.
+    //
+    // The check lives here rather than in `to_svg` because that returns a plain
+    // `String` and changing it would break every caller for a case a caller can
+    // reasonably produce.
+    let has_points = figure
+        .subplots
+        .iter()
+        .any(|s| s.series.iter().any(|series| !series.x.is_empty()));
+    if !has_points {
+        return Err(crate::PlotError::InvalidData(
+            "figure contains no plottable points".to_string(),
+        ));
+    }
     let svg = to_svg(figure);
     let mut file = File::create(path)?;
     file.write_all(svg.as_bytes())?;

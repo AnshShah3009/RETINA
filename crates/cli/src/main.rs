@@ -383,6 +383,13 @@ fn command_retrieval(argv: &[String]) -> Result<(), String> {
             ground_truth.len()
         ));
     }
+    // An empty prediction file satisfies the length check above - 0 == 0 - and
+    // then every metric divides by a zero query count. The `trajectory`
+    // subcommand already guards its inputs this way ("contains no poses", "no
+    // TUM poses could be associated"); this brings `retrieval` in line.
+    if predictions.is_empty() || predictions.iter().all(|q| q.is_empty()) {
+        return Err("predictions file contains no ranked ids".to_string());
+    }
 
     let k = opts.k;
     let recall = cv_eval::recall_at_k(&predictions, &ground_truth, k);
