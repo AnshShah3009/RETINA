@@ -106,8 +106,46 @@ smoke!(
     imgproc_demo,
     features_demo,
     orb_benchmark,
-    demo,
 );
+
+/// The viewer demo opens a window and runs until it is closed, so it can never
+/// be "finish within 120s". It is spawned, given a moment to fail, and then
+/// killed - asserting only that it did not die on startup.
+///
+/// This is the third time this example has broken the smoke suite, and the
+/// first two were the viewer's own doing: a launcher that printed to stdout, and
+/// then one that rendered. A GUI example and an "every example exits" harness are
+/// incompatible, so the harness learned about them rather than the examples
+/// pretending to be batch jobs.
+#[test]
+fn viewer_demo_opens_and_survives_startup() {
+    let Some(path) = example_path("demo") else {
+        eprintln!("skipping demo: not built");
+        return;
+    };
+    let mut child = Command::new(&path)
+        .spawn()
+        .expect("demo should be spawnable");
+
+    // Long enough to get past pipeline creation, which is where the renderer
+    // reports a missing device or a shader that will not compile.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    match child.try_wait() {
+        // Still running is the success case: the window is up.
+        Ok(None) => {
+            let _ = child.kill();
+        }
+        Ok(Some(status)) => panic!(
+            "demo exited {status} instead of staying open - \
+             it is a GUI app and should keep running"
+        ),
+        Err(e) => {
+            let _ = child.kill();
+            panic!("demo: wait failed: {e}");
+        }
+    }
+}
 
 /// `orbdiag` is a long-running diagnostic that sweeps feature counts and runs
 /// the mapper on each, so it is exercised by one size rather than the whole
@@ -119,14 +157,70 @@ fn orbdiag_starts_and_reports() {
         eprintln!("skipping orbdiag: not built");
         return;
     };
-    let output = Command::new(&path)
-        .output()
+    // `.output()` waits for the process to exit, and orbdiag sweeps feature
+    // counts over the full dataset - it runs for many minutes and never
+    // returns. The test therefore blocked on it and could only ever pass if the
+    // example happened to finish first; on CI it did not, and the assertion
+    // fired on an empty stdout rather than on anything real.
+    //
+    // The pipe is drained on a background thread while the main thread polls
+    // for the report, with a deadline. Joining the reader directly is not
+    // enough: it returns as soon as the child closes the pipe, which on CI
+    // happened before any report was written.
+    let mut child = Command::new(&path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .expect("orbdiag should be spawnable");
-    // It is expected to run past any reasonable timeout, so this asserts only
-    // that it produced its opening diagnostic line rather than panicking.
-    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let stdout_pipe = child.stdout.take().expect("piped stdout");
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = std::sync::Arc::clone(&collected);
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut stdout_pipe = stdout_pipe;
+        let mut bytes = [0u8; 4096];
+        loop {
+            match stdout_pipe.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
+                    sink.push_str(&String::from_utf8_lossy(&bytes[..n]));
+                }
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let found = loop {
+        if collected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains("verified_pairs")
+        {
+            break true;
+        }
+        if std::time::Instant::now() > deadline {
+            break false;
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            // It exited without reporting; give the reader a moment to drain
+            // whatever it wrote on the way out.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            break collected
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains("verified_pairs");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let stdout = collected.lock().unwrap_or_else(|e| e.into_inner()).clone();
     assert!(
-        stdout.contains("verified_pairs"),
+        found,
         "orbdiag did not reach its first report; it may have failed early.\n{}",
         stdout.lines().take(5).collect::<Vec<_>>().join("\n")
     );

@@ -5,8 +5,12 @@ edition = "2024"
 
 [dependencies]
 cv-core = { workspace = true }
+nalgebra = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true }
+wgpu = { workspace = true }
+egui-wgpu = "0.33.3"
+epaint = "0.33.3"
 bytemuck = { workspace = true }
 
 [features]

@@ -37,10 +37,19 @@ pub fn read_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
     if is_ascii {
         // ASCII format
         // Prepend the header bytes already consumed, then read the rest
-        let header_prefix = String::from_utf8_lossy(&header[..bytes_read]).into_owned();
+        //
+        // The header must be decoded as UTF-8 *strictly*. It used to go through
+        // `from_utf8_lossy`, which silently replaced every invalid byte with
+        // U+FFFD and then parsed the result as text - so a file that is not
+        // valid UTF-8 at all was accepted and its mangled bytes were discarded
+        // as if they were a comment. The remaining bytes are read the same way
+        // (`read_to_string` rejects invalid UTF-8), so this only closes the gap
+        // the 80-byte header read had opened.
+        let header_prefix = std::str::from_utf8(&header[..bytes_read])
+            .map_err(|e| Error::ParseError(format!("STL ASCII header is not valid UTF-8: {e}")))?;
         let mut rest = String::new();
         reader.read_to_string(&mut rest)?;
-        let content = header_prefix + &rest;
+        let content = header_prefix.to_owned() + &rest;
         parse_ascii_stl(&content)
     } else {
         // Binary format
@@ -51,6 +60,9 @@ pub fn read_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
 fn parse_ascii_stl(content: &str) -> Result<TriangleMesh> {
     let mut vertices: Vec<Point3<f32>> = Vec::new();
     let mut faces: Vec<[usize; 3]> = Vec::new();
+    let mut saw_facet = false;
+    let mut loop_open = false;
+    let mut loop_vertices: Vec<Point3<f32>> = Vec::new();
 
     let lines: Vec<&str> = content.lines().collect();
     let mut i = 0;
@@ -58,39 +70,130 @@ fn parse_ascii_stl(content: &str) -> Result<TriangleMesh> {
     while i < lines.len() {
         let line = lines[i].trim();
 
-        if line.starts_with("facet normal") || line.starts_with("outer loop") {
+        if line.starts_with("solid ") || line == "solid" {
             i += 1;
             continue;
         }
 
-        if line.starts_with("vertex ") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                let x: f32 = parts[1]
-                    .parse()
-                    .map_err(|_| Error::ParseError(format!("Invalid x: {}", parts[1])))?;
-                let y: f32 = parts[2]
-                    .parse()
-                    .map_err(|_| Error::ParseError(format!("Invalid y: {}", parts[2])))?;
-                let z: f32 = parts[3]
-                    .parse()
-                    .map_err(|_| Error::ParseError(format!("Invalid z: {}", parts[3])))?;
-                vertices.push(Point3::new(x, y, z));
+        if line.starts_with("facet normal") {
+            saw_facet = true;
+            i += 1;
+            continue;
+        }
+
+        if line.starts_with("outer loop") {
+            if loop_open {
+                return Err(Error::ParseError(
+                    "STL ASCII: 'outer loop' inside an open loop".to_string(),
+                ));
             }
+            loop_open = true;
+            loop_vertices.clear();
+            i += 1;
+            continue;
+        }
+
+        if line.starts_with("vertex") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            // A `vertex` line must carry exactly three coordinates. The old
+            // `parts.len() >= 4` guard dropped a short line *silently*, which
+            // did not lose the vertex - it shifted every later vertex down by
+            // one, so the following `endloop` closed a triangle over three
+            // unrelated vertices and the mesh was quietly wrong.
+            if parts.len() < 4 {
+                return Err(Error::ParseError(format!(
+                    "STL ASCII: vertex line needs 3 coordinates, got {}: {line:?}",
+                    parts.len().saturating_sub(1)
+                )));
+            }
+            let x = parse_stl_coordinate(parts[1], line)?;
+            let y = parse_stl_coordinate(parts[2], line)?;
+            let z = parse_stl_coordinate(parts[3], line)?;
+            let point = Point3::new(x, y, z);
+            loop_vertices.push(point);
+            vertices.push(point);
+            i += 1;
+            continue;
         }
 
         if line.starts_with("endloop") {
-            // End of a triangle
-            if vertices.len() >= 3 {
-                let n = vertices.len();
-                faces.push([n - 3, n - 2, n - 1]);
+            if !loop_open {
+                return Err(Error::ParseError(
+                    "STL ASCII: 'endloop' without an 'outer loop'".to_string(),
+                ));
             }
+            // A triangle is exactly three vertices. Any other count means the
+            // facet was truncated or malformed, and emitting a face anyway (as
+            // the old `vertices.len() >= 3` over the whole file did) paired
+            // whatever three vertices happened to be lying around.
+            if loop_vertices.len() != 3 {
+                return Err(Error::ParseError(format!(
+                    "STL ASCII: a facet must have exactly 3 vertices, got {}",
+                    loop_vertices.len()
+                )));
+            }
+            let n = vertices.len();
+            faces.push([n - 3, n - 2, n - 1]);
+            loop_open = false;
+            loop_vertices.clear();
+            i += 1;
+            continue;
+        }
+
+        if line.starts_with("endfacet") {
+            if loop_open {
+                return Err(Error::ParseError(
+                    "STL ASCII: 'endfacet' inside an open loop".to_string(),
+                ));
+            }
+            i += 1;
+            continue;
+        }
+
+        if line.starts_with("endsolid") {
+            break;
         }
 
         i += 1;
     }
 
+    // A file that stops in the middle of a facet - no `endloop`, no `endfacet`,
+    // no `endsolid` - used to return `Ok` with the three vertices it had read
+    // and *no* faces, so a caller saw an empty mesh rather than a failure. An
+    // unfinished loop is the clearest signal of truncation, so it is reported
+    // first; an `endsolid` in the middle of a facet is reported after it.
+    if loop_open {
+        return Err(Error::ParseError(
+            "STL ASCII: unexpected EOF inside a loop (no 'endloop')".to_string(),
+        ));
+    }
+    if saw_facet && faces.len() * 3 != vertices.len() {
+        return Err(Error::ParseError(format!(
+            "STL ASCII: unexpected EOF: {} vertices for {} closed facets",
+            vertices.len(),
+            faces.len()
+        )));
+    }
+
     Ok(TriangleMesh::with_vertices_and_faces(vertices, faces))
+}
+
+/// Parse one STL coordinate, rejecting non-finite values.
+///
+/// `f32::from_str` accepts "NaN", "inf" and "infinity" - valid IEEE-754
+/// spellings, not syntax errors - so a single malformed coordinate used to
+/// produce a vertex at infinity, which poisons every bound, normal and
+/// distance computed from the mesh instead of being reported here.
+fn parse_stl_coordinate(token: &str, line: &str) -> Result<f32> {
+    let value: f32 = token
+        .parse()
+        .map_err(|_| Error::ParseError(format!("Invalid coordinate: {token} in {line:?}")))?;
+    if !value.is_finite() {
+        return Err(Error::ParseError(format!(
+            "Non-finite coordinate: {token} in {line:?}"
+        )));
+    }
+    Ok(value)
 }
 
 fn parse_binary_stl<R: BufRead>(_header: &[u8; 80], mut reader: R) -> Result<TriangleMesh> {
@@ -122,6 +225,18 @@ fn parse_binary_stl<R: BufRead>(_header: &[u8; 80], mut reader: R) -> Result<Tri
 
             float_bytes.copy_from_slice(&triangle_data[offset + 8..offset + 12]);
             let z = f32::from_le_bytes(float_bytes);
+
+            // The binary path decoded the floats with no validation at all, so
+            // the NaN and infinity *bit patterns* a malformed (or hostile) file
+            // carries went straight into the mesh. A vertex at infinity is not a
+            // vertex: it poisons every normal, bound and distance derived from
+            // the mesh instead of being reported where it occurred.
+            if !(x.is_finite() && y.is_finite() && z.is_finite()) {
+                return Err(Error::ParseError(format!(
+                    "STL binary: non-finite vertex {v} of triangle {}: ({x}, {y}, {z})",
+                    faces.len()
+                )));
+            }
 
             vertices.push(Point3::new(x, y, z));
         }

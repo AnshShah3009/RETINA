@@ -171,12 +171,30 @@ fn clamp_point_count(count: usize) -> usize {
     count.min(MAX_REASONABLE_PCD_POINTS)
 }
 
+/// Reject a non-finite coordinate decoded from a PCD record.
+fn check_finite(x: f32, y: f32, z: f32, point_index: usize) -> Result<()> {
+    if x.is_finite() && y.is_finite() && z.is_finite() {
+        return Ok(());
+    }
+    Err(Error::ParseError(format!(
+        "PCD: non-finite coordinate for point {point_index}: ({x}, {y}, {z})"
+    )))
+}
+
 fn parse_pcd_ascii<I>(lines: I, count: usize, fields: &[String]) -> Result<PointCloud>
 where
     I: Iterator<Item = std::io::Result<String>>,
 {
-    let reserve = clamp_point_count(count);
-    let mut points = Vec::with_capacity(reserve);
+    // `POINTS` is a header line, so it is worth exactly as much as the rest of
+    // the header, and the body may hold no points at all. Reserving from it up
+    // front meant `POINTS 40000000000` - twenty-six characters - committed
+    // 2.4 GB before the first line of the body was looked at, and the
+    // reservation was then thrown away because the body was empty. The vectors
+    // are left to grow from what the body actually contains: for a well-formed
+    // file that converges on the same capacity, and for a hostile header it
+    // costs nothing. `count` still bounds how many rows are read, so a lying
+    // header cannot make the reader spin either.
+    let mut points = Vec::new();
     let mut normals: Option<Vec<Vector3<f32>>> = None;
     let mut colors: Option<Vec<Point3<f32>>> = None;
 
@@ -190,10 +208,10 @@ where
             && fields.contains(&"b".to_string()));
 
     if has_normals {
-        normals = Some(Vec::with_capacity(reserve));
+        normals = Some(Vec::new());
     }
     if has_colors {
-        colors = Some(Vec::with_capacity(reserve));
+        colors = Some(Vec::new());
     }
 
     // Get field indices
@@ -218,10 +236,20 @@ where
             continue;
         }
 
+        // `s.parse().unwrap_or(0.0)` turned `hello world there` into the point
+        // (0, 0, 0): a malformed row became *plausible data*, which is the worst
+        // possible outcome - a caller cannot tell it from a real scan. A column
+        // that does not parse is an error.
         let values: Vec<f32> = line
             .split_whitespace()
-            .map(|s| s.parse().unwrap_or(0.0))
-            .collect();
+            .map(|s| {
+                s.parse::<f32>().map_err(|_| {
+                    Error::ParseError(format!(
+                        "PCD ascii: cannot parse {s:?} as a number: {line:?}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         if values.len() < 3 {
             continue;
@@ -231,6 +259,10 @@ where
         let x = values.get(x_idx).copied().unwrap_or(0.0);
         let y = values.get(y_idx).copied().unwrap_or(0.0);
         let z = values.get(z_idx).copied().unwrap_or(0.0);
+        // `f32::from_str` accepts "NaN", "inf", "infinity" and "1e40" (which
+        // overflows to infinity), so a single bad coordinate used to reach the
+        // cloud as a point at infinity and poison every bound computed from it.
+        check_finite(x, y, z, points.len())?;
         points.push(Point3::new(x, y, z));
 
         // Read normals
@@ -386,6 +418,13 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
             &header.types,
             z_field.unwrap_or(2),
         );
+        // A PCD body is raw bytes, so a NaN or infinity is not a parse error -
+        // `read_field_as_f32` decodes the bit pattern and hands back a
+        // perfectly ordinary `f32`. Nothing downstream can tell it apart from
+        // real data once it is inside a `PointCloud`, and every bound,
+        // centroid and nearest-neighbour search computed from it is then
+        // garbage. Report it where the value was decoded.
+        check_finite(x, y, z, i)?;
         points.push(Point3::new(x, y, z));
 
         // Read normals
@@ -470,6 +509,24 @@ fn parse_pcd_binary_compressed<R: Read>(mut reader: R, header: &PcdHeader) -> Re
     })?;
     let compressed_size = u32::from_le_bytes(size_buf[0..4].try_into().unwrap()) as usize;
     let uncompressed_size = u32::from_le_bytes(size_buf[4..8].try_into().unwrap()) as usize;
+
+    // `compressed_size` is a 4-byte field the file controls, and it sized the
+    // buffer directly, so `0xFFFFFFFF` - eight bytes of header - asked for a
+    // 4 GiB allocation before the read that would have failed on the very next
+    // byte. The plain-binary path's 8 GiB cap never covered this buffer. LZF
+    // cannot do better than ~1:1 on incompressible input, so the decompressed
+    // payload is the ceiling on what a well-formed file can legitimately carry,
+    // and anything much above it is a header lying about the payload.
+    const MAX_PCD_COMPRESSED_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8 GiB
+    if compressed_size > MAX_PCD_COMPRESSED_BYTES
+        || uncompressed_size > MAX_PCD_COMPRESSED_BYTES
+        || compressed_size > uncompressed_size
+    {
+        return Err(Error::ParseError(format!(
+            "PCD binary_compressed: refusing to read {compressed_size} compressed bytes \
+             (uncompressed_size = {uncompressed_size})"
+        )));
+    }
 
     // Read the compressed data
     let mut compressed = vec![0u8; compressed_size];

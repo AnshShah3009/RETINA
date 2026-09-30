@@ -1469,9 +1469,31 @@ totalling 1,973 lines are committed and referenced by nothing:
 
 They are not declared in `gpu_kernels/mod.rs`, so they are not compiled, not
 tested, and not reachable from any API. Declaring them - three lines - does not
-compile: `cubecl_optimized.rs:565` has an unbalanced delimiter
-(`error: unexpected closing delimiter`), so these files have never been through a
-compiler at all. They were merged as text.
+compile, and fixing that reveals how far from a build they are.
+
+Two corrections to earlier notes in this document, both found by trying:
+
+**The `compute_context_impl.rs` files are not dead.** `hal/src/gpu/mod.rs:157`
+and `hal/src/cpu/mod.rs:176` pull theirs in with `include!`, not `mod`, because
+each is a bare `impl` block relying on the names its parent imports. A check that
+looks only for `mod` declarations reports 2,643 and 4,925 lines as unreferenced
+that are in fact compiled and live.
+
+**`cargo build -p cv-hal --features cubecl` succeeds, and that is the problem.**
+The feature is declared and the `cubecl` / `cubecl-wgpu` dependencies resolve,
+but the three kernel modules are not under it either, so enabling it compiles
+strictly less than it appears to. Declaring them under
+`#[cfg(feature = "cubecl")]` gives, after fixing one unbalanced delimiter at
+`cubecl_optimized.rs:565`, **159 errors** - 28 missing `CubeContext`, 22 invalid
+`#[const]` parameter attributes, 20 and 16 missing `global_idx`, 19 `Return`
+uses CubeCL 0.9 no longer supports, 10 missing `ExecutionDims`, 8 each missing
+`half` and `WgpuDevice`.
+
+That is API drift against a CubeCL release, not a typo. These files were written
+for an older CubeCL and have never been compiled since; porting 1,973 lines to
+CubeCL 0.9 is a project, not a fix. It is recorded here rather than attempted,
+because the alternative - carrying code that cannot build on a branch whose
+stated purpose is functional parity - is what this section already objects to.
 
 `benches/cubecl_perf.rs`, added on the same branch, is a CPU-baseline
 criterion suite that does not reference the modules either, and

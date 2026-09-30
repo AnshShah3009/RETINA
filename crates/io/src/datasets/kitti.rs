@@ -76,6 +76,23 @@ pub fn read_poses<P: AsRef<Path>>(path: P) -> Result<Vec<Pose>> {
         //   m4  m5  m6  m7   (ty)
         //   m8  m9  m10 m11  (tz)
         let rotation = Matrix3::new(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
+
+        // A pose's rotation must be a rotation. A singular matrix - an all-zero
+        // row, a truncated file, a header read at the wrong offset - has no
+        // inverse and cannot be decomposed into a rotation, but every downstream
+        // consumer will happily treat it as one and produce a trajectory that is
+        // wrong with no error anywhere. The determinant is the cheap check that
+        // catches the whole class.
+        let det = rotation.determinant();
+        if !det.is_finite() || det.abs() < 1e-12 {
+            return Err(Error::ParseError(format!(
+                "{}: line {}: the 3x3 block is singular (determinant {det}), \
+                 so it is not a rotation",
+                path.display(),
+                line_no
+            )));
+        }
+
         let translation = Vector3::new(m[3], m[7], m[11]);
         poses.push(Pose::new(rotation, translation));
     }
