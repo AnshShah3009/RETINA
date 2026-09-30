@@ -398,6 +398,14 @@ fn every_shader_compiles() {
         ),
         ("canny", include_str!("../crates/hal/shaders/canny.wgsl")),
         ("warp", include_str!("../crates/hal/shaders/warp.wgsl")),
+        // The bf16 family. The `*_f16` siblings are deliberately absent: they
+        // are behind cv-hal's `half-precision` feature, which nothing enables,
+        // and they cannot compile on wgpu 28 anyway - its ShaderModuleDescriptor
+        // has no field for naga capabilities, so `array<f16>` is rejected with
+        // "Using `f16` values requires the naga::valid::Capabilities::FLOAT16
+        // flag". Asserting them here would report a failure for code that is
+        // unreachable and gated, rather than a real one.
+        //
         // The bf16 family. Three of these had no bfloat16-to-f32 conversion and
         // used the raw u32 bit pattern as a value, which is the same defect
         // class as the Canny/match_template/Hough packed-u8 bugs; the
