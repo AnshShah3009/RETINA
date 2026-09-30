@@ -1279,3 +1279,46 @@ rows and `continue`s for columns, and the destination is zero-initialised, so a
 `half_block`-wide band reads as "matched at infinity". Correct as a "no match"
 signal, but a caller that treats 0 as a valid disparity sees a false border band.
 The GPU path was not compared against it.
+
+## Unsafe audit, second pass: what remains and why it is sound
+
+After the earlier soundness fixes, `unsafe` in this repository is 13 blocks in
+`cv-hal` and 13 in `cv-distributed`; every other crate carries
+`#![forbid(unsafe_code)]`. All 26 were re-read individually.
+
+**`cv-hal` — all 13 are `bytemuck` impls or casts behind a real runtime guard.**
+
+- Nine are `unsafe impl Pod`/`Zeroable` over `#[repr(C)]` parameter structs
+  (`Mog2Params`, `ThresholdParams`, `BilateralParams`, `TransformParams`, and
+  the threshold marker). Each has a `DataType` check before the buffer is bound,
+  and the f32-only ones are now concrete impls rather than blanket ones.
+- Four are f32 reinterpretations. Three keep a `TypeId` comparison *and* a
+  release-mode `if` that returns `NotSupported`, so the compiler is not the only
+  thing standing between the cast and a wrong element type.
+- The one that was genuinely fragile - `optical_flow_lk` transmuting a whole
+  `Vec<[f32; 2]>` into `Vec<[T; 2]>` on the strength of a `debug_assert` that
+  vanishes in release - is now an explicit per-element conversion. One fewer
+  `unsafe`, and the precondition is no longer a comment.
+
+**`cv-distributed` — all 13 are mmap, `flock`, futex and `kill` wrappers.**
+
+The shared-memory layout is the one place where an error would be a silent
+out-of-bounds read in another process, so it was checked arithmetically rather
+than by reading:
+
+| check | value |
+| --- | --- |
+| device region ends at | 2,112 bytes |
+| slot region ends at | 34,880 bytes |
+| `SHM_TOTAL_SIZE` | 40,960 bytes |
+
+Every boundary fits with roughly 6 KB to spare, `idx` is bounded against
+`MAX_SLOTS`/`MAX_DEVICES` *before* the multiply, so the offsets cannot overflow,
+and the base is page-aligned by `mmap` while every region offset and stride is
+asserted 64-aligned at compile time. The `debug_assert`s in the `*_ptr` helpers
+are therefore documentation of an already-enforced invariant rather than the
+enforcement itself.
+
+No unsound `unsafe` remains. The count is 26, down from 35 before the earlier
+pass, and every one of them is either a `bytemuck` impl over a `#[repr(C)]` type
+or a syscall wrapper whose preconditions are checked before the call.
