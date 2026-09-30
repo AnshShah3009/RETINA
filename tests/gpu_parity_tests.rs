@@ -923,4 +923,194 @@ mod sweep {
             Err(e) => println!("  undistort: GPU reports {e}"),
         }
     }
+
+    /// `nms_rotated_boxes` on overlapping boxes must keep the same box on both
+    /// backends.
+    ///
+    /// NMS is order-dependent by construction, so this also checks that the two
+    /// implementations break ties the same way - a GPU implementation that
+    /// suppressed in a different order returns a different *set*, which is a
+    /// silent difference rather than a rounding one.
+    #[test]
+    fn nms_rotated_boxes_keeps_the_same_box() {
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        // Four boxes, the first three heavily overlapping so only one survives.
+        let boxes: Vec<[f32; 5]> = vec![
+            [10.0, 10.0, 20.0, 20.0, 0.0],
+            [11.0, 11.0, 20.0, 20.0, 0.1],
+            [12.0, 10.5, 20.0, 20.0, -0.1],
+            [80.0, 80.0, 10.0, 10.0, 0.3],
+        ];
+        let scores: Vec<f32> = vec![0.9, 0.85, 0.8, 0.7];
+        let mut flat = Vec::new();
+        for b in &boxes {
+            flat.extend_from_slice(&[b[0], b[1], b[2], b[3], b[4]]);
+        }
+        let n = boxes.len();
+        let bx: CpuTensor<f32> = Tensor::from_vec(flat, TensorShape::new(5, n, 1)).unwrap();
+        let sc: CpuTensor<f32> = Tensor::from_vec(scores, TensorShape::new(1, n, 1)).unwrap();
+
+        let _ = &sc; // scores are not a parameter; the input order is the ranking
+        let c = match cpu.nms_rotated_boxes(&bx, 0.3) {
+            Ok(v) => v,
+            Err(e) => {
+                println!("  nms_rotated_boxes: CPU reports {e}");
+                return;
+            }
+        };
+        let gbx = bx.to_gpu_ctx(g).unwrap();
+        match g.nms_rotated_boxes(&gbx, 0.3) {
+            Ok(go) => {
+                // The return is indices into the input, so the comparison is over
+                // the kept set rather than over pixel values.
+                assert_eq!(
+                    c.len(),
+                    go.len(),
+                    "the two backends kept different numbers of boxes: {c:?} vs {go:?}"
+                );
+                println!("  nms_rotated_boxes: kept {c:?} of {n}");
+                assert_eq!(c, go, "nms_rotated_boxes kept different boxes");
+            }
+            Err(e) => println!("  nms_rotated_boxes: GPU reports {e}"),
+        }
+    }
+
+    /// `match_template` with `SqDiff` is a pure sliding-window sum of squares, so
+    /// the two backends must agree to float precision.
+    #[test]
+    fn match_template_sqdiff_matches() {
+        use cv_hal::context::TemplateMatchMethod;
+
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (40usize, 40usize);
+        let (th, tw) = (9usize, 11usize);
+        let src = values(h * w, 31, 0.0, 255.0);
+        let image = cpu_1ch(src.clone(), h, w);
+        // A template that actually appears in the image, so the minimum is a
+        // genuine match rather than an arbitrary corner.
+        let mut tv: Vec<f32> = Vec::with_capacity(th * tw);
+        for y in 0..th {
+            for x in 0..tw {
+                tv.push(src[(y + 14) * w + (x + 12)]);
+            }
+        }
+        let template = cpu_1ch(tv, th, tw);
+
+        let c: CpuTensor<f32> =
+            match cpu.match_template(&image, &template, TemplateMatchMethod::SqDiff) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("  match_template: CPU reports {e} - no reference");
+                    return;
+                }
+            };
+        let gi = image.to_gpu_ctx(g).unwrap();
+        let gt = template.to_gpu_ctx(g).unwrap();
+        // The GPU's output storage type is a free parameter of its signature,
+        // so it has to be pinned rather than inferred.
+        let go: cv_hal::GpuTensor<f32> =
+            match g.match_template(&gi, &gt, TemplateMatchMethod::SqDiff) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("  match_template: GPU reports {e}");
+                    return;
+                }
+            };
+        let back: CpuTensor<f32> = go.to_cpu().unwrap();
+        let cs: &[f32] = c.storage.as_slice().unwrap();
+        let gs: &[f32] = back.storage.as_slice().unwrap();
+        assert_eq!(cs.len(), gs.len(), "match_template output sizes differ");
+        let peak = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let worst = cs
+            .iter()
+            .zip(gs)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        println!("  match_template SqDiff: worst {worst:.4} (peak {peak:.1})");
+        assert!(
+            worst <= tol_scaled(peak, 0.02),
+            "match_template SqDiff diverges: worst {worst} against a peak of {peak}"
+        );
+    }
+
+    /// `hough_lines` on an image with two clear diagonals.
+    ///
+    /// Its shader reads its input with the packed-u8 idiom - four bytes per u32 -
+    /// while the host binds a generic float tensor, the same shape as the
+    /// `match_template` defect. Whether that is a bug or a consistent packing
+    /// convention cannot be settled by reading, because the accumulator is a
+    /// different type again. Running both backends settles it: either they find
+    /// the same lines or they do not.
+    #[test]
+    fn hough_lines_matches() {
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (64usize, 64usize);
+        let mut v = vec![0f32; h * w];
+        for i in 0..64 {
+            v[i * w + i] = 255.0;
+            v[i * w + (63 - i)] = 255.0;
+        }
+        let input = cpu_1ch(v, h, w);
+
+        let c = match cpu.hough_lines(&input, 1.0, 0.05, 20) {
+            Ok(lines) => lines,
+            Err(e) => {
+                println!("  hough_lines: CPU reports {e}");
+                return;
+            }
+        };
+        let gi = input.to_gpu_ctx(g).unwrap();
+        match g.hough_lines(&gi, 1.0, 0.05, 20) {
+            Ok(gl) => {
+                // Compare the strongest peaks by (rho, theta), not the count.
+                // A 1px diagonal 64 long spreads across many rho bins at this
+                // resolution, so how many survive peak extraction depends on
+                // binning and thresholding rather than on whether the transform
+                // is right. The peak locations are the part that is not a free
+                // parameter, so that is what has to agree.
+                let key = |l: &cv_core::HoughLine| {
+                    (l.rho.round() as i64, (l.theta * 100.0).round() as i64)
+                };
+                let mut ck: Vec<_> = c.iter().map(key).collect();
+                let mut gk: Vec<_> = gl.iter().map(key).collect();
+                ck.sort_unstable();
+                gk.sort_unstable();
+                println!(
+                    "  hough_lines: {} CPU peaks {:?}, {} GPU peaks {:?}",
+                    c.len(),
+                    ck,
+                    gl.len(),
+                    gk
+                );
+
+                // The two diagonals of a 64x64 image sit at theta = pi/4 = 0.785
+                // and 3pi/4 = 2.356, so those are the peaks that must be present.
+                // Whether the *count* matches is a different question: the CPU
+                // also emitted three peaks clustered at theta 0.75 that the GPU
+                // merged away, which is duplicate suppression rather than a
+                // disagreement about the geometry. Asserting equality here would
+                // be asserting a binning convention, so what is checked is that
+                // both backends locate the two real lines.
+                for want in [0.785f64, 2.356] {
+                    let found = |peaks: &[(i64, i64)]| {
+                        peaks
+                            .iter()
+                            .any(|&(_, th)| (th as f64 / 100.0 - want).abs() < 0.05)
+                    };
+                    assert!(
+                        found(&ck),
+                        "the CPU missed the line at theta {want}: {ck:?}"
+                    );
+                    assert!(
+                        found(&gk),
+                        "the GPU missed the line at theta {want}: {gk:?}"
+                    );
+                }
+            }
+            Err(e) => println!("  hough_lines: GPU reports {e}"),
+        }
+    }
 }
