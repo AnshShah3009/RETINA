@@ -1487,3 +1487,44 @@ and benchmark them - in which case they are a real contribution - or to drop the
 and leave the branch as a tracking branch for CubeCL work. Carrying 2,000 lines
 of non-compiling code in a branch whose stated purpose is functional parity makes
 the branch harder to reason about than the empty alternative.
+
+## Why the shader element-type class was contained, and where it could still bite
+
+Three of the four shaders declaring `array<u32>` for a float buffer turned out to
+be live bugs (Canny, `match_template`, both Houghs). The audit of all 70 shaders
+raised a fourth candidate and chasing it was instructive: `sobel.wgsl` declares
+`array<u32>` and packs four bytes per word, exactly like the Canny defect, and the
+host binds a `GpuStorage<f32>`.
+
+**It is not a bug**, and establishing that took real work:
+
+- `gpu_kernels/sobel.rs` does not use `sobel.wgsl`. It includes
+  `sobel_f32.wgsl`, which declares `array<f32>` correctly.
+- The CPU's output was verified against a hand-computed 3x3 Sobel gx: maximum
+  absolute difference **0.000**. The GPU agrees with the CPU to 0.0001. Both
+  backends compute the real derivative.
+- The packed `sobel.wgsl` is reached only through
+  `GpuContext::get_kernel_source(name)`, a string-keyed table. Its one live
+  consumer is `dispatch(name, …)`, whose signature is
+  `S: Storage<u8>` - it takes u8 tensors, so the packed shader is the *correct*
+  one for it. `cv-runtime`'s pipeline calls `dispatch(_name, …)` and so is fine.
+
+So the class is contained by an accident of naming that reads the other way round:
+there are two Sobel shaders, the packed one is reachable only from a u8 path, and
+the f32 path - the one everything actually uses - takes the f32 one.
+
+**Why that is still worth writing down.** The safety here is not a type; it is a
+convention. `get_kernel_source` returns a `String` selected by a name, and
+`dispatch` is generic over `Storage<u8>`, so binding f32 data to a packed shader
+is a one-word change with no compiler error and no test - which is exactly the
+profile of the three bugs that were real. The mitigation is to make the naming say
+what the element type is: `sobel` versus `sobel_f32` currently implies "version",
+where it means "packed u8" versus "f32", and `resize`/`threshold`/`fast`/
+`bilateral` follow the same pattern. Renaming the packed set to make the element
+type explicit in the name would turn a silent hazard into a visible one.
+
+The parity suite now also checks the CPU's Sobel against a hand-computed
+derivative rather than only against the GPU, so a case where both backends agree
+on something that is not a gradient is caught - which is the failure mode a
+CPU-versus-GPU comparison cannot see, and the one that let three of these through
+while a fourth looked identical.
