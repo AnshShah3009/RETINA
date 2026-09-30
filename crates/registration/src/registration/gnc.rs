@@ -72,6 +72,22 @@ impl GNCOptimizer {
         let mut best_cost = f32::MAX;
         let mut best_transformation = transformation;
 
+        // A fixed reference loss, never mutated.
+        //
+        // `best_cost` is compared across the whole solve, so the costs have to
+        // be commensurable. They were not: `self.loss.evaluate` was evaluated
+        // under whatever parameter that outer iteration happened to set, and a
+        // Geman-McClure cost at `mu = 100 * mu0` is numerically about a hundred
+        // times the cost at `mu0` for the same residual. The first outer
+        // iteration therefore won on magnitude alone and `best_transformation`
+        // stayed frozen at the convex surrogate for the remaining schedule -
+        // discarding the graduated part, which is the entire point of GNC.
+        //
+        // The loss is `Copy`, so taking a snapshot costs nothing and gives every
+        // iteration the same yardstick.
+        let reference_loss = self.loss;
+        let reference_param = self.loss.get_param();
+
         // GNC outer loop - gradually reduce parameter
         for gnc_iter in 0..self.gnc_iterations {
             // Compute current parameter schedule
@@ -95,7 +111,8 @@ impl GNCOptimizer {
                     .unzip();
 
                 // Check convergence
-                let cost: f32 = residuals.iter().map(|&r| self.loss.evaluate(r)).sum();
+                // Scored with the fixed reference, not the annealing parameter.
+                let cost: f32 = residuals.iter().map(|&r| reference_loss.evaluate(r)).sum();
                 if cost < best_cost {
                     best_cost = cost;
                     best_transformation = transformation;
@@ -125,7 +142,12 @@ impl GNCOptimizer {
                 let tgt_point = target[tgt_idx];
                 let transformed = best_transformation.transform_point(&src_point);
                 let residual = (transformed - tgt_point).norm();
-                residual < self.loss.get_param()
+                // Compared against the reference parameter, matching the one
+                // `best_transformation` was selected under. Using the final
+                // parameter here described a different function than the one the
+                // returned pose was chosen for, so `inlier_count` and `fitness`
+                // were measured against a mixture of two parameterisations.
+                residual < reference_param
             })
             .copied()
             .collect();
