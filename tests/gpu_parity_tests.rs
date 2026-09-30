@@ -507,3 +507,63 @@ fn probe_lbvh_builds() {
     );
     println!("  LBVH: {} nodes for {n} points", nodes.shape.len());
 }
+
+/// `ComputeContext::resize` hard-coded bilinear, so a caller had no way to ask
+/// for a different resampling - which is what left the ORB ctx pyramid unable to
+/// reproduce the `Triangle` filtering the CPU path uses, and the two detection
+/// entry points disagreeing on identical pixels.
+///
+/// This asserts the mode is actually honoured, not merely accepted: a nearest
+/// and a Lanczos resize of the same input must differ, and neither may match the
+/// other. A no-op `resize_with` that silently ignored its argument would pass a
+/// test that only checked it returned Ok.
+#[test]
+fn probe_resize_with_honours_the_mode() {
+    use cv_hal::context::Interpolation;
+
+    let Some(g) = gpu() else { return };
+    let (w, h) = (64usize, 64usize);
+    // A diagonal ramp: a nearest-neighbour downsample and a filtered one pick
+    // visibly different values.
+    let data: Vec<f32> = (0..h * w)
+        .map(|i| ((i % w) as f32 / w as f32) * 255.0)
+        .collect();
+    let input: CpuTensor<f32> = cv_core::Tensor::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+    let on_gpu = input.to_gpu_ctx(g).unwrap();
+
+    let bilinear = g.resize(&on_gpu, (32, 32)).unwrap();
+    // `Nearest` has no GPU implementation and must say so rather than silently
+    // running bilinear - substituting one mode for another is the exact
+    // failure this method exists to remove.
+    match g.resize_with(&on_gpu, (32, 32), Interpolation::Nearest) {
+        Err(_) => println!("  resize Nearest: correctly reported unsupported"),
+        Ok(v) => {
+            let cpu = v.to_cpu().unwrap();
+            let a = bilinear.storage.as_slice().unwrap();
+            let c = cpu.storage.as_slice().unwrap();
+            let same = a.iter().zip(c).all(|(x, y)| (x - y).abs() < 1e-6);
+            assert!(!same, "Nearest was silently run as bilinear");
+        }
+    }
+    let lanczos = g
+        .resize_with(&on_gpu, (32, 32), Interpolation::Lanczos)
+        .unwrap();
+
+    let b = bilinear.to_cpu().unwrap();
+    let l = lanczos.to_cpu().unwrap();
+    let bs = b.storage.as_slice().unwrap();
+    let ls = l.storage.as_slice().unwrap();
+
+    let diff = |a: &[f32], c: &[f32]| -> f32 {
+        a.iter()
+            .zip(c)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    };
+    let bl = diff(bs, ls);
+    println!("  resize modes: bilinear-vs-lanczos {bl:.3}");
+    assert!(
+        bl > 1e-3,
+        "Lanczos was identical to bilinear: the mode is ignored"
+    );
+}
