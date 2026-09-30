@@ -1285,6 +1285,30 @@ fn shader_storage_element_types_match_their_hosts() {
         ("nms.wgsl", &[(0, "f32"), (1, "f32")]),
         ("pointcloud_transform.wgsl", &[(0, "f32"), (1, "f32")]),
         ("resize_f32.wgsl", &[(0, "f32"), (1, "f32")]),
+        (
+            "akaze_derivatives.wgsl",
+            &[(0, "f32"), (1, "f32"), (2, "f32"), (3, "f32")],
+        ),
+        ("akaze_diffusion.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("bilateral_f32.wgsl", &[(0, "f32")]),
+        ("color_cvt_f32.wgsl", &[(0, "f32")]),
+        ("convolve_2d.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
+        ("fast_f32.wgsl", &[(0, "f32")]),
+        ("fast_nms_f32.wgsl", &[(0, "f32")]),
+        ("hough_f32.wgsl", &[(0, "f32")]),
+        ("icp_dense.wgsl", &[(0, "f32")]),
+        ("iou_matrix.wgsl", &[(0, "f32")]),
+        (
+            "matrix_multiply.wgsl",
+            &[(0, "f32"), (1, "f32"), (2, "f32")],
+        ),
+        ("mog2_update.wgsl", &[(0, "f32")]),
+        ("sift_descriptor.wgsl", &[(0, "f32")]),
+        ("sift_extrema.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("sift_orientation.wgsl", &[(0, "f32")]),
+        ("sobel_f32.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
+        ("threshold_f32.wgsl", &[(0, "f32")]),
+        ("vector_ops.wgsl", &[(0, "f32"), (1, "f32")]),
         ("stereo_match.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("subtract.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("warp.wgsl", &[(0, "f32"), (1, "f32")]),
@@ -1358,6 +1382,97 @@ fn shader_storage_element_types_match_their_hosts() {
     assert!(
         failures.is_empty(),
         "shader/host element-type mismatches:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// The `_f32` suffix must mean what it says, for every shader.
+///
+/// The element-type defect that produced three silent bugs is guarded against
+/// per-shader above. This checks the *invariant* that makes it checkable at all:
+/// the filename is the only thing distinguishing a packed-u8 shader from an
+/// f32 one when both are reached through a string-keyed table, and a name that
+/// lies is how the wrong shader gets bound.
+///
+/// Across all 70 shaders the convention holds without exception - the 17 that
+/// declare only `array<u32>` are the packed-u8 set (`sobel`, `resize`,
+/// `threshold`, `bilateral`, `fast`, `color_cvt`, `morphology`, `undistort`, the
+/// `_bf16` variants, and the two integer-indexed kernels), and every `_f32`
+/// variant declares only f32. The one apparent exception is `hough_f32`, whose
+/// second binding is a u32 accumulator - an atomic, not pixel data - which is
+/// why `atomic` is excluded below.
+#[test]
+fn f32_suffixed_shaders_declare_f32_storage() {
+    use std::collections::BTreeMap;
+
+    let dir = format!("{}/crates/hal/shaders", env!("CARGO_MANIFEST_DIR"));
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) => panic!("cannot read {}: {}", dir, e),
+    };
+    let mut shaders: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("wgsl") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            shaders.insert(stem.to_string(), path);
+        }
+    }
+
+    for (name, path) in &shaders {
+        if !name.ends_with("_f32") {
+            continue;
+        }
+        let source = std::fs::read_to_string(path).unwrap();
+        let mut elems: Vec<&str> = Vec::new();
+        for line in source.lines() {
+            if !line.contains("var<storage") {
+                continue;
+            }
+            let Some(after) = line.split("array<").nth(1) else {
+                continue;
+            };
+            if let Some(e) = after
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .find(|s| !s.is_empty())
+            {
+                if !elems.contains(&e) {
+                    elems.push(e);
+                }
+            }
+        }
+        checked += 1;
+        // `atomic` is a u32 accumulator, not pixel data, and is legitimately
+        // mixed in; `vecN` is a layout view over the same storage.
+        let offending: Vec<&&str> = elems
+            .iter()
+            .filter(|e| **e != "f32" && **e != "atomic")
+            .collect();
+        if !offending.is_empty() {
+            failures.push(format!(
+                "{} is named _f32 but declares array<{}>",
+                path.file_name().unwrap().to_string_lossy(),
+                offending
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(">, array<")
+            ));
+        }
+    }
+
+    assert!(
+        checked > 0,
+        "no _f32 shaders were found; the scan is broken"
+    );
+    assert!(
+        failures.is_empty(),
+        "the _f32 naming convention is broken:\n  {}",
         failures.join("\n  ")
     );
 }
