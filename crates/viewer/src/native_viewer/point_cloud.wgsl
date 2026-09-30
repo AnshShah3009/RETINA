@@ -30,6 +30,15 @@ struct VertexOut {
     @location(1) sprite_uv: vec2<f32>,
 };
 
+// Projection onto WebGPU's [0, 1] depth range: z_ndc = A + B / z, with
+// `z = -near -> 0` and `z = -far -> 1`. A = B / near and B = 1 / (1/near - 1/far).
+const NEAR_PLANE: f32 = 0.01;
+const FAR_PLANE: f32 = 1000.0;
+const FAR_PLANE_COEFF: f32 = 1.0 / (1.0 / NEAR_PLANE - 1.0 / FAR_PLANE);
+const NEAR_PLANE_COEFF: f32 = FAR_PLANE_COEFF / NEAR_PLANE;
+
+// Projection onto WebGPU's [0, 1] depth range: z_ndc = A + B / z, chosen so
+// that `z = -near -> 0` and `z = -far -> 1`. With A = B / near and
 const CORNERS = array<vec2<f32>, 6>(
     vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
     vec2<f32>(-1.0,  1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0,  1.0),
@@ -39,13 +48,24 @@ const CORNERS = array<vec2<f32>, 6>(
 fn vs_main(input: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     let corner = CORNERS[vi];
 
-    // Row-major multiply, so the matrix is indexed view[col][row].
+    // `look_at` on the host produces a **row-major** matrix `m`, where
+    // `(m * p)[i] = sum_j m[i][j] * p[j]`.
+    //
+    // WGSL's `mat4x4<f32>` is **column-major**: `m[i]` is column `i`, so
+    // `m[i][j]` is the element at row `j`, column `i`. Summing
+    // `uniforms.view[i][j] * world[j]` therefore computes the *transpose*.
+    //
+    // The original comment here said "row-major multiply, so the matrix is
+    // indexed view[col][row]" and then indexed it the other way. The bug is
+    // invisible for an identity view - which is what the readback test happened
+    // to use - and wrong for every real camera, which silently renders nothing.
     let world = vec4<f32>(input.position, 1.0);
     var eye = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     for (var r = 0u; r < 4u; r = r + 1u) {
         var acc = 0.0;
         for (var c = 0u; c < 4u; c = c + 1u) {
-            acc = acc + uniforms.view[r][c] * world[c];
+            // Column-major read: element at (row c, column r).
+            acc = acc + uniforms.view[c][r] * world[c];
         }
         eye[r] = acc;
     }
@@ -57,11 +77,21 @@ fn vs_main(input: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     // 0.02 is an arbitrary near-plane stand-in; it only sets the scale.
     let radius_ndc = uniforms.point_radius * 0.02 / depth;
 
+    // WebGPU, like Vulkan and D3D, requires `z_ndc` in **[0, 1]**. There is no
+    // projection matrix anywhere in this pipeline - the host sends only a view
+    // matrix - so `eye.z / eye.w` was being handed straight to the rasteriser.
+    // With a camera looking down -z that is always negative, i.e. entirely
+    // outside the clip volume, so **every primitive was clipped and the window
+    // could never have drawn anything at all**.
+    //
+    // This maps the view frustum onto [0, 1]: `z = -near -> 0`, `z = -far -> 1`.
+    let z_ndc = NEAR_PLANE_COEFF + FAR_PLANE_COEFF / eye.z;
+
     var out: VertexOut;
     out.clip_position = vec4<f32>(
         eye.x / eye.w + corner.x * radius_ndc / uniforms.viewport.x,
         eye.y / eye.w + corner.y * radius_ndc / uniforms.viewport.y,
-        eye.z / eye.w,
+        z_ndc,
         eye.w,
     );
     out.sprite_uv = corner;

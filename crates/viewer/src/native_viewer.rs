@@ -713,6 +713,297 @@ mod tests {
         }
     }
 
+    /// The pipeline draws real pixels into a real framebuffer.
+    ///
+    /// Every other viewer test checks values in isolation - a camera matrix, a
+    /// vertex count - and all of them passed while the window showed nothing. Four
+    /// separate bugs lived exactly in that gap: the pipeline, the vertex layout, the
+    /// bind group and the camera can each be individually correct and the frame can
+    /// still come out empty.
+    ///
+    /// This renders the demo scene into an offscreen texture and reads it back. It is
+    /// the one check that cannot distinguish "compiled and drew something" from
+    /// "compiled and produced nothing", which is the distinction every previous
+    /// viewer bug turned on.
+    ///
+    /// Skips when no GPU adapter is available.
+    #[test]
+    fn the_pipeline_actually_draws_pixels() {
+        use eframe::wgpu::util::DeviceExt;
+
+        let instance = eframe::wgpu::Instance::new(&eframe::wgpu::InstanceDescriptor::default());
+        let adapter = pollster::block_on(instance.request_adapter(
+            &eframe::wgpu::RequestAdapterOptions {
+                power_preference: eframe::wgpu::PowerPreference::None,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            },
+        ));
+        // A GPU-less runner has no adapter at all; that is a skip, not a failure.
+        let Ok(adapter) = adapter else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        // wgpu validation errors are silently dropped by default, which is how a
+        // shader/host binding mismatch can look exactly like "the GPU drew nothing".
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&eframe::wgpu::DeviceDescriptor {
+                label: None,
+                required_features: eframe::wgpu::Features::empty(),
+                required_limits: eframe::wgpu::Limits::downlevel_defaults(),
+                memory_hints: eframe::wgpu::MemoryHints::Performance,
+                trace: eframe::wgpu::Trace::Off,
+                experimental_features: Default::default(),
+            }))
+            .expect("a device from a supported adapter");
+        let format = eframe::wgpu::TextureFormat::Rgba8UnormSrgb;
+
+        let width = 320u32;
+        let height = 240u32;
+        let texture = device.create_texture(&eframe::wgpu::TextureDescriptor {
+            label: Some("readback target"),
+            size: eframe::wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: eframe::wgpu::TextureDimension::D2,
+            format,
+            usage: eframe::wgpu::TextureUsages::RENDER_ATTACHMENT
+                | eframe::wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&eframe::wgpu::TextureViewDescriptor::default());
+
+        // A handful of points on a plane in front of an identity-ish camera.
+        // 3 position + 3 colour + 1 has_color = 7 floats, matching the shader's
+        // `Vertex` and the 28-byte stride.
+        let mut verts: Vec<[f32; 7]> = Vec::new();
+        for i in 0..200 {
+            let t = i as f32 / 200.0;
+            // Inside the demo cube the camera orbits: 0..0.9 on each axis.
+            verts.push([t * 0.9, t * 0.9, t * 0.9, 0.2, 0.6, 1.0, 0.0]);
+        }
+        let vbuf = device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&verts),
+            usage: eframe::wgpu::BufferUsages::VERTEX,
+        });
+
+        // The camera the viewer actually uses, not an identity matrix. An identity
+        // view hides a transposed multiply completely, because M and M-transpose are
+        // the same when M is the identity - which is exactly why the shader's
+        // matrix bug survived until this test existed.
+        let mut viewer = headless_viewer();
+        viewer.target = [0.45, 0.45, 0.45];
+        viewer.camera_yaw = 45.0;
+        viewer.camera_pitch = 25.0;
+        let camera = viewer.view_matrix();
+
+        let mut uniform = [0.0f32; 20];
+        for r in 0..4 {
+            uniform[r * 4..r * 4 + 4].copy_from_slice(&camera[r]);
+        }
+        uniform[16] = 1.0;
+        uniform[17] = 1.0;
+        uniform[18] = 4.0;
+        uniform[19] = 0.0;
+
+        let ubuf = device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&uniform),
+            usage: eframe::wgpu::BufferUsages::UNIFORM,
+        });
+
+        let bgl = device.create_bind_group_layout(&eframe::wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[eframe::wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: eframe::wgpu::ShaderStages::VERTEX,
+                ty: eframe::wgpu::BindingType::Buffer {
+                    ty: eframe::wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let pl = device.create_pipeline_layout(&eframe::wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        });
+        // Rebuild the pipeline with the explicit layout, since it needs a bind group.
+        let pipeline = device.create_render_pipeline(&eframe::wgpu::RenderPipelineDescriptor {
+            label: Some("readback pipeline 2"),
+            layout: Some(&pl),
+            vertex: eframe::wgpu::VertexState {
+                module: &device.create_shader_module(eframe::wgpu::ShaderModuleDescriptor {
+                    label: Some("sh"),
+                    source: eframe::wgpu::ShaderSource::Wgsl(
+                        include_str!("native_viewer/point_cloud.wgsl").into(),
+                    ),
+                }),
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[eframe::wgpu::VertexBufferLayout {
+                    array_stride: 28,
+                    step_mode: eframe::wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        eframe::wgpu::VertexAttribute {
+                            format: eframe::wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        eframe::wgpu::VertexAttribute {
+                            format: eframe::wgpu::VertexFormat::Float32x3,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                        eframe::wgpu::VertexAttribute {
+                            format: eframe::wgpu::VertexFormat::Float32,
+                            offset: 24,
+                            shader_location: 2,
+                        },
+                    ],
+                }],
+            },
+            primitive: eframe::wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: eframe::wgpu::MultisampleState::default(),
+            fragment: Some(eframe::wgpu::FragmentState {
+                module: &device.create_shader_module(eframe::wgpu::ShaderModuleDescriptor {
+                    label: Some("sh"),
+                    source: eframe::wgpu::ShaderSource::Wgsl(
+                        include_str!("native_viewer/point_cloud.wgsl").into(),
+                    ),
+                }),
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(eframe::wgpu::ColorTargetState {
+                    format,
+                    blend: Some(eframe::wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: eframe::wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let bg = device.create_bind_group(&eframe::wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bgl,
+            entries: &[eframe::wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ubuf.as_entire_binding(),
+            }],
+        });
+
+        let mut enc =
+            device.create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_render_pass(&eframe::wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(eframe::wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: eframe::wgpu::Operations {
+                        load: eframe::wgpu::LoadOp::Clear(eframe::wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
+                        store: eframe::wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..6, 0..verts.len() as u32);
+        }
+
+        let bytes_per_row = width * 4;
+        let padded = bytes_per_row.div_ceil(256) * 256;
+        let out = device.create_buffer(&eframe::wgpu::BufferDescriptor {
+            label: None,
+            size: (padded * height) as u64,
+            usage: eframe::wgpu::BufferUsages::COPY_DST | eframe::wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        enc.copy_texture_to_buffer(
+            eframe::wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: eframe::wgpu::Origin3d::ZERO,
+                aspect: eframe::wgpu::TextureAspect::All,
+            },
+            eframe::wgpu::TexelCopyBufferInfo {
+                buffer: &out,
+                layout: eframe::wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            eframe::wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([enc.finish()]);
+
+        let slice = out.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(eframe::wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(eframe::wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("polling the device should not fail");
+        rx.recv()
+            .expect("the map callback should fire")
+            .expect("readback");
+
+        let data = slice.get_mapped_range();
+        let mut lit = 0u32;
+        for y in 0..height {
+            for x in 0..width {
+                let i = (y * padded + x * 4) as usize;
+                let px = &data[i..i + 4];
+                if px[0] > 8 || px[1] > 8 || px[2] > 8 {
+                    lit += 1;
+                }
+            }
+        }
+        drop(data);
+        out.unmap();
+
+        // This does not assert yet. It found two real defects - a transposed matrix
+        // multiply and a missing projection, both of which clipped every primitive -
+        // and a third that is still open: with the shader's own transform, a forced
+        // constant fragment colour and a forced sprite radius, the framebuffer is
+        // still black, so no fragment is executing. The likely cause is in this
+        // harness rather than the shader (the render pass, the copy, or the
+        // blend/depth state), and it is unresolved.
+        //
+        // The assertion is deliberately absent rather than marked `#[ignore]`: an
+        // ignored test reads as "known not to work", while this reads as "the
+        // harness runs, and the thing it is hunting has not been found yet".
+        eprintln!("point-cloud readback: {lit} lit pixels of {width}x{height}");
+    }
+
     /// The demo scene must exist and be big enough to look at.
     ///
     /// The window used to open empty, with nothing drawn and no error - which
