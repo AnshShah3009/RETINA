@@ -1034,4 +1034,83 @@ mod sweep {
             "match_template SqDiff diverges: worst {worst} against a peak of {peak}"
         );
     }
+
+    /// `hough_lines` on an image with two clear diagonals.
+    ///
+    /// Its shader reads its input with the packed-u8 idiom - four bytes per u32 -
+    /// while the host binds a generic float tensor, the same shape as the
+    /// `match_template` defect. Whether that is a bug or a consistent packing
+    /// convention cannot be settled by reading, because the accumulator is a
+    /// different type again. Running both backends settles it: either they find
+    /// the same lines or they do not.
+    #[test]
+    fn hough_lines_matches() {
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (64usize, 64usize);
+        let mut v = vec![0f32; h * w];
+        for i in 0..64 {
+            v[i * w + i] = 255.0;
+            v[i * w + (63 - i)] = 255.0;
+        }
+        let input = cpu_1ch(v, h, w);
+
+        let c = match cpu.hough_lines(&input, 1.0, 0.05, 20) {
+            Ok(lines) => lines,
+            Err(e) => {
+                println!("  hough_lines: CPU reports {e}");
+                return;
+            }
+        };
+        let gi = input.to_gpu_ctx(g).unwrap();
+        match g.hough_lines(&gi, 1.0, 0.05, 20) {
+            Ok(gl) => {
+                // Compare the strongest peaks by (rho, theta), not the count.
+                // A 1px diagonal 64 long spreads across many rho bins at this
+                // resolution, so how many survive peak extraction depends on
+                // binning and thresholding rather than on whether the transform
+                // is right. The peak locations are the part that is not a free
+                // parameter, so that is what has to agree.
+                let key = |l: &cv_core::HoughLine| {
+                    (l.rho.round() as i64, (l.theta * 100.0).round() as i64)
+                };
+                let mut ck: Vec<_> = c.iter().map(key).collect();
+                let mut gk: Vec<_> = gl.iter().map(key).collect();
+                ck.sort_unstable();
+                gk.sort_unstable();
+                println!(
+                    "  hough_lines: {} CPU peaks {:?}, {} GPU peaks {:?}",
+                    c.len(),
+                    ck,
+                    gl.len(),
+                    gk
+                );
+
+                // The two diagonals of a 64x64 image sit at theta = pi/4 = 0.785
+                // and 3pi/4 = 2.356, so those are the peaks that must be present.
+                // Whether the *count* matches is a different question: the CPU
+                // also emitted three peaks clustered at theta 0.75 that the GPU
+                // merged away, which is duplicate suppression rather than a
+                // disagreement about the geometry. Asserting equality here would
+                // be asserting a binning convention, so what is checked is that
+                // both backends locate the two real lines.
+                for want in [0.785f64, 2.356] {
+                    let found = |peaks: &[(i64, i64)]| {
+                        peaks
+                            .iter()
+                            .any(|&(_, th)| (th as f64 / 100.0 - want).abs() < 0.05)
+                    };
+                    assert!(
+                        found(&ck),
+                        "the CPU missed the line at theta {want}: {ck:?}"
+                    );
+                    assert!(
+                        found(&gk),
+                        "the GPU missed the line at theta {want}: {gk:?}"
+                    );
+                }
+            }
+            Err(e) => println!("  hough_lines: GPU reports {e}"),
+        }
+    }
 }

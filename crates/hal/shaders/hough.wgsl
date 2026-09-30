@@ -8,7 +8,12 @@ struct Params {
     threshold: u32,
 }
 
-@group(0) @binding(0) var<storage, read> input_data: array<u32>;
+// The host binds a float tensor here, not packed bytes. Declaring the binding
+// `array<u32>` and reassembling four bytes per word reads the low byte of each
+// f32 - 0x00 for any whole-number value - so almost every pixel looked black and
+// was skipped before it could vote. On a 64x64 image with two diagonals the
+// GPU found 2 lines where the CPU found 5.
+@group(0) @binding(0) var<storage, read> input_data: array<f32>;
 @group(0) @binding(1) var<storage, read_write> accumulator: array<atomic<u32>>;
 @group(0) @binding(2) var<uniform> params: Params;
 
@@ -23,8 +28,7 @@ fn vote(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = y * params.width + x;
-    let combined = input_data[idx / 4u];
-    let pixel_val = (combined >> ((idx % 4u) * 8u)) & 0xFFu;
+    let pixel_val = input_data[idx];
 
     if (pixel_val == 0u) {
         return;
