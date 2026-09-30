@@ -114,11 +114,22 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
             .next()
             .ok_or_else(|| Error::ParseError("Unexpected EOF in data".to_string()))??;
 
+
         let values: Vec<f32> = line
             .split_whitespace()
             .map(|s| {
-                s.parse()
-                    .map_err(|_| Error::ParseError(format!("Invalid number: {}", s)))
+                let v: f32 = s
+                    .parse()
+                    .map_err(|_| Error::ParseError(format!("Invalid number: {}", s)))?;
+                // `f32::from_str` accepts "NaN" and "inf"; a point at infinity is
+                // not a vertex, and it poisons every bound computed from the
+                // cloud rather than being reported at the point of the error.
+                if !v.is_finite() {
+                    return Err(Error::ParseError(format!(
+                        "Non-finite coordinate: {s}"
+                    )));
+                }
+                Ok(v)
             })
             .collect::<Result<Vec<_>>>()?;
 
