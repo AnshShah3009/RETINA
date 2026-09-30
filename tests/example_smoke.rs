@@ -119,6 +119,16 @@ smoke!(
 /// pretending to be batch jobs.
 #[test]
 fn viewer_demo_opens_and_survives_startup() {
+    // CI runners are headless, and a winit window cannot be created without a
+    // display. Spawning it there would fail for a reason that has nothing to do
+    // with the viewer, so this is skipped explicitly rather than reported as a
+    // pass - the difference matters, because a silent skip is what let a broken
+    // example reach CI in the first place.
+    if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
+        eprintln!("skipping demo: no display available (headless)");
+        return;
+    }
+
     let Some(path) = example_path("demo") else {
         eprintln!("skipping demo: not built");
         return;
@@ -147,6 +157,28 @@ fn viewer_demo_opens_and_survives_startup() {
     }
 }
 
+/// The first RGB-D sequence directory that exists.
+///
+/// `orbdiag` used to hardcode one machine's absolute path, so it could not run
+/// anywhere else - including CI, where it silently produced no output and the
+/// test failed on that absence.
+fn dataset_dir() -> Option<String> {
+    match std::env::var("RUSTCV_DATASET_DIR") {
+        Ok(d) if std::path::Path::new(&d).is_dir() => return Some(d),
+        _ => {}
+    }
+    for candidate in [
+        "datasets/rgbd_dataset_freiburg1_xyz",
+        "../datasets/rgbd_dataset_freiburg1_xyz",
+        "/home/Phoenix/RUST/datasets/rgbd_dataset_freiburg1_xyz",
+    ] {
+        if std::path::Path::new(candidate).is_dir() {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
 /// `orbdiag` is a long-running diagnostic that sweeps feature counts and runs
 /// the mapper on each, so it is exercised by one size rather than the whole
 /// sweep - it registered 20/20 at every size when checked, and running it in
@@ -167,7 +199,16 @@ fn orbdiag_starts_and_reports() {
     // for the report, with a deadline. Joining the reader directly is not
     // enough: it returns as soon as the child closes the pipe, which on CI
     // happened before any report was written.
+    // orbdiag needs a real RGB-D sequence. Without one it now says so and
+    // exits, which is honest, but there is nothing to exercise - so this is a
+    // visible skip rather than a silent pass.
+    let Some(dataset) = dataset_dir() else {
+        eprintln!("skipping orbdiag: no RGB-D dataset available");
+        return;
+    };
+
     let mut child = Command::new(&path)
+        .arg(&dataset)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
