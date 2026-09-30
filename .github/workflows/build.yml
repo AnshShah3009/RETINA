@@ -49,13 +49,13 @@ jobs:
     - name: Build workspace
       run: cargo build --workspace
 
-      - name: Build examples
-        # `cargo build --workspace` does not build examples, so without this
-        # `example_smoke` silently skips every example: the guard it has always
-        # had ("skipping: not built") turned a whole class of failures into a
-        # green run. That is how a GPU ORB path that panicked on its first call
-        # and a viewer example that hung for 120s both reached CI unnoticed.
-        run: cargo build --workspace --examples
+    - name: Build examples
+      # `cargo build --workspace` does not build examples, so without this
+      # `example_smoke` silently skipped every example: the guard it has always
+      # had ("skipping: not built") turned a whole class of failures into a
+      # green run. That is how a GPU ORB path that panicked on its first call
+      # and a viewer example that hung for 120s both reached CI unnoticed.
+      run: cargo build --workspace --examples
 
     - name: Run clippy
       run: cargo clippy --workspace --lib -- -W clippy::all
@@ -93,13 +93,13 @@ jobs:
 
     - name: Build workspace (CPU backend)
       run: cargo build --workspace --features cpu
-      - name: Build examples
-        run: cargo build --workspace --features cpu --examples
+    - name: Build examples
+      run: cargo build --workspace --features cpu --examples
 
     - name: Build workspace (MLX backend)
       run: cargo build --workspace --features mlx
-      - name: Build examples
-        run: cargo build --workspace --features mlx --examples
+    - name: Build examples
+      run: cargo build --workspace --features mlx --examples
 
     - name: Run clippy
       run: cargo clippy --workspace --lib -- -W clippy::all
