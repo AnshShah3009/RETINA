@@ -1410,7 +1410,45 @@ matches `Replicate` (61.69), `Wrap` (66.06) and `Reflect101` (65.79) equally
 little, which is the strongest single piece of evidence: the GPU is not applying
 *any* of the documented mappings to that pixel.
 
-The test reports the divergence rather than asserting it, so it stays green and
-the numbers stay visible. Turning it into a failure would mean freezing a
-characterisation that has not been explained, which would make the next person
-trust the test instead of the investigation.
+### What the probe established, and a fix that turned out to be wrong
+
+A subagent left nine diagnostic probes behind. One of them is decisive: it sets
+`input[i] = i`, uses a kernel with a single tap, and so each output pixel *is* the
+flat index the GPU fetched. Read out along a middle row of a 37-wide image with a
+7x7 kernel, for `Reflect`:
+
+| coord | -3 | -2 | -1 | 0 | 1 | 2 | 3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| GPU | 32 | 31 | 30 | 0 | 1 | 2 | 3 |
+| correct | 3 | 2 | 1 | 0 | 1 | 2 | 3 |
+
+and for a 9-wide image the same probe returns 1, 2, 3 - correct. So the GPU is
+not reading out of range; it is reading a valid but wrong in-range index, and the
+wrongness depends on the image width.
+
+The `- 1` in `c = period - c - 1` is the suspect. It makes the sequence
+`... 2 1 0 | 0 1 2 ... | 2 1 0`, which is period `2n-2` - that is
+`Reflect101`, not `Reflect`. Removing the `- 1` was the obvious correction, and
+**it was wrong**: it makes `coord = n` map to `n` instead of `n-1`, which is out
+of range for the last row, and the CPU `convolve_2d` then panicked with
+`index out of bounds: the len is 1221 but the index is 1223`. Verified by
+reverting: the panic is produced by that change and disappears without it.
+
+So the situation is narrower than "Reflect is broken" and I do not have the
+correct formula. What is established:
+
+- `c = period - c - 1` is wrong for negative coordinates; it implements
+  `Reflect101` under the name `Reflect`.
+- The plain correction `c = period - c` is wrong for `coord = n`; it can return
+  `n`, which is out of range.
+- A correct implementation needs both ends right, and I did not find it. It is a
+  two-line function; the right move is to derive it from the documented sequence
+  and check `coord` in `-n-1 .. n+1` explicitly rather than adjusting a constant.
+
+The CPU and the shader carry the identical error, so the two backends agree with
+each other and disagree with the documented mode. That is why the divergence
+looked like a CPU-versus-GPU problem and was not one, and why both readings had to
+be falsified before the real shape emerged.
+
+The test still reports rather than asserts, the diagnostic probes are deleted, and
+this is left as a known defect with its shape documented.
