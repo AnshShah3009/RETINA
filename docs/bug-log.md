@@ -146,11 +146,25 @@ test, and the "found by" column says which.
 - **`is_process_alive` cast a `u32` pid to `i32`**; a large value became negative and `kill(-n, 0)` probes a process *group* rather than failing.
 - **`shutter`/futex wake measurement measured the wrong interval** — the waiter's whole elapsed time minus the main thread's, so it included thread spawn and coordinator creation. It reported 20–40 ms against a 20 ms bound on macOS CI. Now synchronises on the waiter parking and compares the best of five trials: **17.6 µs**.
 
+## Parsers, and a window that drew nothing
+
+- **`f64::from_str` accepts `inf`, `nan`, `1e400`.** These are valid IEEE-754 spellings, not syntax errors, so every dataset reader that only checked the parse accepted them: one malformed column produced a pose or timestamp of `inf` that flowed silently into every metric computed from the trajectory. EuRoC, TUM, KITTI and COLMAP now refuse such a file, naming the line and the offending text. The same class was fixed in PLY, and in STL, OBJ and PCD vertex coordinates.
+- **A PLY `element face` block was read as further vertices.** The reader had no element model - it read `num_vertices` rows and stopped, which is only correct when the vertex element happens to be last. A face row's first three integers are shaped exactly like coordinates, so `3 0 0 1` became a vertex with no error anywhere.
+- **`element vertex 40000000000` in a 90-byte PLY reserved ~300 GB.** Clamping the count to 200M still reserved 2.4 GB, because the clamp bounded the *claim* rather than the data. A vertex row is at least 6 bytes, so the reservation is now bounded by what could exist: measured growth for that file drops from 2.4 GB to 2 KB.
+- **A singular KITTI rotation was accepted as a pose.** A zero row, a truncated file or a header read at the wrong offset has no inverse and cannot be a rotation, but every downstream consumer treats it as one. Now rejected on determinant.
+- **Two tests proved nothing.** `ply_vertex_count_is_bounded_before_allocation` reimplemented a 200M clamp locally and asserted its own constants; `ply_hostile_vertex_count` measured process-wide `VmSize`, which also counts the test binary's own allocations and so could not detect the fix it was written for. Both now assert the property they were named for.
+- **The viewer painted its background *after* the render callback**, putting an opaque rectangle over the point clouds. Black window, no error.
+- **`look_at` built the camera basis 180° out** (`z = eye - target`, then `up × z`), so the eye mapped to its own position and the cloud was drawn behind the camera. It compiled and drew *something*. Verified numerically before the fix: eye → origin, target → (0,0,−5).
+- **Wheel zoom used `zoom_delta`**, which is a pinch factor and is exactly `1.0` for an ordinary notch - so the wheel did nothing, and scrolling down drove the eye through the object. Now read from `raw_scroll_delta.y`.
+- **The orbit was dead**: `Response::drag_delta()` is only non-zero when the widget captured the pointer, and a rect inside a `CentralPanel` never does.
+- **The demo opened empty**, which is indistinguishable from a broken renderer.
+- **Two smoke tests waited on processes that never exit.** `demo` is a GUI app; `orbdiag` sweeps the full dataset. Both used `.output()` or a completion deadline and could only pass if the example happened to finish first. `orbdiag`'s own comment said it "is expected to run past any reasonable timeout", and then the test waited for it. Suite time 71s → 8s.
+
 ## Counted
 
 | | |
 | --- | ---: |
 | Defects fixed | **95+** |
 | Commits | 460+ |
-| Tests | 1,512 (from 1,267) |
+| Tests | 1,702 (from 1,267) |
 | Duplicate implementations removed | 12 |
