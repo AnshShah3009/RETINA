@@ -655,7 +655,9 @@ mod sweep {
             for x in 2..w.saturating_sub(2) {
                 // 3x3 Sobel gx
                 let gx = -at(x - 1, y - 1) - 2.0 * at(x - 1, y) - at(x - 1, y + 1)
-                      + at(x + 1, y - 1) + 2.0 * at(x + 1, y) + at(x + 1, y + 1);
+                    + at(x + 1, y - 1)
+                    + 2.0 * at(x + 1, y)
+                    + at(x + 1, y + 1);
                 cpu_vs_hand = cpu_vs_hand.max((cxs[y * w + x] - gx).abs());
             }
         }
@@ -1245,4 +1247,117 @@ mod sweep {
             }
         }
     }
+}
+
+/// Every audited WGSL storage binding must carry the element type its host
+/// buffer actually holds.
+///
+/// Three real defects were exactly this shape, and all returned plausible wrong
+/// answers rather than errors: `canny.wgsl`, `match_template.wgsl` and both
+/// Hough shaders declared `array<u32>` and reassembled four bytes per word while
+/// the host uploaded f32. Canny produced a uniformly black edge map; template
+/// matching found its best match two pixels from the truth with a score of
+/// 697,464 where the CPU found 0.0; Hough found 2 of 5 lines.
+///
+/// Nothing in the build catches this. wgpu binds a buffer and the element type
+/// lives only in the WGSL, so a mismatch is a wrong answer with no error, and
+/// CI has no GPU, so running the code cannot catch it either. This check needs
+/// neither.
+///
+/// The expectations were established by reading each host kernel, element by
+/// element. `vec4`, `vec2` and `atomic` are deliberately not asserted: they are
+/// layout views over the same storage, and a Rust `Vec<[f32; 4]>` packs exactly
+/// as `vec4<f32>`. Shaders join this table as they are audited, so it doubles as
+/// the record of what has been checked.
+#[test]
+fn shader_storage_element_types_match_their_hosts() {
+    use std::collections::HashMap;
+
+    // (binding index) -> the element type the host binds there.
+    let expected: &[(&str, &[(u32, &str)])] = &[
+        ("canny.wgsl", &[(0, "f32"), (1, "f32"), (2, "u32")]),
+        ("hough.wgsl", &[(0, "f32"), (1, "u32")]),
+        ("hough_circles.wgsl", &[(0, "f32"), (1, "u32")]),
+        ("icp_reduce.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("lbvh_build.wgsl", &[(0, "u32"), (1, "u32")]),
+        ("lucas_kanade.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("match_template.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
+        ("nms.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("pointcloud_transform.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("resize_f32.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("stereo_match.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
+        ("subtract.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
+        ("warp.wgsl", &[(0, "f32"), (1, "f32")]),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for (shader, binds) in expected {
+        // The integration test target lives at the workspace root, so
+        // CARGO_MANIFEST_DIR is already the directory the shaders sit under.
+        let path = format!(
+            "{}/crates/hal/shaders/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            shader
+        );
+        let source = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                failures.push(format!("{}: cannot read ({})", shader, e));
+                continue;
+            }
+        };
+
+        let mut declared: HashMap<u32, String> = HashMap::new();
+        for line in source.lines() {
+            if !line.contains("var<storage") {
+                continue;
+            }
+            let Some(rest) = line.split("@binding(").nth(1) else {
+                continue;
+            };
+            let Some(idx) = rest
+                .split(')')
+                .next()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let Some(after) = line.split("array<").nth(1) else {
+                continue;
+            };
+            let elem = after
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .find(|s| !s.is_empty())
+                .unwrap_or("?");
+            declared.entry(idx).or_insert_with(|| elem.to_string());
+        }
+
+        for (idx, want) in *binds {
+            // `atomic<u32>` and a `#[repr(C)]` struct like `LbvhNode` are both
+            // u32-backed storage; only a scalar element type is asserted here.
+            // Vector and composite views are layout, not element type, and are
+            // checked by the operations that consume them.
+            let got = declared.get(idx).map(|s| s.as_str());
+            let comparable = match got {
+                Some("atomic") | Some("LbvhNode") => "u32",
+                other => other.unwrap_or("?"),
+            };
+            if comparable == *want {
+                continue;
+            }
+            match got {
+                Some(g) => failures.push(format!(
+                    "{} binding {}: host holds {}, shader declares array<{}>",
+                    shader, idx, want, g
+                )),
+                None => failures.push(format!("{} has no storage binding {}", shader, idx)),
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "shader/host element-type mismatches:\n  {}",
+        failures.join("\n  ")
+    );
 }
