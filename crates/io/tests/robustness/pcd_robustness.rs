@@ -149,6 +149,14 @@ fn pcd_binary_hostile_points_is_rejected_promptly() {
 #[test]
 fn pcd_ascii_hostile_points_reserves_2_4gb_for_an_empty_body() {
     let file = pcd_ascii("40000000000", "POINTS 40000000000\n", "");
+    // `run_with_budget` runs the parser on a dedicated 4 MiB stack, and the
+    // *first* such thread in a process also gets glibc's per-thread malloc
+    // arena. Both land in the process's `VmSize`, so measuring before/after
+    // across the call attributes ~68 MiB of the harness's own cost to the
+    // parser - which is more than this test's 64 MiB budget, and made the
+    // result depend on whether some earlier test happened to have spawned a
+    // thread first. Warm the cost up so what is left is the parser's own.
+    let _ = run_with_budget(DEFAULT_BUDGET, || Ok(0u8));
     let before = address_space_bytes();
     let cloud = parse_hostile(run_pcd, &file).expect_ok("empty ascii body");
     assert_eq!(cloud.len(), 0, "no data lines means no points");

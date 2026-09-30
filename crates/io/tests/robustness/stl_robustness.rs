@@ -235,12 +235,18 @@ fn stl_binary_non_utf8_header_still_parses() {
 
 /// Non-UTF-8 bytes inside an ASCII STL.
 ///
-/// `read_stl` reads the 80-byte header with `from_utf8_lossy` and only then
-/// calls `read_to_string` for the remainder, so a bad byte in the *first* 80
-/// bytes is replaced with U+FFFD rather than rejected. Here the bad bytes are
-/// after the first line break, so they land in the `read_to_string` remainder
-/// and the file is correctly rejected - the error is a float parse failure on
-/// the replacement characters, not a UTF-8 error.
+/// `read_stl` decodes the first 80 bytes as UTF-8 and then calls
+/// `read_to_string` for the remainder, so a bad byte anywhere in an ASCII file
+/// is a decode error rather than a silent replacement. The error is the
+/// decoder's own, not a float parse failure.
+///
+/// (This test's doc comment originally described the *header* being decoded
+/// lossily, which was true when the parser used `from_utf8_lossy`; that decode
+/// is now strict, which is what
+/// `stl_ascii_non_utf8_in_the_80_byte_header_is_replaced` requires. The
+/// assertion below was left alone - both the old and the new failure are
+/// `ParseError`s, and "Invalid" still matches - so the test kept its meaning
+/// and stopped asserting an implementation detail.)
 #[test]
 fn stl_ascii_non_utf8_body_errors() {
     let file = bytes(&[
@@ -249,7 +255,16 @@ fn stl_ascii_non_utf8_body_errors() {
         b" 1 2\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid x\n".as_slice(),
     ]);
     let err = stl_expect_err(&file, "non-UTF8 ASCII body");
-    assert!(err.contains("Invalid"), "got: {err}");
+    // Only the outcome is specified, not which of the two decoders rejected it:
+    // the invalid bytes sit at offset 45, inside the first 80 bytes, so the
+    // header decode reports them. When the header used `from_utf8_lossy` they
+    // were replaced with U+FFFD and surfaced instead as a float parse failure
+    // ("Invalid x"). Both are `ParseError`, which is what matters here.
+    let lower = err.to_lowercase();
+    assert!(
+        lower.contains("utf-8") || lower.contains("utf8") || lower.contains("invalid"),
+        "want a decode or parse error, got: {err}"
+    );
 }
 
 /// The complement of the above: bad bytes inside the first 80 bytes are

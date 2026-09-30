@@ -242,18 +242,15 @@ fn datasets_euroc_translation_must_be_finite() {
         "g.csv",
         "1,inf,-inf,nan,1,0,0,0,0,0,0,0,0,0,0,0,0\n2,1e400,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0\n",
     );
-    let states = euroc::read_groundtruth(&path).expect("read");
-    assert_eq!(states.len(), 2, "both rows are well-formed apart from the values");
-    for s in &states {
-        let t = s.pose.translation;
-        assert!(
-            t.x.is_finite() && t.y.is_finite() && t.z.is_finite(),
-            "KNOWN BUG: euroc::read_groundtruth returned a non-finite translation ({}, {}, {})",
-            t.x,
-            t.y,
-            t.z
-        );
-    }
+    // `inf`, `nan` and `1e400` (which parses to infinity) are all rejected
+    // outright. They are valid IEEE-754 spellings rather than syntax errors, so
+    // without an explicit check a single bad column produced a pose of `inf`
+    // that flowed silently into every metric computed from the trajectory.
+    let err = euroc::read_groundtruth(&path).expect_err("a non-finite column must be rejected");
+    assert!(
+        err.to_string().contains("finite"),
+        "the error should name the reason, got: {err}"
+    );
 }
 
 /// Same for the TUM ground truth reader.
@@ -261,18 +258,11 @@ fn datasets_euroc_translation_must_be_finite() {
 fn datasets_tum_translation_must_be_finite() {
     let dir = TempDir::new("ds_finite_tum");
     let path = dir.write("g.txt", "1.0 inf nan 0 0 0 0 1\n2.0 0 0 0 0 0 0 1\n");
-    let poses = tum::read_groundtruth(&path).expect("read");
-    for p in &poses {
-        let t = p.pose.translation;
-        assert!(
-            t.x.is_finite() && t.y.is_finite() && t.z.is_finite(),
-            "KNOWN BUG: tum::read_groundtruth returned a non-finite translation ({}, {}, {})",
-            t.x,
-            t.y,
-            t.z
-        );
-    }
-    assert!(poses[0].timestamp.is_finite());
+    let err = tum::read_groundtruth(&path).expect_err("a non-finite column must be rejected");
+    assert!(
+        err.to_string().contains("finite"),
+        "the error should name the reason, got: {err}"
+    );
 }
 
 /// Same for the KITTI times reader, which (unlike `kitti::read_poses`) has no
@@ -281,13 +271,10 @@ fn datasets_tum_translation_must_be_finite() {
 fn datasets_kitti_times_must_be_finite() {
     let dir = TempDir::new("ds_finite_kitti");
     let path = dir.write("times.txt", "0.0\ninf\nnan\n-1e400\n");
-    let times = kitti::read_times(&path).expect("read");
-    for (i, t) in times.iter().enumerate() {
-        assert!(
-            t.is_finite(),
-            "KNOWN BUG: kitti::read_times returned a non-finite timestamp at index {i}: {t}"
-        );
-    }
+    // A non-finite timestamp silently poisons every time-based association
+    // downstream, so the file is refused rather than partially accepted.
+    let err = kitti::read_times(&path).expect_err("non-finite times must be rejected");
+    assert!(err.to_string().contains("finite"), "got: {err}");
 }
 
 /// Same for the TUM index reader.
@@ -295,14 +282,8 @@ fn datasets_kitti_times_must_be_finite() {
 fn datasets_tum_index_timestamp_must_be_finite() {
     let dir = TempDir::new("ds_finite_tum_idx");
     let path = dir.write("rgb.txt", "inf rgb/a.png\nnan rgb/b.png\n");
-    let entries = tum::read_index(&path).expect("read");
-    for e in &entries {
-        assert!(
-            e.timestamp.is_finite(),
-            "KNOWN BUG: tum::read_index returned a non-finite timestamp: {}",
-            e.timestamp
-        );
-    }
+    let err = tum::read_index(&path).expect_err("non-finite timestamps must be rejected");
+    assert!(err.to_string().contains("finite"), "got: {err}");
 }
 
 /// Same for the generic EuRoC csv reader.
@@ -328,15 +309,10 @@ fn datasets_euroc_csv_values_must_be_finite() {
 fn datasets_colmap_camera_params_must_be_finite() {
     let dir = TempDir::new("ds_finite_cam");
     let path = dir.write("c.txt", "1 PINHOLE 640 480 inf 500 nan 240\n");
-    let cams = colmap::read_cameras_text(&path).expect("read");
-    for c in &cams {
-        for p in &c.params {
-            assert!(
-                p.is_finite(),
-                "KNOWN BUG: colmap::read_cameras_text accepted a non-finite parameter: {p}"
-            );
-        }
-    }
+    // An `inf` focal length or a `nan` principal point makes every projection
+    // downstream silently produce garbage, so the read is refused.
+    let err = colmap::read_cameras_text(&path).expect_err("non-finite params must be rejected");
+    assert!(err.to_string().contains("finite"), "got: {err}");
 }
 
 /// Same for COLMAP 3-D points and reprojection errors.
@@ -344,19 +320,8 @@ fn datasets_colmap_camera_params_must_be_finite() {
 fn datasets_colmap_points_must_be_finite() {
     let dir = TempDir::new("ds_finite_pts");
     let path = dir.write("p.txt", "1 inf nan -inf 255 128 0 0.5\n2 0 0 0 0 0 0 inf\n");
-    let points = colmap::read_points3d_text(&path).expect("read");
-    for p in &points {
-        let v = p.position;
-        assert!(
-            v.x.is_finite() && v.y.is_finite() && v.z.is_finite() && p.error.is_finite(),
-            "KNOWN BUG: colmap::read_points3d_text returned a non-finite point \
-             ({}, {}, {}) error {}",
-            v.x,
-            v.y,
-            v.z,
-            p.error
-        );
-    }
+    let err = colmap::read_points3d_text(&path).expect_err("non-finite points must be rejected");
+    assert!(err.to_string().contains("finite"), "got: {err}");
 }
 
 /// COLMAP 2-D observations: a NaN pixel coordinate is accepted.
@@ -364,15 +329,8 @@ fn datasets_colmap_points_must_be_finite() {
 fn datasets_colmap_observations_must_be_finite() {
     let dir = TempDir::new("ds_finite_obs");
     let path = dir.write("i.txt", "1 1 0 0 0 0 0 0 1 a.jpg\nnan inf 1\n");
-    let images = colmap::read_images_text(&path).expect("read");
-    for p in &images[0].points2d {
-        assert!(
-            p.x.is_finite() && p.y.is_finite(),
-            "KNOWN BUG: colmap::read_images_text accepted a non-finite observation ({}, {})",
-            p.x,
-            p.y
-        );
-    }
+    let err = colmap::read_images_text(&path).expect_err("non-finite observations must be rejected");
+    assert!(err.to_string().contains("finite"), "got: {err}");
 }
 
 // ===========================================================================

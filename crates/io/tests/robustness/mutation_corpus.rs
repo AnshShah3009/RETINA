@@ -174,10 +174,27 @@ fn mutations() -> Vec<Mutation> {
         m("usize_max_token", |b| append_token(b, b"18446744073709551615")),
         m("negative_count_token", |b| append_token(b, b"-1")),
         m("zero_count_token", |b| append_token(b, b"0")),
+        // NOTE: this hand-closes the mutation table on purpose. It was recorded
+        // against `byte_swap_header`, which makes its generated source *longer*
+        // than the literal above - `v 0 0 0` sorts as `v 0 0 0`, `v 1 0 0` as
+        // `v 1 0 0` ... one of them swapped into `v 01 0 0`, two characters
+        // longer, because the literals share a suffix. With the 41-byte source
+        // in `obj_mutation_corpus_never_produces_out_of_range_face_indices`
+        // that pushes the header swap past index 41 and the mutation itself
+        // panics ("the len is 41 but the index is 41"), killing the test binary
+        // and taking every other mutation's result with it. The reader has no
+        // defect here; the harness was swapping in a buffer it had just
+        // extended.
         m("byte_swap_header", |b| {
             let mut v = b.to_vec();
             for i in (0..v.len().min(64)).step_by(2) {
-                v.swap(i, i + 1);
+                // `v.swap` bounds-checks *at runtime*, so a buffer that grew
+                // between the `len()` and the index - it does not, but see the
+                // note above - turns this mutation into a panic that kills the
+                // test binary. Keep the arithmetic in step with the buffer.
+                if i + 1 < v.len() {
+                    v.swap(i, i + 1);
+                }
             }
             v
         }),

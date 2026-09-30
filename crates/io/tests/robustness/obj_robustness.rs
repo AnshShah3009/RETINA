@@ -142,27 +142,20 @@ fn obj_huge_file_without_vertices_terminates() {
 // 2. Face indices: the 1-based to 0-based conversion
 // ===========================================================================
 
-/// A face index far beyond the vertex list. `i - 1` succeeds and the index is
-/// stored as-is; `to_triangle_mesh` then hands downstream code an out-of-range
-/// index.
+/// A face index far beyond the vertex list.
+///
+/// `i - 1` used to succeed and the index was stored as-is, so
+/// `to_triangle_mesh` handed downstream code an index of 999998 into a
+/// 3-vertex mesh - a plausible-wrong-result that turns into a panic (or a read
+/// of unrelated memory) in the first consumer that indexes `vertices[face[k]]`.
+/// The reader must refuse it instead.
 #[test]
 fn obj_out_of_range_face_index_is_rejected() {
     let file = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 999999\n".to_vec();
-    let m = obj_mesh(&file).expect_ok("out-of-range face");
-    if let Err(payload) = std::panic::catch_unwind(|| {
-        assert_mesh_consistent(&m, "obj_robustness::obj_out_of_range_face_index_is_rejected")
-    }) {
-        let msg = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
-            .unwrap_or_default();
-        panic!("KNOWN BUG (obj face indices are not bounds-checked): {msg}");
-    }
-    panic!(
-        "KNOWN BUG: ObjMesh::read accepted face index 999999 for a 3-vertex mesh; the face \
-         {:?} refers to vertex 999998, which does not exist",
-        m.faces[0]
+    let err = obj_mesh(&file).expect_err("face index 999999 in a 3-vertex mesh");
+    assert!(
+        err.contains("out of range"),
+        "the error should say the index addresses no vertex, got: {err}"
     );
 }
 
@@ -196,41 +189,30 @@ fn obj_face_with_slashes_and_negative_index() {
 }
 
 /// A face index of `usize::MAX` becomes `usize::MAX - 1` after the 1-based
-/// conversion.
+/// conversion - an index that survived into the mesh untouched, and that any
+/// bounds check has to catch rather than wrap.
 #[test]
 fn obj_face_index_near_usize_max_is_rejected() {
     let file = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 18446744073709551615\n".to_vec();
-    let m = obj_mesh(&file).expect_ok("usize::MAX-1 index");
-    if let Err(payload) = std::panic::catch_unwind(|| {
-        assert_mesh_consistent(&m, "obj_robustness::obj_face_index_near_usize_max_is_rejected")
-    }) {
-        let msg = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
-            .unwrap_or_default();
-        panic!("KNOWN BUG (obj face indices are not bounds-checked): {msg}");
-    }
-    panic!("KNOWN BUG: face index usize::MAX survived into the mesh as {:?}", m.faces[0]);
+    let err = obj_mesh(&file).expect_err("usize::MAX index");
+    assert!(
+        err.contains("out of range"),
+        "the error should say the index addresses no vertex, got: {err}"
+    );
 }
 
-/// A `v` line that appears *after* an `f` line: the face refers to a vertex that
-/// has not been read yet, and forward references are accepted.
+/// A `v` line that appears *after* an `f` line: the face refers to vertices that
+/// have not been read yet. OBJ does not allow forward references, and accepting
+/// one produced a mesh whose indices were out of range as soon as the reader
+/// stopped.
 #[test]
 fn obj_forward_face_reference_is_rejected() {
     let file = b"f 1 2 3\nv 0 0 0\nv 1 0 0\nv 0 1 0\n".to_vec();
-    let m = obj_mesh(&file).expect_ok("forward reference");
-    if let Err(payload) = std::panic::catch_unwind(|| {
-        assert_mesh_consistent(&m, "obj_robustness::obj_forward_face_reference_is_rejected")
-    }) {
-        let msg = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| payload.downcast_ref::<&'static str>().map(|s| s.to_string()))
-            .unwrap_or_default();
-        panic!("KNOWN BUG (obj face indices are not bounds-checked): {msg}");
-    }
-    panic!("KNOWN BUG: a forward face reference was accepted: {:?}", m.faces[0]);
+    let err = obj_mesh(&file).expect_err("forward reference");
+    assert!(
+        err.contains("out of range"),
+        "a forward reference is an out-of-range index at the point it is read, got: {err}"
+    );
 }
 
 /// An n-gon: fan triangulation must produce `len - 2` triangles, all with
