@@ -1322,3 +1322,39 @@ enforcement itself.
 No unsound `unsafe` remains. The count is 26, down from 35 before the earlier
 pass, and every one of them is either a `bytemuck` impl over a `#[repr(C)]` type
 or a syscall wrapper whose preconditions are checked before the call.
+
+## The one defect class that kept recurring
+
+Three separate fixes this session were the same bug: a WGSL storage binding
+declared `array<u32>` while the host uploads f32, with the shader reassembling
+four bytes per word.
+
+| shader | symptom |
+| --- | --- |
+| `canny.wgsl` | every Sobel sample was 0, so the edge map came back uniformly black |
+| `match_template.wgsl` | best match sat 2 px from the truth with a score of 697,464 where the CPU found 0.0 |
+| `hough.wgsl`, `hough_circles.wgsl` | almost every pixel looked black and returned before voting, so 2 of 5 lines were found |
+
+The reason it recurs is that the shaders are written from a CPU reference that
+packs bytes, and nothing in the build rejects the mismatch. There is no type
+information crossing the boundary - wgpu binds a buffer, and the element type
+lives only in the WGSL. So the compiler cannot catch it, the host cannot catch
+it, and the failure is silent: each of these returned a plausible result rather
+than an error. Canny returned an all-black image, which at least looks like
+"no edges found"; `match_template` and `hough` returned answers that were wrong
+in a way nothing would flag.
+
+`sobel.wgsl` uses the same packed-u8 idiom and is *not* affected, because it also
+packs on write - the convention is self-consistent there. That is exactly why
+reading the shader is not enough to decide, and why the sweep runs the thing
+rather than inspecting it.
+
+Three of the four were found by the table-driven parity sweep in
+`tests/gpu_parity_tests.rs`, and all three were in operations no test touched.
+The sweep currently covers nine; the trait declares 49.
+
+The general lesson is the one this file keeps arriving at: a shader that fails to
+compile produces a loud error and is found in minutes, while a shader that
+compiles and reads the wrong bytes produces a quiet wrong answer and survives
+indefinitely. The only defence is to run both backends on the same input and
+compare.
