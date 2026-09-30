@@ -524,8 +524,26 @@ impl Farneback {
 
                 if w_sum > 0.0 {
                     if let Some(a_inv) = a_sum.try_inverse() {
+                        // `d` is the *increment*, not the answer. The solve gives
+                        // the displacement that best reconciles the two polynomial
+                        // expansions, and it belongs on top of whatever the
+                        // previous level or iteration already established.
+                        //
+                        // Assigning it outright discarded `_u, _v` on the success
+                        // path - they were read and then used only on the two
+                        // failure branches - so the iteration never accumulated
+                        // and the result was dominated by the image-content term
+                        // rather than by motion. Measured: a known 10 px shift
+                        // came back as 0.054 px, 0.5% of the truth, and the
+                        // existing `test_farneback` passed because it only
+                        // asserted `u > 0.0`.
                         let d = a_inv * db_sum;
-                        new_flow.set_motion(x, y, d[0] as f32, d[1] as f32);
+                        new_flow.set_motion(
+                            x,
+                            y,
+                            (_u as f64 + d[0]) as f32,
+                            (_v as f64 + d[1]) as f32,
+                        );
                     } else {
                         new_flow.set_motion(x, y, _u, _v);
                     }
@@ -827,6 +845,62 @@ mod tests {
 
         // Should detect rightward motion
         assert!(u > 0.0, "Expected positive horizontal flow");
+    }
+
+    /// Farneback must estimate the *magnitude* of the motion, not merely its
+    /// sign.
+    ///
+    /// The existing `test_farneback` only asserts `u > 0.0`, which passes for a
+    /// field of almost any size in the right direction. This one shifts a textured
+    /// image by a known amount and checks the estimate against it.
+    #[test]
+    fn probe_farneback_magnitude() {
+        let (pw, ph) = (120usize, 100usize);
+        let shift = 10i32;
+        let mut a = vec![0f32; pw * ph];
+        for y in 0..ph {
+            for x in 0..pw {
+                a[y * pw + x] = (((x * 37 + y * 91) % 255) as f32) / 255.0;
+            }
+        }
+        let mut b = vec![0f32; pw * ph];
+        for y in 0..ph {
+            for x in 0..pw {
+                let sx = x as i32 - shift;
+                b[y * pw + x] = if sx >= 0 {
+                    a[y * pw + sx as usize]
+                } else {
+                    0.0
+                };
+            }
+        }
+        let to_img = |v: &[f32]| {
+            image::GrayImage::from_raw(
+                pw as u32,
+                ph as u32,
+                v.iter().map(|&x| (x * 255.0) as u8).collect(),
+            )
+            .unwrap()
+        };
+        let fb = Farneback::new().with_pyramid_levels(3).with_window_size(11);
+        let flow = fb.compute(&to_img(&a), &to_img(&b)).unwrap();
+
+        let mut sum = 0f64;
+        let mut n = 0u64;
+        for y in 30..70u32 {
+            for x in 30..80u32 {
+                sum += flow.get_motion(x, y).0 as f64;
+                n += 1;
+            }
+        }
+        let mean_u = sum / n as f64;
+        // Assert the magnitude, not just the sign. `test_farneback` asserts
+        // `u > 0.0`, which passes on 0.054 - 0.5% of the true motion.
+        assert!(
+            (mean_u - shift as f64).abs() < 2.0,
+            "Farneback estimated {mean_u:.3} px for a known {shift} px shift; \
+             the field is well-formed but does not estimate translation"
+        );
     }
 
     #[test]

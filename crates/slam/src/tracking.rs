@@ -131,38 +131,27 @@ impl Tracker {
                 }
             }
         } else {
-            // First frame initialization
-            // Seed the map with initial points (assuming some default depth or just placeholders)
-            // For true monocular SLAM, we need 2 frames to initialize.
-            // For now, let's just accept the frame as the origin and wait for the next frame.
-            // We can add dummy points or just return success so the loop continues.
-
-            // Critical: If we don't add points to the map, the next frame will also see empty map.
-            // For a demo, let's assume we can initialize map points from this frame?
-            // Without depth, we can't.
-            // So we need "Bootstrapping" state.
-            // Simplified: Just set success = true, pose = Identity.
-            // The map remains empty, so next frame will also fall here?
-            // NO. "if !map.points.is_empty()" checks points.
-
-            // To make the demo interesting, let's pretend we initialized some points
-            // just to allow matching test (even if physics is wrong) or change logic to
-            // "if map is empty, create dummy map points at z=1.0 for all keypoints"
-            // This allows the tracker to "start".
-
-            for (i, desc) in frame.descriptors.descriptors.iter().enumerate() {
-                // Back-project to z=1.0
-                let kp = &desc.keypoint;
-                let x = (kp.x - self.intrinsics.cx) / self.intrinsics.fx;
-                let y = (kp.y - self.intrinsics.cy) / self.intrinsics.fy;
-                let pos = Point3::new(x as f32, y as f32, 1.0);
-
-                let desc_data = desc.data.clone();
-                let mp = crate::types::MapPoint::new(i as u64, pos, desc_data);
-                map.add_point(mp);
-            }
-
-            tracking_success = true;
+            // Monocular SLAM cannot initialise from one frame: there is no
+            // parallax, so no point can be triangulated.
+            //
+            // This used to fabricate a map by back-projecting every keypoint
+            // onto a hard-coded plane at z = 1.0, then report
+            // `tracking_success = true` with an identity pose. Every subsequent
+            // frame then matched the real scene against that fabricated plane
+            // and ran PnP on it - which is the most degenerate configuration PnP
+            // has, a fronto-parallel planar target - and returned a confident,
+            // meaningless pose with no error anywhere. The original comments
+            // conceded it was a placeholder, "even if physics is wrong".
+            //
+            // Failing is the honest answer, and it is reachable: callers that
+            // have depth should use `process_frame_with_depth`, and callers
+            // with two frames get the map from the second.
+            return Err(
+                "SLAM cannot initialise from a single monocular frame: no parallax means \
+                 nothing to triangulate. Supply depth via process_frame_with_depth, or \
+                 track from the second frame."
+                    .to_string(),
+            );
         }
 
         if !tracking_success {
