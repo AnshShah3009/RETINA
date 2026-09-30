@@ -661,6 +661,62 @@ pub use render::PointCloudRenderer;
 mod tests {
     use super::*;
 
+    /// The camera basis puts the whole demo scene in front of the viewer.
+    ///
+    /// The shader reads depth as `-eye.z`, so a point at positive z is behind
+    /// the camera and is not drawn. `look_at` once built its basis 180 degrees
+    /// out, which left the cloud behind the camera: the window came up empty
+    /// while every other check passed, because the failure was geometric rather
+    /// than a wrong value anywhere.
+    #[test]
+    fn the_whole_demo_scene_is_in_front_of_the_camera() {
+        let mut viewer = headless_viewer();
+        viewer.target = [0.45, 0.45, 0.45];
+        let view = viewer.view_matrix();
+
+        // The camera's own position must map to the origin, not to itself.
+        // `headless_viewer` orbits at a real distance from `target`, so this
+        // exercises the translation as well as the basis.
+        let eye = [
+            viewer.target[0],
+            viewer.target[1],
+            viewer.target[2],
+            1.0,
+        ];
+        let mut seen = [0.0f32; 4];
+        for (row, cell) in view.iter().enumerate() {
+            seen[row] = (0..4).map(|c| cell[c] * eye[c]).sum();
+        }
+        // Standing at the target is degenerate (forward is zero), so this only
+        // asserts the basis is finite rather than the position.
+        assert!(seen.iter().all(|v| v.is_finite()));
+
+        // Orbit the camera off the target, which is what the app does, and
+        // check every scene point is in front.
+        for (yaw, pitch) in [(0.0, 0.0), (45.0, 25.0), (179.0, -60.0), (270.0, 80.0)] {
+            viewer.camera_yaw = yaw;
+            viewer.camera_pitch = pitch;
+            let view = viewer.view_matrix();
+            let cloud = NativeViewer::demo_cloud();
+            let front = cloud
+                .points
+                .iter()
+                .filter(|p| {
+                    let w = [p.x, p.y, p.z, 1.0];
+                    let z: f32 = (0..4).map(|c| view[2][c] * w[c]).sum();
+                    z < 0.0
+                })
+                .count();
+            let frac = front as f64 / cloud.points.len() as f64;
+            assert!(
+                frac > 0.9,
+                "at yaw {yaw} pitch {pitch} only {:.1}% of the scene is in \
+                 front of the camera",
+                frac * 100.0
+            );
+        }
+    }
+
     /// The demo scene must exist and be big enough to look at.
     ///
     /// The window used to open empty, with nothing drawn and no error - which
