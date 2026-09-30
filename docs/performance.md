@@ -1562,3 +1562,24 @@ file, and the cost of that was two rounds of confidently wrong work. The checks
 that saved it were the same ones that find the real bugs - compile the shader,
 run the test - which is the argument for having them even when they are
 inconvenient.
+
+### A third false positive, from the crates review
+
+The review reported that `UnifiedBuffer`'s `Drop` leaks a VRAM reservation
+when the global scheduler has not been initialised, because the release is
+inside `if let Ok(s) = scheduler()`. It is not a leak: `scheduler()` is
+`OnceLock::get_or_init`, so the initialiser runs at most once, and if it fails the
+`Err` propagates *and the `OnceLock` stays empty* — the next call retries rather
+than receiving a cached failure. The `if let Ok` is defensive, not a silent skip.
+
+The other half of that finding is real but is a design limitation rather than a
+defect: `reserve_device` and `release_device` take only a device index, with no
+per-owner accounting, which is consistent with `PyDeviceInfo.owner_count` being
+hard-coded to 0 rather than being evidence of a leak. Making the coordinator
+owner-aware is a design change with cross-process implications, not a bug fix,
+and it is not attempted here.
+
+Three false positives out of roughly thirty findings is worth recording as a
+ratio. Every one was caught by a check - a compile test, a round-trip assertion,
+a compile-to-f32 model - rather than by reading, which is the practical argument
+for having those checks even when they are inconvenient to build.
