@@ -58,6 +58,14 @@ pub mod brief;
 pub mod canny;
 pub mod color;
 pub mod convolve;
+#[cfg(feature = "cubecl")]
+pub mod cubecl_advanced;
+#[cfg(feature = "cubecl")]
+pub mod cubecl_backend;
+#[cfg(feature = "cubecl")]
+pub mod cubecl_optimized;
+#[cfg(feature = "cubecl")]
+pub mod cubecl_proto;
 pub mod fast;
 pub mod hough;
 pub mod hough_circles;

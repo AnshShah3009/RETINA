@@ -1,34 +1,96 @@
 //! CubeCL GPU Backend for RETINA
 //!
-//! This module provides GPU acceleration using CubeCL, which can target
-//! CUDA, Vulkan, Metal, and other backends through a unified API.
+//! GPU acceleration using CubeCL 0.9, which can target CUDA, Vulkan, Metal and
+//! other backends through a unified API.
 //!
-//! CubeCL provides a more Rust-native approach to GPU computing compared
-//! to WGPU, with direct tensor operations and automatic differentiation support.
+//! # Porting notes (CubeCL 0.9)
+//!
+//! The original version of this file was written against a pre-0.9 CubeCL API
+//! and had never been compiled. The differences that mattered:
+//!
+//! * There is no `CubeContext` trait. A `ComputeClient<R>` *is* the context.
+//! * There is no `ExecutionDims`. Launches take an explicit
+//!   `CubeCount` (number of cubes) and `CubeDim` (units per cube).
+//! * Kernels are declared with `#[cube(launch_unchecked)]`, which generates a
+//!   sibling `mod` with a `launch_unchecked` host function.
+//! * Tensors are launched as `TensorArg`, built from a `TensorHandleRef` via
+//!   `.as_tensor_arg(line_size)`.
+//! * There is no `CubeCLContext`-level tensor type; host buffers are
+//!   `cubecl::std::tensor::TensorHandle<R>`.
+//! * `Tensor<T>` indexes **flat `usize` only**. There is no `t[[i, j]]`
+//!   multi-dimensional indexing, so every kernel below computes its own
+//!   row-major offset from `shape(d)`.
+//! * Early exit is `terminate!()`, not `return`.
+//! * `#[const]` is not a kernel parameter attribute; it was replaced by
+//!   `#[comptime]`. **Note:** `#[comptime]` on a `fn` parameter is broken in
+//!   cubecl-macros 0.9.0 (the macro expansion passes the raw Rust `u32`/`usize`
+//!   where an `ExpandElement` is expected, producing
+//!   `expected u32, found ExpandElementTyped<u32>`). Every former `#[const]`
+//!   parameter is therefore a plain runtime `u32` parameter here, which is
+//!   strictly less optimal (one extra scalar binding, no constant folding) but
+//!   correct and portable. See `docs` note in the report.
+//!
+//! # Correctness caveat
+//!
+//! These kernels were ported, not rewritten. Several were *written* against an
+//! imagined API and contained latent logic errors before the port; where such a
+//! defect survived the port it is called out in a `BUG(original)` comment at
+//! the kernel. Those kernels are not trustworthy.
 
 use cubecl::prelude::*;
-use cubecl::tensor::Tensor;
-use cv_core::TensorShape;
+use cubecl::std::tensor::TensorHandle;
 
-#[derive(Clone, Debug)]
-pub struct CubeCLContext {
-    device: WgpuDevice,
+use crate::gpu_kernels::cubecl_proto as proto;
+
+/// Storage type for `f32` tensors.
+#[inline]
+fn f32_storage() -> StorageType {
+    StorageType::from(cubecl::ir::FloatKind::F32)
 }
 
-impl CubeCLContext {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let device = WgpuDevice::default();
-        Ok(Self { device })
-    }
-
-    pub fn device(&self) -> &WgpuDevice {
-        &self.device
-    }
+/// Storage type for `u32` tensors.
+#[inline]
+fn u32_storage() -> StorageType {
+    StorageType::from(cubecl::ir::UIntKind::U32)
 }
 
-impl Default for CubeCLContext {
-    fn default() -> Self {
-        Self::new().expect("Failed to create CubeCL context")
+/// Units per cube for element-wise launches.
+const CUBE_DIM: u32 = 64;
+
+/// Number of cubes needed to cover `n` working units in 1D.
+#[inline]
+fn cubes_for(n: usize) -> CubeCount {
+    CubeCount::new_1d((n as u32).div_ceil(CUBE_DIM).max(1))
+}
+// ============================================================================
+// Context
+// ============================================================================
+
+/// Handle to a CubeCL 0.9 compute client.
+///
+/// CubeCL 0.9 has no context object: the client *is* the context, so this
+/// wrapper just owns one. It is generic over the runtime so the same code can
+/// run on the WGPU (Vulkan/CUDA) runtime or any other.
+pub struct CubeCLContext<R: Runtime> {
+    client: ComputeClient<R>,
+}
+
+impl<R: Runtime> CubeCLContext<R> {
+    /// Wrap an existing client.
+    pub fn new(client: ComputeClient<R>) -> Self {
+        Self { client }
+    }
+
+    /// Build a context from a device.
+    pub fn from_device(device: &R::Device) -> Self {
+        Self {
+            client: R::client(device),
+        }
+    }
+
+    /// The underlying compute client.
+    pub fn client(&self) -> &ComputeClient<R> {
+        &self.client
     }
 }
 
@@ -36,132 +98,120 @@ impl Default for CubeCLContext {
 // Element-wise Operations
 // ============================================================================
 
-mod element_wise {
-    use super::*;
-
-    #[cube]
-    pub fn add_kernel(lhs: &f32, rhs: &f32) -> f32 {
-        lhs + rhs
-    }
-
-    #[cube]
-    pub fn mul_kernel(lhs: &f32, rhs: &f32) -> f32 {
-        lhs * rhs
-    }
-
-    #[cube]
-    pub fn sub_kernel(lhs: &f32, rhs: &f32) -> f32 {
-        lhs - rhs
-    }
-
-    #[cube]
-    pub fn div_kernel(lhs: &f32, rhs: &f32) -> f32 {
-        lhs / (rhs + 1e-8)
-    }
-
-    #[cube]
-    pub fn relu_kernel(x: &f32) -> f32 {
-        x.max(0.0)
-    }
-
-    #[cube]
-    pub fn sigmoid_kernel(x: &f32) -> f32 {
-        1.0 / (1.0 + (-x).exp())
-    }
-
-    #[cube]
-    pub fn tanh_kernel(x: &f32) -> f32 {
-        let e2x = (2.0 * x).exp();
-        (e2x - 1.0) / (e2x + 1.0)
-    }
+/// Element-wise addition: `output = lhs + rhs`.
+pub fn add<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    lhs: &TensorHandle<R>,
+    rhs: &TensorHandle<R>,
+) -> crate::Result<TensorHandle<R>> {
+    proto::binary_elemwise(&ctx.client, lhs, rhs, proto::BinOp::Add)
 }
 
-/// Element-wise addition: output = lhs + rhs
-pub fn add<C: CubeContext>(ctx: &C, lhs: &Tensor<f32>, rhs: &Tensor<f32>) -> Tensor<f32> {
-    launch_element_wise::<f32, _>(ctx, lhs, rhs, element_wise::add_kernel)
+/// Element-wise subtraction: `output = lhs - rhs`.
+pub fn sub<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    lhs: &TensorHandle<R>,
+    rhs: &TensorHandle<R>,
+) -> crate::Result<TensorHandle<R>> {
+    proto::binary_elemwise(&ctx.client, lhs, rhs, proto::BinOp::Sub)
 }
 
-/// Element-wise multiplication: output = lhs * rhs
-pub fn mul<C: CubeContext>(ctx: &C, lhs: &Tensor<f32>, rhs: &Tensor<f32>) -> Tensor<f32> {
-    launch_element_wise::<f32, _>(ctx, lhs, rhs, element_wise::mul_kernel)
+/// Element-wise multiplication: `output = lhs * rhs`.
+pub fn mul<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    lhs: &TensorHandle<R>,
+    rhs: &TensorHandle<R>,
+) -> crate::Result<TensorHandle<R>> {
+    proto::binary_elemwise(&ctx.client, lhs, rhs, proto::BinOp::Mul)
 }
 
-/// Element-wise subtraction: output = lhs - rhs
-pub fn sub<C: CubeContext>(ctx: &C, lhs: &Tensor<f32>, rhs: &Tensor<f32>) -> Tensor<f32> {
-    launch_element_wise::<f32, _>(ctx, lhs, rhs, element_wise::sub_kernel)
+/// ReLU activation: `output = max(0, x)`.
+pub fn relu<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    input: &TensorHandle<R>,
+) -> crate::Result<TensorHandle<R>> {
+    proto::unary_elemwise(&ctx.client, input, proto::UnOp::Relu)
 }
 
-/// Element-wise division: output = lhs / rhs
-pub fn div<C: CubeContext>(ctx: &C, lhs: &Tensor<f32>, rhs: &Tensor<f32>) -> Tensor<f32> {
-    launch_element_wise::<f32, _>(ctx, lhs, rhs, element_wise::div_kernel)
+/// Sigmoid activation: `output = 1 / (1 + exp(-x))`.
+pub fn sigmoid<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    input: &TensorHandle<R>,
+) -> crate::Result<TensorHandle<R>> {
+    proto::unary_elemwise(&ctx.client, input, proto::UnOp::Sigmoid)
 }
 
-/// ReLU activation: output = max(0, x)
-pub fn relu<C: CubeContext>(ctx: &C, input: &Tensor<f32>) -> Tensor<f32> {
-    launch_unary::<f32, _>(ctx, input, element_wise::relu_kernel)
-}
-
-/// Sigmoid activation: output = 1 / (1 + exp(-x))
-pub fn sigmoid<C: CubeContext>(ctx: &C, input: &Tensor<f32>) -> Tensor<f32> {
-    launch_unary::<f32, _>(ctx, input, element_wise::sigmoid_kernel)
-}
-
-/// Tanh activation
-pub fn tanh<C: CubeContext>(ctx: &C, input: &Tensor<f32>) -> Tensor<f32> {
-    launch_unary::<f32, _>(ctx, input, element_wise::tanh_kernel)
+/// Tanh activation.
+pub fn tanh<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    input: &TensorHandle<R>,
+) -> crate::Result<TensorHandle<R>> {
+    proto::unary_elemwise(&ctx.client, input, proto::UnOp::Tanh)
 }
 
 // ============================================================================
 // Reduction Operations
 // ============================================================================
+//
+// The original file called `input.sum(axis)` / `input.max(axis)` on a
+// `Tensor<f32>`, which never existed in CubeCL. 0.9 has no built-in reduction
+// tensor method, and a correct parallel reduction needs a multi-pass algorithm
+// (workgroup reduction -> partials -> final reduce).
+//
+// Rather than ship a reduction that may be subtly wrong, these are provided as
+// host-side reference implementations over the read-back data. They are
+// correct, and obviously not fast. `sum/max/min/mean` are marked accordingly.
 
-mod reduction {
-    use super::*;
-
-    #[cube]
-    pub fn sum_reduce(acc: &f32, val: &f32) -> f32 {
-        acc + val
-    }
-
-    #[cube]
-    pub fn max_reduce(acc: &f32, val: &f32) -> f32 {
-        acc.max(*val)
-    }
-
-    #[cube]
-    pub fn min_reduce(acc: &f32, val: &f32) -> f32 {
-        acc.min(*val)
-    }
+/// Sum reduction along `axis`, computed on the host.
+pub fn sum<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    input: &TensorHandle<R>,
+    axis: usize,
+) -> crate::Result<TensorHandle<R>> {
+    proto::host_reduce(&ctx.client, input, axis, proto::RedOp::Sum)
 }
 
-/// Sum reduction along specified axis
-pub fn sum<C: CubeContext>(ctx: &C, input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
-    input.sum(axis)
+/// Max reduction along `axis`, computed on the host.
+pub fn max<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    input: &TensorHandle<R>,
+    axis: usize,
+) -> crate::Result<TensorHandle<R>> {
+    proto::host_reduce(&ctx.client, input, axis, proto::RedOp::Max)
 }
 
-/// Max reduction along specified axis
-pub fn max<C: CubeContext>(ctx: &C, input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
-    input.max(axis)
+/// Min reduction along `axis`, computed on the host.
+pub fn min<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    input: &TensorHandle<R>,
+    axis: usize,
+) -> crate::Result<TensorHandle<R>> {
+    proto::host_reduce(&ctx.client, input, axis, proto::RedOp::Min)
 }
 
-/// Min reduction along specified axis
-pub fn min<C: CubeContext>(ctx: &C, input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
-    input.min(axis)
-}
-
-/// Mean reduction along specified axis
-pub fn mean<C: CubeContext>(ctx: &C, input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
-    input.mean(axis)
+/// Mean reduction along `axis`, computed on the host.
+pub fn mean<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    input: &TensorHandle<R>,
+    axis: usize,
+) -> crate::Result<TensorHandle<R>> {
+    proto::host_reduce(&ctx.client, input, axis, proto::RedOp::Mean)
 }
 
 // ============================================================================
 // Matrix Operations
 // ============================================================================
 
-/// Matrix multiplication: C = A @ B
-/// Uses CubeCL's built-in matmul for optimal performance
-pub fn matmul<C: CubeContext>(ctx: &C, a: &Tensor<f32>, b: &Tensor<f32>) -> Tensor<f32> {
-    a.matmul(b)
+/// Matrix multiplication: `C = A @ B`, via a naive tiled kernel.
+///
+/// Only supports `f32` and rank-2 tensors. This is a correctness reference,
+/// not a tuned GEMM (CubeCL has no built-in matmul tensor method in 0.9).
+pub fn matmul<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    a: &TensorHandle<R>,
+    b: &TensorHandle<R>,
+) -> crate::Result<TensorHandle<R>> {
+    proto::launch_matmul(&ctx.client, a, b)
 }
 
 // ============================================================================
@@ -171,100 +221,153 @@ pub fn matmul<C: CubeContext>(ctx: &C, a: &Tensor<f32>, b: &Tensor<f32>) -> Tens
 mod conv2d {
     use super::*;
 
-    #[cube]
+    /// 2D convolution, NCHW layout.
+    ///
+    /// One unit per output element; the linear index is decomposed into
+    /// `(b, c_out, h_out, w_out)` row-major.
+    #[cube(launch_unchecked)]
     pub fn conv2d_kernel(
         input: &Tensor<f32>,
-        kernel: &Tensor<f32>,
+        weights: &Tensor<f32>,
         output: &mut Tensor<f32>,
         kernel_size: u32,
         stride: u32,
         padding: u32,
     ) {
-        let batch = input.dims(0);
-        let channels_in = input.dims(1);
-        let height_in = input.dims(2);
-        let width_in = input.dims(3);
+        let batch = input.shape(0);
+        let channels_in = input.shape(1);
+        let height_in = input.shape(2);
+        let width_in = input.shape(3);
 
-        let height_out = (height_in + 2 * padding - kernel_size) / stride + 1;
-        let width_out = (width_in + 2 * padding - kernel_size) / stride + 1;
+        let channels_out = output.shape(1);
+        let height_out = output.shape(2);
+        let width_out = output.shape(3);
 
-        let b = global_idx().0;
-        if b >= batch {
-            return;
+        let idx = ABSOLUTE_POS;
+        let total = batch * channels_out * height_out * width_out;
+        if idx >= total {
+            terminate!();
         }
 
-        let index = global_idx();
-        let c_out = index / (height_out * width_out);
-        let h_out = (index % (height_out * width_out)) / width_out;
-        let w_out = index % width_out;
+        let k = kernel_size as usize;
+        let s = stride as usize;
+        let p = padding as usize;
 
-        let mut sum = 0.0f32;
+        // Decompose the flat output index row-major over NCHW.
+        let w_out = width_out;
+        let h_out = height_out;
+        let c_out = channels_out;
+
+        let plane = h_out * w_out;
+        let b = idx / (c_out * plane);
+        let rem = idx % (c_out * plane);
+        let c = rem / plane;
+        let rem2 = rem % plane;
+        let oh = rem2 / w_out;
+        let ow = rem2 % w_out;
+
+        let mut acc = 0.0f32;
         for c_in in 0..channels_in {
-            for kh in 0..kernel_size {
-                for kw in 0..kernel_size {
-                    let h_in = h_out * stride + kh - padding;
-                    let w_in = w_out * stride + kw - padding;
-
-                    if h_in < height_in && w_in < width_in {
-                        let input_val = input[[b, c_in, h_in, w_in]];
-                        let kernel_val = kernel[[c_out, c_in, kh, kw]];
-                        sum += input_val * kernel_val;
+            for kh in 0..k {
+                for kw in 0..k {
+                    // Zero padding: skip taps that fall outside the input.
+                    let ih_raw = oh * s + kh;
+                    let iw_raw = ow * s + kw;
+                    if ih_raw < p || iw_raw < p {
+                        // Outside the padded border on the top/left.
+                    } else {
+                        let ih = ih_raw - p;
+                        let iw = iw_raw - p;
+                        if ih < height_in && iw < width_in {
+                            let in_off =
+                                ((b * channels_in + c_in) * height_in + ih) * width_in + iw;
+                            let w_off = ((c * channels_in + c_in) * k + kh) * k + kw;
+                            acc += input[in_off] * weights[w_off];
+                        }
                     }
                 }
             }
         }
 
-        output[[b, c_out, h_out, w_out]] = sum;
+        let out_off = ((b * c_out + c) * h_out + oh) * w_out + ow;
+        output[out_off] = acc;
     }
 }
 
-/// 2D Convolution
+/// 2D convolution.
 ///
-/// # Arguments
-/// * `ctx` - CubeCL context
-/// * `input` - Input tensor [batch, channels_in, height, width]
-/// * `kernel` - Convolution kernel [channels_out, channels_in, kernel_h, kernel_w]
+/// * `input` - `[batch, channels_in, height, width]`
+/// * `weights` - `[channels_out, channels_in, kernel_h, kernel_w]`
 /// * `stride` - Convolution stride
 /// * `padding` - Zero padding
-pub fn conv2d<C: CubeContext>(
-    ctx: &C,
-    input: &Tensor<f32>,
-    kernel: &Tensor<f32>,
+pub fn conv2d<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    input: &TensorHandle<R>,
+    weights: &TensorHandle<R>,
     stride: usize,
     padding: usize,
-) -> Tensor<f32> {
-    let kernel_size = kernel.dims(2) as usize;
-    let batch = input.dims(0);
-    let channels_out = kernel.dims(0);
-    let height_in = input.dims(2);
-    let width_in = input.dims(3);
+) -> crate::Result<TensorHandle<R>> {
+    let client = &ctx.client;
 
-    let height_out = (height_in + 2 * padding - kernel_size) / stride + 1;
-    let width_out = (width_in + 2 * padding - kernel_size) / stride + 1;
+    let rank = input.shape.len();
+    if rank != 4 || weights.shape.len() != 4 {
+        return Err(crate::Error::InvalidInput(
+            "conv2d expects rank-4 input and weights".into(),
+        ));
+    }
+    if stride == 0 {
+        return Err(crate::Error::InvalidInput(
+            "conv2d stride must be > 0".into(),
+        ));
+    }
 
-    let output = ctx.create_tensor(
-        vec![batch, channels_out, height_out, width_out]
-            .try_into()
-            .unwrap(),
+    let batch = input.shape[0];
+    let channels_in = input.shape[1];
+    let height_in = input.shape[2];
+    let width_in = input.shape[3];
+    let channels_out = weights.shape[0];
+    let k = weights.shape[2];
+    if weights.shape[3] != k {
+        return Err(crate::Error::InvalidInput(
+            "conv2d expects a square kernel".into(),
+        ));
+    }
+
+    // Validate the output shape before subtracting, so a too-small input gives
+    // a clean error instead of an integer-underflow panic.
+    let h_num = (height_in as isize) + 2 * (padding as isize) - (k as isize);
+    let w_num = (width_in as isize) + 2 * (padding as isize) - (k as isize);
+    if h_num < 0 || w_num < 0 {
+        return Err(crate::Error::InvalidInput(
+            "conv2d kernel larger than padded input".into(),
+        ));
+    }
+    let height_out = h_num as usize / stride + 1;
+    let width_out = w_num as usize / stride + 1;
+
+    let total = batch * channels_out * height_out * width_out;
+    let output = TensorHandle::empty(
+        client,
+        vec![batch, channels_out, height_out, width_out],
+        f32_storage(),
     );
 
-    let client = ctx.client();
-    let kernel = ctx.compile(conv2d::conv2d_kernel);
-
-    client
-        .execute(
-            &kernel,
-            // Args
-            &[input.as_ref(), kernel.as_ref(), output.as_ref()],
-            // Dimensions
-            launch_params::<conv2d::conv2d_kernel>(
-                ctx,
-                (batch, height_out * width_out * channels_out),
-            ),
+    unsafe {
+        conv2d::conv2d_kernel::launch_unchecked(
+            client,
+            cubes_for(total),
+            CubeDim::new_1d(CUBE_DIM),
+            input.as_ref().as_tensor_arg(1),
+            weights.as_ref().as_tensor_arg(1),
+            output.as_ref().as_tensor_arg(1),
+            ScalarArg::new(k as u32),
+            ScalarArg::new(stride as u32),
+            ScalarArg::new(padding as u32),
         )
-        .expect("Conv2D kernel failed");
+    }
+    .map_err(|e| crate::Error::RuntimeError(format!("conv2d launch failed: {e:?}")))?;
 
-    output
+    Ok(output)
 }
 
 // ============================================================================
@@ -274,38 +377,41 @@ pub fn conv2d<C: CubeContext>(
 mod pointcloud {
     use super::*;
 
-    /// Compute squared Euclidean distance between all pairs of points
-    #[cube]
+    /// Squared Euclidean distance between all pairs of points.
+    ///
+    /// `points` is `[num_points, 3]`, output is `[num_points, num_points]`.
+    #[cube(launch_unchecked)]
     pub fn pairwise_distance_kernel(
         points: &Tensor<f32>,
         output: &mut Tensor<f32>,
         num_points: u32,
     ) {
-        let i = global_idx().0;
-        if i >= num_points * num_points {
-            return;
+        let idx = ABSOLUTE_POS;
+        let n = num_points as usize;
+        if idx >= n * n {
+            terminate!();
         }
 
-        let p1_idx = i / num_points;
-        let p2_idx = i % num_points;
+        let i = idx / n;
+        let j = idx % n;
 
-        let px1 = points[[p1_idx, 0]];
-        let py1 = points[[p1_idx, 1]];
-        let pz1 = points[[p1_idx, 2]];
+        let dx = points[i * 3] - points[j * 3];
+        let dy = points[i * 3 + 1] - points[j * 3 + 1];
+        let dz = points[i * 3 + 2] - points[j * 3 + 2];
 
-        let px2 = points[[p2_idx, 0]];
-        let py2 = points[[p2_idx, 1]];
-        let pz2 = points[[p2_idx, 2]];
-
-        let dx = px1 - px2;
-        let dy = py1 - py2;
-        let dz = pz1 - pz2;
-
-        output[[p1_idx, p2_idx]] = dx * dx + dy * dy + dz * dz;
+        output[idx] = dx * dx + dy * dy + dz * dz;
     }
 
-    /// K-Nearest Neighbors search
-    #[cube]
+    /// K-nearest-neighbours, one unit per query.
+    ///
+    /// Insertion sort into a fixed-size register array of capacity 32.
+    /// BUG(original): the original computed `dists[k_idx]` for `k_idx` in
+    /// `0..k` but only ever shifted/inserted within that range, and returned
+    /// distances for slots that were never filled when fewer than `k` points
+    /// existed. Here slots are initialised to `+inf` and the caller is
+    /// required to pass `k <= 32`; with `k > num_points` the trailing entries
+    /// stay `+inf` and index 0, which is the honest answer.
+    #[cube(launch_unchecked)]
     pub fn knn_kernel(
         points: &Tensor<f32>,
         queries: &Tensor<f32>,
@@ -315,212 +421,221 @@ mod pointcloud {
         num_points: u32,
         num_queries: u32,
     ) {
-        let q_idx = global_idx().0;
-        if q_idx >= num_queries {
-            return;
+        let q = ABSOLUTE_POS;
+        if q >= num_queries as usize {
+            terminate!();
         }
 
-        let qx = queries[[q_idx, 0]];
-        let qy = queries[[q_idx, 1]];
-        let qz = queries[[q_idx, 2]];
+        let kk = k as usize;
+        let n = num_points as usize;
 
-        // Compute distances to all points
-        let mut dists: [f32; 32] = [0.0; 32]; // Max k=32
-        let mut indices_arr: [u32; 32] = [0; 32];
+        // Fill with +inf so unfilled slots are distinguishable.
+        let mut dists = Array::new(32usize);
+        let mut idxs = Array::new(32usize);
+        for t in 0..32usize {
+            dists[t] = 1e30f32;
+            idxs[t] = 0u32;
+        }
 
-        for p_idx in 0..num_points {
-            let px = points[[p_idx, 0]];
-            let py = points[[p_idx, 1]];
-            let pz = points[[p_idx, 2]];
+        let qx = queries[q * 3];
+        let qy = queries[q * 3 + 1];
+        let qz = queries[q * 3 + 2];
 
-            let dx = qx - px;
-            let dy = qy - py;
-            let dz = qz - pz;
-            let dist = dx * dx + dy * dy + dz * dz;
+        for p in 0..n {
+            let dx = qx - points[p * 3];
+            let dy = qy - points[p * 3 + 1];
+            let dz = qz - points[p * 3 + 2];
+            let d = dx * dx + dy * dy + dz * dz;
 
-            // Simple insertion sort for top-k
-            for k_idx in 0..k {
-                if dist < dists[k_idx as usize] {
-                    // Shift
-                    for shift in (k_idx + 1..k).rev() {
-                        dists[shift as usize] = dists[(shift - 1) as usize];
-                        indices_arr[shift as usize] = indices_arr[(shift - 1) as usize];
+            // Insertion into the sorted prefix.
+            let mut j = 0usize;
+            while j < kk {
+                if d < dists[j] {
+                    // Shift right.
+                    let mut s = kk - 1;
+                    while s > j {
+                        dists[s] = dists[s - 1];
+                        idxs[s] = idxs[s - 1];
+                        s -= 1;
                     }
-                    dists[k_idx as usize] = dist;
-                    indices_arr[k_idx as usize] = p_idx;
+                    dists[j] = d;
+                    idxs[j] = p as u32;
                     break;
                 }
+                j += 1;
             }
         }
 
-        for k_idx in 0..k {
-            distances[[q_idx, k_idx]] = dists[k_idx as usize];
-            indices[[q_idx, k_idx]] = indices_arr[k_idx as usize];
+        for j in 0..kk {
+            distances[q * kk + j] = dists[j];
+            indices[q * kk + j] = idxs[j];
         }
     }
 
-    /// Voxel grid downsampling - assign each point to a voxel and reduce
-    #[cube]
+    /// Voxel grid hashing.
+    ///
+    /// BUG(original): the original wrote the hash into column 0 and the point
+    /// index into column 1, but the host wrapper allocated a `[n, 2]` f32
+    /// tensor while the kernel was declared over `Tensor<u32>` - a type
+    /// mismatch that would have been a hard error. It also multiplied `i32`
+    /// voxel coordinates by large literals, which overflows in debug builds.
+    /// Here the output is `[n, 2]` u32 (hash, point index) with reduced
+    /// multipliers, and the caller re-scans the hashes to group points.
+    #[cube(launch_unchecked)]
     pub fn voxel_hash_kernel(
         points: &Tensor<f32>,
         voxel_keys: &mut Tensor<u32>,
-        voxel_counts: &mut Tensor<u32>,
         num_points: u32,
         voxel_size: f32,
     ) {
-        let p_idx = global_idx().0;
-        if p_idx >= num_points {
-            return;
+        let idx = ABSOLUTE_POS;
+        if idx >= num_points as usize {
+            terminate!();
         }
 
-        let px = points[[p_idx, 0]];
-        let py = points[[p_idx, 1]];
-        let pz = points[[p_idx, 2]];
+        let px = points[idx * 3];
+        let py = points[idx * 3 + 1];
+        let pz = points[idx * 3 + 2];
 
         let vx = (px / voxel_size) as i32;
         let vy = (py / voxel_size) as i32;
         let vz = (pz / voxel_size) as i32;
 
-        // Simple hash function
-        let hash = ((vx * 73856093) ^ (vy * 19349663) ^ (vz * 83492791)).abs() as u32;
+        // Hash the voxel coordinate. CubeCL 0.9 has no wrapping integer
+        // arithmetic, so the multipliers are reduced to values whose product
+        // with a plausible voxel index stays inside i32.
+        let h = ((vx * 73857) ^ (vy * 19349) ^ (vz * 83493)) as u32;
 
-        voxel_keys[[p_idx, 0]] = hash;
-        voxel_keys[[p_idx, 1]] = p_idx; // Store original index
+        voxel_keys[idx * 2] = h;
+        voxel_keys[idx * 2 + 1] = idx as u32;
     }
 }
 
-/// Compute pairwise squared distances between all points
-pub fn pairwise_squared_distance<C: CubeContext>(
-    ctx: &C,
-    points: &Tensor<f32>,
+/// Compute pairwise squared distances between all points.
+///
+/// `points` is `[num_points, 3]`.
+pub fn pairwise_squared_distance<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    points: &TensorHandle<R>,
     num_points: usize,
-) -> Tensor<f32> {
-    let output = ctx.create_tensor(vec![num_points, num_points].try_into().unwrap());
+) -> crate::Result<TensorHandle<R>> {
+    let client = &ctx.client;
+    let output = TensorHandle::empty(client, vec![num_points, num_points], f32_storage());
 
-    let client = ctx.client();
-    let kernel = ctx.compile(pointcloud::pairwise_distance_kernel);
-
-    client
-        .execute(
-            &kernel,
-            &[points.as_ref(), output.as_ref()],
-            launch_params::<pointcloud::pairwise_distance_kernel>(ctx, (num_points * num_points,)),
+    unsafe {
+        pointcloud::pairwise_distance_kernel::launch_unchecked(
+            client,
+            cubes_for(num_points * num_points),
+            CubeDim::new_1d(CUBE_DIM),
+            points.as_ref().as_tensor_arg(1),
+            output.as_ref().as_tensor_arg(1),
+            ScalarArg::new(num_points as u32),
         )
-        .expect("Pairwise distance kernel failed");
+    }
+    .map_err(|e| crate::Error::RuntimeError(format!("pairwise distance launch failed: {e:?}")))?;
 
-    output
+    Ok(output)
 }
 
-/// K-Nearest Neighbors search
-pub fn knn<C: CubeContext>(
-    ctx: &C,
-    points: &Tensor<f32>,
-    queries: &Tensor<f32>,
+/// K-nearest-neighbours search.
+///
+/// `k` must be <= 32 (the register-array capacity compiled into the kernel).
+pub fn knn<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    points: &TensorHandle<R>,
+    queries: &TensorHandle<R>,
     k: usize,
-) -> (Tensor<f32>, Tensor<u32>) {
-    let num_points = points.dims(0) as usize;
-    let num_queries = queries.dims(0) as usize;
+) -> crate::Result<(TensorHandle<R>, TensorHandle<R>)> {
+    let client = &ctx.client;
 
-    let distances = ctx.create_tensor(vec![num_queries, k].try_into().unwrap());
-    let indices = ctx.create_tensor(vec![num_queries, k].try_into().unwrap());
+    if k == 0 || k > 32 {
+        return Err(crate::Error::InvalidInput(
+            "knn requires 1 <= k <= 32".into(),
+        ));
+    }
+    if points.shape.len() != 2 || points.shape[1] != 3 {
+        return Err(crate::Error::InvalidInput(
+            "knn points must be [n, 3]".into(),
+        ));
+    }
+    if queries.shape.len() != 2 || queries.shape[1] != 3 {
+        return Err(crate::Error::InvalidInput(
+            "knn queries must be [n, 3]".into(),
+        ));
+    }
 
-    let client = ctx.client();
-    let kernel = ctx.compile(pointcloud::knn_kernel);
+    let num_points = points.shape[0];
+    let num_queries = queries.shape[0];
 
-    client
-        .execute(
-            &kernel,
-            &[
-                points.as_ref(),
-                queries.as_ref(),
-                distances.as_ref(),
-                indices.as_ref(),
-            ],
-            launch_params::<pointcloud::knn_kernel>(ctx, (num_queries,)),
+    let distances = TensorHandle::empty(client, vec![num_queries, k], f32_storage());
+    let indices = TensorHandle::empty(client, vec![num_queries, k], u32_storage());
+
+    unsafe {
+        pointcloud::knn_kernel::launch_unchecked(
+            client,
+            cubes_for(num_queries),
+            CubeDim::new_1d(CUBE_DIM),
+            points.as_ref().as_tensor_arg(1),
+            queries.as_ref().as_tensor_arg(1),
+            distances.as_ref().as_tensor_arg(1),
+            indices.as_ref().as_tensor_arg(1),
+            ScalarArg::new(k as u32),
+            ScalarArg::new(num_points as u32),
+            ScalarArg::new(num_queries as u32),
         )
-        .expect("KNN kernel failed");
+    }
+    .map_err(|e| crate::Error::RuntimeError(format!("knn launch failed: {e:?}")))?;
 
-    (distances, indices)
+    Ok((distances, indices))
 }
 
-/// Voxel grid hashing for downsampling
-pub fn voxel_hash<C: CubeContext>(ctx: &C, points: &Tensor<f32>, voxel_size: f32) -> Tensor<u32> {
-    let num_points = points.dims(0) as usize;
-    let output = ctx.create_tensor(vec![num_points, 2].try_into().unwrap());
+/// Voxel grid hashing for downsampling.
+///
+/// Returns a `[num_points, 2]` u32 tensor of `(hash, point_index)`.
+pub fn voxel_hash<R: Runtime>(
+    ctx: &CubeCLContext<R>,
+    points: &TensorHandle<R>,
+    voxel_size: f32,
+) -> crate::Result<TensorHandle<R>> {
+    let client = &ctx.client;
 
-    let client = ctx.client();
-    let kernel = ctx.compile(pointcloud::voxel_hash_kernel);
+    if voxel_size <= 0.0 {
+        return Err(crate::Error::InvalidInput("voxel_size must be > 0".into()));
+    }
+    if points.shape.len() != 2 || points.shape[1] != 3 {
+        return Err(crate::Error::InvalidInput(
+            "voxel_hash points must be [n, 3]".into(),
+        ));
+    }
 
-    client
-        .execute(
-            &kernel,
-            &[points.as_ref(), output.as_ref()],
-            launch_params::<pointcloud::voxel_hash_kernel>(ctx, (num_points,)),
+    let num_points = points.shape[0];
+    let output = TensorHandle::empty(client, vec![num_points, 2], u32_storage());
+
+    unsafe {
+        pointcloud::voxel_hash_kernel::launch_unchecked(
+            client,
+            cubes_for(num_points),
+            CubeDim::new_1d(CUBE_DIM),
+            points.as_ref().as_tensor_arg(1),
+            output.as_ref().as_tensor_arg(1),
+            ScalarArg::new(num_points as u32),
+            ScalarArg::new(voxel_size),
         )
-        .expect("Voxel hash kernel failed");
+    }
+    .map_err(|e| crate::Error::RuntimeError(format!("voxel hash launch failed: {e:?}")))?;
 
-    output
+    Ok(output)
 }
 
 // ============================================================================
-// Utility Functions
+// Host-side utilities
 // ============================================================================
 
-/// Helper to launch binary element-wise kernels
-fn launch_element_wise<F: Float, K: cubecl::Kernel<F>>(
-    ctx: &impl CubeContext,
-    lhs: &Tensor<F>,
-    rhs: &Tensor<F>,
-    _kernel: K,
-) -> Tensor<F> {
-    let output = ctx.create_tensor(lhs.dims());
+/// Upload `data` to a new contiguous `f32` tensor.
+pub use proto::tensor_from_slice;
 
-    let client = ctx.client();
-    let kernel = ctx.compile(_kernel);
+/// Download a `f32` tensor to the host.
+pub use proto::tensor_to_slice;
 
-    let total_elements = lhs.dims().iter().product::<usize>();
-
-    client
-        .execute(
-            &kernel,
-            &[lhs.as_ref(), rhs.as_ref(), output.as_ref()],
-            launch_params::<K>(ctx, (total_elements,)),
-        )
-        .expect("Element-wise kernel failed");
-
-    output
-}
-
-/// Helper to launch unary element-wise kernels
-fn launch_unary<F: Float, K: cubecl::Kernel<F>>(
-    ctx: &impl CubeContext,
-    input: &Tensor<F>,
-    _kernel: K,
-) -> Tensor<F> {
-    let output = ctx.create_tensor(input.dims());
-
-    let client = ctx.client();
-    let kernel = ctx.compile(_kernel);
-
-    let total_elements = input.dims().iter().product::<usize>();
-
-    client
-        .execute(
-            &kernel,
-            &[input.as_ref(), output.as_ref()],
-            launch_params::<K>(ctx, (total_elements,)),
-        )
-        .expect("Unary kernel failed");
-
-    output
-}
-
-/// Helper to get launch parameters for a kernel
-fn launch_params<K: cubecl::Kernel<f32>>(
-    ctx: &impl CubeContext,
-    dims: impl Into<cubecl::TensorDim>,
-) -> cubecl::ExecutionDims {
-    let client = ctx.client();
-    let numel = dims.clone().into_num_elements();
-    cubecl::ExecutionDims::new::<K>(client, dims).expect("Failed to create execution dims")
-}
+/// Download a `u32` tensor to the host.
+pub use proto::tensor_to_slice_u32;
