@@ -1322,3 +1322,168 @@ enforcement itself.
 No unsound `unsafe` remains. The count is 26, down from 35 before the earlier
 pass, and every one of them is either a `bytemuck` impl over a `#[repr(C)]` type
 or a syscall wrapper whose preconditions are checked before the call.
+
+## The one defect class that kept recurring
+
+Three separate fixes this session were the same bug: a WGSL storage binding
+declared `array<u32>` while the host uploads f32, with the shader reassembling
+four bytes per word.
+
+| shader | symptom |
+| --- | --- |
+| `canny.wgsl` | every Sobel sample was 0, so the edge map came back uniformly black |
+| `match_template.wgsl` | best match sat 2 px from the truth with a score of 697,464 where the CPU found 0.0 |
+| `hough.wgsl`, `hough_circles.wgsl` | almost every pixel looked black and returned before voting, so 2 of 5 lines were found |
+
+The reason it recurs is that the shaders are written from a CPU reference that
+packs bytes, and nothing in the build rejects the mismatch. There is no type
+information crossing the boundary - wgpu binds a buffer, and the element type
+lives only in the WGSL. So the compiler cannot catch it, the host cannot catch
+it, and the failure is silent: each of these returned a plausible result rather
+than an error. Canny returned an all-black image, which at least looks like
+"no edges found"; `match_template` and `hough` returned answers that were wrong
+in a way nothing would flag.
+
+`sobel.wgsl` uses the same packed-u8 idiom and is *not* affected, because it also
+packs on write - the convention is self-consistent there. That is exactly why
+reading the shader is not enough to decide, and why the sweep runs the thing
+rather than inspecting it.
+
+Three of the four were found by the table-driven parity sweep in
+`tests/gpu_parity_tests.rs`, and all three were in operations no test touched.
+The sweep currently covers nine; the trait declares 49.
+
+The general lesson is the one this file keeps arriving at: a shader that fails to
+compile produces a loud error and is found in minutes, while a shader that
+compiles and reads the wrong bytes produces a quiet wrong answer and survives
+indefinitely. The only defence is to run both backends on the same input and
+compare.
+
+## Open: `convolve_2d` border modes diverge from the CPU, and it is not where it looks
+
+Found by the parity sweep, and **not fixed**. Recorded here because the
+characterisation is sharp even though the cause is not.
+
+A 37x33 f32 image, a symmetric 5x5 Gaussian, the same input uploaded to both
+backends and verified identical after a round trip:
+
+| border mode | differing pixels | columns affected |
+| --- | ---: | --- |
+| `Constant(0.0)` | 0 / 1221 | - |
+| `Replicate` | 0 / 1221 | - |
+| `Reflect101` | 66 / 1221 | **2** (columns 0-1) |
+| `Reflect` | 136 / 1221 | **37** (every column) |
+| `Wrap` | 136 / 1221 | **37** (every column) |
+
+`Reflect101` is 66 = 2 columns x 33 rows, which is exactly the set of pixels
+whose kernel taps reach outside the frame on a 5-wide kernel. That is the
+behaviour a correct border mode should have, and it is a real divergence of
+magnitude 19.8, so `Reflect101` is *also* wrong - just wrong in a way that looks
+like a border bug.
+
+`Reflect` and `Wrap` affecting every column is the interesting part. A border
+mode cannot change a pixel whose 25 taps are all inside the image, so the
+difference is not localised to the frame. Something about those two mode values
+changes the result across the whole image.
+
+What has been ruled out, by measurement rather than by reading:
+
+- The two border formulas are textually identical. Both were extracted into a
+  standalone program and compared over `n` in 2, 3, 5, 33, 37 for coordinates
+  `-6..n+6`: zero differences.
+- `ConvolveParams` matches the WGSL `Params` field for field, is `#[repr(C)]`,
+  and is uploaded with `bytemuck::bytes_of`; the uniform layout is 24 bytes with
+  no padding shift.
+- `border_mode_to_int` maps Reflect to 2, Reflect101 to 4, Wrap to 3, matching
+  the shader's own comment.
+- The input and kernel round-trip through the GPU unchanged to within 1e-4.
+- The pipeline cache is keyed on shader source and entry point, and the border
+  mode is a uniform rather than a compile-time constant, so a stale pipeline
+  cannot be the cause. The params buffer is created per call, not pooled.
+- The GPU is demonstrably *distinguishing* the modes: the three non-clamping
+  modes give three different results, and none equals `Replicate`, so the
+  branches are being taken.
+
+An independent Python model of the whole convolution predicts the CPU's value at
+(0,0) to the last digit - 62.382217 - so the CPU is right. The GPU's 66.598694
+matches `Replicate` (61.69), `Wrap` (66.06) and `Reflect101` (65.79) equally
+little, which is the strongest single piece of evidence: the GPU is not applying
+*any* of the documented mappings to that pixel.
+
+### What the probe established, and a fix that turned out to be wrong
+
+A subagent left nine diagnostic probes behind. One of them is decisive: it sets
+`input[i] = i`, uses a kernel with a single tap, and so each output pixel *is* the
+flat index the GPU fetched. Read out along a middle row of a 37-wide image with a
+7x7 kernel, for `Reflect`:
+
+| coord | -3 | -2 | -1 | 0 | 1 | 2 | 3 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| GPU | 32 | 31 | 30 | 0 | 1 | 2 | 3 |
+| correct | 3 | 2 | 1 | 0 | 1 | 2 | 3 |
+
+and for a 9-wide image the same probe returns 1, 2, 3 - correct. So the GPU is
+not reading out of range; it is reading a valid but wrong in-range index, and the
+wrongness depends on the image width.
+
+The `- 1` in `c = period - c - 1` is the suspect. It makes the sequence
+`... 2 1 0 | 0 1 2 ... | 2 1 0`, which is period `2n-2` - that is
+`Reflect101`, not `Reflect`. Removing the `- 1` was the obvious correction, and
+**it was wrong**: it makes `coord = n` map to `n` instead of `n-1`, which is out
+of range for the last row, and the CPU `convolve_2d` then panicked with
+`index out of bounds: the len is 1221 but the index is 1223`. Verified by
+reverting: the panic is produced by that change and disappears without it.
+
+So the situation is narrower than "Reflect is broken" and I do not have the
+correct formula. What is established:
+
+- `c = period - c - 1` is wrong for negative coordinates; it implements
+  `Reflect101` under the name `Reflect`.
+- The plain correction `c = period - c` is wrong for `coord = n`; it can return
+  `n`, which is out of range.
+- A correct implementation needs both ends right, and I did not find it. It is a
+  two-line function; the right move is to derive it from the documented sequence
+  and check `coord` in `-n-1 .. n+1` explicitly rather than adjusting a constant.
+
+The CPU and the shader carry the identical error, so the two backends agree with
+each other and disagree with the documented mode. That is why the divergence
+looked like a CPU-versus-GPU problem and was not one, and why both readings had to
+be falsified before the real shape emerged.
+
+The test still reports rather than asserts, the diagnostic probes are deleted, and
+this is left as a known defect with its shape documented.
+
+## `research/cubecl`: in sync, and functionally empty
+
+**Git parity: yes.** The branch is 0 commits behind `master` and carries 62 of its
+own. It builds and the whole workspace test suite passes on it.
+
+**Functional parity: no, because its own work does not function.** Three modules
+totalling 1,973 lines are committed and referenced by nothing:
+
+| file | lines | referenced by |
+| --- | ---: | --- |
+| `crates/hal/src/gpu_kernels/cubecl_backend.rs` | 526 | nothing |
+| `crates/hal/src/gpu_kernels/cubecl_advanced.rs` | 793 | nothing |
+| `crates/hal/src/gpu_kernels/cubecl_optimized.rs` | 654 | nothing |
+
+They are not declared in `gpu_kernels/mod.rs`, so they are not compiled, not
+tested, and not reachable from any API. Declaring them - three lines - does not
+compile: `cubecl_optimized.rs:565` has an unbalanced delimiter
+(`error: unexpected closing delimiter`), so these files have never been through a
+compiler at all. They were merged as text.
+
+`benches/cubecl_perf.rs`, added on the same branch, is a CPU-baseline
+criterion suite that does not reference the modules either, and
+`docs/GPU_BENCHMARK_RESULTS.md` reports matmul and voxel-downsampling speedups
+that no benchmark on the branch can produce. Those figures were measured on
+different hardware (the document says an Intel Meteor Lake iGPU; this machine has
+a Radeon 890M and an RTX 5070 Ti) and nothing in the tree reproduces them.
+
+So "the cubecl branch is in parity with master" is true of the commit graph and
+false of behaviour: the branch inherits everything master does, and adds code
+that does not run. The honest options are to make the three modules compile, test
+and benchmark them - in which case they are a real contribution - or to drop them
+and leave the branch as a tracking branch for CubeCL work. Carrying 2,000 lines
+of non-compiling code in a branch whose stated purpose is functional parity makes
+the branch harder to reason about than the empty alternative.

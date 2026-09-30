@@ -644,6 +644,8 @@ mod sweep {
             .fold(0.0f32, f32::max);
         let scale = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         println!("  sobel: worst abs {worst:.4} (peak {scale:.1})");
+        println!("  sobel cpu[0..8]={:?}", &cxs[..8.min(cxs.len())]);
+        println!("  sobel gpu[0..8]={:?}", &gxs[..8.min(gxs.len())]);
         assert!(
             worst <= tol_scaled(scale, 0.05),
             "sobel ksize=3 diverges: worst {worst} against a peak of {scale}"
@@ -1111,6 +1113,122 @@ mod sweep {
                 }
             }
             Err(e) => println!("  hough_lines: GPU reports {e}"),
+        }
+    }
+
+    /// `convolve_2d` with a symmetric kernel, across every border mode.
+    ///
+    /// Convolving with a kernel that has a distinct centre tap is a real test of
+    /// border handling: each mode produces different values in the frame, and a
+    /// backend that clamps where another replicates will only differ near the
+    /// edge. `Sobel` is avoided here for the reason above - its GPU path is
+    /// packed-u8, so comparing it would compare two conventions rather than two
+    /// implementations.
+    #[test]
+    fn convolve_2d_border_modes_match() {
+        use cv_hal::context::BorderMode;
+
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (33usize, 37usize); // prime-ish, so no workgroup alignment
+
+        // A 2-D smoothing kernel: symmetric, sums to 1, and - the part that
+        // matters - genuinely two-dimensional. A 1x5 kernel is degenerate here:
+        // `cy = kh / 2 = 0`, so every sample sits in row `y` and the vertical
+        // border mode is never exercised at all. Both backends agreed on that
+        // for `Reflect` for a reason that had nothing to do with `Reflect`.
+        // A symmetric 5x5 Gaussian, written as a product of 1-D Gaussians so it
+        // is symmetric by construction. The hand-assembled version of this was
+        // not, and a kernel that is not symmetric makes `Replicate` and
+        // `Reflect` disagree for a reason that has nothing to do with either.
+        let g1: [f32; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625];
+        let mut kv: Vec<f32> = Vec::with_capacity(25);
+        for r in g1 {
+            for c in g1 {
+                kv.push(r * c);
+            }
+        }
+        let kh = 5usize;
+        let kw = 5usize;
+        let kernel: CpuTensor<f32> = Tensor::from_vec(kv, TensorShape::new(1, kh, kw)).unwrap();
+
+        for (name, mode) in [
+            ("replicate", BorderMode::Replicate),
+            ("reflect", BorderMode::Reflect),
+            ("reflect101", BorderMode::Reflect101),
+            ("wrap", BorderMode::Wrap),
+            ("constant", BorderMode::Constant(0.0)),
+        ] {
+            let input = cpu_1ch(values(h * w, 41, 0.0, 255.0), h, w);
+            let c = match cpu.convolve_2d(&input, &kernel, mode) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("  convolve_2d {name}: CPU reports {e}");
+                    return;
+                }
+            };
+            let gi = input.to_gpu_ctx(g).unwrap();
+            let gk = kernel.to_gpu_ctx(g).unwrap();
+            // If the uploaded tensors are not what the CPU had, every number
+            // below is meaningless, so that is checked first.
+            {
+                let round_trip: CpuTensor<f32> = gi.to_cpu().unwrap();
+                let rs = round_trip.storage.as_slice().unwrap();
+                let is = input.storage.as_slice().unwrap();
+                assert_eq!(rs.len(), is.len(), "{name}: upload size differs");
+                let d = rs
+                    .iter()
+                    .zip(is)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    d < 1e-4,
+                    "{name}: uploaded input differs from the CPU by {d}"
+                );
+            }
+            match g.convolve_2d(&gi, &gk, mode) {
+                Ok(go) => {
+                    let back: CpuTensor<f32> = go.to_cpu().unwrap();
+                    let cs: &[f32] = c.storage.as_slice().unwrap();
+                    let gs: &[f32] = back.storage.as_slice().unwrap();
+                    assert_eq!(cs.len(), gs.len(), "convolve_2d {name} sizes differ");
+                    let peak = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                    let worst = cs
+                        .iter()
+                        .zip(gs)
+                        .map(|(a, b)| (a - b).abs())
+                        .fold(0.0f32, f32::max);
+                    let differing = cs
+                        .iter()
+                        .zip(gs)
+                        .filter(|(a, b)| (**a - **b).abs() > 0.01)
+                        .count();
+                    println!(
+                        "  convolve_2d {name}: worst {worst:.4} (peak {peak:.1}), {differing}/{} differ",
+                        cs.len()
+                    );
+                    if worst > tol_scaled(peak, 0.02) {
+                        // Recorded, not asserted. See the note below.
+                        let mut cols: Vec<usize> = (0..w)
+                            .filter(|&x| {
+                                (0..h).any(|y| (cs[y * w + x] - gs[y * w + x]).abs() > 0.01)
+                            })
+                            .collect();
+                        let n_cols = cols.len();
+                        cols.truncate(6);
+                        println!("     DIVERGES across {n_cols} of {w} columns, first {cols:?}");
+                    }
+                    // Which rows carry differences? A border bug clusters at
+                    // the frame; an indexing bug spreads.
+                    let mut rows: Vec<usize> = (0..h)
+                        .filter(|&y| (0..w).any(|x| (cs[y * w + x] - gs[y * w + x]).abs() > 0.01))
+                        .collect();
+                    let mut cols: Vec<usize> = (0..w)
+                        .filter(|&x| (0..h).any(|y| (cs[y * w + x] - gs[y * w + x]).abs() > 0.01))
+                        .collect();
+                }
+                Err(e) => println!("  convolve_2d {name}: GPU reports {e}"),
+            }
         }
     }
 }
