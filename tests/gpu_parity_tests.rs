@@ -644,8 +644,22 @@ mod sweep {
             .fold(0.0f32, f32::max);
         let scale = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         println!("  sobel: worst abs {worst:.4} (peak {scale:.1})");
-        println!("  sobel cpu[0..8]={:?}", &cxs[..8.min(cxs.len())]);
-        println!("  sobel gpu[0..8]={:?}", &gxs[..8.min(gxs.len())]);
+        // Is the GPU's gradient a real gradient? Compare against a hand-computed
+        // Sobel on the same input. A plausible-looking field that is not the
+        // derivative would show up here.
+        let is = input.storage.as_slice().unwrap();
+        let w = 64usize;
+        let at = |x: usize, y: usize| is[y * w + x] as f32;
+        let mut cpu_vs_hand: f32 = 0.0;
+        for y in 2..h.saturating_sub(2) {
+            for x in 2..w.saturating_sub(2) {
+                // 3x3 Sobel gx
+                let gx = -at(x - 1, y - 1) - 2.0 * at(x - 1, y) - at(x - 1, y + 1)
+                      + at(x + 1, y - 1) + 2.0 * at(x + 1, y) + at(x + 1, y + 1);
+                cpu_vs_hand = cpu_vs_hand.max((cxs[y * w + x] - gx).abs());
+            }
+        }
+        println!("  sobel CPU vs hand-computed Sobel gx: max abs {cpu_vs_hand:.3}");
         assert!(
             worst <= tol_scaled(scale, 0.05),
             "sobel ksize=3 diverges: worst {worst} against a peak of {scale}"
