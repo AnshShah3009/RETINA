@@ -398,6 +398,31 @@ fn every_shader_compiles() {
         ),
         ("canny", include_str!("../crates/hal/shaders/canny.wgsl")),
         ("warp", include_str!("../crates/hal/shaders/warp.wgsl")),
+        // The bf16 family. Three of these had no bfloat16-to-f32 conversion and
+        // used the raw u32 bit pattern as a value, which is the same defect
+        // class as the Canny/match_template/Hough packed-u8 bugs; the
+        // sibling bf16 shaders that do it correctly unpack with a shift and a
+        // mask, and these now do too.
+        (
+            "bilateral_bf16",
+            include_str!("../crates/hal/shaders/bilateral_bf16.wgsl"),
+        ),
+        (
+            "fast_bf16",
+            include_str!("../crates/hal/shaders/fast_bf16.wgsl"),
+        ),
+        (
+            "fast_nms_bf16",
+            include_str!("../crates/hal/shaders/fast_nms_bf16.wgsl"),
+        ),
+        (
+            "resize_bf16",
+            include_str!("../crates/hal/shaders/resize_bf16.wgsl"),
+        ),
+        (
+            "threshold_bf16",
+            include_str!("../crates/hal/shaders/threshold_bf16.wgsl"),
+        ),
         ("nms", include_str!("../crates/hal/shaders/nms.wgsl")),
         (
             "tsdf_raycast",

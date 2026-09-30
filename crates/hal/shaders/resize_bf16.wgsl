@@ -13,8 +13,17 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> output_data: array<u32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
-fn get_u32(idx: u32) -> u32 {
-    return input_data[idx];
+// bfloat16 -> f32. A bf16 value is the high 16 bits of an f32.
+//
+// The bilinear taps were being passed to `mix` as raw u32, which is a type error
+// and, had it compiled, would have interpolated integer bit patterns rather than
+// pixel values. The f32 sibling samples the same four taps as f32.
+fn bf16_to_f32(bits: u32) -> f32 {
+    return bitcast<f32>(bits << 16);
+}
+
+fn get_val(idx: u32) -> f32 {
+    return bf16_to_f32(input_data[idx]);
 }
 
 @compute @workgroup_size(16, 16)
@@ -42,12 +51,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dx = select(0.0, clamp(src_x_f - f32(x0), 0.0, 1.0), x0 != x1);
     let dy = select(0.0, clamp(src_y_f - f32(y0), 0.0, 1.0), y0 != y1);
     
-    let p00 = get_u32(y0 * params.src_w + x0);
-    let p10 = get_u32(y0 * params.src_w + x1);
-    let p01 = get_u32(y1 * params.src_w + x0);
-    let p11 = get_u32(y1 * params.src_w + x1);
+    let p00 = get_val(y0 * params.src_w + x0);
+    let p10 = get_val(y0 * params.src_w + x1);
+    let p01 = get_val(y1 * params.src_w + x0);
+    let p11 = get_val(y1 * params.src_w + x1);
     
     let val_f = mix(mix(p00, p10, dx), mix(p01, p11, dx), dy);
     
-    output_data[y_dst * params.dst_w + x_dst] = val_f;
+    // Narrow back to bf16 for storage; assigning the f32 directly to a `u32`
+    // binding is a type error.
+    output_data[y_dst * params.dst_w + x_dst] = u32(bitcast<u32>(val_f) >> 16);
 }
