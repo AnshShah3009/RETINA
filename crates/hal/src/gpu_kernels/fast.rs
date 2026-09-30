@@ -229,7 +229,16 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
     let num_elements = num_pixels;
 
     // 1. Count pass
-    let usages = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
+    //
+    // `COPY_DST` is required as well as `COPY_SRC`: after the count pass this
+    // same buffer is overwritten with the sorted indices, via
+    // `Queue::write_buffer`, which wgpu rejects without it - "Usage flags
+    // BufferUsages(COPY_SRC | STORAGE) ... do not contain required usage flags
+    // BufferUsages(COPY_DST)". That turned every GPU ORB run into a panic
+    // inside `Orb::detect_and_compute_ctx`, which is what the `orb_benchmark`
+    // example exercises.
+    let usages =
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
     let counts_buffer = ctx.get_buffer((num_elements as u64) * 4, usages);
 
     let params = CollectParams {
