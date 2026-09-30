@@ -1417,6 +1417,72 @@ impl ComputeContext for GpuContext {
         }
     }
 
+    /// Resize with an explicit interpolation mode.
+    ///
+    /// The plain `resize` above hard-codes bilinear, so a caller could not ask
+    /// for anything else - which is what left the ORB ctx detection path unable
+    /// to reproduce the `Triangle` filtering the CPU pyramid uses.
+    fn resize_with<
+        T: cv_core::Float + bytemuck::Pod + 'static,
+        S: Storage<T> + cv_core::StorageFactory<T> + 'static,
+    >(
+        &self,
+        input: &Tensor<T, S>,
+        new_shape: (usize, usize),
+        interpolation: crate::context::Interpolation,
+    ) -> crate::Result<Tensor<T, S>> {
+        use crate::storage::GpuStorage;
+        use std::marker::PhantomData;
+
+        let Some(input_storage) = input.storage.as_any().downcast_ref::<GpuStorage<T>>() else {
+            return self.resize(input, new_shape);
+        };
+        let input_gpu = crate::GpuTensor::<T> {
+            storage: input_storage.clone(),
+            shape: input.shape,
+            dtype: input.dtype,
+            _phantom: PhantomData,
+        };
+        // The shader implements two modes only. Rather than silently
+        // substituting one for another - which is the failure this method was
+        // added to remove - an unsupported request is an error naming what is
+        // available.
+        let mode = match interpolation {
+            crate::context::Interpolation::Linear => {
+                crate::gpu_kernels::resize::InterpolationMode::Bilinear
+            }
+            crate::context::Interpolation::Cubic | crate::context::Interpolation::Lanczos => {
+                crate::gpu_kernels::resize::InterpolationMode::Lanczos4
+            }
+            crate::context::Interpolation::Nearest => {
+                return Err(crate::Error::NotSupported(
+                    "GPU resize: Nearest is not implemented; the shader provides \
+                     Bilinear and Lanczos4. Resample on the host, or use one of \
+                     those."
+                        .into(),
+                ));
+            }
+        };
+        let result_gpu = crate::gpu_kernels::resize::resize_with_mode(
+            self,
+            &input_gpu,
+            new_shape.0 as u32,
+            new_shape.1 as u32,
+            mode,
+        )?;
+        let storage_any = result_gpu.storage.as_any();
+        if let Some(storage_s) = storage_any.downcast_ref::<S>() {
+            Ok(Tensor {
+                storage: storage_s.clone(),
+                shape: result_gpu.shape,
+                dtype: result_gpu.dtype,
+                _phantom: PhantomData,
+            })
+        } else {
+            Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+        }
+    }
+
     fn bilateral_filter<
         T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'static,
         S: Storage<T> + cv_core::StorageFactory<T> + 'static,
