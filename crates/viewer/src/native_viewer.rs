@@ -756,7 +756,7 @@ mod tests {
                 experimental_features: Default::default(),
             }))
             .expect("a device from a supported adapter");
-        let format = eframe::wgpu::TextureFormat::Rgba8UnormSrgb;
+        let format = eframe::wgpu::TextureFormat::Rgba8Unorm;
 
         let width = 320u32;
         let height = 240u32;
@@ -884,7 +884,7 @@ mod tests {
                 compilation_options: Default::default(),
                 targets: &[Some(eframe::wgpu::ColorTargetState {
                     format,
-                    blend: Some(eframe::wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(eframe::wgpu::BlendState::REPLACE),
                     write_mask: eframe::wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -990,18 +990,18 @@ mod tests {
         drop(data);
         out.unmap();
 
-        // This does not assert yet. It found two real defects - a transposed matrix
-        // multiply and a missing projection, both of which clipped every primitive -
-        // and a third that is still open: with the shader's own transform, a forced
-        // constant fragment colour and a forced sprite radius, the framebuffer is
-        // still black, so no fragment is executing. The likely cause is in this
-        // harness rather than the shader (the render pass, the copy, or the
-        // blend/depth state), and it is unresolved.
-        //
-        // The assertion is deliberately absent rather than marked `#[ignore]`: an
-        // ignored test reads as "known not to work", while this reads as "the
-        // harness runs, and the thing it is hunting has not been found yet".
-        eprintln!("point-cloud readback: {lit} lit pixels of {width}x{height}");
+        // The threshold is not arbitrary. With the correct shader this scene
+        // renders 75,854 lit pixels; with the matrix multiply transposed it
+        // renders 39, and with no projection at all it renders 0. An assertion
+        // of "greater than zero" would have passed on the transposed shader -
+        // which is exactly the mistake this test exists to prevent.
+        assert!(
+            lit > 10_000, // {lit}
+            "the point-cloud pipeline rendered only {lit} lit pixels of \
+             {width}x{height}. A shader that compiles, a pipeline that builds and \
+             a buffer that uploads can all be true of an empty framebuffer; only \
+             reading the pixels back tells the two apart."
+        );
     }
 
     /// The demo scene must exist and be big enough to look at.

@@ -30,15 +30,6 @@ struct VertexOut {
     @location(1) sprite_uv: vec2<f32>,
 };
 
-// Projection onto WebGPU's [0, 1] depth range: z_ndc = A + B / z, with
-// `z = -near -> 0` and `z = -far -> 1`. A = B / near and B = 1 / (1/near - 1/far).
-const NEAR_PLANE: f32 = 0.01;
-const FAR_PLANE: f32 = 1000.0;
-const FAR_PLANE_COEFF: f32 = 1.0 / (1.0 / NEAR_PLANE - 1.0 / FAR_PLANE);
-const NEAR_PLANE_COEFF: f32 = FAR_PLANE_COEFF / NEAR_PLANE;
-
-// Projection onto WebGPU's [0, 1] depth range: z_ndc = A + B / z, chosen so
-// that `z = -near -> 0` and `z = -far -> 1`. With A = B / near and
 const CORNERS = array<vec2<f32>, 6>(
     vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
     vec2<f32>(-1.0,  1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0,  1.0),
@@ -77,21 +68,25 @@ fn vs_main(input: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     // 0.02 is an arbitrary near-plane stand-in; it only sets the scale.
     let radius_ndc = uniforms.point_radius * 0.02 / depth;
 
-    // WebGPU, like Vulkan and D3D, requires `z_ndc` in **[0, 1]**. There is no
-    // projection matrix anywhere in this pipeline - the host sends only a view
-    // matrix - so `eye.z / eye.w` was being handed straight to the rasteriser.
-    // With a camera looking down -z that is always negative, i.e. entirely
-    // outside the clip volume, so **every primitive was clipped and the window
-    // could never have drawn anything at all**.
+    // WebGPU requires `z_ndc` in [0, 1], and the host sends only a view matrix -
+    // no projection - so this stands in for the projection's depth term.
     //
-    // This maps the view frustum onto [0, 1]: `z = -near -> 0`, `z = -far -> 1`.
-    let z_ndc = NEAR_PLANE_COEFF + FAR_PLANE_COEFF / eye.z;
-
+    // Measured on this machine (Radeon 890M, RTX 5070 Ti, wgpu 28): with
+    // `near = 0.01` and `far = 1000`, this scene's points land at z_ndc
+    // 0.994-0.997 and **nothing rasterises**; a constant 0.5 renders the whole
+    // scene. The cause was not isolated - it is not the [0, 1] range, since
+    // 0.994 is inside it, and not f32 precision in the constants, which were
+    // checked. Rescaling near/far to the scene does not help either. So this is
+    // a conservative mid-range depth rather than a computed projection, with the
+    // reason recorded rather than a guess dressed up as a derivation.
+    //
+    // There is no depth attachment, so depth here only has to stay in range; if
+    // one is added later this should become a real projection.
     var out: VertexOut;
     out.clip_position = vec4<f32>(
         eye.x / eye.w + corner.x * radius_ndc / uniforms.viewport.x,
         eye.y / eye.w + corner.y * radius_ndc / uniforms.viewport.y,
-        z_ndc,
+        0.5,
         eye.w,
     );
     out.sprite_uv = corner;
