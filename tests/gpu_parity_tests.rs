@@ -567,3 +567,222 @@ fn probe_resize_with_honours_the_mode() {
         "Lanczos was identical to bilinear: the mode is ignored"
     );
 }
+
+/// A table-driven CPU/GPU parity sweep over the operations the per-feature
+/// tests above do not reach.
+///
+/// The reason this file exists: `multi_gpu_tests.rs` covers seven operations, and
+/// the individual probes here cover six more. The trait declares 49. Everything
+/// outside that set had been checked by neither, and in this session seven GPU
+/// entry points turned out never to have run at all - a shader that fails wgpu
+/// validation, a pipeline that cannot be created. Every one of them was in
+/// exactly this uncovered region, and none would have been caught by CI, which
+/// has no GPU and skips.
+///
+/// Each case runs the same input on both backends and reports the worst
+/// absolute difference. A case that cannot be compared yet says so rather than
+/// being omitted, because an omission is indistinguishable from a pass.
+mod sweep {
+    use super::*;
+    use cv_core::{CpuTensor, Storage, Tensor, TensorShape};
+    use cv_hal::context::{ComputeContext, WarpType};
+
+    /// Deterministic pseudo-random floats, so a failure is reproducible.
+    fn values(n: usize, seed: u64, lo: f32, hi: f32) -> Vec<f32> {
+        let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        (0..n)
+            .map(|_| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                // `>> 8` leaves up to 2^56, which as an f32 is ~1e16 and makes
+                // the fraction 16 million rather than something in [0, 1). The
+                // first version of this helper had that bug, and it was
+                // invisible here: the "divergence" it produced was in a region
+                // where any tolerance passes, so both the broken input and the
+                // comparison had to be checked by hand. `>> 33` leaves 31 bits,
+                // which is exactly a u32.
+                lo + ((s >> 33) as f32 / u32::MAX as f32) * (hi - lo)
+            })
+            .collect()
+    }
+
+    fn cpu_1ch(v: Vec<f32>, h: usize, w: usize) -> CpuTensor<f32> {
+        Tensor::from_vec(v, TensorShape::new(1, h, w)).unwrap()
+    }
+
+    /// `sobel` with ksize 3, which both backends support.
+    ///
+    /// The 5x5 kernel was excluded deliberately: the GPU returns `NotSupported`
+    /// for anything but ksize 3, so comparing it would be comparing an error
+    /// against a value. That asymmetry is itself worth a test, below.
+    #[test]
+    fn sobel_ksize3_matches() {
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (48usize, 64usize);
+        let input = cpu_1ch(values(h * w, 7, 0.0, 255.0), h, w);
+
+        // `sobel` returns (dx, dy), so both channels are compared.
+        let (cx, cy) = cpu.sobel(&input, 1, 1, 3).unwrap();
+        let gi = input.to_gpu_ctx(g).unwrap();
+        let (gx, gy) = g.sobel(&gi, 1, 1, 3).unwrap();
+        let gxc = gx.to_cpu().unwrap();
+        let gyc = gy.to_cpu().unwrap();
+
+        let cxs = cx.storage.as_slice().unwrap();
+        let cys = cy.storage.as_slice().unwrap();
+        let gxs = gxc.storage.as_slice().unwrap();
+        let gys = gyc.storage.as_slice().unwrap();
+        let cs: Vec<f32> = cxs.iter().chain(cys).copied().collect();
+        let gs: Vec<f32> = gxs.iter().chain(gys).copied().collect();
+        assert_eq!(cs.len(), gs.len(), "sobel output sizes differ");
+        let worst = cs
+            .iter()
+            .zip(gs)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let scale = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        println!("  sobel: worst abs {worst:.4} (peak {scale:.1})");
+        assert!(
+            worst <= tol_scaled(scale, 0.05),
+            "sobel ksize=3 diverges: worst {worst} against a peak of {scale}"
+        );
+    }
+
+    /// Relative tolerance against the output's own magnitude.
+    ///
+    /// An absolute threshold is useless across operations whose scale ranges
+    /// from 0-1 to 0-255, and it turns a large-but-correct result into a
+    /// failure or a small-but-wrong one into a pass.
+    fn tol_scaled(peak: f32, fraction: f32) -> f32 {
+        (peak * fraction).max(1e-3)
+    }
+
+    /// `warp` with the identity must return the input unchanged on both backends.
+    ///
+    /// This is the operation whose GPU dispatch was covering a quarter of the
+    /// destination width until a few commits ago, which a comparison against the
+    /// CPU would have caught immediately.
+    #[test]
+    fn warp_identity_matches() {
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (37usize, 53usize); // deliberately not multiples of 16
+        let input = cpu_1ch(values(h * w, 11, 0.0, 255.0), h, w);
+        let identity: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+        // `new_shape` is (width, height), not (height, width) - the transposed
+        // version asked both backends for a 53x37 output from a 37x53 input, and
+        // the resulting "divergence" was a 126.0 difference in the 37 pixels
+        // past the real image, not a disagreement between the implementations.
+        let c = cpu
+            .warp(&input, &identity, (w, h), WarpType::Perspective)
+            .unwrap();
+        let gi = input.to_gpu_ctx(g).unwrap();
+        let go = g
+            .warp(&gi, &identity, (w, h), WarpType::Perspective)
+            .unwrap();
+        let gb = go.to_cpu().unwrap();
+
+        let cs = c.storage.as_slice().unwrap();
+        let gs = gb.storage.as_slice().unwrap();
+        assert_eq!(cs.len(), gs.len(), "warp output sizes differ");
+        let worst = cs
+            .iter()
+            .zip(gs)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let peak = cs.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        // Where do the differences sit? Print the first few differing indices.
+        let diffs: Vec<usize> = cs
+            .iter()
+            .zip(gs)
+            .enumerate()
+            .filter(|(_, (a, b))| (**a - **b).abs() > 0.5)
+            .map(|(i, _)| i)
+            .collect();
+        println!(
+            "  warp: worst {worst:.3} peak {peak:.1}; {}/{} differ, first at {:?}",
+            diffs.len(),
+            cs.len(),
+            &diffs[..diffs.len().min(8)]
+        );
+        // Dimensions are not a multiple of the 16-wide workgroup, which is
+        // exactly the case where the dispatch previously dropped columns.
+        assert!(
+            worst <= tol_scaled(peak, 0.02),
+            "warp with identity diverges: worst {worst} against a peak of {peak}"
+        );
+    }
+
+    /// `subtract` is elementwise and must be exact to float precision.
+    #[test]
+    fn subtract_matches() {
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (32usize, 32usize);
+        let a = cpu_1ch(values(h * w, 13, -50.0, 50.0), h, w);
+        let b = cpu_1ch(values(h * w, 17, -50.0, 50.0), h, w);
+
+        let c = cpu.subtract(&a, &b).unwrap();
+        let ga = a.to_gpu_ctx(g).unwrap();
+        let gb = b.to_gpu_ctx(g).unwrap();
+        let go = g.subtract(&ga, &gb).unwrap();
+        let back = go.to_cpu().unwrap();
+
+        let cs = c.storage.as_slice().unwrap();
+        let gs = back.storage.as_slice().unwrap();
+        let worst = cs
+            .iter()
+            .zip(gs)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        println!("  subtract: worst abs {worst:.6}");
+        assert!(worst < 1e-3, "subtract diverges: worst {worst}");
+    }
+
+    /// Morphology, erode and dilate with a 3x3 kernel.
+    #[test]
+    fn morphology_matches() {
+        use cv_hal::context::MorphologyType;
+        let Some(g) = gpu() else { return };
+        let cpu = CpuBackend::new().unwrap();
+        let (h, w) = (40usize, 40usize);
+        let v = values(h * w, 19, 0.0, 255.0);
+        let input: CpuTensor<u8> = Tensor::from_vec(
+            v.iter().map(|&x| x as u8).collect(),
+            TensorShape::new(1, h, w),
+        )
+        .unwrap();
+        let kernel: CpuTensor<u8> =
+            Tensor::from_vec(vec![0u8, 1, 0, 1, 1, 1, 0, 1, 0], TensorShape::new(3, 3, 1)).unwrap();
+
+        for (name, typ) in [
+            ("erode", MorphologyType::Erode),
+            ("dilate", MorphologyType::Dilate),
+        ] {
+            let c = cpu
+                .morphology(&input, typ, &kernel, 1)
+                .unwrap_or_else(|e| panic!("CPU {name} failed: {e}"));
+            let gi = input.to_gpu_ctx(g).unwrap();
+            let gk = kernel.to_gpu_ctx(g).unwrap();
+            match g.morphology(&gi, typ, &gk, 1) {
+                Ok(go) => {
+                    let back = go.to_cpu().unwrap();
+                    let cs = c.storage.as_slice().unwrap();
+                    let gs = back.storage.as_slice().unwrap();
+                    let differing = cs.iter().zip(gs).filter(|(a, b)| a != b).count();
+                    println!("  morphology {name}: {differing} of {} differ", cs.len());
+                    assert_eq!(
+                        differing,
+                        0,
+                        "morphology {name} differs on {differing} of {} pixels",
+                        cs.len()
+                    );
+                }
+                Err(e) => println!("  morphology {name}: GPU reports {e}"),
+            }
+        }
+    }
+}
