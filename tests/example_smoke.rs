@@ -106,8 +106,46 @@ smoke!(
     imgproc_demo,
     features_demo,
     orb_benchmark,
-    demo,
 );
+
+/// The viewer demo opens a window and runs until it is closed, so it can never
+/// be "finish within 120s". It is spawned, given a moment to fail, and then
+/// killed - asserting only that it did not die on startup.
+///
+/// This is the third time this example has broken the smoke suite, and the
+/// first two were the viewer's own doing: a launcher that printed to stdout, and
+/// then one that rendered. A GUI example and an "every example exits" harness are
+/// incompatible, so the harness learned about them rather than the examples
+/// pretending to be batch jobs.
+#[test]
+fn viewer_demo_opens_and_survives_startup() {
+    let Some(path) = example_path("demo") else {
+        eprintln!("skipping demo: not built");
+        return;
+    };
+    let mut child = Command::new(&path)
+        .spawn()
+        .expect("demo should be spawnable");
+
+    // Long enough to get past pipeline creation, which is where the renderer
+    // reports a missing device or a shader that will not compile.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    match child.try_wait() {
+        // Still running is the success case: the window is up.
+        Ok(None) => {
+            let _ = child.kill();
+        }
+        Ok(Some(status)) => panic!(
+            "demo exited {status} instead of staying open - \
+             it is a GUI app and should keep running"
+        ),
+        Err(e) => {
+            let _ = child.kill();
+            panic!("demo: wait failed: {e}");
+        }
+    }
+}
 
 /// `orbdiag` is a long-running diagnostic that sweeps feature counts and runs
 /// the mapper on each, so it is exercised by one size rather than the whole
