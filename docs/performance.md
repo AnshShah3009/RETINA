@@ -1528,3 +1528,37 @@ derivative rather than only against the GPU, so a case where both backends agree
 on something that is not a gradient is caught - which is the failure mode a
 CPU-versus-GPU comparison cannot see, and the one that let three of these through
 while a fourth looked identical.
+
+## The audit's own false positives, recorded
+
+Two claims I made during the bf16/f16 audit were wrong, and both were caught by
+the tests rather than by me. Worth recording because the first one was close to
+shipping a rewrite of working code.
+
+**"All six bf16 shaders use raw u32 as a value."** False. `fast_bf16`,
+`fast_nms_bf16` and `threshold_bf16` unpack correctly with a shift and a mask. I
+had grepped for a `0xFFFF` idiom, not found it in those three, and generalised
+from the two that genuinely lacked it. The fix that nearly landed would have
+replaced a correct `(input_data >> shift) & 0xFFFFu` with a whole-word
+`bitcast<f32>(bits << 16)`, which computes a different thing for a packed pair.
+The test failed on the rewrite and the rewrite was reverted.
+
+Three really were broken - `bilateral_bf16` (sigmas typed `u32` where the host
+writes f32, so it never compiled, plus raw bits used as a value),
+`resize_bf16` (four taps to `mix` as u32) - and `color_cvt_bf16` was an
+unfinished draft calling a function the file does not define.
+
+**"The f16 path is unreachable and nobody noticed."** False. It is behind
+cv-hal's `half-precision` feature, which nothing enables, so the shaders are
+correctly compiled out. I had added all six to the compile test, which then
+failed on `array<f16>` needing naga's `FLOAT16` capability - and I started
+rewriting the dtype dispatch to report `NotSupported` instead, before noticing
+the `#[cfg(feature = "half-precision")]` attribute sitting on the arm I was
+editing. They are out of the compile test now, with the reason recorded at the
+call site rather than in this file alone.
+
+The pattern across both: I generalised from a grep rather than reading each
+file, and the cost of that was two rounds of confidently wrong work. The checks
+that saved it were the same ones that find the real bugs - compile the shader,
+run the test - which is the argument for having them even when they are
+inconvenient.
