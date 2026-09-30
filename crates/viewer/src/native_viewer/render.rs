@@ -12,8 +12,8 @@
 //! the egui-provided mapping into that space.
 
 use cv_core::point_cloud::PointCloud;
-use std::sync::Arc;
 use eframe::wgpu::util::DeviceExt;
+use std::sync::Arc;
 
 /// Vertex data uploaded per point.
 #[repr(C)]
@@ -75,19 +75,20 @@ impl PointCloudRenderer {
             source: eframe::wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
 
-        let bind_group_layout = device.create_bind_group_layout(&eframe::wgpu::BindGroupLayoutDescriptor {
-            label: Some("Point Cloud BGL"),
-            entries: &[eframe::wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: eframe::wgpu::ShaderStages::VERTEX,
-                ty: eframe::wgpu::BindingType::Buffer {
-                    ty: eframe::wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let bind_group_layout =
+            device.create_bind_group_layout(&eframe::wgpu::BindGroupLayoutDescriptor {
+                label: Some("Point Cloud BGL"),
+                entries: &[eframe::wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: eframe::wgpu::ShaderStages::VERTEX,
+                    ty: eframe::wgpu::BindingType::Buffer {
+                        ty: eframe::wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
 
         let layout = device.create_pipeline_layout(&eframe::wgpu::PipelineLayoutDescriptor {
             label: Some("Point Cloud PL"),
@@ -201,13 +202,13 @@ impl PointCloudRenderer {
         };
         let (min_z, max_z) = z_range(pc);
         let verts = build_vertices(pc, min_z, max_z);
-        existing.buffer = self
-            .device
-            .create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
-                label: Some("Point Cloud Vertices"),
-                contents: bytemuck::cast_slice(&verts),
-                usage: eframe::wgpu::BufferUsages::VERTEX,
-            });
+        existing.buffer =
+            self.device
+                .create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
+                    label: Some("Point Cloud Vertices"),
+                    contents: bytemuck::cast_slice(&verts),
+                    usage: eframe::wgpu::BufferUsages::VERTEX,
+                });
         existing.len = verts.len();
         Ok(())
     }
@@ -231,11 +232,7 @@ impl PointCloudRenderer {
 
     fn draw_into(&self, pass: &mut eframe::wgpu::RenderPass<'static>) {
         let view = self.view.lock().map(|v| *v).unwrap_or_else(|_| identity());
-        let radius = self
-            .point_radius
-            .lock()
-            .map(|r| *r)
-            .unwrap_or(3.0);
+        let radius = self.point_radius.lock().map(|r| *r).unwrap_or(3.0);
         let uniforms = Uniforms {
             view,
             viewport: [1.0, 1.0],
@@ -245,14 +242,16 @@ impl PointCloudRenderer {
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-        let bind_group = self.device.create_bind_group(&eframe::wgpu::BindGroupDescriptor {
-            label: Some("Point Cloud BG"),
-            layout: &self.bind_group_layout,
-            entries: &[eframe::wgpu::BindGroupEntry {
-                binding: 0,
-                resource: self.uniform_buffer.as_entire_binding(),
-            }],
-        });
+        let bind_group = self
+            .device
+            .create_bind_group(&eframe::wgpu::BindGroupDescriptor {
+                label: Some("Point Cloud BG"),
+                layout: &self.bind_group_layout,
+                entries: &[eframe::wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                }],
+            });
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);

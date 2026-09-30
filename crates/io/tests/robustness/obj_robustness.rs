@@ -119,7 +119,9 @@ fn obj_non_utf8_errors() {
 fn obj_nan_vertices_are_rejected() {
     let file = b"v nan inf -inf\nv 1e40 0 0\n".to_vec();
     match parse(run_obj, &file) {
-        Outcome::Returned(cloud) => assert_all_finite(&cloud, "read_obj accepted a non-finite coordinate"),
+        Outcome::Returned(cloud) => {
+            assert_all_finite(&cloud, "read_obj accepted a non-finite coordinate")
+        }
         other => assert!(other.is_ok_or_err()),
     }
 }

@@ -45,9 +45,8 @@ pub fn read_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
         // as if they were a comment. The remaining bytes are read the same way
         // (`read_to_string` rejects invalid UTF-8), so this only closes the gap
         // the 80-byte header read had opened.
-        let header_prefix = std::str::from_utf8(&header[..bytes_read]).map_err(|e| {
-            Error::ParseError(format!("STL ASCII header is not valid UTF-8: {e}"))
-        })?;
+        let header_prefix = std::str::from_utf8(&header[..bytes_read])
+            .map_err(|e| Error::ParseError(format!("STL ASCII header is not valid UTF-8: {e}")))?;
         let mut rest = String::new();
         reader.read_to_string(&mut rest)?;
         let content = header_prefix.to_owned() + &rest;

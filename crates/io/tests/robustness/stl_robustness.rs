@@ -335,7 +335,9 @@ fn stl_ascii_non_numeric_vertex_errors() {
 fn stl_ascii_nan_vertices_are_rejected() {
     let file = b"solid x\nfacet normal 0 0 1\nouter loop\nvertex nan inf -inf\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid x\n".to_vec();
     match stl_outcome(&file) {
-        Outcome::Returned(m) => assert_all_finite(&m.vertices, "read_stl accepted a non-finite ASCII vertex"),
+        Outcome::Returned(m) => {
+            assert_all_finite(&m.vertices, "read_stl accepted a non-finite ASCII vertex")
+        }
         other => assert!(other.is_ok_or_err()),
     }
 }
@@ -344,9 +346,15 @@ fn stl_ascii_nan_vertices_are_rejected() {
 /// mesh.
 #[test]
 fn stl_binary_nan_vertices_are_rejected() {
-    let body = stl_triangle([f32::NAN, f32::INFINITY, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+    let body = stl_triangle(
+        [f32::NAN, f32::INFINITY, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+    );
     match stl_outcome(&stl_binary("binary", 1, &body)) {
-        Outcome::Returned(m) => assert_all_finite(&m.vertices, "read_stl accepted a non-finite binary vertex"),
+        Outcome::Returned(m) => {
+            assert_all_finite(&m.vertices, "read_stl accepted a non-finite binary vertex")
+        }
         other => assert!(other.is_ok_or_err()),
     }
 }

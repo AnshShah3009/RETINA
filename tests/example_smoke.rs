@@ -161,10 +161,12 @@ fn orbdiag_starts_and_reports() {
     // counts over the full dataset - it runs for many minutes and never
     // returns. The test therefore blocked on it and could only ever pass if the
     // example happened to finish first; on CI it did not, and the assertion
-    // below fired on an empty stdout rather than on anything real.
+    // fired on an empty stdout rather than on anything real.
     //
-    // The pipe is read on a background thread and the child is killed once it
-    // has reported, so the assertion is about the diagnostic actually appearing.
+    // The pipe is drained on a background thread while the main thread polls
+    // for the report, with a deadline. Joining the reader directly is not
+    // enough: it returns as soon as the child closes the pipe, which on CI
+    // happened before any report was written.
     let mut child = Command::new(&path)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -174,7 +176,7 @@ fn orbdiag_starts_and_reports() {
     let stdout_pipe = child.stdout.take().expect("piped stdout");
     let collected = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let sink = std::sync::Arc::clone(&collected);
-    let reader = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         use std::io::Read;
         let mut stdout_pipe = stdout_pipe;
         let mut bytes = [0u8; 4096];
@@ -184,19 +186,35 @@ fn orbdiag_starts_and_reports() {
                 Ok(n) => {
                     let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
                     sink.push_str(&String::from_utf8_lossy(&bytes[..n]));
-                    if sink.contains("verified_pairs") {
-                        break;
-                    }
                 }
             }
         }
     });
 
-    reader.join().expect("the reader thread should not panic");
-    let found = collected
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains("verified_pairs");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let found = loop {
+        if collected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains("verified_pairs")
+        {
+            break true;
+        }
+        if std::time::Instant::now() > deadline {
+            break false;
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            // It exited without reporting; give the reader a moment to drain
+            // whatever it wrote on the way out.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            break collected
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains("verified_pairs");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+
     let _ = child.kill();
     let _ = child.wait();
 

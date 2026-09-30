@@ -57,8 +57,7 @@ fn ctx_or_skip() -> Option<Arc<GpuContext>> {
 /// because a buffer missing `COPY_DST` panics right here.
 fn write_stamp(ctx: &GpuContext, buf: &wgpu::Buffer, n: u32) {
     let data: Vec<u32> = (0..(STAMP_SIZE / 4) as u32).map(|i| stamp(n) ^ i).collect();
-    ctx.queue
-        .write_buffer(buf, 0, bytemuck::cast_slice(&data));
+    ctx.queue.write_buffer(buf, 0, bytemuck::cast_slice(&data));
     let _ = ctx.device.poll(wgpu::PollType::Wait {
         submission_index: None,
         timeout: Some(Duration::from_secs(5)),
@@ -104,7 +103,20 @@ fn bucket_under_test(size: u64) -> u64 {
 #[test]
 fn size_bucket_never_shrinks_a_request() {
     for &size in &[
-        1u64, 2, 3, 16, 100, 255, 256, 257, 1023, 1024, 1025, 4096, 65_536, 1024 * 1024,
+        1u64,
+        2,
+        3,
+        16,
+        100,
+        255,
+        256,
+        257,
+        1023,
+        1024,
+        1025,
+        4096,
+        65_536,
+        1024 * 1024,
         1024 * 1024 + 1,
         3 * 1024 * 1024,
         7 * 1024 * 1024 + 5,
@@ -580,14 +592,22 @@ fn a_pooled_storage_copy_dst_buffer_really_accepts_write_buffer() {
     let pool = GpuBufferPool::new();
     let device = ctx.device.clone();
 
-    let polluting = pool.get(&device, 4096, BufferUsages::STORAGE | BufferUsages::COPY_SRC);
+    let polluting = pool.get(
+        &device,
+        4096,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    );
     pool.return_buffer(
         &device,
         polluting,
         BufferUsages::STORAGE | BufferUsages::COPY_SRC,
     );
 
-    let buf = pool.get(&device, 4096, BufferUsages::STORAGE | BufferUsages::COPY_DST);
+    let buf = pool.get(
+        &device,
+        4096,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    );
     // write_buffer validates usage and panics if COPY_DST is missing.
     write_stamp(&ctx, &buf, 303);
     assert!(buf.usage().contains(BufferUsages::COPY_DST));
@@ -600,14 +620,22 @@ fn a_pooled_storage_copy_src_buffer_really_supports_readback() {
     let pool = GpuBufferPool::new();
     let device = ctx.device.clone();
 
-    let polluting = pool.get(&device, 4096, BufferUsages::STORAGE | BufferUsages::COPY_DST);
+    let polluting = pool.get(
+        &device,
+        4096,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST,
+    );
     pool.return_buffer(
         &device,
         polluting,
         BufferUsages::STORAGE | BufferUsages::COPY_DST,
     );
 
-    let buf = pool.get(&device, 4096, BufferUsages::STORAGE | BufferUsages::COPY_SRC);
+    let buf = pool.get(
+        &device,
+        4096,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    );
     let data: Vec<u32> =
         futures::executor::block_on(read_buffer(device.clone(), &ctx.queue, &buf, 0, 16))
             .expect("readback from a pooled COPY_SRC buffer must succeed");
@@ -701,7 +729,10 @@ fn concurrent_get_return_keeps_usage_flags_and_live_buffers_separate() {
                     writable,
                     "usage flags crossed between buckets under concurrency"
                 );
-                assert!(buf.size() >= 16 * 1024, "pool handed out an undersized buffer");
+                assert!(
+                    buf.size() >= 16 * 1024,
+                    "pool handed out an undersized buffer"
+                );
                 if writable {
                     queue.write_buffer(&buf, 0, bytemuck::cast_slice(&[0x1234_5678u32; 16]));
                 }
@@ -791,24 +822,52 @@ fn negative_control_a_one_bucket_pool_fails_the_claims_this_file_makes() {
     let pool = OneBucketPool::new();
 
     // Seed with a STORAGE | COPY_DST | COPY_SRC buffer and give it content.
-    let seed = pool.get(&device, 4096, BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC);
+    let seed = pool.get(
+        &device,
+        4096,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
     write_stamp(&ctx, &seed, 5);
-    pool.return_buffer(&device, seed, BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC);
+    pool.return_buffer(
+        &device,
+        seed,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
 
     // Claim 1 (used by `writable_buffer_is_not_handed_out_for_a_read_only_request`):
     // a buffer returned under one usage must not come back for another. The
     // broken pool hands it back stamped, so the claim must fail.
-    let wrong_usage = pool.get(&device, 4096, BufferUsages::STORAGE | BufferUsages::COPY_SRC);
+    let wrong_usage = pool.get(
+        &device,
+        4096,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    );
     let leaked = read_stamp(&ctx, &wrong_usage) == stamp(5);
 
     // Claim 2 (used by `buffer_returned_at_a_larger_size_does_not_shrink_for_a_smaller_request`):
     // a smaller request must not be served from a larger bucket. The broken pool
     // always reuses, so the size claim must fail.
-    pool.return_buffer(&device, wrong_usage, BufferUsages::STORAGE | BufferUsages::COPY_SRC);
-    let big = pool.get(&device, 100_000, BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC);
+    pool.return_buffer(
+        &device,
+        wrong_usage,
+        BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+    );
+    let big = pool.get(
+        &device,
+        100_000,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
     let big_size = big.size();
-    pool.return_buffer(&device, big, BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC);
-    let small = pool.get(&device, 1000, BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC);
+    pool.return_buffer(
+        &device,
+        big,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
+    let small = pool.get(
+        &device,
+        1000,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
     let wrong_size = small.size() >= big_size;
 
     // Claim 3 (used by `two_outstanding_gets_produce_two_independent_buffers`):
@@ -816,8 +875,16 @@ fn negative_control_a_one_bucket_pool_fails_the_claims_this_file_makes() {
     // recycles on `return_buffer` gets this one right, so the broken variant
     // for the control is "replay the last buffer *without* removing it".
     let always = always_last_pool(&device);
-    let a = always.get(&device, 4096, BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC);
-    let b = always.get(&device, 4096, BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC);
+    let a = always.get(
+        &device,
+        4096,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
+    let b = always.get(
+        &device,
+        4096,
+        BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+    );
     write_stamp(&ctx, &a, 6);
     let shared = read_stamp(&ctx, &b) == stamp(6);
 

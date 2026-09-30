@@ -39,10 +39,7 @@ fn unspaced_keyword(line: &str) -> Option<&'static str> {
     // Longest keyword the line actually begins with. `vn 1 1 1` must resolve to
     // `vn`, never to `v`, so the table is ordered longest-prefix-first and the
     // *first* prefix match wins - whether or not it is properly spaced.
-    let keyword = KEYWORDS
-        .iter()
-        .copied()
-        .find(|kw| line.starts_with(kw))?;
+    let keyword = KEYWORDS.iter().copied().find(|kw| line.starts_with(kw))?;
     let rest = &line[keyword.len()..];
     if rest.is_empty() || rest.starts_with(char::is_whitespace) {
         // A well-formed statement.
@@ -102,9 +99,9 @@ pub fn read_obj<R: BufRead>(reader: R) -> Result<PointCloud> {
 /// it is inside a `PointCloud`, and every bound, centroid and RANSAC threshold
 /// computed from the cloud is then garbage.
 fn parse_obj_coordinate(token: &str, axis: &str, line: &str) -> Result<f32> {
-    let value: f32 = token
-        .parse()
-        .map_err(|_| Error::ParseError(format!("Invalid {axis} coordinate: {token} in {line:?}")))?;
+    let value: f32 = token.parse().map_err(|_| {
+        Error::ParseError(format!("Invalid {axis} coordinate: {token} in {line:?}"))
+    })?;
     if !value.is_finite() {
         return Err(Error::ParseError(format!(
             "Non-finite {axis} coordinate: {token} in {line:?}"
@@ -199,9 +196,9 @@ impl ObjMesh {
                     .iter()
                     .map(|p| {
                         let idx_str = p.split('/').next().unwrap_or(p);
-                        let i = idx_str.parse::<usize>().map_err(|_| {
-                            Error::ParseError(format!("Invalid face index: {}", p))
-                        })?;
+                        let i = idx_str
+                            .parse::<usize>()
+                            .map_err(|_| Error::ParseError(format!("Invalid face index: {}", p)))?;
                         if i == 0 {
                             return Err(Error::ParseError(format!(
                                 "OBJ face index is 1-based, got 0 in: {}",
@@ -209,15 +206,15 @@ impl ObjMesh {
                             )));
                         }
                         let idx = i - 1; // OBJ uses 1-based indexing
-                        // Bound-check against the vertices read *so far*.
-                        // Nothing else does: `ObjMesh` and `TriangleMesh` both
-                        // store faces as `usize`, so a file-controlled index
-                        // that addresses no vertex survives into a mesh whose
-                        // every consumer indexes `vertices[face[k]]` - ICP,
-                        // normals, rasterisation - and panics or reads
-                        // unrelated memory. That includes a *forward*
-                        // reference, which OBJ does not allow, and an index
-                        // near `usize::MAX`.
+                                         // Bound-check against the vertices read *so far*.
+                                         // Nothing else does: `ObjMesh` and `TriangleMesh` both
+                                         // store faces as `usize`, so a file-controlled index
+                                         // that addresses no vertex survives into a mesh whose
+                                         // every consumer indexes `vertices[face[k]]` - ICP,
+                                         // normals, rasterisation - and panics or reads
+                                         // unrelated memory. That includes a *forward*
+                                         // reference, which OBJ does not allow, and an index
+                                         // near `usize::MAX`.
                         if idx >= mesh.vertices.len() {
                             return Err(Error::ParseError(format!(
                                 "OBJ face index {i} is out of range: only {} vertex/vertices \

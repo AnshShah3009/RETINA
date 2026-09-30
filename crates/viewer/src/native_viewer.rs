@@ -24,10 +24,7 @@ impl ColorMode {
     const ALL: [ColorMode; 3] = [ColorMode::PerPoint, ColorMode::Height, ColorMode::Flat];
 
     fn next(self) -> ColorMode {
-        let i = ColorMode::ALL
-            .iter()
-            .position(|m| *m == self)
-            .unwrap_or(0);
+        let i = ColorMode::ALL.iter().position(|m| *m == self).unwrap_or(0);
         ColorMode::ALL[(i + 1) % ColorMode::ALL.len()]
     }
 
@@ -242,7 +239,11 @@ impl NativeViewer {
         if length3(s) < 1e-6 {
             // `up` is parallel to the view direction, so the cross product is
             // zero and the camera is gimbal-locked. Pick any axis that is not.
-            let fallback = if f[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+            let fallback = if f[0].abs() < 0.9 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
             s = cross3(f, fallback);
         }
         let s = normalize3(s);
@@ -256,11 +257,7 @@ impl NativeViewer {
             [u[0], u[1], u[2]],
             [-f[0], -f[1], -f[2]],
         ];
-        let t = [
-            -dot3(s, eye),
-            -dot3(u, eye),
-            dot3(f, eye),
-        ];
+        let t = [-dot3(s, eye), -dot3(u, eye), dot3(f, eye)];
 
         let mut m = [[0.0f32; 4]; 4];
         for i in 0..3 {
@@ -305,8 +302,8 @@ impl NativeViewer {
             if delta.x != 0.0 {
                 // Scaled by distance so a drag moves the scene by about the same
                 // number of pixels whether the camera is near or far.
-                self.camera_yaw = (self.camera_yaw + delta.x * 0.5 * self.camera_dist / 4.0)
-                    .rem_euclid(360.0);
+                self.camera_yaw =
+                    (self.camera_yaw + delta.x * 0.5 * self.camera_dist / 4.0).rem_euclid(360.0);
                 moved = true;
             }
             if delta.y != 0.0 {
@@ -342,8 +339,7 @@ impl NativeViewer {
             // Up pulls back, down pushes in. The clamp stops the eye crossing
             // through the target, which would otherwise put the cloud behind the
             // camera at a negative depth.
-            self.camera_dist = (self.camera_dist * (1.0 - scroll * 0.002))
-                .clamp(0.02, 500.0);
+            self.camera_dist = (self.camera_dist * (1.0 - scroll * 0.002)).clamp(0.02, 500.0);
             moved = true;
         }
         moved
@@ -351,10 +347,7 @@ impl NativeViewer {
 
     /// The point count actually on the GPU.
     fn uploaded_points(&self) -> usize {
-        self.renderer
-            .as_ref()
-            .map(|r| r.point_count())
-            .unwrap_or(0)
+        self.renderer.as_ref().map(|r| r.point_count()).unwrap_or(0)
     }
 
     /// The cloud the demo opens with.
@@ -487,7 +480,10 @@ impl eframe::App for NativeViewer {
             // requests them is registered, so a callback added during its own
             // rect's paint would silently never run - which looks exactly like a
             // renderer that draws nothing.
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 420.0), egui::Sense::click_and_drag());
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 420.0),
+                egui::Sense::click_and_drag(),
+            );
             let camera_moved = self.handle_camera(&response, ctx);
 
             match self.renderer.as_ref() {
@@ -506,7 +502,8 @@ impl eframe::App for NativeViewer {
                     // the window came up empty with no error anywhere, which is
                     // the same failure shape as the two bugs before it, just a
                     // new one.
-                    ui.painter().rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+                    ui.painter()
+                        .rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
                     ui.painter().add(renderer.callback(rect));
                     ui.painter().rect_stroke(
                         rect,
@@ -642,16 +639,20 @@ pub fn run_native_viewer() -> Result<(), eframe::Error> {
         ..Default::default()
     };
 
-    eframe::run_native("Rust CV Viewer", options, Box::new(|cc| {
-        let mut viewer = NativeViewer::new(cc);
+    eframe::run_native(
+        "Rust CV Viewer",
+        options,
+        Box::new(|cc| {
+            let mut viewer = NativeViewer::new(cc);
 
-        // Load a cloud up front. A viewer that opens empty reads as broken: there
-        // is nothing to tell a working renderer from a dead one until the user
-        // finds and presses a button. The demo's whole job is to show a cloud.
-        viewer.add_point_cloud(NativeViewer::demo_cloud());
+            // Load a cloud up front. A viewer that opens empty reads as broken: there
+            // is nothing to tell a working renderer from a dead one until the user
+            // finds and presses a button. The demo's whole job is to show a cloud.
+            viewer.add_point_cloud(NativeViewer::demo_cloud());
 
-        Ok(Box::new(viewer))
-    }))
+            Ok(Box::new(viewer))
+        }),
+    )
 }
 
 mod render;
@@ -677,12 +678,7 @@ mod tests {
         // The camera's own position must map to the origin, not to itself.
         // `headless_viewer` orbits at a real distance from `target`, so this
         // exercises the translation as well as the basis.
-        let eye = [
-            viewer.target[0],
-            viewer.target[1],
-            viewer.target[2],
-            1.0,
-        ];
+        let eye = [viewer.target[0], viewer.target[1], viewer.target[2], 1.0];
         let mut seen = [0.0f32; 4];
         for (row, cell) in view.iter().enumerate() {
             seen[row] = (0..4).map(|c| cell[c] * eye[c]).sum();
@@ -744,13 +740,9 @@ mod tests {
         );
     }
 
-
     fn approx(a: [f32; 3], b: [f32; 3]) {
         for i in 0..3 {
-            assert!(
-                (a[i] - b[i]).abs() < 1e-5,
-                "component {i}: {a:?} != {b:?}"
-            );
+            assert!((a[i] - b[i]).abs() < 1e-5, "component {i}: {a:?} != {b:?}");
         }
     }
 
@@ -818,7 +810,11 @@ mod tests {
         let mut flat = PointCloud::default();
         flat.points.push(nalgebra::Point3::new(1.0, 2.0, 3.0));
         flat.points.push(nalgebra::Point3::new(4.0, 5.0, 3.0));
-        assert_eq!(z_range(&flat), (0.0, 1.0), "a zero-height range must not divide by zero");
+        assert_eq!(
+            z_range(&flat),
+            (0.0, 1.0),
+            "a zero-height range must not divide by zero"
+        );
 
         let mut real = PointCloud::default();
         real.points.push(nalgebra::Point3::new(0.0, 0.0, -2.0));
@@ -1048,10 +1044,10 @@ mod tests {
             events: vec![
                 egui::Event::PointerMoved(canvas.center()),
                 egui::Event::MouseWheel {
-                        unit: egui::MouseWheelUnit::Point,
-                        delta: egui::vec2(0.0, -50.0),
-                        modifiers: egui::Modifiers::default(),
-                    },
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -50.0),
+                    modifiers: egui::Modifiers::default(),
+                },
             ],
             ..Default::default()
         };

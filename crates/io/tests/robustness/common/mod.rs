@@ -293,7 +293,10 @@ impl TempDir {
             .unwrap_or(0);
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut path = std::env::temp_dir();
-        path.push(format!("cv_io_robust_{tag}_{}_{seq}_{nanos}", std::process::id()));
+        path.push(format!(
+            "cv_io_robust_{tag}_{}_{seq}_{nanos}",
+            std::process::id()
+        ));
         fs::create_dir_all(&path).expect("create temp dir");
         Self { path }
     }

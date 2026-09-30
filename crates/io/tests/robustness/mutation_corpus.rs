@@ -78,10 +78,7 @@ fn is_known(parser: &str, signature: &str) -> bool {
 type Mutation = (&'static str, Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>);
 
 fn mutations() -> Vec<Mutation> {
-    fn m(
-        name: &'static str,
-        f: impl Fn(&[u8]) -> Vec<u8> + Send + Sync + 'static,
-    ) -> Mutation {
+    fn m(name: &'static str, f: impl Fn(&[u8]) -> Vec<u8> + Send + Sync + 'static) -> Mutation {
         (name, Arc::new(f))
     }
 
@@ -93,7 +90,9 @@ fn mutations() -> Vec<Mutation> {
         m("truncate_to_40", |b| b[..b.len().min(40)].to_vec()),
         m("truncate_to_80", |b| b[..b.len().min(80)].to_vec()),
         m("truncate_half", |b| b[..b.len() / 2].to_vec()),
-        m("truncate_minus_1", |b| b[..b.len().saturating_sub(1)].to_vec()),
+        m("truncate_minus_1", |b| {
+            b[..b.len().saturating_sub(1)].to_vec()
+        }),
         m("all_zeroes", |b| vec![0u8; b.len()]),
         m("all_0xff", |b| vec![0xffu8; b.len()]),
         m("flip_top_bit", |b| {
@@ -124,12 +123,18 @@ fn mutations() -> Vec<Mutation> {
             v
         }),
         m("replace_newline_with_nul", |b| {
-            b.iter().map(|&c| if c == b'\n' { 0 } else { c }).collect::<Vec<u8>>()
+            b.iter()
+                .map(|&c| if c == b'\n' { 0 } else { c })
+                .collect::<Vec<u8>>()
         }),
         m("repeat_body", |b| {
             // Duplicate everything after the first newline, which for ASCII
             // formats doubles the point count without the header knowing.
-            let cut = b.iter().position(|&c| c == b'\n').map(|i| i + 1).unwrap_or(0);
+            let cut = b
+                .iter()
+                .position(|&c| c == b'\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
             let mut v = b.to_vec();
             v.extend_from_slice(&b[cut..]);
             v
@@ -145,10 +150,14 @@ fn mutations() -> Vec<Mutation> {
             v
         }),
         m("spaces_for_newlines", |b| {
-            b.iter().map(|&c| if c == b'\n' { b' ' } else { c }).collect::<Vec<u8>>()
+            b.iter()
+                .map(|&c| if c == b'\n' { b' ' } else { c })
+                .collect::<Vec<u8>>()
         }),
         m("uppercase_keywords", |b| {
-            b.iter().map(|c| c.to_ascii_uppercase()).collect::<Vec<u8>>()
+            b.iter()
+                .map(|c| c.to_ascii_uppercase())
+                .collect::<Vec<u8>>()
         }),
         m("no_trailing_newline", |b| {
             let mut v = b.to_vec();
@@ -171,7 +180,9 @@ fn mutations() -> Vec<Mutation> {
         m("inf_token", |b| append_token(b, b"inf")),
         m("huge_token", |b| append_token(b, b"4e9 4e9 4e9")),
         m("huge_count_token", |b| append_token(b, b"4000000000")),
-        m("usize_max_token", |b| append_token(b, b"18446744073709551615")),
+        m("usize_max_token", |b| {
+            append_token(b, b"18446744073709551615")
+        }),
         m("negative_count_token", |b| append_token(b, b"-1")),
         m("zero_count_token", |b| append_token(b, b"0")),
         // NOTE: this hand-closes the mutation table on purpose. It was recorded
@@ -297,8 +308,10 @@ fn mutation_corpus_never_panics_hangs_or_silently_misparses() {
                         .enumerate()
                         .find(|(_, p)| !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()))
                     {
-                        let detail =
-                            format!("returned a non-finite point at index {i}: ({}, {}, {})", p.x, p.y, p.z);
+                        let detail = format!(
+                            "returned a non-finite point at index {i}: ({}, {}, {})",
+                            p.x, p.y, p.z
+                        );
                         if !is_known(case.parser, &detail) {
                             record(&label, detail);
                         }
@@ -327,19 +340,19 @@ fn mutation_corpus_never_panics_hangs_or_silently_misparses() {
 fn obj_mutation_corpus_never_produces_out_of_range_face_indices() {
     let sources: Vec<(&'static str, Vec<u8>)> = vec![
         ("obj_3v1f", obj_ascii()),
-        (
-            "obj_8v_ngon",
-            {
-                let mut s = String::new();
-                for i in 0..8 {
-                    s.push_str(&format!("v {i} 0 0\n"));
-                }
-                s.push_str("f 1 2 3 4 5 6 7 8\n");
-                s.into_bytes()
-            },
-        ),
+        ("obj_8v_ngon", {
+            let mut s = String::new();
+            for i in 0..8 {
+                s.push_str(&format!("v {i} 0 0\n"));
+            }
+            s.push_str("f 1 2 3 4 5 6 7 8\n");
+            s.into_bytes()
+        }),
         ("obj_1v0f", b"v 0 0 0\n".to_vec()),
-        ("obj_3v_oob", b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\nf 1 2 99\n".to_vec()),
+        (
+            "obj_3v_oob",
+            b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\nf 1 2 99\n".to_vec(),
+        ),
     ];
 
     for (sname, src) in &sources {
@@ -403,7 +416,11 @@ fn obj_mutation_corpus_never_produces_out_of_range_face_indices() {
 /// reader at all.
 #[test]
 fn mutation_corpus_harness_reaches_the_binary_stl_path() {
-    let file = stl_binary("binary", 1, &stl_triangle([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
+    let file = stl_binary(
+        "binary",
+        1,
+        &stl_triangle([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+    );
     let mut zeroed = vec![0u8; file.len()];
     zeroed[80..].copy_from_slice(&file[80..]);
     let cloud = parse(run_stl, &zeroed).expect_ok("80 zero header bytes, valid body");

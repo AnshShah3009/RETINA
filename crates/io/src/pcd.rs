@@ -244,7 +244,9 @@ where
             .split_whitespace()
             .map(|s| {
                 s.parse::<f32>().map_err(|_| {
-                    Error::ParseError(format!("PCD ascii: cannot parse {s:?} as a number: {line:?}"))
+                    Error::ParseError(format!(
+                        "PCD ascii: cannot parse {s:?} as a number: {line:?}"
+                    ))
                 })
             })
             .collect::<Result<Vec<_>>>()?;

@@ -64,7 +64,10 @@ fn pcd_binary_compressed_truncated_size_header_errors() {
 fn pcd_binary_truncated_mid_record_errors() {
     let file = pcd_binary("1", "", &f32s(&[1.0, 2.0]));
     let err = parse_err(run_pcd, &file, "half record");
-    assert!(err.contains("12 bytes"), "error should name the byte count: {err}");
+    assert!(
+        err.contains("12 bytes"),
+        "error should name the byte count: {err}"
+    );
 }
 
 // ===========================================================================
@@ -97,7 +100,11 @@ fn pcd_binary_header_says_1000_body_has_3() {
 fn pcd_ascii_body_longer_than_declared_is_not_appended() {
     let file = pcd_ascii("2", "POINTS 2\n", "1 2 3\n4 5 6\n7 8 9\n");
     let cloud = parse(run_pcd, &file).expect_ok("ascii");
-    assert_eq!(cloud.len(), 2, "extra ASCII rows beyond POINTS must be ignored");
+    assert_eq!(
+        cloud.len(),
+        2,
+        "extra ASCII rows beyond POINTS must be ignored"
+    );
     assert_eq!(cloud[1], nalgebra::Point3::new(4.0, 5.0, 6.0));
 }
 
@@ -107,7 +114,11 @@ fn pcd_ascii_body_longer_than_declared_is_not_appended() {
 fn pcd_ascii_fewer_rows_than_declared_is_not_padded() {
     let file = pcd_ascii("1000", "POINTS 1000\n", "1.0 2.0 3.0\n");
     let cloud = parse(run_pcd, &file).expect_ok("ascii");
-    assert_eq!(cloud.len(), 1, "missing ASCII rows must not become (0,0,0) points");
+    assert_eq!(
+        cloud.len(),
+        1,
+        "missing ASCII rows must not become (0,0,0) points"
+    );
 }
 
 /// Same shape, but written `1 2 3`. A fix that *rejects* rows with fewer than
@@ -117,7 +128,10 @@ fn pcd_ascii_fewer_rows_than_declared_is_not_padded() {
 fn pcd_ascii_fewer_rows_than_declared_does_not_panic() {
     let file = pcd_ascii("1000", "POINTS 1000\n", "1 2 3\n");
     let cloud = parse(run_pcd, &file).expect_ok("ascii");
-    assert!(cloud.len() <= 1, "one row of data must yield at most one point");
+    assert!(
+        cloud.len() <= 1,
+        "one row of data must yield at most one point"
+    );
 }
 
 /// `WIDTH`/`HEIGHT` disagree with `POINTS`; `POINTS` is authoritative, so the
@@ -288,7 +302,11 @@ fn pcd_binary_single_zero_size_field_errors() {
 #[test]
 fn pcd_binary_missing_size_line_uses_default_stride() {
     let head = "# .PCD v0.7\nVERSION 0.7\nFIELDS x y z\nTYPE F F F\nWIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA binary\n";
-    let err = parse_err(run_pcd, &head.as_bytes().to_vec(), "no SIZE line, empty body");
+    let err = parse_err(
+        run_pcd,
+        &head.as_bytes().to_vec(),
+        "no SIZE line, empty body",
+    );
     assert!(err.contains("12 bytes"), "got: {err}");
 }
 
@@ -382,7 +400,11 @@ fn pcd_binary_garbage_in_ascii_body_is_rejected() {
 /// consumer silently produces garbage.
 #[test]
 fn pcd_binary_nan_coordinates_are_rejected() {
-    let file = pcd_binary("1", "", &f32s(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY]));
+    let file = pcd_binary(
+        "1",
+        "",
+        &f32s(&[f32::NAN, f32::INFINITY, f32::NEG_INFINITY]),
+    );
     match parse(run_pcd, &file) {
         Outcome::Returned(cloud) => assert_all_finite(&cloud, "read_pcd accepted a NaN coordinate"),
         other => assert!(other.is_ok_or_err()),
@@ -471,7 +493,11 @@ fn pcd_binary_compressed_truncated_literal_run_errors() {
 #[test]
 fn pcd_binary_size_list_shorter_than_fields() {
     let head = "# .PCD v0.7\nVERSION 0.7\nFIELDS x y z rgb\nSIZE 4 4 4\nTYPE F F F F\nCOUNT 1 1 1 1\nWIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA binary\n";
-    let file = bytes(&[head.as_bytes(), &f32s(&[1.0, 2.0, 3.0]), &0u32.to_le_bytes()]);
+    let file = bytes(&[
+        head.as_bytes(),
+        &f32s(&[1.0, 2.0, 3.0]),
+        &0u32.to_le_bytes(),
+    ]);
     let cloud = parse(run_pcd, &file).expect_ok("SIZE shorter than FIELDS");
     assert_eq!(cloud.len(), 1);
     assert_eq!(cloud[0], nalgebra::Point3::new(1.0, 2.0, 3.0));

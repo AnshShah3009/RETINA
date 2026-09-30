@@ -67,7 +67,10 @@ fn ply_empty_input_errors() {
 /// Header with no x/y/z properties at all.
 #[test]
 fn ply_header_without_xyz_properties_errors() {
-    let file = ply("ply\nformat ascii 1.0\nelement vertex 1\n", "end_header\n1 2 3\n");
+    let file = ply(
+        "ply\nformat ascii 1.0\nelement vertex 1\n",
+        "end_header\n1 2 3\n",
+    );
     let err = parse_err(run_ply, &file, "no x property");
     assert!(err.contains("missing x"), "got: {err}");
 }
@@ -330,7 +333,11 @@ fn ply_nan_coordinates_are_rejected() {
 #[test]
 fn ply_non_utf8_body_errors() {
     let file = bytes(&[
-        ply("ply\nformat ascii 1.0\nelement vertex 1\n", &format!("{XYZ_PROPS}end_header\n")).as_slice(),
+        ply(
+            "ply\nformat ascii 1.0\nelement vertex 1\n",
+            &format!("{XYZ_PROPS}end_header\n"),
+        )
+        .as_slice(),
         &[0xff, 0xfe, b' ', b'1', b' ', b'2', b'\n'],
     ]);
     let err = parse_err(run_ply, &file, "non-UTF8 body");
@@ -354,7 +361,11 @@ fn ply_non_utf8_header_errors() {
 #[test]
 fn ply_binary_garbage_body_errors() {
     let file = bytes(&[
-        ply("ply\nformat ascii 1.0\nelement vertex 1\n", &format!("{XYZ_PROPS}end_header\n")).as_slice(),
+        ply(
+            "ply\nformat ascii 1.0\nelement vertex 1\n",
+            &format!("{XYZ_PROPS}end_header\n"),
+        )
+        .as_slice(),
         &[0u8, 0xff, 0x7f, 0x80, 0x00],
     ]);
     parse_err(run_ply, &file, "binary garbage body");
