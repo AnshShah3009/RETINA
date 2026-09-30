@@ -157,14 +157,52 @@ fn orbdiag_starts_and_reports() {
         eprintln!("skipping orbdiag: not built");
         return;
     };
-    let output = Command::new(&path)
-        .output()
+    // `.output()` waits for the process to exit, and orbdiag sweeps feature
+    // counts over the full dataset - it runs for many minutes and never
+    // returns. The test therefore blocked on it and could only ever pass if the
+    // example happened to finish first; on CI it did not, and the assertion
+    // below fired on an empty stdout rather than on anything real.
+    //
+    // The pipe is read on a background thread and the child is killed once it
+    // has reported, so the assertion is about the diagnostic actually appearing.
+    let mut child = Command::new(&path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .expect("orbdiag should be spawnable");
-    // It is expected to run past any reasonable timeout, so this asserts only
-    // that it produced its opening diagnostic line rather than panicking.
-    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let stdout_pipe = child.stdout.take().expect("piped stdout");
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = std::sync::Arc::clone(&collected);
+    let reader = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut stdout_pipe = stdout_pipe;
+        let mut bytes = [0u8; 4096];
+        loop {
+            match stdout_pipe.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut sink = sink.lock().unwrap_or_else(|e| e.into_inner());
+                    sink.push_str(&String::from_utf8_lossy(&bytes[..n]));
+                    if sink.contains("verified_pairs") {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    reader.join().expect("the reader thread should not panic");
+    let found = collected
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains("verified_pairs");
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let stdout = collected.lock().unwrap_or_else(|e| e.into_inner()).clone();
     assert!(
-        stdout.contains("verified_pairs"),
+        found,
         "orbdiag did not reach its first report; it may have failed early.\n{}",
         stdout.lines().take(5).collect::<Vec<_>>().join("\n")
     );
