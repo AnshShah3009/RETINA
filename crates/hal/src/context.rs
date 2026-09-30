@@ -630,9 +630,16 @@ pub enum ThresholdType {
 pub enum BorderMode<T: Float> {
     Constant(T),
     Replicate,
+    /// Reflect without duplicating the border pixel: `fedcba|abcdefgh|fedcba`,
+    /// so index -1 maps to 1. OpenCV's `BORDER_REFLECT`.
     Reflect,
-    /// Reflect without duplicating the border pixel (period = 2n-2).
-    /// This is the default border mode in OpenCV (`BORDER_REFLECT_101`).
+    /// Reflect *with* the border pixel duplicated: `gfedcb|abcdefgh|gfedcb`, so
+    /// index -1 maps to 0.
+    ///
+    /// This is OpenCV's `BORDER_REFLECT_101` and its default border mode. The
+    /// doc comment previously read "without duplicating the border pixel", which
+    /// describes `Reflect` - the two had collapsed into the same folding, so
+    /// neither comment could have been checked against the other.
     Reflect101,
     Wrap,
 }
