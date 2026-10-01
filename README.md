@@ -251,3 +251,5 @@ cargo test --workspace
 ## License
 
 MIT
+
+See `docs/VIEWER.md` for the viewer: what works, what does not, and where to resume.
