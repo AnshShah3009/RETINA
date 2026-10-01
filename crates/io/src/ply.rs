@@ -18,7 +18,8 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     let mut num_vertices = 0usize;
     // Vertex properties in declared order — PLY allows any property order,
     // so data must be indexed by name rather than assumed position.
-    let mut props: Vec<String> = Vec::new();
+    /// Property names in declared order, with whether each is a `list`.
+    let mut props: Vec<(String, bool)> = Vec::new();
     // Whether the header declared an element after the vertices, meaning the
     // body must not be read past the vertex count.
     let mut vertex_block_ends = false;
@@ -65,7 +66,22 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
                 .last()
                 .ok_or_else(|| Error::ParseError("Invalid property line".to_string()))?
                 .to_string();
-            props.push(name);
+            // A `property list <count_type> <value_type> <name>` occupies a
+            // *variable* number of body columns - one for the count, then that
+            // many values - so it cannot be a fixed column position.
+            //
+            // Pushing its name anyway shifted every later property by one: a
+            // vertex declared `x y z vertex_indices red green blue` with body
+            // row `1 2 3 1 42 255 0 0` read the `42` (the first list value) as
+            // green and the `255` as blue, so a red vertex came back green.
+            // Measured: colours `[0.165, 1.0, 0.0]` where `[1.0, 0.0, 0.0]`
+            // was correct.
+            //
+            // This reader cannot represent a list, so the property is recorded
+            // and flagged, and the element is rejected below. Returning
+            // plausible-looking wrong geometry would be worse than an error.
+            let is_list = line.split_whitespace().nth(1) == Some("list");
+            props.push((name, is_list));
         } else if line == "end_header" {
             in_header = false;
         }
@@ -78,8 +94,12 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
         )));
     }
 
+    // A list property has no fixed column, so it cannot be the source of a
+    // scalar property and is excluded here.
     let pos_of = |names: &[&str]| -> Option<usize> {
-        props.iter().position(|p| names.contains(&p.as_str()))
+        props
+            .iter()
+            .position(|(p, is_list)| !is_list && names.contains(&p.as_str()))
     };
 
     let xi =
@@ -131,6 +151,23 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     } else {
         None
     };
+    // A vertex element declaring a `property list` cannot be parsed correctly
+    // here, and returning plausible-looking geometry would be worse than
+    // refusing.
+    //
+    // Excluding the list from the column positions fixes the property *before*
+    // it, but every scalar *after* it is still shifted, because the list occupies
+    // a variable number of body columns that this reader does not know to skip.
+    // So the file is reported rather than mis-parsed. Reading list properties
+    // properly needs a full element/property model, which is the same change
+    // that would make `property list` first-class.
+    if let Some((name, _)) = props.iter().find(|(_, is_list)| *is_list) {
+        return Err(Error::ParseError(format!(
+            "PLY: vertex property {name:?} is a `property list`, which this reader \
+             does not support. Parsing it would misplace every scalar property \
+             declared after it."
+        )));
+    }
     let width = props.len();
 
     for _ in 0..num_vertices {
