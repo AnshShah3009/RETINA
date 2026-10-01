@@ -213,7 +213,10 @@ fn compute_point_to_plane_ctx(
 
                     for u in 0..width {
                         let idx = v * width + u;
-                        let depth = source_depth[idx];
+                        // The slices may be shorter than the declared frame.
+                        let Some(&depth) = source_depth.get(idx) else {
+                            continue;
+                        };
 
                         if depth <= 0.0 {
                             continue;
@@ -333,7 +336,11 @@ fn compute_fitness_rmse(
 
                 for u in 0..width {
                     let idx = v * width + u;
-                    let depth = source_depth[idx];
+                    // The slice may be shorter than the declared frame; the
+                    // zero-dimension guard above does not cover that.
+                    let Some(&depth) = source_depth.get(idx) else {
+                        continue;
+                    };
                     if depth <= 0.0 {
                         continue;
                     }
@@ -478,7 +485,16 @@ fn downsample_depth(input: &[f32], width: usize, height: usize, scale: f32) -> V
                 let src_y = (y as f32 / scale) as usize;
                 let src_idx = (src_y.min(height.saturating_sub(1))) * width
                     + (src_x.min(width.saturating_sub(1)));
-                row[x] = input[src_idx];
+                // `src_idx` is clamped to `width * height`, but the slice may be
+                // shorter than that: `compute_rgbd_odometry(&[1.0; 10], &[1.0;
+                // 10], .., 64, 64, ..)` indexed element 2048 of a 10-element
+                // slice and panicked. The zero-width guard further up does not
+                // cover a non-zero frame with a short slice.
+                if src_idx >= input.len() {
+                    row[x] = 0.0;
+                } else {
+                    row[x] = input[src_idx];
+                }
             }
         });
 
@@ -501,7 +517,10 @@ fn compute_vertex_normal_map_ctx(
         vertices.par_iter_mut().enumerate().for_each(|(idx, v)| {
             let x = (idx % width) as f32;
             let y = (idx / width) as f32;
-            let z = depth[idx];
+            // A depth slice shorter than width*height used to index past the
+            // end here; in a closure that means leaving the vertex at its
+            // default rather than aborting the caller.
+            let z = depth.get(idx).copied().unwrap_or(0.0);
 
             if z > 0.0 {
                 let vx = (x - intrinsics.cx) * z / intrinsics.fx;
@@ -557,7 +576,10 @@ fn evaluate_odometry_ctx(
                 let mut local_valid = 0;
                 for u in 0..width {
                     let idx = v * width + u;
-                    let depth = source_depth[idx];
+                    // The slices may be shorter than the declared frame.
+                    let Some(&depth) = source_depth.get(idx) else {
+                        continue;
+                    };
 
                     if depth <= 0.0 {
                         continue;
@@ -574,7 +596,9 @@ fn evaluate_odometry_ctx(
 
                     if tu >= 0 && tu < width as i32 && tv >= 0 && tv < height as i32 {
                         let tidx = (tv as usize) * width + (tu as usize);
-                        let target_z = target_depth[tidx];
+                        let Some(&target_z) = target_depth.get(tidx) else {
+                            continue;
+                        };
 
                         if target_z > 0.0 {
                             let error = (transformed.z - target_z).abs();

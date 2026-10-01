@@ -75,8 +75,14 @@ pub fn voxel_downsample(
         // Average normals (then re-normalise).
         if let (Some(norms), Some(ref mut out_n)) = (&normals, &mut out_normals) {
             let mut nsum = Vector3::zeros();
+            // Indices come from the voxel keys, and the caller may pass fewer
+            // normals than points. `voxel_downsample(&[P;2], Some(&[n;1]),
+            // None, 2.0)` panicked on element 1 of a 1-element slice. Every other
+            // `filters` function validates its optional inputs; this one did not.
             for &i in indices {
-                nsum += norms[i];
+                if let Some(n) = norms.get(i) {
+                    nsum += n;
+                }
             }
             let len = nsum.norm();
             if len > 1e-15 {
@@ -84,7 +90,10 @@ pub fn voxel_downsample(
             } else {
                 // Opposing normals cancelled: fall back to the first normal
                 // in the voxel rather than an arbitrary +Z.
-                let first = norms[indices[0]];
+                let Some(first) = norms.get(indices[0]).copied() else {
+                    out_n.push(Vector3::new(0.0, 0.0, 1.0));
+                    continue;
+                };
                 let fl = first.norm();
                 if fl > 1e-15 {
                     out_n.push(first / fl);
@@ -98,7 +107,9 @@ pub fn voxel_downsample(
         if let (Some(cols), Some(ref mut out_c)) = (&colors, &mut out_colors) {
             let mut csum = Vector3::zeros();
             for &i in indices {
-                csum += cols[i];
+                if let Some(c) = cols.get(i) {
+                    csum += c;
+                }
             }
             out_c.push(csum / n);
         }

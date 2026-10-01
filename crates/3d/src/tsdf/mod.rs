@@ -141,6 +141,15 @@ impl TSDFVolume {
 
                     for u in 0..width {
                         let idx = v * width + u;
+                        // Both images are bounds-checked against their *slice*
+                        // rather than the declared `width`/`height`. A caller
+                        // passing a short slice indexed past the end and
+                        // panicked. `integrate_ctx` returns `()`, so it cannot
+                        // report the problem - skipping the row is the only
+                        // option left, and it beats aborting the caller.
+                        if idx >= depth_image.len() {
+                            continue;
+                        }
                         let depth = depth_image[idx] / self.depth_scale;
 
                         if depth <= 0.0 || depth > 10.0 {
@@ -158,7 +167,7 @@ impl TSDFVolume {
 
                         // Get color
                         let color = color_image
-                            .map(|c| c[idx])
+                            .and_then(|c| c.get(idx).copied())
                             .unwrap_or(Vector3::new(128, 128, 128));
 
                         // Find affected voxels along ray
