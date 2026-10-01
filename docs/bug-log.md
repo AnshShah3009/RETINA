@@ -167,11 +167,48 @@ test, and the "found by" column says which.
 - **A depth term I added was not the fix, and I claimed it was.** With `near = 0.01, far = 1000` this scene lands at z_ndc 0.994–0.997 and rasterises nothing, while a constant 0.5 renders everything. That value is *inside* the [0, 1] range, the constants are finite in f32, and rescaling near/far to the scene does not help — so the cause is **not identified**. The shader uses a conservative mid-range depth with that recorded at the call site, rather than a derivation I cannot support. There is no depth attachment, so depth only needs to stay in range.
 - **The first version of that test asserted "more than zero lit pixels" and was useless** — the transposed shader renders 39 pixels and would have passed. The threshold is 10,000, measured: 75,854 correct, 39 transposed, 0 with the depth term wrong. Verified by reintroducing the bug.
 
+## A hang, which is worse than a wrong answer
+
+- **`solve_dlt_homography` never returned on NaN input.** The design matrix
+  carries NaN into LAPACK's bidiagonalisation, whose convergence test is a
+  *comparison* — and every comparison against NaN is false, so it never
+  converges. Found by a scratch probe: a single NaN observation fed to
+  `calibrate_camera_planar` hung, and the workspace test suite timed out after
+  360 s waiting on it. `solve_dlt_fundamental` had the identical exposure and is
+  now guarded the same way.
+- Verified: against the unfixed code the new tests time out; with the guard they
+  pass in under a second. 26 other `.svd(true, true)` call sites exist across the
+  workspace and are **not** individually guarded — any of them reachable with
+  non-finite input would hang the same way. That is recorded rather than asserted
+  safe.
+- **`find_essential_mat_ransac_handles_outliers` is flaky.** It runs 600 RANSAC
+  samples with no seed, so the sampled hypothesis varies run to run; the
+  recovered translation direction is near-degenerate on that synthetic scene and
+  the assertion fails intermittently. Pre-existing, and left alone here.
+
+## ICP, FPFH and rays
+
+- **Point-to-plane ICP reported `fitness: 1.0` for a registration that never
+  happened**, three ways: a singular `A` skipped the solve silently; too few
+  correspondences fell through to the tail and reported `rmse = f32::MAX`; and
+  the returned transform was the *live* iterate while the metrics tracked the
+  best-*fitness* one — which freezes at iteration 0, overstating the error by 5-6
+  orders of magnitude.
+- **FPFH panicked on a zero radius** (`p.x / 0.0` → `i32::MAX` → `vx + dx`
+  overflow) and **fabricated all-zero descriptors** for a cloud too sparse to
+  estimate normals: 6 features, 0 with any non-zero bin, reported `Ok`.
+- **`Ray::new` normalised unconditionally**, so a zero direction gave NaN that
+  propagated silently through every later transform.
+- **`VoxelGrid` indexed a point slice with unvalidated indices** — the same class
+  as `icp_accumulate`, and it panicked on a stale index.
+- **ORB's GPU path never ran non-max suppression**, and truncated to the
+  candidate budget before it could.
+
 ## Counted
 
 | | |
 | --- | ---: |
 | Defects fixed | **95+** |
 | Commits | 460+ |
-| Tests | 1,708 (from 1,267) |
+| Tests | 1,748 (from 1,267) |
 | Duplicate implementations removed | 12 |
