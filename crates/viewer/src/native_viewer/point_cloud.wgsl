@@ -61,12 +61,24 @@ fn vs_main(input: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
         eye[r] = acc;
     }
 
-    // The camera looks down -z in view space, so depth is -eye.z.
-    let depth = max(-eye.z, 0.01);
+    // `eye.w` is the perspective term the host put in the matrix's last row: it
+    // is the distance in front of the camera. Using `-eye.z` here instead would
+    // have worked only while the matrix was affine - which is why the sprite
+    // size looked plausible before the projection existed and wrong after.
+    let depth = max(eye.w, 0.01);
 
     // Perspective-correct radius: a point twice as near covers twice the pixels.
     // 0.02 is an arbitrary near-plane stand-in; it only sets the scale.
-    let radius_ndc = uniforms.point_radius * 0.02 / depth;
+    // `point_radius` is a size in *pixels*, so it converts through NDC as
+    // radius_px / (viewport_width / 2). The factor here was 0.02, which at a
+    // viewport half-width of 1.0 means a point radius of 3 produced 0.03 NDC -
+    // under half a pixel. Sprites that small mostly fall between sample points,
+    // so a scene of 16,826 points rendered 50 lit pixels.
+    //
+    // Dividing by depth keeps the perspective-correct behaviour: the same
+    // physical size appears the same number of pixels wide whether it is near or
+    // far.
+    let radius_ndc = uniforms.point_radius / (depth * uniforms.viewport.x);
 
     // WebGPU requires `z_ndc` in [0, 1], and the host sends only a view matrix -
     // no projection - so this stands in for the projection's depth term.
@@ -82,11 +94,24 @@ fn vs_main(input: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     //
     // There is no depth attachment, so depth here only has to stay in range; if
     // one is added later this should become a real projection.
+    // `eye` is the pre-divide clip vector: the host's matrix puts the perspective
+    // in its last row, so `eye.w` is the depth and `eye.xy` still has to be
+    // divided by it. The rasteriser performs that divide, so it must NOT be
+    // done here - doing it twice shrinks everything by `w` and puts almost the
+    // whole scene off-screen.
+    //
+    // The sprite offset is the exception: it is a screen-space size, so it has
+    // to be added *after* the divide. It therefore goes in as an offset on the
+    // clip vector scaled by `w`, which is what keeps a point the same number of
+    // pixels across at every depth.
+    let offset_x = corner.x * radius_ndc * eye.w / uniforms.viewport.x;
+    let offset_y = corner.y * radius_ndc * eye.w / uniforms.viewport.y;
+
     var out: VertexOut;
     out.clip_position = vec4<f32>(
-        eye.x / eye.w + corner.x * radius_ndc / uniforms.viewport.x,
-        eye.y / eye.w + corner.y * radius_ndc / uniforms.viewport.y,
-        0.5,
+        eye.x + offset_x,
+        eye.y + offset_y,
+        0.5 * eye.w,
         eye.w,
     );
     out.sprite_uv = corner;

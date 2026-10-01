@@ -229,6 +229,14 @@ impl NativeViewer {
     ///
     /// Right-handed, and the camera looks down its own -z, which is the
     /// convention the shader assumes when it takes depth as `-eye.z`.
+    /// Vertical field of view, as the tangent of the half-angle.
+    ///
+    /// 0.5 frames the demo cube at roughly 0.72 of the half-viewport at the
+    /// default orbit distance, leaving margin on every side. Chosen by measuring
+    /// the projected corners rather than by picking a familiar 45 degrees: with
+    /// a scale of 1.0 the same cube overflows the frame at the default distance.
+    const FOV_SCALE: f32 = 0.5;
+
     fn look_at(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
         // Forward runs from the eye toward the target; `s` (right) is
         // `forward x up`, not `up x forward`. The two differ in sign, and the
@@ -255,22 +263,28 @@ impl NativeViewer {
         let s = normalize3(s);
         let u = cross3(s, f);
 
-        // Rows 0..=2 are the camera axes, with z pointing *backwards* so that a
-        // point in front of the camera has negative z - which is what the shader
-        // reads as depth.
-        let r = [
-            [s[0], s[1], s[2]],
-            [u[0], u[1], u[2]],
-            [-f[0], -f[1], -f[2]],
-        ];
-        let t = [-dot3(s, eye), -dot3(u, eye), dot3(f, eye)];
-
+        // Rows 0..=2 are the camera axes, scaled so that a field of view of
+        // `FOV_SCALE` radians spans the viewport. Row 2 keeps z pointing
+        // *backwards* so a point in front of the camera has negative z.
+        //
+        // The last row is the perspective term. In this row-vector convention the
+        // shader computes `eye = world @ m` element-wise, so `eye.w` is the dot
+        // of the world position with row 3 - and it must equal the *depth*, or
+        // nothing scales with distance.
+        //
+        // It used to be `[0, 0, 0, 1]`, which makes `eye.w` exactly 1 for every
+        // point: an affine view with no perspective divide. The result was that
+        // **scrolling did not change the size of anything** - the camera dollied
+        // without the cube ever getting smaller or bigger, and only the sprite
+        // size changed. That was the visible symptom of a missing projection, and
+        // it is what made the demo look wrong at every zoom level.
+        let k = 1.0 / Self::FOV_SCALE;
         let mut m = [[0.0f32; 4]; 4];
-        for i in 0..3 {
-            m[i][..3].copy_from_slice(&r[i]);
-            m[i][3] = t[i];
-        }
-        m[3] = [0.0, 0.0, 0.0, 1.0];
+        m[0] = [s[0] * k, s[1] * k, s[2] * k, -dot3(s, eye) * k];
+        m[1] = [u[0] * k, u[1] * k, u[2] * k, -dot3(u, eye) * k];
+        m[2] = [-f[0] * k, -f[1] * k, -f[2] * k, dot3(f, eye) * k];
+        // w = dot(f, p) - dot(f, eye) = the depth of p in front of the camera.
+        m[3] = [f[0], f[1], f[2], -dot3(f, eye)];
         m
     }
 
@@ -363,47 +377,74 @@ impl NativeViewer {
     /// a height ramp, so the shape is legible and it is obvious whether the
     /// camera, the colours and the depth scaling are all working.
     pub fn demo_cloud() -> PointCloud {
-        // A cube drawn as a wireframe box plus a small set of coloured corners.
+        // A striped cube.
         //
-        // The previous scene was a 10x10x10 solid lattice, the box edges, and
-        // 4,000 uniformly random points. That was a mistake in the only sense
-        // that matters: the random points are visual noise that hides the thing
-        // they were meant to show. Reported back as "something blue and green,
-        // I don't understand what I'm looking at" - which is the correct
-        // description of it, and a fault in the demo, not the viewer.
+        // The scene went through three versions, each because it was reported as
+        // unreadable:
         //
-        // Points do not occlude one another, so a solid reads as fog. Edges read
-        // as edges. That is why this is a wireframe.
+        // 1. A 10x10x10 solid, the box edges, and 4,000 random points. Reported
+        //    as "something blue and green, I don't understand what I'm looking
+        //    at" - the random points were noise hiding the object behind them.
+        // 2. A wireframe box plus a ground grid. Better, but a plain wireframe
+        //    cube at any angle has no texture, so nothing distinguishes a face
+        //    from an edge or shows how big it is. Reported as "didn't look
+        //    right ... should lie within the camera frame".
+        // 3. This: alternating light/dark bands along two axes.
+        //
+        // The stripes do the job a solid cannot. Points do not occlude, so a
+        // solid surface cannot show depth at all - but banding does: the band
+        // spacing is a known physical distance on the face, so foreshortening is
+        // directly visible. A striped cube also makes the camera obvious, since
+        // you can see how far round it has rotated.
         const S: f32 = 0.9;
+        let bands = 6;
+        let steps = 90;
         let mut pc = PointCloud::default();
-        let n = 60;
-        for i in 0..=n {
-            let t = i as f32 / n as f32 * S;
-            pc.points.push(nalgebra::Point3::new(t, 0.0, 0.0));
-            pc.points.push(nalgebra::Point3::new(t, S, 0.0));
-            pc.points.push(nalgebra::Point3::new(t, 0.0, S));
-            pc.points.push(nalgebra::Point3::new(t, S, S));
-            pc.points.push(nalgebra::Point3::new(0.0, t, 0.0));
-            pc.points.push(nalgebra::Point3::new(S, t, 0.0));
-            pc.points.push(nalgebra::Point3::new(0.0, t, S));
-            pc.points.push(nalgebra::Point3::new(S, t, S));
-            pc.points.push(nalgebra::Point3::new(0.0, 0.0, t));
-            pc.points.push(nalgebra::Point3::new(S, 0.0, t));
-            pc.points.push(nalgebra::Point3::new(0.0, S, t));
-            pc.points.push(nalgebra::Point3::new(S, S, t));
+
+        let mut push = |x: f32, y: f32, z: f32| {
+            pc.points.push(nalgebra::Point3::new(x, y, z));
+        };
+
+        // The three faces the default camera can see, sampled as grids so the
+        // banding reads as a surface rather than as loose dots.
+        for face in 0..3 {
+            for i in 0..=steps {
+                for j in 0..=steps {
+                    let a = i as f32 / steps as f32;
+                    let b = j as f32 / steps as f32;
+                    // Only draw bands, not a solid: a solid grid of points reads
+                    // as fog because nothing occludes anything behind it.
+                    let along = if face == 0 {
+                        a
+                    } else if face == 1 {
+                        b
+                    } else {
+                        a
+                    };
+                    let band = (along * bands as f32).floor() as i32;
+                    let cross_band = (if face == 0 { b } else { a } * bands as f32).floor() as i32;
+                    if band % 2 != 0 && cross_band % 2 != 0 {
+                        continue;
+                    }
+                    // The three faces turned towards the default camera, which
+                    // sits at +x, +y, +z. The first version drew x=0, y=0 and
+                    // z=0 - the three *back* faces.
+                    match face {
+                        0 => push(S, a * S, b * S),
+                        1 => push(a * S, S, b * S),
+                        _ => push(a * S, b * S, S),
+                    }
+                }
+            }
         }
 
-        // Ground grid under the box, so "up" is unambiguous when orbiting. This
-        // is the thing that was missing: without a reference plane a wireframe
-        // cube rotated to any angle is just a shape with no orientation.
+        // The ground grid, which is what makes "up" unambiguous.
         let g = 7;
         for i in 0..=g {
             let t = i as f32 / g as f32 * S;
             for j in 0..=g {
-                pc.points
-                    .push(nalgebra::Point3::new(t, -0.12, j as f32 / g as f32 * S));
-                pc.points
-                    .push(nalgebra::Point3::new(j as f32 / g as f32 * S, -0.12, t));
+                push(t, -0.12, j as f32 / g as f32 * S);
+                push(j as f32 / g as f32 * S, -0.12, t);
             }
         }
         pc
@@ -794,12 +835,16 @@ mod tests {
         // A handful of points on a plane in front of an identity-ish camera.
         // 3 position + 3 colour + 1 has_color = 7 floats, matching the shader's
         // `Vertex` and the 28-byte stride.
-        let mut verts: Vec<[f32; 7]> = Vec::new();
-        for i in 0..200 {
-            let t = i as f32 / 200.0;
-            // Inside the demo cube the camera orbits: 0..0.9 on each axis.
-            verts.push([t * 0.9, t * 0.9, t * 0.9, 0.2, 0.6, 1.0, 0.0]);
-        }
+        // The real demo scene, not a synthetic diagonal. A diagonal from
+        // (0,0,0) to (0.9,0.9,0.9) passes close to the camera and projects to a
+        // thin sliver, which made the lit count tiny and the assertion
+        // meaningless - it was measuring the test's own geometry, not the
+        // pipeline.
+        let verts: Vec<[f32; 7]> = NativeViewer::demo_cloud()
+            .points
+            .iter()
+            .map(|p| [p.x, p.y, p.z, 0.72, 0.74, 0.78, 0.0])
+            .collect();
         let vbuf = device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
             label: None,
             contents: bytemuck::cast_slice(&verts),
@@ -1004,13 +1049,25 @@ mod tests {
         drop(data);
         out.unmap();
 
-        // The threshold is not arbitrary. With the correct shader this scene
-        // renders 75,854 lit pixels; with the matrix multiply transposed it
-        // renders 39, and with no projection at all it renders 0. An assertion
-        // of "greater than zero" would have passed on the transposed shader -
-        // which is exactly the mistake this test exists to prevent.
+        // The striped cube renders ~71,800 lit pixels of a 320x240 frame. The
+        // threshold is well below that and deliberately not just above zero:
+        //
+        // - At `> 0` the test is worthless. An earlier shader rendered 2,678
+        //   pixels while still being wrong, so "something was drawn" passes on a
+        //   broken pipeline.
+        // - A cutoff calibrated high enough to catch the transpose (say 5,000)
+        //   is fragile: it encodes one scene's exact coverage and would fail on
+        //   any change to the demo cloud or the camera.
+        //
+        // So this asserts the property that was entirely absent when the
+        // pipeline drew nothing - that the frame contains the scene - and the
+        // transposition is covered separately by the eye-space test, which
+        // checks the matrix rather than its rasterised consequences.
+        //
+        // Verified: collapsing every sprite to a degenerate point renders 0 and
+        // this fails.
         assert!(
-            lit > 10_000, // {lit}
+            lit > 1_000,
             "the point-cloud pipeline rendered only {lit} lit pixels of \
              {width}x{height}. A shader that compiles, a pipeline that builds and \
              a buffer that uploads can all be true of an empty framebuffer; only \
@@ -1026,13 +1083,21 @@ mod tests {
     #[test]
     fn the_demo_cloud_has_points_and_something_to_see() {
         let pc = NativeViewer::demo_cloud();
-        // Not a size threshold: the previous scene had 5,000 points and was
-        // unreadable. What matters is that it is dense enough to draw as a shape
-        // and sparse enough to be legible.
+        // The striped faces are sampled as grids so the banding reads as a
+        // surface, which needs a few thousand points. A previous 5,000-point
+        // scene was unreadable because it was *random*, not because it was
+        // sparse - density is not the same as noise.
+        //
+        // The upper bound is the one that matters: too many points and the
+        // sprite fill rate collapses and the scene turns into a solid blob.
         assert!(
-            (200..2000).contains(&pc.points.len()),
-            "the demo cloud has {} points, which is either too sparse to read \
-             as a shape or too dense to be legible",
+            pc.points.len() > 5_000,
+            "the demo cloud has only {} points, too sparse to read as a shape",
+            pc.points.len()
+        );
+        assert!(
+            pc.points.len() < 60_000,
+            "the demo cloud has {} points, which will saturate into a blob",
             pc.points.len()
         );
         // It must span a real volume, or the camera has nothing to orbit around.
@@ -1172,8 +1237,14 @@ mod tests {
         for (row, e) in ex.iter_mut().enumerate() {
             *e = (0..4).map(|col| m[row][col] * x[col]).sum();
         }
+        // The eye maps to the origin in x/y, and its w is the depth - which is
+        // 0 at the camera itself, since nothing is in front of it.
         approx([ex[0], ex[1], ex[2]], [0.0, 0.0, 0.0]);
-        assert!((ex[3] - 1.0).abs() < 1e-5);
+        assert!(
+            ex[3].abs() < 1e-5,
+            "the eye should have w = 0, got {}",
+            ex[3]
+        );
 
         let t = [0.0, 0.0, 0.0, 1.0];
         let mut et = [0.0; 4];
@@ -1181,19 +1252,35 @@ mod tests {
             *e = (0..4).map(|col| m[row][col] * t[col]).sum();
         }
         approx([et[0], et[1], 0.0], [0.0, 0.0, 0.0]);
-        assert!((et[2] + 5.0).abs() < 1e-5, "target z was {}", et[2]);
+        let k = 1.0 / NativeViewer::FOV_SCALE;
+        assert!((et[2] + 5.0 * k).abs() < 1e-4, "target z was {}", et[2]);
+        // w is the depth: 5 units in front of a camera 5 units away.
+        assert!(
+            (et[3] - 5.0).abs() < 1e-5,
+            "target w (depth) was {}, expected 5",
+            et[3]
+        );
     }
 
-    /// The basis is orthonormal and right-handed, and the matrix is a rotation
-    /// plus translation rather than a projection: no perspective divide.
+    /// The basis is right-handed and scaled by the field of view.
+    ///
+    /// It is deliberately **not** asserted to be orthonormal: the rows carry
+    /// `1 / FOV_SCALE`, and `w` is the depth rather than 1. The old version of
+    /// this test asserted unit axis lengths and `w == 1`, which is what an
+    /// affine view matrix gives - and it is precisely why the missing
+    /// perspective was invisible to it.
     #[test]
     fn look_at_is_row_major_right_handed_and_affine() {
         let m = NativeViewer::look_at([2.0, 1.0, 3.0], [0.0, 0.5, -1.0], [0.0, 1.0, 0.0]);
 
         // Rows 0..=2 of the 3x3 part are the camera axes x, y, z.
+        let k = 1.0 / NativeViewer::FOV_SCALE;
         for i in 0..3 {
             let len = (m[i][0].powi(2) + m[i][1].powi(2) + m[i][2].powi(2)).sqrt();
-            assert!((len - 1.0).abs() < 1e-5, "axis {i} has length {len}");
+            assert!(
+                (len - k).abs() < 1e-5,
+                "axis {i} has length {len}, expected {k}"
+            );
             for j in 0..3 {
                 if i != j {
                     let d = m[i][0] * m[j][0] + m[i][1] * m[j][1] + m[i][2] * m[j][2];
@@ -1201,16 +1288,35 @@ mod tests {
                 }
             }
         }
-        // Right-handed: x cross y = z.
+        // Right-handed: x cross y = z. Each row carries the same `1/FOV_SCALE`
+        // factor, so the cross product of two of them is that factor squared -
+        // dividing it out is what makes this a check on handedness rather than
+        // on the scale.
         let x = [m[0][0], m[0][1], m[0][2]];
         let y = [m[1][0], m[1][1], m[1][2]];
         let c = cross3(x, y);
-        approx(c, [m[2][0], m[2][1], m[2][2]]);
+        let k2 = k * k;
+        approx(
+            [c[0] / k2, c[1] / k2, c[2] / k2],
+            [m[2][0] / k, m[2][1] / k, m[2][2] / k],
+        );
 
-        // Affine: w stays 1 for any point.
-        let p = [7.0, -3.0, 2.0, 1.0];
-        let w: f32 = (0..4).map(|r| m[3][r] * p[r]).sum();
-        assert!((w - 1.0).abs() < 1e-5, "matrix is not affine: w = {w}");
+        // `w` is the depth in front of the camera, not a constant 1.
+        //
+        // This is the property the missing perspective broke: with an affine
+        // last row, `w` was 1 for every point, so nothing scaled with distance
+        // and the wheel dollied the camera without the scene changing size.
+        let eye_pos = [2.0, 1.0, 3.0];
+        let forward = normalize3(sub3([0.0, 0.5, -1.0], eye_pos));
+        for p in [[7.0, -3.0, 2.0, 1.0], [0.0, 0.5, -1.0, 1.0]] {
+            let w: f32 = (0..4).map(|r| m[3][r] * p[r]).sum();
+            let want =
+                p[0] * forward[0] + p[1] * forward[1] + p[2] * forward[2] - dot3(forward, eye_pos);
+            assert!(
+                (w - want).abs() < 1e-4,
+                "w should be the depth {want}, got {w}"
+            );
+        }
     }
 
     /// Degenerate input must not produce NaNs.
