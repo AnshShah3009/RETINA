@@ -51,15 +51,34 @@ impl VoxelGrid {
         )
     }
 
+    /// Average the points in each voxel.
+    ///
+    /// Indices are stored by `insert` and are not re-validated here, so a grid
+    /// built from one point array and then asked to average a *different* one -
+    /// or one that has since shrunk - indexed past the end and panicked. An
+    /// out-of-bounds index is now skipped rather than trusted: a grid holding a
+    /// stale index should lose that voxel, not abort the caller.
+    ///
+    /// This is the same defect class as `icp_accumulate`, which read
+    /// correspondence indices into point arrays with no bounds check.
     pub fn compute_centroids(&mut self, points: &[Point3<f32>]) {
         for voxel in self.grid.values_mut() {
-            if !voxel.indices.is_empty() {
-                let mut centroid = Point3::origin();
-                for &idx in &voxel.indices {
-                    centroid += points[idx].coords;
+            if voxel.indices.is_empty() {
+                continue;
+            }
+            let mut centroid = Point3::origin();
+            let mut used = 0usize;
+            for &idx in &voxel.indices {
+                if let Some(p) = points.get(idx) {
+                    centroid += p.coords;
+                    used += 1;
                 }
-                centroid /= voxel.indices.len() as f32;
-                voxel.centroid = Some(centroid);
+            }
+            if used > 0 {
+                voxel.centroid = Some(centroid / used as f32);
+            } else {
+                // Every index was stale, so this voxel has no centroid at all.
+                voxel.centroid = None;
             }
         }
     }
@@ -72,10 +91,17 @@ impl VoxelGrid {
                     None
                 } else {
                     let mut centroid = Point3::origin();
+                    let mut used = 0usize;
                     for &idx in &voxel.indices {
-                        centroid += points[idx].coords;
+                        if let Some(p) = points.get(idx) {
+                            centroid += p.coords;
+                            used += 1;
+                        }
                     }
-                    Some(centroid / voxel.indices.len() as f32)
+                    if used == 0 {
+                        return None;
+                    }
+                    Some(centroid / used as f32)
                 }
             })
             .collect()

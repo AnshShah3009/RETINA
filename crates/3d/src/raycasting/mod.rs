@@ -17,11 +17,43 @@ pub struct Ray {
 }
 
 impl Ray {
-    pub fn new(origin: Point3<f32>, direction: Vector3<f32>) -> Self {
-        Self {
-            origin,
-            direction: direction.normalize(),
+    /// Build a ray from an origin and a direction.
+    ///
+    /// The direction is normalised. A **zero** direction has no normalisation,
+    /// and `Vector3::normalize` returns NaN for it - so every later `point_at`,
+    /// dot product and intersection returned NaN with no error anywhere, and a
+    /// NaN propagates silently through any transform that touches it.
+    ///
+    /// There is no correct direction to invent, so a degenerate input is reported
+    /// rather than papered over. `try_new` returns `None`; `new` panics with a
+    /// clear message rather than constructing a ray that cannot be used.
+    pub fn try_new(origin: Point3<f32>, direction: Vector3<f32>) -> Option<Self> {
+        // The only invalid norms are non-finite ones and exactly zero. A
+        // *small* norm is still a direction: `1e-7` is a perfectly good unit
+        // vector after normalisation, and rejecting it would refuse legitimate
+        // input. An earlier version of this guard used `<= f32::EPSILON`,
+        // which threw away directions that normalise perfectly well.
+        let norm = direction.norm();
+        if !norm.is_finite() || norm == 0.0 {
+            return None;
         }
+        Some(Self {
+            origin,
+            direction: direction / norm,
+        })
+    }
+
+    /// # Panics
+    ///
+    /// If `direction` is zero-length or non-finite. Use [`Ray::try_new`] to
+    /// handle that case.
+    pub fn new(origin: Point3<f32>, direction: Vector3<f32>) -> Self {
+        Self::try_new(origin, direction).unwrap_or_else(|| {
+            panic!(
+                "Ray::new given a degenerate direction {direction:?}: a ray with no \
+                 direction cannot be normalised, and normalising it anyway yields NaN"
+            )
+        })
     }
 
     pub fn point_at(&self, t: f32) -> Point3<f32> {

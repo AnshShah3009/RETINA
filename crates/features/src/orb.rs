@@ -352,6 +352,35 @@ impl Orb {
     }
 }
 
+/// The minimum spacing between ORB keypoints, in pixels.
+///
+/// Matches the value `fast::non_max_suppression` uses, so the two paths do not
+/// disagree about what counts as a duplicate corner.
+const ORB_MIN_DISTANCE: f64 = 5.0;
+
+/// Drop keypoints that sit within `min_distance` of a stronger one.
+///
+/// Spacing is purely geometric, so this needs no image and no intensity -
+/// `fast::non_max_suppression` re-scores each candidate against the image,
+/// which this path cannot do because it only ever sees a score map.
+///
+/// The keypoints must already be sorted by descending response.
+fn non_max_suppression_points(mut kps: Vec<KeyPoint>, min_distance: f64) -> Vec<KeyPoint> {
+    let mut kept: Vec<KeyPoint> = Vec::with_capacity(kps.len());
+    let min_sq = min_distance * min_distance;
+    for kp in kps.drain(..) {
+        let too_close = kept.iter().any(|k| {
+            let dx = kp.x - k.x;
+            let dy = kp.y - k.y;
+            dx * dx + dy * dy < min_sq
+        });
+        if !too_close {
+            kept.push(kp);
+        }
+    }
+    kept
+}
+
 fn extract_keypoints_from_score_map<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
     ctx: &ComputeDevice,
     score_map: &Tensor<f32, S>,
@@ -408,16 +437,26 @@ fn extract_keypoints_from_score_map<S: Storage<f32> + cv_core::StorageFactory<f3
         }
     }
 
-    if kps.len() > max_kps {
-        kps.sort_by(|a, b| {
-            b.response
-                .partial_cmp(&a.response)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        kps.truncate(max_kps);
-    }
+    // Non-max suppression before the budget is spent. The CPU `detect` has
+    // always done this; this path did not run it at all, and it truncated to
+    // `n_features * 2` first, so a dense cluster consumed the whole budget on a
+    // single corner.
+    kps.sort_by(|a, b| b.response.total_cmp(&a.response));
+    let kps = non_max_suppression_points(kps, ORB_MIN_DISTANCE);
 
-    Ok(KeyPoints { keypoints: kps })
+    // `max_kps` is a *budget*, not a result: the caller passes `n_features * 2`
+    // precisely so that non-max suppression still has candidates to choose
+    // between. Truncating to it first - which is what this did - keeps the
+    // strongest `2 * n_features` candidates and throws away everything else
+    // *before* NMS can drop a near-duplicate, so a cluster of adjacent corners
+    // spends the whole budget on one corner and the detector returns fewer
+    // well-spread keypoints than asked for.
+    //
+    // The CPU path in `detect` has always done it the other way round: NMS
+    // first, truncate last. This now matches.
+    Ok(KeyPoints {
+        keypoints: kps.into_iter().take(max_kps).collect(),
+    })
 }
 
 /// Detect ORB keypoints and compute descriptors using an optional GPU compute context.
@@ -1303,6 +1342,75 @@ mod tests {
             kps.keypoints.iter().any(|k| k.y > (h / 2) as f64),
             "detection must not be biased to the top rows; got {:?}",
             kps.keypoints.iter().map(|k| (k.x, k.y)).collect::<Vec<_>>()
+        );
+    }
+
+    /// A budget is a cap on the result, not a cut applied to the candidates.
+    ///
+    /// `extract_keypoints_from_score_map` is called with `n_features * 2` so
+    /// that non-max suppression has a pool to choose from. It used to sort and
+    /// truncate to that pool *before* NMS ran, so a cluster of adjacent corners
+    /// consumed the entire budget on one corner: the strongest candidates all
+    /// sit within a pixel or two of each other, and the ones NMS would have kept
+    /// instead were already discarded.
+    ///
+    /// The test builds exactly that case - one dense cluster plus well-separated
+    /// candidates - and asserts the separated ones survive. It is a property of
+    /// the ordering, so it fails against the old code rather than merely
+    /// describing it.
+    #[test]
+    fn the_candidate_budget_does_not_starve_non_max_suppression() {
+        use cv_core::storage::CpuStorage;
+
+        // 20x20 grid. One dense cluster in the corner, and candidates spread out
+        // so a correct NMS keeps several of them.
+        const H: usize = 20;
+        const W: usize = 20;
+        let mut data = vec![0.0f32; H * W];
+
+        // The cluster: a 4x4 block of near-identical strong responses.
+        for y in 0..4 {
+            for x in 0..4 {
+                data[y * W + x] = 0.90 + 0.001 * (x + y) as f32;
+            }
+        }
+        // Separated candidates, each stronger than nothing but weaker than the
+        // cluster, so the budget is contested.
+        for (x, y) in [(10usize, 10usize), (15, 15), (5, 17), (18, 4)] {
+            data[y * W + x] = 0.50;
+        }
+
+        let tensor = Tensor {
+            storage: CpuStorage::from_vec(data.clone()).unwrap(),
+            shape: cv_core::TensorShape::new(1, H, W),
+            dtype: cv_core::DataType::F32,
+            _phantom: std::marker::PhantomData,
+        };
+
+        // A budget of 2, as `n_features * 2` would be for n_features = 1.
+        let cpu = cv_hal::cpu::CpuBackend::new().expect("a CPU backend");
+        let kps = extract_keypoints_from_score_map(&ComputeDevice::Cpu(&cpu), &tensor, 2)
+            .expect("extract");
+
+        assert_eq!(kps.keypoints.len(), 2, "the budget is a cap, not a target");
+
+        // Both survivors must come from different places in the image. Under the
+        // old ordering, both would have come from the 4x4 cluster and been
+        // within a pixel of each other - which is exactly what NMS exists to
+        // prevent.
+        let mut min_separation = f64::INFINITY;
+        for (i, a) in kps.keypoints.iter().enumerate() {
+            for b in &kps.keypoints[i + 1..] {
+                let dx = a.x - b.x;
+                let dy = a.y - b.y;
+                min_separation = min_separation.min((dx * dx + dy * dy).sqrt());
+            }
+        }
+        assert!(
+            min_separation > 4.0,
+            "the two kept keypoints are {min_separation:.2} px apart, so both \
+             came from the same cluster and non-max suppression had nothing to \
+             choose between"
         );
     }
 }
