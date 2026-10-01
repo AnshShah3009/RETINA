@@ -1359,10 +1359,27 @@ compiles and reads the wrong bytes produces a quiet wrong answer and survives
 indefinitely. The only defence is to run both backends on the same input and
 compare.
 
-## Open: `convolve_2d` border modes diverge from the CPU, and it is not where it looks
+## Resolved: `convolve_2d` border modes diverged from the CPU, and it was not where it looked
 
-Found by the parity sweep, and **not fixed**. Recorded here because the
-characterisation is sharp even though the cause is not.
+**Now fixed.** The characterisation below was sharp; the cause was one layer
+down and in a different file. `crates/hal/src/cpu/border.rs` folded
+`BorderMode::Reflect` with `period - c - 1` over a period of `2n`, and
+`BorderMode::Reflect101` with `period - c` over `2n - 2` - which written out are
+the *same* reflection, so two enum variants behaved identically and both
+disagreed with OpenCV by one:
+
+| index | -3 | -2 | -1 | 0 | 4 | 5 | 6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `BORDER_REFLECT` (correct) | 3 | 2 | 1 | 0 | 4 | 3 | 2 |
+| `BORDER_REFLECT_101` (correct) | 2 | 1 | 0 | 0 | 4 | 4 | 3 |
+| `Reflect` did | 2 | 1 | 0 | 0 | 4 | 4 | 3 |
+| `Reflect101` did | 3 | 2 | 1 | 0 | 4 | 3 | 2 |
+
+Fixing `border.rs` resolved this as a side effect, and
+`sweep::convolve_2d_border_modes_match` now passes on real hardware across all
+five modes. A fix attempted in `convolve_2d` itself had panicked the CPU and
+been reverted - the bug was in a shared helper underneath. The original
+characterisation is kept below as the record.
 
 A 37x33 f32 image, a symmetric 5x5 Gaussian, the same input uploaded to both
 backends and verified identical after a round trip:
