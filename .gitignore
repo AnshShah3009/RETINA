@@ -33,3 +33,9 @@ examples/target/
 ci_artifacts/
 reference/
 .worktrees/
+
+# Scratch probes left by audit agents. Several were committed by a `git add -A`
+# on a directory and then broke CI - one failed the workspace suite, another did
+# not compile, and one hung the run for 360s. They are diagnostics, not tests.
+zz_scratch*
+zz_probe*
