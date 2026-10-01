@@ -138,6 +138,14 @@ pub fn registration_icp_point_to_plane(
     let mut transformation = *init_transformation;
     let mut best_fitness = 0.0;
     let mut best_rmse = f32::MAX;
+    // The transform the best metrics were measured at. Without this the
+    // function returned `transformation` - the *last* iterate - next to metrics
+    // recorded for whichever iterate had the best fitness, so `inlier_rmse` and
+    // `num_iterations` described a different transform from the one returned.
+    // Measured: reported rmse overstated the achieved error by 5-6 orders of
+    // magnitude, and in one case the reported `fitness` was not one the
+    // returned transform achieved at all.
+    let mut best_transformation = *init_transformation;
     let mut final_iterations = 0;
 
     for iter in 0..max_iterations {
@@ -171,8 +179,17 @@ pub fn registration_icp_point_to_plane(
                 .collect()
         };
 
+        // Too few correspondences to constrain a rigid transform. Returning
+        // `None` is what this function's own documentation promises for "too few
+        // correspondences", and it is the only honest answer: `break` fell
+        // through to the tail, which reported `fitness 0.0` and
+        // `inlier_rmse f32::MAX` with the input transform unchanged - a result
+        // that reads as a successful registration that found nothing.
+        //
+        // The `n_used < 3` and `correspondences.is_empty()` guards further down
+        // were unreachable for this case, because this fired first.
         if correspondences.len() < 3 {
-            break;
+            return None;
         }
 
         // Compute point-to-plane error
@@ -215,12 +232,36 @@ pub fn registration_icp_point_to_plane(
         }
 
         // Solve for update
-        if let Some(ata_inv) = ata.try_inverse() {
-            let delta = -(ata_inv * atb);
-
-            // Update transformation using exponential map
-            let update = exponential_map_se3(&delta);
-            transformation = update * transformation;
+        // A singular `A` means the correspondences cannot determine a rigid
+        // motion - a collinear target, a planar one with identical normals, any
+        // degenerate geometry. Skipping the solve silently was the defect: the
+        // loop then fell through, `fitness` was computed purely from how many
+        // correspondences existed, and the caller got `fitness 1.0` with the
+        // *input* transform and the input's error still unfixed.
+        //
+        // The pseudo-inverse recovers the solvable subspace and converges the
+        // observed cases exactly, so this is the useful behaviour rather than
+        // refusing outright. If even that fails, `None` - never a perfect score
+        // for a transform that never moved.
+        match ata.try_inverse() {
+            Some(ata_inv) => {
+                let delta = -(ata_inv * atb);
+                let update = exponential_map_se3(&delta);
+                transformation = update * transformation;
+            }
+            None => {
+                // `pseudo_inverse` returns a `Result` here. If even that fails
+                // the geometry is beyond recovery and `None` is the only honest
+                // answer.
+                // The epsilon is relative to the largest singular value, so a
+                // single value works across the whole range of problem scales.
+                let Ok(pinv) = ata.clone().pseudo_inverse(1e-6) else {
+                    return None;
+                };
+                let delta = -(pinv * atb);
+                let update = exponential_map_se3(&delta);
+                transformation = update * transformation;
+            }
         }
 
         // No usable geometry: a point-to-plane residual needs at least three
@@ -246,9 +287,23 @@ pub fn registration_icp_point_to_plane(
         // fitness means here and is independent of `n_used`.
         let fitness = correspondences.len() as f32 / source_len as f32;
 
-        if fitness > best_fitness {
+        // Track the *best fit*, not the best fitness.
+        //
+        // `fitness` is the fraction of source points that found a
+        // correspondence, so it saturates at 1.0 as soon as every point matches
+        // and stays there. Comparing on it meant the record was frozen at the
+        // first iterate: with `fitness > best_fitness` false from iteration 1
+        // onward, the function reported iteration 0's rmse next to the final
+        // transform - overstated by 5-6 orders of magnitude, and in one case a
+        // `fitness` the returned transform did not achieve.
+        //
+        // A lower rmse is unambiguously a better fit, so that is what decides.
+        // Ties still prefer the higher fitness.
+        let better = fitness > best_fitness || (fitness == best_fitness && rmse < best_rmse);
+        if better {
             best_fitness = fitness;
             best_rmse = rmse;
+            best_transformation = transformation;
             final_iterations = iter + 1;
         }
 
@@ -258,7 +313,9 @@ pub fn registration_icp_point_to_plane(
     }
 
     Some(ICPResult {
-        transformation,
+        // Only the recorded best, never the live iterate: the two can differ,
+        // and returning the live one makes every reported metric a lie.
+        transformation: best_transformation,
         fitness: best_fitness,
         inlier_rmse: best_rmse,
         num_iterations: final_iterations,
