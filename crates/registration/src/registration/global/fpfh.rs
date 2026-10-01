@@ -35,12 +35,39 @@ pub fn compute_fpfh_features(cloud: &PointCloud, radius: f32) -> Result<Vec<FPFH
         return Ok(Vec::new());
     }
 
+    // A zero or non-finite radius divides by zero below: `p.x / voxel_size` is
+    // +/-inf, `.floor() as i32` saturates to `i32::MAX`, and the neighbour loop's
+    // `vx + dx` then overflows - a panic on ordinary bad input from a public API.
+    // (Only for clouds with at least one point, since the empty case returned
+    // above.)
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err(Error::InvalidInput(format!(
+            "FPFH radius must be finite and > 0, got {radius}"
+        )));
+    }
+
     // --- normals ---
     // If the cloud already has normals, use them; otherwise estimate via PCA.
     let normals: Vec<Vector3<f32>> = if let Some(ref normals) = cloud.normals {
         normals.clone()
     } else {
-        estimate_normals_pca(&cloud.points, radius)
+        {
+            let (normals, unsolved) = estimate_normals_pca(&cloud.points, radius);
+            if unsolved > 0 {
+                // Returning zero-information descriptors here is worse than an
+                // error: a downstream FGR ratio test rejects them, but any other
+                // consumer of this public function silently gets a descriptor
+                // that looks valid and carries no information. Measured: a cloud
+                // with 6 points spread 0.5 m apart at radius 0.05 gave 0 of 6
+                // features with any non-zero bin, reported as `Ok`.
+                return Err(Error::InvalidInput(format!(
+                    "cannot estimate normals for {unsolved} of {n} points: fewer \
+                     than 3 neighbours within radius {radius}. Increase the radius \
+                     or use a denser cloud."
+                )));
+            }
+            normals
+        }
     };
 
     if normals.len() != n {
@@ -117,14 +144,20 @@ pub fn compute_fpfh_features(cloud: &PointCloud, radius: f32) -> Result<Vec<FPFH
 ///
 /// This is a self-contained fallback so the registration crate does not
 /// depend on `cv-3d`.
-fn estimate_normals_pca(points: &[Point3<f32>], radius: f32) -> Vec<Vector3<f32>> {
+fn estimate_normals_pca(points: &[Point3<f32>], radius: f32) -> (Vec<Vector3<f32>>, usize) {
     let n = points.len();
     let mut normals = vec![Vector3::z(); n];
 
     if n == 0 {
-        return normals;
+        return (normals, 0);
     }
 
+    // Points with fewer than three neighbours have no plane to fit: PCA needs
+    // three points to determine a normal, and a single arbitrary direction
+    // produces a histogram with no information in it. Those keep the `(0, 0, 1)`
+    // default, which is why a sparse cloud used to yield descriptors that were
+    // entirely zero while reporting success.
+    let mut unsolved = 0usize;
     let voxel_size = radius;
     let radius_sq = radius * radius;
 
@@ -167,7 +200,8 @@ fn estimate_normals_pca(points: &[Point3<f32>], radius: f32) -> Vec<Vector3<f32>
         }
 
         if count < 3 {
-            continue; // keep default (0,0,1)
+            unsolved += 1;
+            continue; // keep the (0, 0, 1) default
         }
 
         centroid /= count as f32;
@@ -218,7 +252,7 @@ fn estimate_normals_pca(points: &[Point3<f32>], radius: f32) -> Vec<Vector3<f32>
         normals[i] = normal;
     }
 
-    normals
+    (normals, unsolved)
 }
 
 /// Compute Simple Point Feature Histogram for a single point.
