@@ -865,8 +865,11 @@ mod tests {
         for r in 0..4 {
             uniform[r * 4..r * 4 + 4].copy_from_slice(&camera[r]);
         }
-        uniform[16] = 1.0;
-        uniform[17] = 1.0;
+        // The real canvas size, not (1, 1). Passing NDC half-extents here is
+        // what made the sprite radius 192 px instead of 4; a test that hardcoded
+        // 1.0 could not have caught it.
+        uniform[16] = width as f32;
+        uniform[17] = height as f32;
         uniform[18] = 4.0;
         uniform[19] = 0.0;
 
@@ -1049,7 +1052,7 @@ mod tests {
         drop(data);
         out.unmap();
 
-        // The striped cube renders ~71,800 lit pixels of a 320x240 frame. The
+        // The striped cube renders 76,315 lit pixels of a 320x240 frame. The
         // threshold is well below that and deliberately not just above zero:
         //
         // - At `> 0` the test is worthless. An earlier shader rendered 2,678
@@ -1072,6 +1075,36 @@ mod tests {
              {width}x{height}. A shader that compiles, a pipeline that builds and \
              a buffer that uploads can all be true of an empty framebuffer; only \
              reading the pixels back tells the two apart."
+        );
+    }
+
+    /// A point radius in pixels converts to NDC by dividing by half the
+    /// viewport width, and nothing else.
+    ///
+    /// NDC spans -1..1 across the viewport, so it *is* the screen: a radius of
+    /// `R` pixels covers `R / (width / 2)` NDC at every depth. Two earlier
+    /// versions of this line got the units wrong in opposite directions - one
+    /// produced sub-pixel sprites, the next produced 192 px discs that filled
+    /// the frame - so the conversion is pinned here rather than only observed in
+    /// a rendered frame.
+    #[test]
+    fn a_point_radius_in_pixels_is_constant_on_screen() {
+        let width = 320.0f32;
+        let height = 240.0f32;
+        let radius_px = 4.0f32;
+        let radius_ndc = radius_px / (width * 0.5);
+        assert!(
+            (radius_ndc - 0.025).abs() < 1e-6,
+            "4 px on a 320 px canvas is 0.025 NDC, got {radius_ndc}"
+        );
+        // Round-tripping back to pixels must give the requested radius.
+        assert!((radius_ndc * width * 0.5 - radius_px).abs() < 1e-6);
+        // Each axis uses its own extent, so a non-square canvas keeps sprites
+        // circular in pixels rather than stretched by the aspect ratio.
+        let radius_ndc_y = radius_px / (height * 0.5);
+        assert!(
+            (radius_ndc_y * height * 0.5 - radius_px).abs() < 1e-6,
+            "the y axis must convert back to the same pixel radius"
         );
     }
 

@@ -32,8 +32,15 @@ struct Vertex {
 struct Uniforms {
     /// Row-major view matrix.
     view: [[f32; 4]; 4],
-    /// Half-extent of the NDC viewport, `(1, 1)` for a full-screen viewport.
-    viewport: [f32; 2],
+    /// The drawable area in **pixels**, `(width, height)`.
+    ///
+    /// This was `viewport` and carried `(1, 1)` - the NDC half-extent - while
+    /// the shader used it as a pixel count. A point radius of 3 therefore became
+    /// `3 / depth` in NDC units, which at depth 2.5 is 1.2: a sprite 192 px in
+    /// radius on a 320 px canvas, filling the frame with one disc. Renaming it
+    /// to `pixel_size` is the fix as much as the value is; the two units are not
+    /// interchangeable and the name said NDC while the use was pixels.
+    pixel_size: [f32; 2],
     point_radius: f32,
     _pad: f32,
 }
@@ -230,12 +237,12 @@ impl PointCloudRenderer {
         egui_wgpu::Callback::new_paint_callback(rect, CloudCallback(Arc::clone(self)))
     }
 
-    fn draw_into(&self, pass: &mut eframe::wgpu::RenderPass<'static>) {
+    fn draw_into(&self, pass: &mut eframe::wgpu::RenderPass<'static>, pixel_size: [f32; 2]) {
         let view = self.view.lock().map(|v| *v).unwrap_or_else(|_| identity());
         let radius = self.point_radius.lock().map(|r| *r).unwrap_or(3.0);
         let uniforms = Uniforms {
             view,
-            viewport: [1.0, 1.0],
+            pixel_size: [pixel_size[0].max(1.0), pixel_size[1].max(1.0)],
             point_radius: radius,
             _pad: 0.0,
         };
@@ -277,11 +284,14 @@ struct CloudCallback(Arc<PointCloudRenderer>);
 impl egui_wgpu::CallbackTrait for CloudCallback {
     fn paint(
         &self,
-        _info: epaint::PaintCallbackInfo,
+        info: epaint::PaintCallbackInfo,
         render_pass: &mut eframe::wgpu::RenderPass<'static>,
         _resources: &egui_wgpu::CallbackResources,
     ) {
-        self.0.draw_into(render_pass);
+        self.0.draw_into(
+            render_pass,
+            [info.screen_size_px[0] as f32, info.screen_size_px[1] as f32],
+        );
     }
 }
 
