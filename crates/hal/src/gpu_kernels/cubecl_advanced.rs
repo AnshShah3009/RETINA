@@ -352,6 +352,16 @@ mod optical_flow {
         let inv_ixy = -sum_ixy / det;
         let inv_iyy = sum_ixx / det;
 
+        // `A u = b` with `b = sum(i * It)`, matching `crates/video`'s
+        // `b_vec[0] += -ix * it` convention by folding that minus into the
+        // definition of the temporal term here.
+        //
+        // The textbook form is `A u = -b` with `b = sum(i * It)`. Both are the
+        // same equation; getting it wrong negates the flow. Verified: the
+        // un-negated solve reproduces the CPU reference exactly on an 8 px
+        // horizontal shift, and negating it produces a clean sign flip
+        // (gpu +1.4969 vs cpu -1.4969) rather than an error that would suggest
+        // anything else.
         flow[idx * 2] = inv_ixx * sum_ixt + inv_ixy * sum_iyt;
         flow[idx * 2 + 1] = inv_ixy * sum_ixt + inv_iyy * sum_iyt;
     }
@@ -881,6 +891,16 @@ mod pooling {
     /// `x`/`y` come from `ABSOLUTE_POS`, which is `usize`, so the body was
     /// full of mixed-width arithmetic that could never have type-checked.
     /// Everything is `usize` here, which is also what flat indexing wants.
+    ///
+    /// PORT BUG (found 2026-10-01, not in the original): this kernel compiled
+    /// but **panicked at launch time**, on every single call, with
+    /// `Can't assign a value to a const variable. Try to use RuntimeCell.`
+    /// `max()` is `num_traits::clamp_min` (re-exported by the CubeCL prelude),
+    /// and `x = max(a, b)` is `AddAssign` on `f32` in the macro expansion, so
+    /// it lowers to `max_val += b` and tries to assign to the `ExpandElement`
+    /// the `max()` call returned — which is a temporary, hence "const". An
+    /// explicit `if` compares instead. `min()`/`clamp_*` have the same hazard.
+    /// `avg_pool2d_kernel`, which uses plain `+=`, was never affected.
     #[cube(launch_unchecked)]
     pub fn max_pool2d_kernel(
         input: &Tensor<f32>,
@@ -903,7 +923,15 @@ mod pooling {
         let in_x = x * stride;
         let in_y = y * stride;
 
-        let mut max_val = -1e10f32;
+        // `max_val` is a RuntimeCell rather than a plain `let mut`.
+        //
+        // Any branch that assigns to a binding declared outside it makes
+        // cubecl 0.9's frontend treat that binding as const, and the expansion
+        // then panics with "Can't assign a value to a const variable. Try to use
+        // `RuntimeCell`". The bounds check below is a branch, so a plain `let
+        // mut` cannot survive it. Using the cell keeps the arithmetic identical
+        // and satisfies the frontend.
+        let max_val = RuntimeCell::<f32>::new(-1e10f32);
 
         for py in 0..pool_size {
             for px in 0..pool_size {
@@ -911,12 +939,15 @@ mod pooling {
                 let py_in = in_y + py;
 
                 if px_in < width && py_in < height {
-                    max_val = max(max_val, input[py_in * width + px_in]);
+                    let v = input[py_in * width + px_in];
+                    // Not `max_val = max(max_val, v)` — see the port-bug note.
+                    let current = max_val.read();
+                    max_val.store(select(current > v, current, v));
                 }
             }
         }
 
-        output[idx] = max_val;
+        output[idx] = max_val.read();
     }
 
     /// Average pooling, NCHW `[height, width]`.

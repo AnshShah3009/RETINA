@@ -281,6 +281,24 @@ pub enum RedOp {
 /// CubeCL 0.9 has no built-in reduction, and a hand-written two-pass parallel
 /// reduction is easy to get subtly wrong, so this is deliberately the simple
 /// version.
+///
+/// BUG(port, found 2026-10-01 — not an original defect): `Max` and `Min` were
+/// **wrong for `axis > 0`**. The initialiser test was
+///
+/// ```text
+/// if o == 0 && i == 0 { v } else { out[dst].max(v) }
+/// ```
+///
+/// which seeds only output element `dst == 0` (`o == 0, i == 0`) from the data.
+/// Every other output element starts at the `vec![0.0]` allocation and therefore
+/// returns `0.0` whenever its true maximum is negative, and `Min` is the mirror
+/// image (returns `0.0` whenever its true minimum is positive). `Sum` and `Mean`
+/// were never affected because `0.0` is their identity.
+///
+/// The seed is now decided by *this output element's own* first contributing
+/// input, `i == 0`, which is correct for every axis and for every shape. Found by
+/// `crates/hal/tests/cubecl_kernels_test.rs`, which is checked against a broken
+/// `host_reduce` on purpose.
 pub fn host_reduce<R: Runtime>(
     client: &ComputeClient<R>,
     input: &TensorHandle<R>,
@@ -318,15 +336,17 @@ pub fn host_reduce<R: Runtime>(
                 let v = data[src];
                 out[dst] = match op {
                     RedOp::Sum => out[dst] + v,
+                    // `i == 0` is the first input that reaches *this* output
+                    // element, so it is the right seed for every axis.
                     RedOp::Max => {
-                        if o == 0 && i == 0 {
+                        if i == 0 {
                             v
                         } else {
                             out[dst].max(v)
                         }
                     }
                     RedOp::Min => {
-                        if o == 0 && i == 0 {
+                        if i == 0 {
                             v
                         } else {
                             out[dst].min(v)
