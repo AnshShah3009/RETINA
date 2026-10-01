@@ -38,8 +38,14 @@ impl ColorMode {
 
     fn rgb(self, z: f32, min: f32, max: f32) -> [f32; 3] {
         match self {
-            ColorMode::Flat => [0.35, 0.75, 1.0],
-            ColorMode::PerPoint | ColorMode::Height => {
+            ColorMode::Flat => [0.55, 0.55, 0.58],
+            // "Per point" meant "use the cloud's own colours, or the height ramp
+            // if it has none" - which made it identical to `Height`, so a cloud
+            // with no colours showed the ramp while the mode claimed to be
+            // showing per-point data. A neutral grey says "no colour was given",
+            // which is what is actually true.
+            ColorMode::PerPoint => [0.72, 0.74, 0.78],
+            ColorMode::Height => {
                 let t = if (max - min).abs() < 1e-9 {
                     0.5
                 } else {
@@ -357,19 +363,22 @@ impl NativeViewer {
     /// a height ramp, so the shape is legible and it is obvious whether the
     /// camera, the colours and the depth scaling are all working.
     pub fn demo_cloud() -> PointCloud {
-        let mut pc = Self::mock_cloud();
-        let mut rng_state = 0x9E3779B97F4A7C15u64;
-        let mut next = || {
-            rng_state ^= rng_state << 13;
-            rng_state ^= rng_state >> 7;
-            rng_state ^= rng_state << 17;
-            rng_state
-        };
-        // The twelve edges of the cube, so its shape is legible: points do not
-        // occlude one another, so a solid lattice alone reads as fog.
+        // A cube drawn as a wireframe box plus a small set of coloured corners.
+        //
+        // The previous scene was a 10x10x10 solid lattice, the box edges, and
+        // 4,000 uniformly random points. That was a mistake in the only sense
+        // that matters: the random points are visual noise that hides the thing
+        // they were meant to show. Reported back as "something blue and green,
+        // I don't understand what I'm looking at" - which is the correct
+        // description of it, and a fault in the demo, not the viewer.
+        //
+        // Points do not occlude one another, so a solid reads as fog. Edges read
+        // as edges. That is why this is a wireframe.
         const S: f32 = 0.9;
-        for i in 0..=40 {
-            let t = i as f32 / 40.0 * S;
+        let mut pc = PointCloud::default();
+        let n = 60;
+        for i in 0..=n {
+            let t = i as f32 / n as f32 * S;
             pc.points.push(nalgebra::Point3::new(t, 0.0, 0.0));
             pc.points.push(nalgebra::Point3::new(t, S, 0.0));
             pc.points.push(nalgebra::Point3::new(t, 0.0, S));
@@ -384,13 +393,18 @@ impl NativeViewer {
             pc.points.push(nalgebra::Point3::new(S, S, t));
         }
 
-        // A sparse shell so depth ordering is visible when orbiting.
-        for _ in 0..4000 {
-            pc.points.push(nalgebra::Point3::new(
-                (next() % 1000) as f32 / 1000.0 * 0.9,
-                (next() % 1000) as f32 / 1000.0 * 0.9,
-                (next() % 1000) as f32 / 1000.0 * 0.9,
-            ));
+        // Ground grid under the box, so "up" is unambiguous when orbiting. This
+        // is the thing that was missing: without a reference plane a wireframe
+        // cube rotated to any angle is just a shape with no orientation.
+        let g = 7;
+        for i in 0..=g {
+            let t = i as f32 / g as f32 * S;
+            for j in 0..=g {
+                pc.points
+                    .push(nalgebra::Point3::new(t, -0.12, j as f32 / g as f32 * S));
+                pc.points
+                    .push(nalgebra::Point3::new(j as f32 / g as f32 * S, -0.12, t));
+            }
         }
         pc
     }
@@ -1012,9 +1026,13 @@ mod tests {
     #[test]
     fn the_demo_cloud_has_points_and_something_to_see() {
         let pc = NativeViewer::demo_cloud();
+        // Not a size threshold: the previous scene had 5,000 points and was
+        // unreadable. What matters is that it is dense enough to draw as a shape
+        // and sparse enough to be legible.
         assert!(
-            pc.points.len() > 1000,
-            "the demo cloud is only {} points",
+            (200..2000).contains(&pc.points.len()),
+            "the demo cloud has {} points, which is either too sparse to read \
+             as a shape or too dense to be legible",
             pc.points.len()
         );
         // It must span a real volume, or the camera has nothing to orbit around.
@@ -1051,8 +1069,15 @@ mod tests {
         assert!(pc.colors.is_none());
 
         let colors = colors_for(&pc, ColorMode::PerPoint);
+        // A colour per point, so the cloud still draws...
         assert_eq!(colors.len(), pc.points.len());
-        assert_ne!(colors[0], colors[1], "a z-ramp must vary with z");
+        // ...but not a height ramp. This test used to require the opposite, and
+        // that requirement is why the viewer showed a blue-green ramp while its
+        // colour mode read "per point".
+        assert_eq!(
+            colors[0], colors[1],
+            "with no colours given, PerPoint must be flat, not a z-ramp"
+        );
     }
 
     /// An existing colour array is passed through untouched.
@@ -1077,10 +1102,29 @@ mod tests {
         assert_eq!(flat[0], flat[2], "flat mode must not vary with z");
 
         let height = colors_for(&pc, ColorMode::Height);
-        assert_ne!(height[0], height[2]);
-        // PerPoint on an uncolored cloud is the ramp, so it must match Height.
+        assert_ne!(height[0], height[2], "the height ramp must vary with z");
+
+        // `PerPoint` on a cloud with no colours must NOT be the height ramp.
+        //
+        // It used to be, and the test asserted exactly that - which is how a
+        // viewer showing a blue-green height ramp while its colour mode read
+        // "per point" survived. A mode that claims to show the cloud's own data
+        // and silently shows a different thing is worse than one that shows
+        // nothing: the ramp looks like data. Neutral grey says "no colour was
+        // given", which is what is true.
         let per_point = colors_for(&pc, ColorMode::PerPoint);
-        assert_eq!(per_point[1], height[1]);
+        assert_ne!(
+            per_point[1], height[1],
+            "PerPoint must not silently fall back to the height ramp"
+        );
+        assert_eq!(
+            per_point[0], per_point[2],
+            "PerPoint must not vary with z when no colours were given"
+        );
+
+        // All three modes must be distinguishable from each other.
+        assert_ne!(flat[1], height[1]);
+        assert_ne!(flat[1], per_point[1]);
     }
 
     #[test]
