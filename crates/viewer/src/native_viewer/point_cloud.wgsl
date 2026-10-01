@@ -30,6 +30,14 @@ struct VertexOut {
     @location(1) sprite_uv: vec2<f32>,
 };
 
+// The depth range, mapping the view frustum onto WebGPU's z_ndc in [0, 1]:
+// `z = -near -> 0`, `z = -far -> 1`. With A = B / near and
+// B = 1 / (1/near - 1/far), both ends land exactly.
+const NEAR_PLANE: f32 = 0.05;
+const FAR_PLANE: f32 = 200.0;
+const FAR_PLANE_COEFF: f32 = 1.0 / (1.0 / NEAR_PLANE - 1.0 / FAR_PLANE);
+const NEAR_PLANE_COEFF: f32 = FAR_PLANE_COEFF / NEAR_PLANE;
+
 const CORNERS = array<vec2<f32>, 6>(
     vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
     vec2<f32>(-1.0,  1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0,  1.0),
@@ -118,11 +126,19 @@ fn vs_main(input: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     let offset_x = corner.x * radius_ndc * eye.w * half_width;
     let offset_y = corner.y * radius_ndc * eye.w * half_height;
 
+    // A real perspective depth, so a depth test can resolve overdraw.
+    //
+    // The previous value was a constant 0.5 for every point, which made depth
+    // useless: with a depth buffer attached, either everything passes or nothing
+    // does. `z_ndc = A + B / eye.z` maps the frustum onto [0, 1], so a nearer
+    // point has a *smaller* value and wins a `Less` test.
+    let z_ndc = NEAR_PLANE_COEFF + FAR_PLANE_COEFF / eye.z;
+
     var out: VertexOut;
     out.clip_position = vec4<f32>(
         eye.x + offset_x,
         eye.y + offset_y,
-        0.5 * eye.w,
+        z_ndc,
         eye.w,
     );
     out.sprite_uv = corner;

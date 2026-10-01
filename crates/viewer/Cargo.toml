@@ -12,6 +12,7 @@ wgpu = { workspace = true }
 egui-wgpu = "0.33.3"
 epaint = "0.33.3"
 bytemuck = { workspace = true }
+image = { workspace = true }
 
 [features]
 default = []

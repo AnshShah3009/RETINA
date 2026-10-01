@@ -376,6 +376,96 @@ impl NativeViewer {
     /// occlude, so a cube of them looks like fog. This adds the twelve edges and
     /// a height ramp, so the shape is legible and it is obvious whether the
     /// camera, the colours and the depth scaling are all working.
+    /// Load an image as a point cloud: luminance becomes depth, colour is kept.
+    ///
+    /// This is the most demanding thing the renderer can be asked to draw, and
+    /// it is the fastest way to see whether the projection is right. A wireframe
+    /// cube is symmetric enough to hide a mirrored axis or a wrong scale; a
+    /// photograph is not - the moment the face is inside out or the image is
+    /// squashed, it is obvious.
+    ///
+    /// Brightness is used for depth rather than a depth map, which is a
+    /// deliberate simplification: it gives a smooth, well-distributed surface
+    /// from any photograph without needing per-pixel depth, and it is enough to
+    /// exercise the projection. Points are laid out in the camera's own frame -
+    /// x and y across the image, z away from it - and scaled by `size`, so the
+    /// whole thing is one `look_at` away from being framed.
+    pub fn from_image(path: &std::path::Path, size: f32) -> Result<PointCloud, String> {
+        let img = image::open(path)
+            .map_err(|e| format!("cannot open {}: {e}", path.display()))?
+            .to_rgb8();
+        let (w, h) = img.dimensions();
+
+        // A dense grid aliases badly when points are 1-2 px apart at any real
+        // zoom, and costs a lot of fill rate. One point every `step` pixels is
+        // enough to resolve the image at the sizes this viewer shows.
+        let step = ((w * h) as f64 / 120_000.0).sqrt().max(1.0) as u32;
+
+        let mut pc = PointCloud::default();
+        let mut colors: Vec<nalgebra::Point3<f32>> = Vec::new();
+        let aspect = w as f32 / h as f32;
+
+        let mut y = 0u32;
+        while y < h {
+            let mut x = 0u32;
+            while x < w {
+                let p = img.get_pixel(x, y);
+                let luma =
+                    (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0;
+                pc.points.push(nalgebra::Point3::new(
+                    (x as f32 / w as f32 - 0.5) * aspect * size,
+                    (0.5 - y as f32 / h as f32) * size,
+                    luma * size * 0.35,
+                ));
+                colors.push(nalgebra::Point3::new(
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                ));
+                x += step;
+            }
+            y += step;
+        }
+        pc.colors = Some(colors);
+        Ok(pc)
+    }
+
+    /// Point the camera at the centre of the loaded clouds and pull back far
+    /// enough to fit them.
+    ///
+    /// A photograph loaded at `size = 1.6` spans about 1.1 units wide, but the
+    /// demo cube's camera sits 2.5 away from a *fixed* target. A wide, flat
+    /// cloud therefore lands off-centre or edge-on, which is what the first
+    /// `--image` run showed. Fitting the camera to the data is the only version
+    /// of this that works for an arbitrary cloud.
+    pub fn frame_bounds(&mut self) {
+        let mut lo = [f32::MAX; 3];
+        let mut hi = [f32::MIN; 3];
+        let mut any = false;
+        for (pc, _) in &self.clouds {
+            for p in &pc.points {
+                any = true;
+                for (i, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    lo[i] = lo[i].min(v);
+                    hi[i] = hi[i].max(v);
+                }
+            }
+        }
+        if !any {
+            return;
+        }
+        self.target = [
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        ];
+        // The largest half-extent, times a margin. `FOV_SCALE` is the tangent of
+        // the half-angle, so the distance that fits a half-extent `r` is
+        // `r / FOV_SCALE` - the margin then leaves room for the frame.
+        let radius = ((hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2])) * 0.5;
+        self.camera_dist = (radius / Self::FOV_SCALE * 1.35).max(0.05);
+    }
+
     pub fn demo_cloud() -> PointCloud {
         // A striped cube.
         //
@@ -688,22 +778,49 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
 }
 
 /// Launcher function
+/// Open the viewer, optionally loading an image instead of the demo cube.
+///
+/// `--image <path>` loads a photograph as a point cloud: luminance becomes
+/// depth, colour is preserved. That is a much better check of the renderer than
+/// a synthetic cube - a wireframe cube is symmetric enough that a mirrored axis
+/// or a wrong scale still looks plausible, while a face is not.
 pub fn run_native_viewer() -> Result<(), eframe::Error> {
+    // `--image <path>`, or `--demo` for the synthetic cube.
+    let args: Vec<String> = std::env::args().collect();
+    let image_path = args
+        .windows(2)
+        .find(|w| w[0] == "--image" || w[0] == "-i")
+        .map(|w| std::path::PathBuf::from(&w[1]));
+
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
+        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1000.0, 800.0]),
         ..Default::default()
     };
 
     eframe::run_native(
         "Rust CV Viewer",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             let mut viewer = NativeViewer::new(cc);
 
-            // Load a cloud up front. A viewer that opens empty reads as broken: there
-            // is nothing to tell a working renderer from a dead one until the user
-            // finds and presses a button. The demo's whole job is to show a cloud.
-            viewer.add_point_cloud(NativeViewer::demo_cloud());
+            match image_path {
+                Some(ref path) => match NativeViewer::from_image(path, 1.6) {
+                    Ok(pc) => {
+                        let n = pc.points.len();
+                        viewer.add_point_cloud(pc);
+                        // Frame the loaded cloud: a photograph is flat and wide, so
+                        // the demo cube's camera - aimed at a point - would show it
+                        // edge-on or off-centre.
+                        viewer.frame_bounds();
+                        eprintln!("viewer: loaded {} points from {}", n, path.display());
+                    }
+                    Err(e) => {
+                        eprintln!("viewer: {e}");
+                        viewer.add_point_cloud(NativeViewer::demo_cloud());
+                    }
+                },
+                None => viewer.add_point_cloud(NativeViewer::demo_cloud()),
+            }
 
             Ok(Box::new(viewer))
         }),
@@ -840,10 +957,90 @@ mod tests {
         // thin sliver, which made the lit count tiny and the assertion
         // meaningless - it was measuring the test's own geometry, not the
         // pipeline.
-        let verts: Vec<[f32; 7]> = NativeViewer::demo_cloud()
+        // `PC_IMAGE` renders that file instead of the demo cube, so the same
+        // harness that checks the pipeline can also show what it is drawing.
+        let cloud = match std::env::var("PC_IMAGE") {
+            Ok(path) => NativeViewer::from_image(std::path::Path::new(&path), 1.6)
+                .unwrap_or_else(|e| panic!("cannot load {path}: {e}")),
+            Err(_) => NativeViewer::demo_cloud(),
+        };
+        if std::env::var("PC_IMAGE").is_ok() {
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for p in &cloud.points {
+                for (i, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    lo[i] = lo[i].min(v);
+                    hi[i] = hi[i].max(v);
+                }
+            }
+            eprintln!(
+                "cloud {} points, x {:.3}..{:.3} y {:.3}..{:.3} z {:.3}..{:.3}",
+                cloud.points.len(),
+                lo[0],
+                hi[0],
+                lo[1],
+                hi[1],
+                lo[2],
+                hi[2]
+            );
+            eprintln!("colors present: {}", cloud.colors.is_some());
+            for (name, yaw, pitch) in [("yaw90", 90.0f32, 0.0f32)] {
+                let mut v = headless_viewer();
+                v.target = [0.0, 0.0, 0.28];
+                v.camera_yaw = yaw;
+                v.camera_pitch = pitch;
+                v.camera_dist = 2.4;
+                let m = v.view_matrix();
+                let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) =
+                    (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                let (mut lo_w, mut hi_w) = (f32::MAX, f32::MIN);
+                for p in cloud.points.iter().step_by(37) {
+                    let w4 = [p.x, p.y, p.z, 1.0];
+                    let mut e = [0.0f32; 4];
+                    for (row, val) in e.iter_mut().enumerate() {
+                        *val = (0..4).map(|c| m[row][c] * w4[c]).sum();
+                    }
+                    lo_w = lo_w.min(e[3]);
+                    hi_w = hi_w.max(e[3]);
+                    if e[3] <= 0.0 {
+                        continue;
+                    }
+                    let nx = e[0] / e[3];
+                    let ny = e[1] / e[3];
+                    lo_x = lo_x.min(nx);
+                    hi_x = hi_x.max(nx);
+                    lo_y = lo_y.min(ny);
+                    hi_y = hi_y.max(ny);
+                }
+                println!(
+                    "{name}: w {:.2}..{:.2} ndc x {:.2}..{:.2} ndc y {:.2}..{:.2}",
+                    lo_w, hi_w, lo_x, hi_x, lo_y, hi_y
+                );
+            }
+        }
+        let cap: usize = std::env::var("PC_CAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(usize::MAX);
+        let verts: Vec<[f32; 7]> = cloud
             .points
             .iter()
-            .map(|p| [p.x, p.y, p.z, 0.72, 0.74, 0.78, 0.0])
+            .take(cap)
+            .enumerate()
+            .map(|(i, p)| {
+                let c = cloud
+                    .colors
+                    .as_ref()
+                    .and_then(|cs| cs.get(i))
+                    .map(|c| [c.x, c.y, c.z])
+                    .unwrap_or([0.72, 0.74, 0.78]);
+                let c = if std::env::var("PC_NOCOLOR").is_ok() {
+                    [0.72, 0.74, 0.78]
+                } else {
+                    c
+                };
+                [p.x, p.y, p.z, c[0], c[1], c[2], 0.0]
+            })
             .collect();
         let vbuf = device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
             label: None,
@@ -856,9 +1053,16 @@ mod tests {
         // the same when M is the identity - which is exactly why the shader's
         // matrix bug survived until this test existed.
         let mut viewer = headless_viewer();
-        viewer.target = [0.45, 0.45, 0.45];
-        viewer.camera_yaw = 45.0;
-        viewer.camera_pitch = 25.0;
+        if std::env::var("PC_IMAGE").is_ok() {
+            // Look at the image square-on. The image lies in the **xy** plane,
+            // so the camera has to be on +z: at yaw 0 the eye is on +x and the
+            // whole image collapses into a line - a flat olive slab, which is
+            // exactly what the first dump showed.
+        } else {
+            viewer.target = [0.45, 0.45, 0.45];
+            viewer.camera_yaw = 45.0;
+            viewer.camera_pitch = 25.0;
+        }
         let camera = viewer.view_matrix();
 
         let mut uniform = [0.0f32; 20];
@@ -1049,6 +1253,20 @@ mod tests {
                 }
             }
         }
+        // Dump the frame so it can be looked at rather than described. A
+        // wireframe cube was being judged from a paragraph of numbers; the
+        // renderer was wrong four times in a row and none of it showed up in a
+        // test.
+        if let Ok(path) = std::env::var("PC_DUMP") {
+            let mut raw = Vec::with_capacity((width * height * 3) as usize);
+            for y in 0..height {
+                for x in 0..width {
+                    let i = (y * padded + x * 4) as usize;
+                    raw.extend_from_slice(&data[i..i + 3]);
+                }
+            }
+            let _ = std::fs::write(path, raw);
+        }
         drop(data);
         out.unmap();
 
@@ -1069,6 +1287,7 @@ mod tests {
         //
         // Verified: collapsing every sprite to a degenerate point renders 0 and
         // this fails.
+        eprintln!("verts {} lit {lit}", verts.len());
         assert!(
             lit > 1_000,
             "the point-cloud pipeline rendered only {lit} lit pixels of \
