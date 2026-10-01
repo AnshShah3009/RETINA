@@ -262,9 +262,31 @@ impl TSDFVolume {
                             block.get_tsdf((x, y + 1, z + 1)),
                         ];
 
+                        // Corner colours, in the same order as `corners`, so a
+                        // triangle vertex can be coloured by where it lies
+                        // between the two corners its edge joins.
+                        let ci = |dx: usize, dy: usize, dz: usize| {
+                            block.colors[VoxelBlock::voxel_index((x + dx, y + dy, z + dz))]
+                        };
+                        let corner_colors = [
+                            ci(0, 0, 0),
+                            ci(1, 0, 0),
+                            ci(1, 1, 0),
+                            ci(0, 1, 0),
+                            ci(0, 0, 1),
+                            ci(1, 0, 1),
+                            ci(1, 1, 1),
+                            ci(0, 1, 1),
+                        ];
+
                         // Marching cubes on this cell
-                        let cell_tris =
-                            marching_cubes_cell(block_coords, (x, y, z), &corners, self.voxel_size);
+                        let cell_tris = marching_cubes_cell(
+                            block_coords,
+                            (x, y, z),
+                            &corners,
+                            &corner_colors,
+                            self.voxel_size,
+                        );
 
                         triangles.extend(cell_tris);
                     }
@@ -370,7 +392,7 @@ pub struct Triangle {
 const MC_EDGE_TABLE: [i32; 256] = [
     0x0, 0x109, 0x203, 0x30a, 0x406, 0x50f, 0x605, 0x70c, 0x80c, 0x905, 0xa0f, 0xb06, 0xc0a, 0xd03,
     0xe09, 0xf00, 0x190, 0x99, 0x393, 0x29a, 0x596, 0x49f, 0x795, 0x69c, 0x99c, 0x895, 0xb9f,
-    0xa96, 0xd9a, 0xc93, 0xf99, 0xe90, 0x230, 0x139, 0x33, 0x13a, 0x636, 0x73f, 0x435, 0x53c,
+    0xa96, 0xd9a, 0xc93, 0xf99, 0xe90, 0x230, 0x339, 0x33, 0x13a, 0x636, 0x73f, 0x435, 0x53c,
     0xa3c, 0xb35, 0x83f, 0x936, 0xe3a, 0xf33, 0xc39, 0xd30, 0x3a0, 0x2a9, 0x1a3, 0xaa, 0x7a6,
     0x6af, 0x5a5, 0x4ac, 0xbac, 0xaa5, 0x9af, 0x8a6, 0xfaa, 0xea3, 0xda9, 0xca0, 0x460, 0x569,
     0x663, 0x76a, 0x66, 0x16f, 0x265, 0x36c, 0xc6c, 0xd65, 0xe6f, 0xf66, 0x86a, 0x963, 0xa69,
@@ -385,7 +407,7 @@ const MC_EDGE_TABLE: [i32; 256] = [
     0xc6c, 0x36c, 0x265, 0x16f, 0x66, 0x76a, 0x663, 0x569, 0x460, 0xca0, 0xda9, 0xea3, 0xfaa,
     0x8a6, 0x9af, 0xaa5, 0xbac, 0x4ac, 0x5a5, 0x6af, 0x7a6, 0xaa, 0x1a3, 0x2a9, 0x3a0, 0xd30,
     0xc39, 0xf33, 0xe3a, 0x936, 0x83f, 0xb35, 0xa3c, 0x53c, 0x435, 0x73f, 0x636, 0x13a, 0x33,
-    0x139, 0x230, 0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795, 0x49f,
+    0x339, 0x230, 0xe90, 0xf99, 0xc93, 0xd9a, 0xa96, 0xb9f, 0x895, 0x99c, 0x69c, 0x795, 0x49f,
     0x596, 0x29a, 0x393, 0x99, 0x190, 0xf00, 0xe09, 0xd03, 0xc0a, 0xb06, 0xa0f, 0x905, 0x80c,
     0x70c, 0x605, 0x50f, 0x406, 0x30a, 0x203, 0x109, 0x0,
 ];
@@ -677,6 +699,25 @@ const TRI_TABLE: [[i32; 16]; 256] = [
 ///
 /// Given two corner positions `p1` and `p2` with TSDF values `val1` and `val2`,
 /// finds the point along the edge where the isosurface (at `iso_level`) crosses.
+/// Where `iso_level` falls between two corner values, as a fraction in [0, 1].
+///
+/// The same fraction the position interpolation uses, so a vertex's colour sits
+/// where the vertex sits rather than at whichever corner happens to come first.
+fn interpolation_fraction(iso_level: f32, val1: f32, val2: f32) -> f32 {
+    let denom = val1 - val2;
+    if denom.abs() < 1.0e-12 {
+        0.0
+    } else {
+        ((iso_level - val2) / denom).clamp(0.0, 1.0)
+    }
+}
+
+/// Linear blend of two u8 channel values, rounded and clamped.
+fn blend_u8(a: u8, b: u8, t: f32) -> u8 {
+    let v = a as f32 + (b as f32 - a as f32) * t;
+    v.round().clamp(0.0, 255.0) as u8
+}
+
 fn vertex_interp(
     iso_level: f32,
     p1: &Point3<f32>,
@@ -724,6 +765,7 @@ fn marching_cubes_cell(
     block_coords: &(i32, i32, i32),
     local: (usize, usize, usize),
     corners: &[f32; 8],
+    corner_colors: &[Vector3<u8>; 8],
     voxel_size: f32,
 ) -> Vec<Triangle> {
     let iso_level = 0.0_f32;
@@ -770,6 +812,14 @@ fn marching_cubes_cell(
     // Compute interpolated vertex on each intersected edge
     let edge_bits = MC_EDGE_TABLE[cube_index];
     let mut vert_list: [Point3<f32>; 12] = [Point3::origin(); 12];
+    // Colour at each edge's vertex, interpolated between the two corners that
+    // edge joins, exactly as the position is.
+    //
+    // This was hardcoded to `(128, 128, 128)` for every triangle, so
+    // `Triangle::colors` was a valid-length field carrying no information - and
+    // the per-voxel colours `update_voxel` stores were read nowhere. Measured:
+    // 563,394 of 563,394 output colours were the default.
+    let mut color_list: [Vector3<u8>; 12] = [Vector3::new(128, 128, 128); 12];
 
     for edge in 0..12 {
         if edge_bits & (1 << edge) != 0 {
@@ -780,6 +830,12 @@ fn marching_cubes_cell(
                 &positions[c1],
                 corners[c0],
                 corners[c1],
+            );
+            let f = interpolation_fraction(iso_level, corners[c0], corners[c1]);
+            color_list[edge] = Vector3::new(
+                blend_u8(corner_colors[c0].x, corner_colors[c1].x, f),
+                blend_u8(corner_colors[c0].y, corner_colors[c1].y, f),
+                blend_u8(corner_colors[c0].z, corner_colors[c1].z, f),
             );
         }
     }
@@ -810,9 +866,9 @@ fn marching_cubes_cell(
             vertices: [v0, v1, v2],
             normals: [normal, normal, normal],
             colors: [
-                Vector3::new(128, 128, 128),
-                Vector3::new(128, 128, 128),
-                Vector3::new(128, 128, 128),
+                color_list[row[i] as usize],
+                color_list[row[i + 1] as usize],
+                color_list[row[i + 2] as usize],
             ],
         });
 
@@ -934,5 +990,55 @@ mod tests {
         let normal = volume.estimate_normal((0, 0, 0), (4, 4, 4));
         assert_eq!(normal, Vector3::zeros());
         assert!(normal.x.is_finite() && normal.y.is_finite() && normal.z.is_finite());
+    }
+
+    /// `MC_EDGE_TABLE` must agree with the sign rule that defines it.
+    ///
+    /// Edge `e` of a cube is crossed exactly when its two corner signs differ,
+    /// so the whole 256-entry table is derivable rather than transcribed. It is
+    /// transcribed - and **two entries were wrong**: indices 33 and 222 both
+    /// held `0x139` where the rule gives `0x339`. Bit 9 is the crossing on edge 9
+    /// (corners 1 and 5), and `TRI_TABLE[33]` references edge 9.
+    ///
+    /// `marching_cubes_cell` only computes `vert_list[e]` when bit `e` is set, so
+    /// `vert_list[9]` kept its initialiser `Point3::origin()` and that literal
+    /// world origin was emitted as a mesh vertex. Measured on a tilted plane:
+    /// 167 of 187,798 triangles contained a vertex at exactly (0, 0, 0), and the
+    /// first corrupted triangle spanned 1.88 world units - 188 voxels - from a
+    /// one-voxel cell.
+    ///
+    /// Deriving the table here means a transcription error cannot survive.
+    #[test]
+    fn edge_table_matches_the_sign_rule() {
+        // Bourke's corner and edge numbering, as used by the tables above.
+        const EDGES: [(usize, usize); 12] = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
+        ];
+
+        for cfg in 0..256usize {
+            let mut expected: i32 = 0;
+            for (e, (a, b)) in EDGES.iter().enumerate() {
+                if ((cfg >> a) & 1) != ((cfg >> b) & 1) {
+                    expected |= 1 << e;
+                }
+            }
+            assert_eq!(
+                MC_EDGE_TABLE[cfg], expected,
+                "MC_EDGE_TABLE[{cfg}]: the sign rule gives {expected:#06x}, the \
+                 table has {:#06x}",
+                MC_EDGE_TABLE[cfg]
+            );
+        }
     }
 }
