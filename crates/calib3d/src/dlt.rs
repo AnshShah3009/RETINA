@@ -89,6 +89,22 @@ pub fn solve_dlt_homography(src: &[[f64; 2]], dst: &[[f64; 2]]) -> Option<Matrix
         return None;
     }
 
+    // Reject non-finite input *before* the SVD.
+    //
+    // A design matrix built from NaN propagates into LAPACK's bidiagonalisation,
+    // whose convergence test is a comparison - and every comparison against NaN
+    // is false, so it never terminates. `calibrate_camera_planar` feeding this a
+    // single NaN observation did not return at all; it hung the whole workspace
+    // test suite for 360 s.
+    //
+    // Returning `None` is the honest answer: a homography through a point at
+    // infinity does not exist, and the caller already treats `None` as "this
+    // view cannot be used".
+    if src.iter().flatten().any(|v| !v.is_finite()) || dst.iter().flatten().any(|v| !v.is_finite())
+    {
+        return None;
+    }
+
     // 1. Hartley normalisation of both point sets.
     let (t1, n1) = hartley_normalize(src)?;
     let (t2, n2) = hartley_normalize(dst)?;
@@ -166,6 +182,14 @@ pub fn solve_dlt_fundamental(pts1: &[[f64; 2]], pts2: &[[f64; 2]]) -> Option<Mat
         return None;
     }
 
+    // Same exposure as the homography solver: a NaN point set reaches LAPACK's
+    // bidiagonalisation, whose convergence test never becomes true, so the solve
+    // does not return.
+    if pts1.iter().flatten().any(|v| !v.is_finite())
+        || pts2.iter().flatten().any(|v| !v.is_finite())
+    {
+        return None;
+    }
     let (t1, n1) = hartley_normalize(pts1)?;
     let (t2, n2) = hartley_normalize(pts2)?;
 

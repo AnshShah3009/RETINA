@@ -116,10 +116,14 @@ pub fn calibrate_camera_planar_with_options(
             ));
         }
         let obj2d: Vec<Point2<f64>> = obj.iter().map(|p| Point2::new(p.x, p.y)).collect();
+        eprintln!(" {}", homographies.len());
         homographies.push(estimate_homography_dlt(&obj2d, img)?);
+        eprintln!(" {}", homographies.len());
     }
 
+    eprintln!("");
     let k = intrinsics_from_planar_homographies(&homographies)?;
+    eprintln!("");
     let mut fx = k[(0, 0)];
     let mut fy = k[(1, 1)];
     let mut cx = k[(0, 2)];
@@ -520,7 +524,10 @@ pub fn refine_camera_calibration_iterative_with_options(
         .map(|v| v * v)
         .sum::<f64>();
 
-    for _ in 0..max_iters {
+    for _dbg in 0..max_iters {
+        if _dbg % 10 == 0 {
+            eprintln!(" {_dbg}");
+        }
         let r = residuals(&params, n_views);
         let mut j = DMatrix::<f64>::zeros(r.len(), free_indices.len());
         for (col, &pi) in free_indices.iter().enumerate() {
