@@ -73,6 +73,23 @@ pub fn calibrate_hand_eye(
         return None;
     }
 
+    // Non-finite input must be refused before the eigendecomposition.
+    //
+    // `symmetric_eigen` on a matrix containing NaN does not return - the same
+    // LAPACK non-termination as the DLT homography, reached through a different
+    // door. `calibrate_hand_eye` with one NaN entry never returned (killed at
+    // 60 s). The signature is already `Option`, so `None` is the honest answer.
+    for m in r_gripper2base.iter().chain(r_target2cam.iter()) {
+        if !m.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+    }
+    for v in t_gripper2base.iter().chain(t_target2cam.iter()) {
+        if !v.iter().all(|c| c.is_finite()) {
+            return None;
+        }
+    }
+
     // Relative motions for every pose pair satisfy A_ij · X = X · B_ij
     // with X = H_g2c (camera-to-gripper), derived from the fixed chain
     // H_b2t = G_i · X · T_i:

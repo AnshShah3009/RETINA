@@ -34,7 +34,17 @@ pub fn hartley_normalize(pts: &[[f64; 2]]) -> Option<(Matrix3<f64>, Vec<[f64; 2]
         .map(|p| ((p[0] - mean_x).powi(2) + (p[1] - mean_y).powi(2)).sqrt())
         .sum::<f64>()
         / n;
-    if mean_dist <= 1e-12 {
+    // `!mean_dist.is_finite()` is the load-bearing half.
+    //
+    // A NaN coordinate makes `mean_dist` NaN, and `NaN <= 1e-12` is **false** -
+    // so the guard passes and an all-NaN normalisation matrix goes into LAPACK's
+    // SVD, whose convergence test is a comparison that can never become true.
+    // The call then does not return at all: `calibrate_camera_planar` with one
+    // NaN observation was killed at 300 s and again at 120 s, and an 8x9 matrix
+    // with a single NaN did not finish the SVD in 120 s on its own.
+    //
+    // A hang is worse than a wrong answer, because nothing reports it.
+    if !mean_dist.is_finite() || mean_dist <= 1e-12 {
         return None;
     }
 
