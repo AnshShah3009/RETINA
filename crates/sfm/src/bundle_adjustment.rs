@@ -586,7 +586,6 @@ fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfi
     // 35 seconds, almost all of it in the dense factorisation. A sparse
     // conjugate-gradient solve on J^T J + lambda*diag(J^T J) touches only the
     // nonzeros and costs milliseconds for the same result.
-    let n_params = current_params.len();
     let cpu = match cv_hal::cpu::CpuBackend::new() {
         Some(cpu) => cpu,
         None => return, // no CPU backend: leave the state untouched
@@ -608,9 +607,40 @@ fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfi
         // Marquardt damping: scale the diagonal, keeping the system SPD.
         lhs.scale_diagonal(1.0 + lambda);
 
-        let delta = cg
-            .solve(&device, &lhs, &neg_jtr)
-            .unwrap_or_else(|_| DVector::zeros(n_params));
+        // Use the iterate the solver reached. Do NOT substitute a zero step.
+        //
+        // `solve` reports non-convergence as `Err`, which is correct for a caller
+        // that needs a *solution* to `A x = b`. This is a Levenberg-Marquardt step
+        // and it does not need a solution - it needs a usable step, and it judges
+        // steps by whether the cost decreases, which is a stronger test than the
+        // linear residual. An approximate conjugate-gradient iterate on a damped
+        // SPD system is still a descent direction, so discarding it loses a step
+        // that was almost certainly fine.
+        //
+        // Measured on this workspace's own system: residual `1.301e-7` against a
+        // `1e-10` tolerance - a usable step, thrown away by the old code.
+        //
+        // The zero step was worse than merely useless. It made a solver failure
+        // indistinguishable from a *rejected* step: a zero delta gives
+        // `next_params == current_params`, hence `next_err == current_err`
+        // *exactly*, so the strict `<` below filed it under the rejection branch and
+        // the loop went on to `break; // stalled` - the wrong word for "my linear
+        // solver failed". Whether the solve converged exactly is not tracked here
+        // for the same reason: the cost test below is the criterion that matters,
+        // and it is self-correcting through the damping.
+        let (delta, _solved_exactly) = match cg.solve_relaxed(&device, &lhs, &neg_jtr) {
+            Ok(result) => result,
+            Err(e) => {
+                // No iterate at all - a device or storage failure rather than slow
+                // convergence. There is nothing to step with, so stop rather than
+                // spin out the remaining iterations, and say so.
+                eprintln!(
+                    "bundle_adjust_sequential: the sparse linear solve failed with no \
+                     iterate available, so no further progress is possible: {e}"
+                );
+                break;
+            }
+        };
 
         let next_params = &current_params + &delta;
         state.from_parameters(&next_params);

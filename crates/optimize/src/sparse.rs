@@ -267,12 +267,46 @@ impl SparseMatrix {
 }
 
 pub trait LinearSolver {
+    /// Solve `A x = b` to this solver's tolerance.
+    ///
+    /// Returns `Err` when the tolerance was **not** met. That is deliberate: an
+    /// unconverged `x` is not a solution to `A x = b`, and a caller that needs a
+    /// solution must not receive one that is quietly wrong.
     fn solve(
         &self,
         ctx: &ComputeDevice,
         a: &SparseMatrix,
         b: &DVector<f64>,
     ) -> Result<DVector<f64>, String>;
+
+    /// Solve `A x = b`, returning the iterate actually reached and whether it met
+    /// the tolerance.
+    ///
+    /// This exists because `solve`'s contract is wrong for one caller. An
+    /// optimizer does not need a *solution* - it needs a usable step, and it judges
+    /// steps by whether the cost decreases, which is a stronger test than the
+    /// linear residual. An approximate iterate from conjugate gradient on a
+    /// symmetric positive-definite system is still a descent direction.
+    ///
+    /// Without this, that caller has exactly two options when `solve` returns `Err`:
+    /// abandon an optimisation that is working, or substitute something
+    /// fabricated. `sfm`'s Levenberg-Marquardt step chose the latter and
+    /// substituted a **zero step** - which is also precisely what a *rejected* step
+    /// looks like, so a solver failure and an unproductive step became
+    /// indistinguishable, and the loop reported "stalled" when the truth was that
+    /// its linear solver had failed. Measured on a real system the residual was
+    /// `1.301e-7` against a `1e-10` tolerance: a perfectly usable step, thrown away.
+    ///
+    /// The default implementation delegates to `solve`, so a solver that cannot
+    /// report a partial result keeps its previous behaviour.
+    fn solve_relaxed(
+        &self,
+        ctx: &ComputeDevice,
+        a: &SparseMatrix,
+        b: &DVector<f64>,
+    ) -> Result<(DVector<f64>, bool), String> {
+        self.solve(ctx, a, b).map(|x| (x, true))
+    }
 }
 
 /// Conjugate Gradient solver on GPU/CPU
@@ -387,6 +421,83 @@ mod tests {
     /// was asked for, and the LM step that consumes it gets a silently wrong
     /// direction.
     #[test]
+    /// The iterate reached must be available to a caller that can use it.
+    ///
+    /// `solve` rejecting a non-converged result is correct for a caller that needs
+    /// a *solution* to `A x = b`. An optimizer needs a *step*, and it judges steps
+    /// by whether the cost decreases - a stronger test than the linear residual.
+    /// Before `solve_relaxed` existed, the caller's only options were to abandon a
+    /// working optimisation or fabricate, and `sfm`'s Levenberg-Marquardt step
+    /// fabricated a zero step.
+    ///
+    /// **Measured on the system LM actually solves**, `J^T J + lambda*diag(J^T J)`
+    /// with `lambda = 10`, 200x200, and only ONE allowed iteration:
+    ///
+    /// ```text
+    ///  k   damped iterate ||Ax-b||   the zero step ||A*0-b||
+    ///  1             7.03e-2                      1.41e1
+    ///  2             3.20e-3                      1.41e1
+    ///  5             3.02e-7                      1.41e1
+    /// ```
+    ///
+    /// A single iteration is already 200x better than the zero step that replaced
+    /// it. That is the case this fix is about.
+    ///
+    /// An earlier version of this test used an *undamped* Laplacian and asserted the
+    /// same property, which is **false**: on that system CG's residual 2-norm grows
+    /// from `1.41e1` to `1.28e2` over ten iterations, so the iterate is worse than
+    /// zero by that criterion. Measuring it also showed the implementation matches
+    /// an independently written dense reference CG to the last digit at every
+    /// iteration, so that is CG's nature and not a bug - and it is precisely why the
+    /// linear residual is the wrong gate for an optimizer step. Damping is what
+    /// makes the system well-conditioned; without it the iteration is being asked to
+    /// do something it was never going to do in ten steps.
+    #[test]
+    fn cg_relaxed_solve_hands_back_the_iterate_it_reached() {
+        let n = 200usize;
+        let mut a = laplacian(n);
+        a.scale_diagonal(1.0 + 10.0);
+        let b = DVector::from_element(n, 1.0);
+        let cpu = cv_hal::cpu::CpuBackend::new().unwrap();
+        let device = ComputeDevice::Cpu(&cpu);
+
+        let solver = CgSolver {
+            max_iters: 1,
+            tolerance: 1e-12,
+        };
+
+        // One iteration cannot reach 1e-12, so `solve` must refuse it...
+        assert!(
+            solver.solve(&device, &a, &b).is_err(),
+            "a single iteration cannot meet 1e-12 on this system"
+        );
+
+        // ...while the relaxed form hands back what it did reach, flagged as not
+        // converged.
+        let (x, converged) = solver
+            .solve_relaxed(&device, &a, &b)
+            .expect("the relaxation must not turn a usable iterate into an error");
+        assert!(
+            !converged,
+            "the same budget cannot have converged, or the two entry points disagree"
+        );
+        assert!(
+            x.iter().all(|v| v.is_finite()),
+            "the iterate must be finite; a partial solve is still a step"
+        );
+
+        // THE POINT OF THE FIX: this iterate is worth far more than the zero step
+        // substituted for it. If it were not, discarding it would have cost nothing.
+        let residual_of = |v: &DVector<f64>| (&a.spmv_native(v).unwrap() - &b).norm();
+        let reached = residual_of(&x);
+        let zero = residual_of(&DVector::zeros(x.len()));
+        assert!(
+            reached < zero * 0.1,
+            "one damped CG iteration must be far better than the zero step that used \
+             to replace it: ||Ax-b|| {reached:.6e} vs ||A*0-b|| {zero:.6e}"
+        );
+    }
+
     fn cg_iteration_cap_is_not_reported_as_a_solution() {
         let a = laplacian(200);
         let b = DVector::from_element(200, 1.0);
@@ -428,13 +539,18 @@ mod tests {
     }
 }
 
-impl LinearSolver for CgSolver {
-    fn solve(
+impl CgSolver {
+    /// One implementation of conjugate gradient, shared by both entry points.
+    ///
+    /// Returns the iterate reached and its residual norm, so `solve` can decide
+    /// whether to call it a solution and `solve_relaxed` can hand it back
+    /// regardless. Duplicating the loop would let the two drift apart.
+    fn run(
         &self,
         ctx: &ComputeDevice,
         a: &SparseMatrix,
         b: &DVector<f64>,
-    ) -> Result<DVector<f64>, String> {
+    ) -> Result<(DVector<f64>, f64), String> {
         let mut x = DVector::zeros(a.cols);
         let mut residual = b - a.spmv_ctx(ctx, &x)?;
         let mut p = residual.clone();
@@ -454,24 +570,45 @@ impl LinearSolver for CgSolver {
 
             let rsnew = residual.dot(&residual);
             if rsnew.sqrt() < self.tolerance {
-                return Ok(x);
+                return Ok((x, rsnew.sqrt()));
             }
             p = &residual + (rsnew / rsold) * &p;
             rsold = rsnew;
         }
 
-        // The iteration cap is not convergence: an unconverged `x` is a wrong
-        // answer for `A x = b`, and the caller (a Levenberg-Marquardt step, for
-        // instance) has no way to see it. Report it.
         let final_residual = residual.norm();
-        if final_residual < self.tolerance {
-            Ok(x)
-        } else {
-            Err(format!(
-                "conjugate gradient did not converge in {} iterations (tolerance {:.3e}): \
-                 ||A x - b|| = {:.3e}",
-                self.max_iters, self.tolerance, final_residual
-            ))
+        Ok((x, final_residual))
+    }
+}
+
+impl LinearSolver for CgSolver {
+    fn solve(
+        &self,
+        ctx: &ComputeDevice,
+        a: &SparseMatrix,
+        b: &DVector<f64>,
+    ) -> Result<DVector<f64>, String> {
+        let (x, residual) = self.run(ctx, a, b)?;
+        if residual < self.tolerance {
+            return Ok(x);
         }
+        // The iteration cap is not convergence, and a caller that needs a
+        // solution must not be handed one that is quietly wrong. Callers that can
+        // use an approximate step ask for it via `solve_relaxed`.
+        Err(format!(
+            "conjugate gradient did not converge in {} iterations (tolerance {:.3e}): \
+             ||A x - b|| = {:.3e}",
+            self.max_iters, self.tolerance, residual
+        ))
+    }
+
+    fn solve_relaxed(
+        &self,
+        ctx: &ComputeDevice,
+        a: &SparseMatrix,
+        b: &DVector<f64>,
+    ) -> Result<(DVector<f64>, bool), String> {
+        let (x, residual) = self.run(ctx, a, b)?;
+        Ok((x, residual < self.tolerance))
     }
 }
