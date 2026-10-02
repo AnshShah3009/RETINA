@@ -54,7 +54,6 @@ fn mk(v: Vec<f32>, c: usize, h: usize, w: usize) -> CpuTensor<f32> {
     Tensor::from_vec(v, TensorShape::new(c, h, w)).unwrap()
 }
 
-
 /// Assert CPU and GPU agree within `tol`.
 ///
 /// Added because these tests previously only *printed* the difference. They are

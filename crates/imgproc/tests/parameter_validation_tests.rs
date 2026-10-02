@@ -13,7 +13,9 @@
 
 use cv_core::{CpuTensor, TensorShape};
 use cv_imgproc::convolve::BorderMode;
-use cv_imgproc::distance_transform::{distance_transform, distance_transform_with_labels, DistanceType};
+use cv_imgproc::distance_transform::{
+    distance_transform, distance_transform_with_labels, DistanceType,
+};
 use cv_imgproc::edges::sobel_ex;
 use cv_imgproc::hough::{hough_lines, hough_lines_p};
 use cv_imgproc::local_threshold::{local_threshold, LocalThresholdMethod};
@@ -141,8 +143,8 @@ fn defect02_sobel_ex_unsupported_ksize_is_rejected() {
     let img = step_image(32);
 
     // CONTROL: ksize = 3 works exactly as before.
-    let k3 = sobel_ex(&img, 1, 0, 3, 1.0, 0.0, BorderMode::Replicate)
-        .expect("ksize = 3 is supported");
+    let k3 =
+        sobel_ex(&img, 1, 0, 3, 1.0, 0.0, BorderMode::Replicate).expect("ksize = 3 is supported");
     assert_eq!(k3.width(), 32);
     assert_eq!(k3.height(), 32);
     assert!(

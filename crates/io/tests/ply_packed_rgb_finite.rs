@@ -158,10 +158,7 @@ fn the_inf_literal_is_still_a_colour() {
 #[test]
 fn control_a_nan_literal_loses_its_payload_in_ascii() {
     for &packed in &[0x7FFF_0000u32, 0xFFFF_0000] {
-        let cloud = read_one(
-            &format!("nan_{packed:08x}"),
-            &packed_rgb_ply(packed),
-        );
+        let cloud = read_one(&format!("nan_{packed:08x}"), &packed_rgb_ply(packed));
         let c = cloud.colors.as_ref().expect("colours were declared")[0];
         // 0x7fc00000: R = 0xC0, G = 0, B = 0.
         let want = [0xC0u8 as f32 / 255.0, 0.0, 0.0];
