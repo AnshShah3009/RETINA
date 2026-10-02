@@ -283,6 +283,67 @@ a crash that does not happen.
   recovered translation direction is near-degenerate on that synthetic scene and
   the assertion fails intermittently. Pre-existing, and left alone here.
 
+## CONFIRMED, NOT YET FIXED: the LM step discards the solver's own failure report
+
+Two halves of an intent mismatch, both readable in the code but in *different*
+crates, which is why neither side looks wrong on its own.
+
+`CgSolver::solve` was deliberately written to report non-convergence, and its
+comment says why, naming this exact caller:
+
+> The iteration cap is not convergence: an unconverged `x` is a wrong answer for
+> `A x = b`, and the caller (a Levenberg-Marquardt step, for instance) has no way
+> to see it. Report it.
+
+The Levenberg-Marquardt step does not see it:
+
+```rust
+let delta = cg.solve(&device, &lhs, &neg_jtr)
+    .unwrap_or_else(|_| DVector::zeros(n_params));
+```
+
+So the report is thrown away and replaced by a **zero step**. Because `delta` is
+zero, `next_params == current_params` and therefore `next_err == current_err`
+*exactly*, so the strict `next_err < current_err` test classifies it as a
+**rejected step** — the same branch a legitimate LM rejection takes. The loop then
+increases damping and retries, up to 12 times, and exits with
+
+```rust
+if rejections >= 12 || !lambda.is_finite() {
+    break; // stalled: keep best parameters
+}
+```
+
+`stalled` is the wrong word for "the linear system never solved", and the code has
+no way to tell the two apart. The observable outcome is that bundle adjustment
+runs, makes no progress, and returns un-optimised parameters as though it had
+converged — the caller cannot see it, because `bundle_adjust` returns `()`.
+
+There is a second, subtler consequence. `bundle_adjust` documents an explicit
+fallback for solver failure:
+
+```rust
+if bundle_adjust_ctx(state, config, &group) { return; }
+// Ctx path unavailable (no compute device / solver failure):
+// fall through to the sequential CPU implementation.
+```
+
+`bundle_adjust_ctx` maps `Err` to `false` for exactly that reason. But an inner
+solve failure never reaches `Err`, because the LM step absorbed it — so the
+fallback that exists for this case **never fires**, and the caller keeps the
+un-optimised result instead of retrying on the CPU.
+
+Both `CgSolver::solve` and `SparseLMSolver::minimize` live in `cv-optimize`, and
+`bundle_adjust_sequential` in `sfm` repeats the same `unwrap_or_else(zeros)`.
+Confirmed by reading both sides; **not yet fixed**, because the two files were
+owned by a concurrent agent. The fix needs a deliberate decision, because the
+sequential path has no channel: `bundle_adjust` returns `()`.
+
+Worth noting as *checked and clean*: a zero `delta` cannot fake convergence. The
+`delta.norm() < convergence_threshold` break lives inside the `next_err <
+current_err` branch, and a zero delta makes that test false, so it is unreachable
+from a failed solve.
+
 ## Two claims I made that measurement disproved
 
 Recorded because the corrections are the substance, and because both errors
