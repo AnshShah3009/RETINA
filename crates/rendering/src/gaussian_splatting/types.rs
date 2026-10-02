@@ -140,7 +140,9 @@ impl Gaussian {
         Self {
             position,
             scale: scale.map(|s| s.max(0.0001)),
-            rotation: rotation.normalize(),
+            // Not `rotation.normalize()`: that divides by zero for a zero
+            // quaternion and stores NaN in a public field. See `unit_quaternion`.
+            rotation: Self::unit_quaternion(&rotation),
             opacity,
             spherical_harmonics: SphericalHarmonics::from_dc(color),
             features: Vector3::zeros(),
@@ -161,8 +163,41 @@ impl Gaussian {
         Matrix3::from_diagonal(&self.scale)
     }
 
+    /// The stored rotation as a unit quaternion, or the identity when it specifies
+    /// no rotation.
+    ///
+    /// **`rotation` is a public field**, so a non-unit quaternion is reachable
+    /// without going through `Gaussian::new` — a deserialised file, or a field
+    /// overwritten directly, which is the same reachability argument
+    /// `inverse_covariance` documents. The matrix formula below is the *unit* form:
+    /// fed a quaternion of norm 2 it produced a matrix of determinant **10.08**
+    /// instead of 1, and a covariance 16x too large, with nothing to indicate it. A
+    /// slightly denormalised quaternion (norm 0.9999) is benign by comparison, which
+    /// is why this survived: the error grows as the square of the norm.
+    ///
+    /// Normalising is not a repair of bad input. A quaternion and any positive
+    /// multiple of it denote the **same** rotation, so the normalised value is what
+    /// the caller meant, and this is a derivation rather than a guess.
+    ///
+    /// A quaternion of norm zero denotes no rotation at all, and `normalize()` on it
+    /// divides by zero and returns NaN — which propagates through the covariance into
+    /// the tile. There is no rotation to derive from it, so the identity is used.
+    /// That one *is* a choice rather than a derivation, and it is the only such
+    /// substitution here.
+    fn unit_quaternion(q: &Vector4<f32>) -> Vector4<f32> {
+        let n = q.norm();
+        if n.is_finite() && n > 0.0 {
+            q / n
+        } else {
+            Vector4::new(0.0, 0.0, 0.0, 1.0)
+        }
+    }
+
     pub fn rotation_matrix(&self) -> Matrix3<f32> {
-        let q = &self.rotation;
+        // Normalised here, not merely in the constructor: `rotation` is public, and
+        // the formula below is only a rotation for a unit quaternion. See
+        // `unit_quaternion`.
+        let q = Self::unit_quaternion(&self.rotation);
         let x = q[0];
         let y = q[1];
         let z = q[2];

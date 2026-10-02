@@ -141,8 +141,19 @@ pub fn write_ply_gaussian_cloud<P: AsRef<Path>>(
     writeln!(file, "end_header").map_err(|e| e.to_string())?;
 
     for gaussian in &cloud.gaussians {
-        let log_opacity =
-            ((1.0 - gaussian.opacity.max(0.0001)) / gaussian.opacity.max(0.0001)).ln();
+        // Opacity is stored as its logit, `ln(p / (1 - p))`, and the reader applies
+        // `sigmoid` to it. The fraction here used to be **inverted** -
+        // `ln((1 - p) / p)`, which is the logit of `1 - p` - so `sigmoid` returned
+        // `1 - p` and the round trip silently complemented the opacity. Measured:
+        // `0.1 -> 0.9` and `0.9 -> 0.1` through both the file and string forms.
+        // `0.5` round-tripped correctly, because `1 - 0.5 == 0.5`, which is why a
+        // test at the midpoint alone would have missed it entirely.
+        //
+        // Clamped strictly inside (0, 1) because the logit is undefined at the
+        // endpoints: `p = 1.0` would give `ln(inf)`. The reader's `sigmoid` accepts
+        // any finite value, so a clamp on the writer is the right place for it.
+        let clamped = gaussian.opacity.clamp(1e-4, 1.0 - 1e-4);
+        let log_opacity = (clamped / (1.0 - clamped)).ln();
         let log_scale0 = gaussian.scale.x.ln();
         let log_scale1 = gaussian.scale.y.ln();
         let log_scale2 = gaussian.scale.z.ln();
@@ -202,8 +213,19 @@ pub fn gaussian_cloud_to_ply_string(cloud: &GaussianCloud) -> String {
     output.push_str("end_header\n");
 
     for gaussian in &cloud.gaussians {
-        let log_opacity =
-            ((1.0 - gaussian.opacity.max(0.0001)) / gaussian.opacity.max(0.0001)).ln();
+        // Opacity is stored as its logit, `ln(p / (1 - p))`, and the reader applies
+        // `sigmoid` to it. The fraction here used to be **inverted** -
+        // `ln((1 - p) / p)`, which is the logit of `1 - p` - so `sigmoid` returned
+        // `1 - p` and the round trip silently complemented the opacity. Measured:
+        // `0.1 -> 0.9` and `0.9 -> 0.1` through both the file and string forms.
+        // `0.5` round-tripped correctly, because `1 - 0.5 == 0.5`, which is why a
+        // test at the midpoint alone would have missed it entirely.
+        //
+        // Clamped strictly inside (0, 1) because the logit is undefined at the
+        // endpoints: `p = 1.0` would give `ln(inf)`. The reader's `sigmoid` accepts
+        // any finite value, so a clamp on the writer is the right place for it.
+        let clamped = gaussian.opacity.clamp(1e-4, 1.0 - 1e-4);
+        let log_opacity = (clamped / (1.0 - clamped)).ln();
         let log_scale0 = gaussian.scale.x.ln();
         let log_scale1 = gaussian.scale.y.ln();
         let log_scale2 = gaussian.scale.z.ln();
