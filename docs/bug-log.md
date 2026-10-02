@@ -283,6 +283,44 @@ a crash that does not happen.
   recovered translation direction is near-degenerate on that synthetic scene and
   the assertion fails intermittently. Pre-existing, and left alone here.
 
+## Turning the probes into tests, and what that immediately found
+
+`tests/gpu_parity_tests.rs` carried eleven `probe_*` tests that computed a CPU/GPU
+difference and **printed** it. Not one asserted. The file header calls this
+"visible rather than silent", but visibility needs a human reading output — so all
+eleven passed unconditionally, and the bug log's credit to this file as the
+evidence that found the multichannel-blur, stereo-compile and LBVH defects was
+misplaced: those were found by *reading printed numbers by hand*.
+
+Eight are now assertions. **The first thing that did was find a live divergence:**
+the CPU stereo matcher left border pixels at `0.0` while the GPU shader writes
+`-1.0`. Nothing downstream broke — `disparity_to_depth` filters `d < 0.5`, which
+catches both — but a caller reading the raw map cannot tell a border from a real
+zero-disparity match.
+
+Two more needed judgement rather than mechanical conversion, and both are the kind
+of thing that goes wrong quietly:
+
+- **`pyramid_down` is a genuine algorithmic divergence.** The CPU subsamples at
+  even offsets after a blur; the GPU runs a full bilinear `resize`. Different
+  filters. On uniform random noise they differ by ~55%, which measures the noise
+  rather than either implementation, so the probe now uses a smooth ramp where the
+  number means something — and it still differs, so it is still asserted.
+- **`GrayToRgb` is simply unimplemented on the GPU.** My first attempt turned that
+  into a panic, which would have made a known-missing feature look like a
+  regression. It now asserts only that the failure is `Not supported`.
+
+A static test also replaces a check that could never have worked: `every_shader_compiles`
+calls `create_shader_module`, which performs **no layout derivation**, and covered
+only `crates/hal/shaders/*` while every offending file was under `src/gpu_kernels/`.
+The new `hal/tests/shader_bindings_limits.rs` parses the WGSL, builds the call
+graph, and asserts no entry point *reaches* more than 4 storage buffers — which is
+what the device limit applies to. Verified by re-injecting three reachable bindings
+into a fixed shader: the test fails, and passes again once reverted.
+
+Also replaced `test_device_not_found_error`, which bound `default_cpu()` to `_` and
+asserted nothing.
+
 ## What a parallel audit found, and what it got wrong
 
 Eight agents swept the tree by crate. Every finding below was re-verified by hand
