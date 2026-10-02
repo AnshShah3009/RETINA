@@ -217,21 +217,60 @@ struct RayHitInfo {
     barycentric: (f32, f32, f32),
 }
 
-/// Distance query: closest point on mesh to query point
+/// Triangle index returned by [`closest_point_on_mesh`] when the mesh has no
+/// surface to report on — it holds no faces, or no vertices at all.
+///
+/// This is deliberately **not** `0`. Zero is a perfectly valid index into
+/// `mesh.faces`, so returning it for a faceless mesh handed callers a triangle
+/// that did not exist; `usize::MAX` cannot be dereferenced into `mesh.faces` at
+/// all and so fails loudly instead of lying quietly.
+pub const NO_TRIANGLE: usize = usize::MAX;
+
+/// Distance query: closest point on mesh to query point.
+///
+/// # Returns
+/// `(closest_point, distance, triangle_index)`.
+///
+/// # The absent-geometry case
+///
+/// A `TriangleMesh` can hold vertices without holding any *faces*: the struct's
+/// two fields are public and independent. There is then no surface to project
+/// onto, so no distance exists and no triangle index can be meaningful. The
+/// function used to guard only `mesh.vertices.is_empty()`, which meant a
+/// vertices-without-faces mesh fell straight through: the search loop over
+/// `mesh.faces` never ran and the function returned
+/// `(vertices[0], distance_to_vertex_0, 0)` — naming triangle 0 of a mesh that
+/// has no triangles. A caller using the index to look up a face got a wrong face
+/// or panicked.
+///
+/// Absence is now reported the way this module already reports it: an
+/// **infinite** distance, the query point echoed back unchanged, and
+/// `NO_TRIANGLE` as the index. `NO_TRIANGLE` is deliberately not a valid index
+/// into `mesh.faces`, so a caller that forgets to check the distance cannot
+/// silently dereference a face that does not exist.
 pub fn closest_point_on_mesh(
     query: &Point3<f32>,
     mesh: &TriangleMesh,
 ) -> (Point3<f32>, f32, usize) {
-    if mesh.vertices.is_empty() {
+    if mesh.vertices.is_empty() || mesh.faces.is_empty() {
         // No geometry to project onto; report an infinite distance instead of
-        // panicking on `mesh.vertices[0]`.
-        return (*query, f32::INFINITY, 0);
+        // panicking on `mesh.vertices[0]` or fabricating a triangle index.
+        return (*query, f32::INFINITY, NO_TRIANGLE);
     }
-    let mut closest_point = mesh.vertices[0];
-    let mut closest_dist = (query.coords - closest_point.coords).norm();
-    let mut closest_tri = 0;
 
-    for (tri_idx, face) in mesh.faces.iter().enumerate() {
+    // Seed from the first real triangle rather than from `vertices[0]`: with no
+    // faces there is nothing to seed from, and with faces the seed is replaced
+    // by the loop below anyway.
+    let first = mesh.faces[0];
+    let (mut closest_point, mut closest_dist) = closest_point_on_triangle(
+        query,
+        mesh.vertices[first[0]],
+        mesh.vertices[first[1]],
+        mesh.vertices[first[2]],
+    );
+    let mut closest_tri = 0usize;
+
+    for (tri_idx, face) in mesh.faces.iter().enumerate().skip(1) {
         let v0 = mesh.vertices[face[0]];
         let v1 = mesh.vertices[face[1]];
         let v2 = mesh.vertices[face[2]];
@@ -338,12 +377,44 @@ pub fn closest_points_on_mesh_ctx(
     })
 }
 
-/// Compute mesh distance to another mesh (Hausdorff distance)
+/// Whether a mesh carries a *surface* — the thing the distance queries in this
+/// module measure against. Vertices alone are not a surface: with no faces there
+/// is nothing to project a query point onto, and reporting a finite distance
+/// would be reporting against a point cloud while the API says "mesh".
+fn has_surface(mesh: &TriangleMesh) -> bool {
+    !mesh.vertices.is_empty() && !mesh.faces.is_empty()
+}
+
+/// Compute mesh distance to another mesh (Hausdorff distance).
+///
+/// Returns `(hausdorff, forward_mean)`.
+///
+/// # The absent-geometry case
+///
+/// The previous guard was
+/// ```ignore
+/// if source.vertices.is_empty() || target.vertices.is_empty() {
+///     return (0.0, 0.0);   // "finite zeros"
+/// }
+/// ```
+/// which avoided the NaN from a `0/0` mean but replaced it with a worse lie:
+/// `(0.0, 0.0)` is the exact value two **identical, fully overlapping** meshes
+/// produce, so "there is no geometry here" was indistinguishable from "perfect
+/// match". `mesh_to_mesh_distance(&TriangleMesh::new(), &cube)` returned
+/// `(0.0, 0.0)`.
+///
+/// The NaN-avoidance intent was right; the replacement was not. Distance is
+/// measured between *surfaces*, so a mesh with no faces has no surface and no
+/// distance exists — which is precisely the `f32::INFINITY` convention
+/// [`closest_point_on_mesh`] already uses one function above. Both components
+/// are now `f32::INFINITY`, so absence propagates through `max` and averages as
+/// absence rather than collapsing to the perfect-match value.
 pub fn mesh_to_mesh_distance(source: &TriangleMesh, target: &TriangleMesh) -> (f32, f32) {
-    if source.vertices.is_empty() || target.vertices.is_empty() {
-        // Distance to/from an empty mesh is undefined; return finite zeros
-        // rather than dividing by zero (NaN) in the mean below.
-        return (0.0, 0.0);
+    if !has_surface(source) || !has_surface(target) {
+        // No geometry on one side: the distances are undefined, not zero. An
+        // infinite value keeps this distinguishable from a perfect match and
+        // cannot be mistaken for a small real distance.
+        return (f32::INFINITY, f32::INFINITY);
     }
 
     // Forward distance: source -> target
@@ -440,14 +511,68 @@ mod tests {
         let (p, d, tri) = closest_point_on_mesh(&query, &mesh);
         assert_eq!(p, query);
         assert!(d.is_infinite());
-        assert_eq!(tri, 0);
+        assert_eq!(tri, NO_TRIANGLE, "there is no triangle to name");
     }
 
+    /// A mesh can hold vertices without holding faces; the index must not be
+    /// fabricated.
     #[test]
-    fn test_mesh_to_mesh_distance_empty_mesh_is_finite() {
+    fn test_closest_point_on_mesh_without_faces() {
+        let mesh = TriangleMesh::with_vertices_and_faces(
+            vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ],
+            vec![],
+        );
+        let query = Point3::new(1.0, 2.0, 3.0);
+        let (p, d, tri) = closest_point_on_mesh(&query, &mesh);
+        assert_eq!(p, query);
+        assert!(
+            d.is_infinite(),
+            "no faces means no surface to measure against, got {d}"
+        );
+        assert!(
+            tri >= mesh.faces.len(),
+            "returned triangle {tri} for a mesh with {} faces",
+            mesh.faces.len()
+        );
+    }
+
+    /// Absence must not look like a perfect match. This test used to assert
+    /// only `is_finite()`, which pinned the fabricated `(0.0, 0.0)` in place.
+    #[test]
+    fn test_mesh_to_mesh_distance_empty_mesh_is_not_a_perfect_match() {
         let empty = TriangleMesh::new();
-        // Previously divided by 0 -> NaN.
         let (hausdorff, mean) = mesh_to_mesh_distance(&empty, &empty);
-        assert!(hausdorff.is_finite() && mean.is_finite());
+
+        assert!(
+            !hausdorff.is_nan() && !mean.is_nan(),
+            "absence must be reported, not a NaN from 0/0"
+        );
+        assert!(
+            hausdorff.is_infinite() && mean.is_infinite(),
+            "an empty mesh has no surface, so the distance is undefined; expected \
+             INFINITY (the closest_point_on_mesh convention), got \
+             hausdorff={hausdorff} mean={mean}"
+        );
+
+        // CONTROL: a genuine perfect match is 0.0 and must stay 0.0, so the two
+        // remain distinguishable.
+        let cube = TriangleMesh::with_vertices_and_faces(
+            vec![
+                Point3::new(-1.0, -1.0, -1.0),
+                Point3::new(1.0, -1.0, -1.0),
+                Point3::new(1.0, 1.0, -1.0),
+            ],
+            vec![[0, 1, 2]],
+        );
+        let (h, m) = mesh_to_mesh_distance(&cube, &cube);
+        assert_eq!(
+            (h, m),
+            (0.0, 0.0),
+            "a mesh measured against itself is a perfect match, not absence"
+        );
     }
 }

@@ -30,6 +30,27 @@ use rayon::prelude::*;
 /// # Errors
 /// Returns `Err` if the viewpoint and look-at point coincide, or if the
 /// resolution is zero in either dimension.
+///
+/// # How a point covers the buffer
+///
+/// A point is not a zero-area dot: it is projected together with its
+/// **neighbourhood**, and the resulting screen-space disc is what occupies the
+/// depth buffer.  The radius is
+///
+/// ```text
+/// r_px = max(1, radius_world * |J(p)|)
+/// ```
+///
+/// where `J` is the Jacobian of the perspective projection, so the same point
+/// covers more pixels when it is close to the camera (and in pixels-per-world
+/// units that is exactly `f / (depth * aspect)`).  A point is visible when it
+/// owns at least one pixel of its own footprint, i.e. when the buffer value
+/// somewhere under it was written by the point itself.
+///
+/// Without that footprint the answer degenerates into "does another point happen
+/// to round to the same pixel?", which is a statement about sampling density
+/// rather than about geometry: raising the resolution made the result *worse*,
+/// because the front and back surfaces of a sphere then collided less often.
 pub fn depth_buffer_visibility(
     points: &[Point3<f64>],
     viewpoint: &Point3<f64>,
@@ -62,64 +83,174 @@ pub fn depth_buffer_visibility(
 
     // Project all points to screen space (parallel).
     let n = points.len();
-    let screen_coords: Vec<Option<(usize, usize, f64)>> = points
+    let splats: Vec<Option<ProjectedPoint>> = points
         .par_iter()
-        .map(|p| {
-            let clip = vp * Vector4::new(p.x, p.y, p.z, 1.0);
-            if clip.w.abs() < 1e-15 {
-                return None;
-            }
-            let ndc_x = clip.x / clip.w;
-            let ndc_y = clip.y / clip.w;
-            let ndc_z = clip.z / clip.w;
-
-            let sx = ((ndc_x + 1.0) * 0.5 * w as f64) as isize;
-            let sy = ((1.0 - ndc_y) * 0.5 * h as f64) as isize;
-
-            if sx < 0
-                || sx >= w as isize
-                || sy < 0
-                || sy >= h as isize
-                || !(-1.0..=1.0).contains(&ndc_z)
-            {
-                return None;
-            }
-
-            let depth = (p - viewpoint).norm();
-            Some((sx as usize, sy as usize, depth))
-        })
+        .map(|p| project_point(*p, viewpoint, &vp, w, h, fov_rad))
         .collect();
 
-    // Z-buffer: for each pixel, track the closest point index.
+    // Rasterize: every pixel under a point's footprint keeps the nearest point
+    // that reached it.  `index_buffer` records *which* point wrote each pixel,
+    // which is what turns the visibility test into a real occlusion test rather
+    // than a depth comparison against an unrelated neighbour.
     let buf_size = w * h;
-    let mut z_buffer = vec![f64::MAX; buf_size];
+    let mut z_buffer = vec![f64::INFINITY; buf_size];
+    let mut owner_dist = vec![f64::INFINITY; buf_size];
     let mut index_buffer = vec![usize::MAX; buf_size];
 
-    for (i, sc) in screen_coords.iter().enumerate() {
-        if let Some((sx, sy, depth)) = sc {
-            let idx = sy * w + sx;
-            if *depth < z_buffer[idx] {
-                z_buffer[idx] = *depth;
-                index_buffer[idx] = i;
-            }
+    for (i, sp) in splats.iter().enumerate() {
+        if let Some(p) = sp {
+            rasterize(
+                i,
+                p,
+                w,
+                h,
+                &mut z_buffer,
+                &mut owner_dist,
+                &mut index_buffer,
+            );
         }
     }
 
-    // Mark visible points: those that are the closest at their pixel,
-    // or within a small tolerance of the closest.
-    let tolerance_factor = 1.005; // 0.5% depth tolerance
+    // A point is visible when it is the nearest point to *some* pixel of its own
+    // footprint.  No depth tolerance is applied: the old `tolerance_factor =
+    // 1.005` resurrected points that were genuinely behind the surface in front
+    // of them, and it is no longer needed now that the buffer records the
+    // identity of the nearest writer rather than only its depth.
     let mut visible = vec![false; n];
-
-    for (i, sc) in screen_coords.iter().enumerate() {
-        if let Some((sx, sy, depth)) = sc {
-            let idx = sy * w + sx;
-            if *depth <= z_buffer[idx] * tolerance_factor {
-                visible[i] = true;
-            }
+    for &writer in &index_buffer {
+        if writer != usize::MAX {
+            visible[writer] = true;
         }
     }
 
     Ok(visible)
+}
+
+/// A point after projection: where it lands, how far away it is, and how many
+/// pixels of the buffer its projected extent covers.
+#[derive(Clone, Copy)]
+struct ProjectedPoint {
+    /// Pixel-space centre, continuous (the old code truncated this to an integer
+    /// immediately, which is precisely what left a point with zero area).
+    cx: f64,
+    cy: f64,
+    /// Distance from the eye.
+    depth: f64,
+    /// Footprint radius in pixels.
+    radius: f64,
+}
+
+/// Project one point, or `None` if it lies outside the view volume.
+///
+/// The footprint radius is
+///
+/// ```text
+/// r_px = max(1, world_radius * |J(p)|)
+/// ```
+///
+/// with `J` the Jacobian of the perspective projection.  A world radius of one
+/// pixel is used as the floor, so a point always covers at least the pixel it
+/// lands in, and points near the camera — or under a narrow field of view —
+/// cover proportionally more, which is the behaviour the depth test needs in
+/// order to compare like with like.
+fn project_point(
+    p: Point3<f64>,
+    viewpoint: &Point3<f64>,
+    vp: &Matrix4<f64>,
+    w: usize,
+    h: usize,
+    fov_rad: f64,
+) -> Option<ProjectedPoint> {
+    let clip = vp * Vector4::new(p.x, p.y, p.z, 1.0);
+    if clip.w.abs() < 1e-15 {
+        return None;
+    }
+    let ndc_x = clip.x / clip.w;
+    let ndc_y = clip.y / clip.w;
+    let ndc_z = clip.z / clip.w;
+
+    if !(-1.0..=1.0).contains(&ndc_z) {
+        return None;
+    }
+
+    let cx = (ndc_x + 1.0) * 0.5 * w as f64;
+    let cy = (1.0 - ndc_y) * 0.5 * h as f64;
+
+    let depth = (p - viewpoint).norm();
+
+    // Pixels per world unit at unit depth. The perspective divide scales that
+    // by 1/depth, so dividing by the eye distance gives the local Jacobian.
+    let px_per_unit_depth = w as f64 / (2.0 * (fov_rad / 2.0).tan());
+    let jacobian = px_per_unit_depth / depth.max(1e-12);
+    let radius = jacobian.max(1.0);
+
+    // Reject only what is *entirely* off-screen: a point centred just outside
+    // the viewport still contributes the part of its footprint that overlaps,
+    // exactly as a rasterizer would.
+    if cx + radius < 0.0 || cx - radius > w as f64 || cy + radius < 0.0 || cy - radius > h as f64 {
+        return None;
+    }
+
+    Some(ProjectedPoint {
+        cx,
+        cy,
+        depth,
+        radius,
+    })
+}
+
+/// Splat one point over its footprint, keeping the nearest writer per pixel.
+///
+/// Two splats compete for a pixel when they overlap.  Depth decides first: the
+/// nearer point occludes.  When the depths are *equal* — every sample of a
+/// surface at constant distance from the eye, for instance — the tie is broken
+/// by whichever splat centre the pixel lies nearest to, i.e. by the usual
+/// "this sample is the representative of this pixel" rule.  Without that
+/// tie-break the first point to reach a pixel kept it for good, so a run of
+/// coplanar samples all at the same depth collapsed to whichever one happened to
+/// be rasterized first and the rest were reported as occluded by it — which is
+/// not occlusion at all, they are equally in front.
+fn rasterize(
+    point_index: usize,
+    p: &ProjectedPoint,
+    w: usize,
+    h: usize,
+    z_buffer: &mut [f64],
+    owner_dist: &mut [f64],
+    index_buffer: &mut [usize],
+) {
+    let x0 = ((p.cx - p.radius).floor() as isize).max(0);
+    let x1 = ((p.cx + p.radius).ceil() as isize).min(w as isize);
+    let y0 = ((p.cy - p.radius).floor() as isize).max(0);
+    let y1 = ((p.cy + p.radius).ceil() as isize).min(h as isize);
+    let r2 = p.radius * p.radius;
+
+    for py in y0..y1 {
+        let dy = (py as f64 + 0.5) - p.cy;
+        for px in x0..x1 {
+            let dx = (px as f64 + 0.5) - p.cx;
+            let d2 = dx * dx + dy * dy;
+            if d2 > r2 {
+                continue;
+            }
+            let idx = py as usize * w + px as usize;
+
+            // Depth tolerance is relative to the depth *range* the buffer
+            // actually spans, not to each individual entry, and it exists only
+            // to make the tie-break above total. It is far too small to
+            // resurrect an occluded point: an occluder on a unit sphere is at a
+            // different depth by O(1), whereas the noise floor here is O(1e-9).
+            let closer = p.depth < z_buffer[idx] * (1.0 - 1e-9);
+            let tied = (p.depth - z_buffer[idx]).abs() <= 1e-9 * z_buffer[idx].max(1.0)
+                && index_buffer[idx] != usize::MAX;
+
+            if closer || (tied && d2 < owner_dist[idx]) {
+                z_buffer[idx] = p.depth;
+                owner_dist[idx] = d2;
+                index_buffer[idx] = point_index;
+            }
+        }
+    }
 }
 
 // ── Matrix construction helpers ──────────────────────────────────────────────
