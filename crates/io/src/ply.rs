@@ -18,19 +18,39 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     let mut num_vertices = 0usize;
     // Vertex properties in declared order — PLY allows any property order,
     // so data must be indexed by name rather than assumed position.
-    /// Property names in declared order, with whether each is a `list` and
-    /// whether it is declared as an integer type.
-    ///
-    /// The integer flag is what makes colour normalisation exact. A colour
-    /// property declared `uchar` holds a byte 0..255 and must be divided by 255;
-    /// one declared `float` already holds 0..1 and must not be. Guessing from
-    /// the value instead cannot distinguish the two: a byte value of `1` is a
-    /// legitimate near-black (`1/255`) and is also what an already-normalised
-    /// `1.0` looks like, so the reader called near-black white.
+    //
+    // Each entry is the property name, whether it is a `list`, and whether it is
+    // declared as an integer type.
+    //
+    // The integer flag is what makes colour normalisation exact. A colour
+    // property declared `uchar` holds a byte 0..255 and must be divided by 255;
+    // one declared `float` already holds 0..1 and must not be. Guessing from
+    // the value instead cannot distinguish the two: a byte value of `1` is a
+    // legitimate near-black (`1/255`) and is also what an already-normalised
+    // `1.0` looks like, so the reader called near-black white.
+    //
+    // This is the *working* set: it is flushed at every element boundary.
     let mut props: Vec<(String, bool, bool)> = Vec::new();
-    // Whether the header declared an element after the vertices, meaning the
-    // body must not be read past the vertex count.
-    let mut vertex_block_ends = false;
+    // The working property set is flushed on every element boundary, so this
+    // holds the *vertex* element's properties — the ones the body is read
+    // against — even when a face element is declared after them.
+    let mut vertex_props: Vec<(String, bool, bool)> = Vec::new();
+    // Body rows belonging to elements declared *before* the vertex element.
+    //
+    // PLY writes one block per element, in header order, so the body does not
+    // start at the vertices: if `element face 2` precedes `element vertex 2`,
+    // the first two rows are faces. Without this the body loop read `3 0 0 1`
+    // as a vertex - a face row's first three integers are shaped exactly like
+    // coordinates - and the real vertex block was never read at all. Measured:
+    // `Ok`, 2 points, `[[3,0,0],[3,0,1]]` where `[[1,2,3],[4,5,6]]` was the
+    // file. Total data loss, reported as success.
+    let mut rows_before_vertex: usize = 0;
+    // Rows of the element currently being described, summed into
+    // `rows_before_vertex` when the header moves on to the next element.
+    let mut current_rows: usize = 0;
+    // Counts of any further `element vertex` blocks, added to the first so the
+    // body still has to satisfy every vertex element the header declares.
+    let mut vertex_blocks_after: usize = 0;
     let mut in_vertex_element = false;
 
     while in_header {
@@ -47,28 +67,57 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
                 .ok_or_else(|| Error::ParseError("Invalid format line".to_string()))?
                 .to_string();
         } else if line.starts_with("element ") {
-            // A new element switches the property scope; only vertex
-            // properties are relevant here. A face element also *ends* the
-            // vertex block, and the body must stop there: PLY writes one block
-            // per element in header order, so the rows after the vertices belong
-            // to the faces. Without this the loop reads `3 0 0 1` as another
-            // vertex, and since a face row's first three integers are shaped
-            // exactly like coordinates, it was accepted silently.
-            if in_vertex_element && !line.starts_with("element vertex") {
-                vertex_block_ends = true;
+            // A new element closes the previous one: its properties leave the
+            // vertex column set, so two `element vertex` blocks no longer union
+            // theirs and a face property can no longer be found by the x/y/z
+            // search. If the previous element was itself a vertex element its
+            // rows are already part of `num_vertices` and are not prepended.
+            if !in_vertex_element {
+                rows_before_vertex = rows_before_vertex.saturating_add(current_rows);
             }
-            in_vertex_element = line.starts_with("element vertex");
             if in_vertex_element {
-                num_vertices = line
-                    .split_whitespace()
-                    .nth(2)
+                // Hand the vertex columns over before the working set is
+                // emptied. The body is read against the vertex element's own
+                // properties, so a later `element face` must not take them away.
+                vertex_props = std::mem::take(&mut props);
+            }
+            props.clear();
+
+            let mut parts = line.split_whitespace();
+            let _keyword = parts.next();
+            let name = parts.next().unwrap_or("");
+            // The VERTEX count is the one the body length depends on, so it is
+            // parsed strictly: `element vertex` with no count, or with one that
+            // is not a number, is still an error.
+            //
+            // A NON-vertex element's count is read leniently - an unparsable one
+            // becomes 0 - because this reader SKIPS those rows as whole lines
+            // rather than parsing their columns, so the count only has to be a
+            // row tally. Making it a second error path would mean a face element
+            // could fail a file whose vertices are perfectly fine.
+            let count: usize = if name == "vertex" {
+                parts
+                    .next()
                     .ok_or_else(|| Error::ParseError("Invalid vertex count".to_string()))?
                     .parse()
-                    .map_err(|_| Error::ParseError("Invalid vertex count number".to_string()))?;
-                // A second `element vertex` restarts the block at its own count.
-                vertex_block_ends = false;
+                    .map_err(|_| Error::ParseError("Invalid vertex count number".to_string()))?
+            } else {
+                parts.next().and_then(|c| c.parse().ok()).unwrap_or(0)
+            };
+            current_rows = count;
+            if name == "vertex" {
+                if in_vertex_element {
+                    // A second `element vertex` extends the block.
+                    vertex_blocks_after = vertex_blocks_after.saturating_add(count);
+                    current_rows = current_rows.saturating_add(count);
+                } else {
+                    in_vertex_element = true;
+                    num_vertices = count;
+                }
+            } else {
+                in_vertex_element = false;
             }
-        } else if in_vertex_element && line.starts_with("property ") {
+        } else if line.starts_with("property ") {
             let name = line
                 .split_whitespace()
                 .last()
@@ -117,7 +166,17 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
                     | "uint32"
             );
             props.push((name, is_list, is_integer));
+        } else if line.starts_with("property ") {
+            // A property line outside any element has nothing to attach to; it
+            // is not counted against any element's row budget.
         } else if line == "end_header" {
+            // A vertex element that is the LAST one in the header never hit an
+            // element boundary, so its columns are handed over here instead.
+            // Guarded, because a vertex element followed by `element face` was
+            // already handed over at that boundary and this would wipe it.
+            if in_vertex_element && vertex_props.is_empty() {
+                vertex_props = std::mem::take(&mut props);
+            }
             in_header = false;
         }
     }
@@ -130,7 +189,10 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     }
 
     // A list property has no fixed column, so it cannot be the source of a
-    // scalar property and is excluded here.
+    // scalar property and is excluded here. Only the vertex element's own
+    // properties are searched: a property declared by a later element is not a
+    // column of a vertex row.
+    let props = &vertex_props;
     let pos_of = |names: &[&str]| -> Option<usize> {
         props
             .iter()
@@ -205,23 +267,36 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     }
     let width = props.len();
 
-    for _ in 0..num_vertices {
+    // The body opens with the rows of any element declared before the vertex
+    // element, in header order. Skip exactly that many lines: they belong to
+    // another element, and the first three integers of a face row are shaped
+    // exactly like coordinates, so reading one is silent data corruption rather
+    // than a visible failure.
+    for _ in 0..rows_before_vertex {
+        lines
+            .next()
+            .ok_or_else(|| Error::ParseError("Unexpected EOF in data".to_string()))??;
+    }
+
+    // A second `element vertex` block extends the first rather than replacing
+    // it. Replacing the count is what `element vertex 1` followed by
+    // `element vertex 40000000000` did - the second block's properties were also
+    // unioned onto the first's, giving a row width no real row has.
+    let total_vertices = num_vertices + vertex_blocks_after;
+
+    for _ in 0..total_vertices {
         let line = lines
             .next()
             .ok_or_else(|| Error::ParseError("Unexpected EOF in data".to_string()))??;
 
+        // Only the coordinates are checked here, and only *after* every token is
+        // parsed - see the note at the check below.
         let values: Vec<f32> = line
             .split_whitespace()
             .map(|s| {
                 let v: f32 = s
                     .parse()
                     .map_err(|_| Error::ParseError(format!("Invalid number: {}", s)))?;
-                // `f32::from_str` accepts "NaN" and "inf"; a point at infinity is
-                // not a vertex, and it poisons every bound computed from the
-                // cloud rather than being reported at the point of the error.
-                if !v.is_finite() {
-                    return Err(Error::ParseError(format!("Non-finite coordinate: {s}")));
-                }
                 Ok(v)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -230,6 +305,34 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
             return Err(Error::InvalidInput(
                 "Not enough values for vertex".to_string(),
             ));
+        }
+
+        // `f32::from_str` accepts "NaN", "inf" and "1e40" (which overflows to
+        // infinity), so a single bad coordinate would reach the cloud as a point
+        // at infinity and poison every bound computed from it.
+        //
+        // This MUST run on x/y/z alone, and that is why it cannot live in the
+        // parse closure above. A packed `rgb`/`rgba` column is a *bit pattern*
+        // reinterpreted as an f32 - the body literally holds the float whose
+        // bits are `R<<16 | G<<8 | B` - so the exponent field IS the colour.
+        // Checking every token refused exactly those colours:
+        //
+        // ```text
+        // 0x7f800000 -> "inf"    (R=127,G=128)
+        // 0xff800000 -> "-inf"   (R=255,G=128)
+        // 0x7fff0000 -> "NaN"    (R=127,G=255)
+        // ```
+        //
+        // a quarter of the saturated red/magenta corner of the cube. Moving the
+        // check past the parse is what lets a packed column through, and keeps
+        // the coordinate guard - and its message - exactly as strict as before.
+        for &(name, idx) in &[("x", xi), ("y", yi), ("z", zi)] {
+            if !values[idx].is_finite() {
+                return Err(Error::ParseError(format!(
+                    "Non-finite coordinate {name}: {}",
+                    line.split_whitespace().nth(idx).unwrap_or("?")
+                )));
+            }
         }
 
         points.push(Point3::new(values[xi], values[yi], values[zi]));
