@@ -79,10 +79,9 @@ pub fn read_poses<P: AsRef<Path>>(path: P) -> Result<Vec<Pose>> {
 
         // A pose's rotation must be a rotation. A singular matrix - an all-zero
         // row, a truncated file, a header read at the wrong offset - has no
-        // inverse and cannot be decomposed into a rotation, but every downstream
-        // consumer will happily treat it as one and produce a trajectory that is
-        // wrong with no error anywhere. The determinant is the cheap check that
-        // catches the whole class.
+        // inverse and cannot be decomposed into a rotation. This branch is kept
+        // purely to name that failure, which is more specific than the general
+        // one below.
         let det = rotation.determinant();
         if !det.is_finite() || det.abs() < 1e-12 {
             return Err(Error::ParseError(format!(
@@ -93,8 +92,24 @@ pub fn read_poses<P: AsRef<Path>>(path: P) -> Result<Vec<Pose>> {
             )));
         }
 
+        // Non-singular is not the same as being a rotation. `2 * I`, a
+        // reflection, and a 1e6-scaled block all have a perfectly good
+        // determinant, and `Pose::new` runs them through
+        // `from_rotation_matrix_unchecked`, which silently re-orthonormalises
+        // them into some *other* rotation: `2 * I` came back as
+        // `diag(1.75, 1.75, 1.75)`. Every KITTI trajectory metric computed from
+        // such a pose is then wrong with no error anywhere. `Pose::try_new`
+        // checks both `det == +1` and orthonormality, which together reject
+        // scale, shear and reflection.
         let translation = Vector3::new(m[3], m[7], m[11]);
-        poses.push(Pose::new(rotation, translation));
+        let pose = Pose::try_new(rotation, translation).map_err(|why| {
+            Error::ParseError(format!(
+                "{}: line {}: the 3x3 block is not a proper rotation (det {det}): {why}",
+                path.display(),
+                line_no
+            ))
+        })?;
+        poses.push(pose);
     }
 
     Ok(poses)
