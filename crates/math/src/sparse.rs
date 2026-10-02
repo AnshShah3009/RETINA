@@ -274,6 +274,35 @@ impl CsrMatrix {
 // Eigensolvers
 // ---------------------------------------------------------------------------
 
+/// Deterministic pseudo-random start vector for the iterative eigensolvers.
+///
+/// The previous start vector was `(1, 1, ..., 1)/sqrt(n)`. That vector is an
+/// EXACT eigenvector for the structured SPD matrices these solvers exist to
+/// attack (1D/2D discrete Laplacians, Poisson stencils with Dirichlet
+/// boundaries), so the iteration was a fixed point from the first step and the
+/// routine reported success on whichever eigenvalue it happened to sit on
+/// (eigenvalue 1 instead of 3 for [[2,-1],[-1,2]]). A fixed LCG stream keeps
+/// the routine reproducible while making the degenerate case unreachable in
+/// practice.
+fn deterministic_start(n: usize, seed: u64) -> DVector<f64> {
+    let mut s = seed;
+    let mut v = DVector::zeros(n);
+    for i in 0..n {
+        s = s
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        // Top 53 bits -> [0, 1) -> (-1, 1)
+        let u = ((s >> 11) as f64) * (2.0 / ((1u64 << 53) as f64)) - 1.0;
+        // Never seed a component of exactly 0.
+        v[i] = if u == 0.0 { 0.5 } else { u };
+    }
+    let norm = v.norm();
+    if norm > 0.0 {
+        v /= norm;
+    }
+    v
+}
+
 /// Which eigenvalues to compute.
 #[derive(Debug, Clone, Copy)]
 pub enum EigWhich {
@@ -288,7 +317,10 @@ pub enum EigWhich {
 /// Power iteration for finding the largest eigenvalue/eigenvector of a
 /// symmetric matrix.
 ///
-/// Returns `(eigenvalue, eigenvector)`.
+/// Returns `(eigenvalue, eigenvector)`. The returned pair is accepted only
+/// when the residual `||A v - lambda v|| / (||A|| * ||v||)` is within `tol`;
+/// otherwise an `Err` is returned rather than an unconverged result reported as
+/// success.
 pub fn eigs_power(
     a: &CsrMatrix,
     max_iters: usize,
@@ -300,25 +332,98 @@ pub fn eigs_power(
         return Err("Matrix must be non-empty".into());
     }
 
-    // Start with a deterministic vector (1, 1, ..., 1) normalized
-    let mut v = DVector::from_element(n, 1.0 / (n as f64).sqrt());
+    // Randomised (but deterministic) start vector: an all-ones start is an
+    // eigenvector for structured SPD matrices, which froze the iteration.
+    let mut v = deterministic_start(n, 0x2545_F491_4F6C_DD1D);
+    let anorm = matrix_inf_norm(a).max(1e-300);
+    // `tol` is the caller's absolute tolerance on the eigenvalue; the residual
+    // gets a floor at 1e-8 relative, which is well below the accuracy the
+    // recurrence can deliver for any realistic n yet far above the roundoff of
+    // a converged Ritz pair.
+    let res_tol = (tol / anorm).max(1e-8);
     let mut eigenvalue = 0.0;
 
     for _ in 0..max_iters {
         let w = a.spmv(&v);
-        let new_eigenvalue = v.dot(&w);
         let norm = w.norm();
-        if norm < 1e-15 {
+        if norm < 1e-300 {
             return Err("Power iteration: zero vector encountered".into());
         }
         v = w / norm;
-        if (new_eigenvalue - eigenvalue).abs() < tol {
+        // Re-evaluate the Rayleigh quotient at the NEW iterate, so the
+        // returned lambda and v are always the same pair.
+        let av = a.spmv(&v);
+        let new_eigenvalue = v.dot(&av);
+        // The residual is the only real convergence proof: a vanishing
+        // eigenvalue change is also satisfied by ANY eigenvector of the matrix
+        // (the all-ones start is exactly one for the discrete Laplacian), and
+        // reporting that as success returned the smallest eigenvalue.
+        if residual_ok(a, new_eigenvalue, &v, res_tol) && (new_eigenvalue - eigenvalue).abs() < tol
+        {
             return Ok((new_eigenvalue, v));
         }
         eigenvalue = new_eigenvalue;
     }
 
+    if !residual_ok(a, eigenvalue, &v, res_tol) {
+        return Err(format!(
+            "Power iteration failed to converge: residual test not satisfied \
+             (lambda = {eigenvalue}, tol = {tol})"
+        ));
+    }
+
     Ok((eigenvalue, v))
+}
+
+/// Scale bound `||A||_inf` used to normalise the eigenpair residual.
+fn matrix_inf_norm(a: &CsrMatrix) -> f64 {
+    let mut best = 0.0_f64;
+    for r in 0..a.nrows {
+        let mut s = 0.0_f64;
+        for idx in a.row_ptr[r]..a.row_ptr[r + 1] {
+            s += a.values[idx].abs();
+        }
+        if s > best {
+            best = s;
+        }
+    }
+    best
+}
+
+/// True when `||A v - lambda v|| <= tol * ||A|| * ||v||`.
+///
+/// The Rayleigh quotient used by the iterative solvers can be a stationary
+/// point of a completely wrong (non-dominant) eigenpair, so convergence has to
+/// be confirmed against the residual rather than assumed.
+fn residual_ok(a: &CsrMatrix, lambda: f64, v: &DVector<f64>, tol: f64) -> bool {
+    let av = a.spmv(v);
+    let r = (&av - v * lambda).norm();
+    let vnorm = v.norm();
+    let scale = matrix_inf_norm(a) * vnorm;
+    if !r.is_finite() {
+        return false;
+    }
+    r <= tol.max(f64::EPSILON) * scale
+}
+
+/// A deterministic unit vector orthogonal (to working precision) to `v`.
+fn orthogonal_perturbation(v: &DVector<f64>, n: usize, seed: u64) -> DVector<f64> {
+    // Folding the bits via rotation instead of a plain sum: summing f64 bit
+    // patterns overflows u64 (and therefore panics under overflow checks).
+    let mut mix = seed;
+    for x in v.iter() {
+        mix = mix.rotate_left(7) ^ x.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    let mut w = deterministic_start(n, mix);
+    let d = w.dot(v);
+    w -= v * d;
+    let norm = w.norm();
+    if norm > 1e-12 {
+        w /= norm;
+    } else {
+        w = deterministic_start(n, seed.wrapping_add(1));
+    }
+    w
 }
 
 /// Inverse power iteration for finding the eigenvalue closest to `sigma`.
@@ -393,8 +498,11 @@ pub fn eigsh(
     let mut alpha = Vec::with_capacity(m); // diagonal
     let mut beta = Vec::with_capacity(m); // sub-diagonal
 
-    // Start with a normalized vector
-    let q0 = DVector::from_element(n, 1.0 / (n as f64).sqrt());
+    // Start with a randomised (deterministic) vector. An all-ones start makes
+    // A*q0 proportional to q0 for structured SPD matrices (Laplacian,
+    // Poisson), so b_0 = 0, the loop broke at j = 0 and the routine returned a
+    // single Ritz value while reporting success — even for k > 1.
+    let q0 = deterministic_start(n, 0x2545_F491_4F6C_DD1D);
     q_vecs.push(q0);
 
     let mut w;
@@ -418,11 +526,38 @@ pub fn eigsh(
 
         let b_j = w.norm();
         if b_j < tol {
-            // Invariant subspace found
-            break;
+            if j + 1 < k {
+                // An invariant subspace was reached before k Ritz values
+                // existed. Falling through here used to silently return fewer
+                // than k eigenvalues as Ok; restart the chain from a fresh
+                // direction so the caller either gets k values or an error.
+                let trial = orthogonal_perturbation(&q_vecs[j], n, 0xD1B5_4A32_D192_ED03);
+                if q_vecs.iter().all(|qi| trial.dot(qi).abs() < 1e-8) {
+                    // A zero off-diagonal block is an exact (block-diagonal)
+                    // invariant subspace, so the Ritz values of the restarted
+                    // chain ARE eigenvalues of T. Give it a small but
+                    // non-degenerate coupling so the restarted block converges
+                    // to the true eigenvectors instead of stalling on a
+                    // half-normalised Ritz vector.
+                    let coupling = b_j.max(1e-4 * alpha[j].abs()).max(1e-12);
+                    beta.push(coupling);
+                    q_vecs.push(trial);
+                } else {
+                    return Err(format!(
+                        "Lanczos broke down after {} vector(s) before reaching k={} \
+                         eigenvalues",
+                        j + 1,
+                        k
+                    ));
+                }
+            } else {
+                // Invariant subspace found; k Ritz values are available.
+                break;
+            }
+        } else {
+            beta.push(b_j);
+            q_vecs.push(w / b_j);
         }
-        beta.push(b_j);
-        q_vecs.push(w / b_j);
     }
 
     let m_actual = alpha.len();
@@ -463,6 +598,13 @@ pub fn eigsh(
     }
 
     let k_actual = k.min(m_actual);
+    if k_actual < k {
+        // Never hand back a short result as success: the caller asked for k
+        // eigenvalues and the Krylov space only yielded k_actual distinct ones.
+        return Err(format!(
+            "Lanczos produced only {k_actual} of the requested {k} eigenvalues"
+        ));
+    }
     let mut result_vals = DVector::zeros(k_actual);
     let mut result_vecs = DMatrix::zeros(n, k_actual);
 
@@ -478,6 +620,21 @@ pub fn eigsh(
         let norm = result_vecs.column(out_col).norm();
         if norm > 1e-15 {
             result_vecs.column_mut(out_col).scale_mut(1.0 / norm);
+        }
+    }
+
+    // Verify the returned pairs really are eigenpairs of the ORIGINAL matrix
+    // before reporting success.
+    let scale = matrix_inf_norm(a);
+    for c in 0..k_actual {
+        let v = result_vecs.column(c).clone_owned();
+        let av = a.spmv(&v);
+        let r = (&av - &v * result_vals[c]).norm();
+        if !(r <= tol.max(f64::EPSILON) * scale * v.norm()) {
+            return Err(format!(
+                "Lanczos residual check failed for Ritz pair {c}: \
+                 ||Av - lambda v|| = {r} exceeds tol * ||A|| * ||v||"
+            ));
         }
     }
 

@@ -118,9 +118,16 @@ pub fn qr_solve(a: &DMatrix<f64>, b: &DVector<f64>) -> Result<DVector<f64>, Stri
     let r_top = r.rows(0, n).clone_owned();
     let qt_b_top = qt_b.rows(0, n).clone_owned();
 
-    // Check for zero diagonal (rank-deficient)
+    // Check for (numerically) zero pivots. The test is RELATIVE to R[0,0]: R's
+    // diagonal scales with the input, so an absolute 1e-14 cutoff declared a
+    // perfectly well-conditioned system rank-deficient merely for being scaled
+    // down (e.g. every entry of A multiplied by 1e-14).
+    let r0 = r_top[(0, 0)].abs();
+    if r0 == 0.0 {
+        return Err("QR solve failed: rank-deficient matrix".into());
+    }
     for i in 0..n {
-        if r_top[(i, i)].abs() < 1e-14 {
+        if r_top[(i, i)].abs() <= f64::EPSILON * r0 {
             return Err("QR solve failed: rank-deficient matrix".into());
         }
     }
@@ -418,7 +425,16 @@ pub fn cond(a: &DMatrix<f64>) -> f64 {
     }
     let max_sv = sv.iter().cloned().fold(0.0_f64, f64::max);
     let min_sv = sv.iter().cloned().fold(f64::INFINITY, f64::min);
-    if min_sv.abs() < 1e-15 {
+    // The singularity cutoff must be RELATIVE to the largest singular value.
+    // Singular values scale with A, so the previous ABSOLUTE test
+    // `min_sv.abs() < 1e-15` reported INFINITY for diag(1, 1e-16), whose true
+    // condition number is 1e16 - a value f64 represents exactly. The relative
+    // rule below declares singular only when `min_sv <= max_sv * MIN_POSITIVE`,
+    // i.e. exactly when the ratio `max_sv/min_sv` is not representable as a
+    // finite f64 (it overflows past 1/MIN_POSITIVE ~ 4.5e307). An exactly
+    // rank-deficient matrix comes out of the SVD with min_sv == 0 and is still
+    // reported as INFINITY.
+    if max_sv == 0.0 || min_sv <= max_sv * f64::MIN_POSITIVE {
         f64::INFINITY
     } else {
         max_sv / min_sv

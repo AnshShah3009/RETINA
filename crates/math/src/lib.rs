@@ -89,7 +89,7 @@ impl Interp1d {
     }
 
     pub fn call(&self, x_val: f64) -> f64 {
-        if self.x.is_empty() || self.y.is_empty() {
+        if self.x.is_empty() || self.y.is_empty() || x_val.is_nan() {
             return f64::NAN;
         }
         if x_val <= self.x[0] {
@@ -99,6 +99,10 @@ impl Interp1d {
             return *self.y.last().unwrap();
         }
 
+        // NaN queries previously panicked here: binary_search_by returned
+        // Err(0) and `pos - 1` underflowed usize to usize::MAX, so the
+        // `self.x[idx + 1]` below went out of bounds. Guarded above, and the
+        // result is clamped so the index can never run off either end.
         let idx = self
             .x
             .binary_search_by(|v| {
@@ -110,7 +114,8 @@ impl Interp1d {
                     }
                 })
             })
-            .unwrap_or_else(|pos| pos - 1);
+            .unwrap_or_else(|pos| pos.saturating_sub(1))
+            .min(self.x.len() - 2);
 
         let denominator = self.x[idx + 1] - self.x[idx];
         let t = if denominator.abs() < 1e-10 {
