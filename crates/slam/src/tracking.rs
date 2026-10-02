@@ -155,17 +155,29 @@ impl Tracker {
         }
 
         if !tracking_success {
-            if let Some(ref last) = self.last_frame {
+            // Reuse the last pose known to be good, taken from the most recent
+            // *completed* frame.
+            //
+            // `current_frame` is that frame here: this check runs before
+            // `last_frame = current_frame.take()` below, so `current_frame` still
+            // holds the previous call's result while `last_frame` is one generation
+            // further back. Checking `last_frame` first therefore missed the
+            // ordinary case - after one successful frame `last_frame` is `None` and
+            // `current_frame` is `Some`, so **neither** branch ran and the frame kept
+            // the `Pose::default()` it was constructed with.
+            //
+            // Measured: a tracking failure on the second frame returned
+            // `Ok(([[0.0, 0.0, 0.0]], []))` - the identity, `0.000000` from
+            // `Pose::default()` - for a camera whose last known pose was
+            // `[[2.0, 0.5, -0.3]]`. Both are well-formed matrices, so nothing
+            // downstream could tell them apart.
+            //
+            // Reusing the last good pose preserves the original intent; only the
+            // frame it was read from was wrong. The error branch remains for a
+            // failure with no completed frame to fall back on.
+            if let Some(last) = self.current_frame.as_ref().or(self.last_frame.as_ref()) {
                 frame.pose = last.pose;
-            } else if self.current_frame.is_none() {
-                // If map was not empty but we failed tracking, we fall here.
-                // But if map was empty, we handled it above.
-                // So this only happens if tracking failed on non-first frame OR logic error.
-                // Actually, if map is empty and we didn't add points, we fail.
-                // But we added points above.
-
-                // Double check logic: if map empty -> add points -> success = true.
-                // So we shouldn't reach here for first frame.
+            } else {
                 return Err("Tracking failed".to_string());
             }
         }

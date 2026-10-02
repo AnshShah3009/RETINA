@@ -312,6 +312,57 @@ behaviour for every caller of both entry points — a decision about whether
 `sigma = 0` means "identity" or "invalid". The latter would want an error channel
 that `gaussian_blur(&GrayImage, f32) -> GrayImage` does not have.
 
+## FIXED: a failed tracking frame reported the identity pose
+
+`Tracker::process_frame` fell back to `last_frame` when tracking failed, but
+`last_frame` is assigned only at the **end** of a call
+(`last_frame = current_frame.take()`), so on the second frame it is still `None`
+while `current_frame` holds frame 1's result. Both fallback branches were therefore
+skipped — the first because `last_frame` was empty, the second because
+`current_frame` was not — and the frame kept the `Pose::default()` it was constructed
+with.
+
+Measured: a tracking failure on the second frame returned `Ok(([[0.0, 0.0, 0.0]],
+[]))` for a camera whose last known pose was `[[2.0, 0.5, -0.3]]`, and the test notes
+it is "`0.000000` from the identity, which is exactly what the fabricated
+`Pose::default()` looks like". Both the identity and a real pose are well-formed
+matrices, so nothing downstream could tell them apart.
+
+Fixed by reading the most recent *completed* frame — `current_frame` at that point,
+since this check runs before the rotation — with `last_frame` still consulted, and
+the error branch kept for a failure with no completed frame at all.
+
+## CONFIRMED, NOT FIXED: the tracker selects a GPU device for a CPU tensor
+
+`crates/slam/src/tracking.rs` branches on `ComputeDevice::Gpu(g)` in three places
+(225, 274, 380) and requires GPU-storage tensors on that path, but the device is
+chosen independently of the input tensor's storage. Handed a CPU tensor — what
+`Tensor::from_vec` produces, and what any caller decoding an image normally has — a
+machine **with** a GPU fails:
+
+```
+a failure with a pose to fall back on is not an error:
+  "Invalid input: GpuContext requires GpuStorage tensors. Use .to_gpu() first."
+```
+
+The guard producing that message is correct. The defect is the selection: on a
+GPU-less machine the CPU path is chosen and the same call succeeds, so this breaks
+exactly where the hardware is better.
+
+**Why it is also flaky.** `GpuContext::global()` is process-global and other tests
+initialise it, so whether this test sees a GPU context depends on which tests ran
+first. Measured: `cargo test -p cv-slam` failed on run 1 and passed on runs 2 and 3,
+while `cargo nextest run --workspace` passed — the same test, the same code.
+
+**CI is unaffected** (no adapter, so the GPU path is never taken), which is precisely
+why it has gone unnoticed, and why this must be fixed on a machine that has one.
+
+Left unfixed deliberately: correcting device selection means deciding whether a CPU
+input should force the CPU path or be uploaded (`to_gpu`), and that choice changes
+behaviour for every tensor a caller passes. Recording it with the mechanism and the
+reproduction is more useful than shipping a change I could not verify across both
+kinds of machine.
+
 ## Sweep: `partial_cmp(..).unwrap()` across the workspace
 
 Ten hits, triaged individually. The interesting result is that **four of the five
