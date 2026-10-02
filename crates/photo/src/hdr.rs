@@ -41,9 +41,17 @@ fn hat_weight(z: f64) -> f64 {
 /// * `images` - Slice of exposure images (all must have the same shape, CHW layout, values in [0,1]).
 /// * `exposure_times` - Exposure time in seconds for each image.
 /// * `samples` - Number of pixel locations to sample for response curve fitting (256 is typical).
+///   Must be greater than 0; `samples == 0` is rejected with an error instead of
+///   dividing by zero.
 ///
 /// # Returns
 /// An HDR radiance map as a `CpuTensor<f64>` with the same spatial dimensions and channels.
+///
+/// # Errors
+/// Returns [`cv_core::Error::InvalidInput`] when `samples == 0`, when fewer than
+/// two exposures are given, or when the exposure times are not finite and positive;
+/// returns [`cv_core::Error::DimensionMismatch`] when the images have differing
+/// shapes or a zero-sized spatial extent.
 #[allow(clippy::needless_range_loop)]
 pub fn merge_debevec<T: Float + Default + 'static>(
     images: &[CpuTensor<T>],
@@ -73,6 +81,20 @@ pub fn merge_debevec<T: Float + Default + 'static>(
 
     let (channels, height, width) = images[0].shape.chw();
     let n_pixels = height * width;
+
+    if samples == 0 {
+        return Err(cv_core::Error::InvalidInput(
+            "samples must be greater than 0 (it sets the number of pixel locations used to fit \
+             the response curve; 0 previously panicked with 'attempt to divide by zero')"
+                .into(),
+        ));
+    }
+    if n_pixels == 0 {
+        return Err(cv_core::Error::DimensionMismatch(format!(
+            "Images must have non-zero spatial dimensions, got {}x{}",
+            height, width
+        )));
+    }
 
     // Validate all images have the same shape.
     for (i, img) in images.iter().enumerate() {

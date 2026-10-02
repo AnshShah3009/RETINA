@@ -395,6 +395,61 @@ impl Farneback {
         Self::default()
     }
 
+    /// Validate the Farneback parameters that must not be degenerate.
+    ///
+    /// * `pyramid_scale` must be finite and in `(0, 1)`. `0.0` collapses every
+    ///   pyramid level onto the full-resolution image (no multiscale search);
+    ///   `>= 1.0` (or a non-finite value) scales levels *up*, and
+    ///   `scale_image` computes a 0-sized image for scale `0.0`.
+    /// * `poly_sigma` must be finite and `> 0`. `sigma == 0.0` makes
+    ///   `gaussian_weight` evaluate `exp(-r^2 / (2 * 0))`, i.e. `0/0` at the
+    ///   `(0, 0)` tap -> `NaN`, which poisons every 6x6 polynomial solve (all
+    ///   coefficients fall back to zero) and every windowed least-squares solve,
+    ///   yielding an all-zero motion field.
+    /// * `pyramid_levels`, `window_size` and `iterations` must be non-zero, and
+    ///   `poly_n` must be odd and at least 3 so the polynomial expansion has a
+    ///   solvable, centred neighbourhood.
+    pub fn validate(&self) -> Result<()> {
+        if !(self.pyramid_scale.is_finite() && self.pyramid_scale > 0.0 && self.pyramid_scale < 1.0)
+        {
+            return Err(Error::InvalidInput(format!(
+                "Farneback: pyramid_scale must be finite and in (0, 1), got {}. \
+                 0.0 collapses the pyramid and >= 1.0 grows the levels instead of coarsening them",
+                self.pyramid_scale
+            )));
+        }
+        if self.pyramid_levels == 0 {
+            return Err(Error::InvalidInput(
+                "Farneback: pyramid_levels must be greater than 0".to_string(),
+            ));
+        }
+        if self.window_size == 0 {
+            return Err(Error::InvalidInput(
+                "Farneback: window_size must be greater than 0".to_string(),
+            ));
+        }
+        if self.iterations == 0 {
+            return Err(Error::InvalidInput(
+                "Farneback: iterations must be greater than 0".to_string(),
+            ));
+        }
+        if self.poly_n < 3 || self.poly_n % 2 == 0 {
+            return Err(Error::InvalidInput(format!(
+                "Farneback: poly_n must be odd and >= 3, got {}",
+                self.poly_n
+            )));
+        }
+        if !(self.poly_sigma.is_finite() && self.poly_sigma > 0.0) {
+            return Err(Error::InvalidInput(format!(
+                "Farneback: poly_sigma must be finite and > 0, got {}. \
+                 sigma == 0 makes the Gaussian weight at the (0,0) tap evaluate 0/0 = NaN, \
+                 which turns the whole motion field into zeros",
+                self.poly_sigma
+            )));
+        }
+        Ok(())
+    }
+
     pub fn with_pyramid_levels(mut self, levels: usize) -> Self {
         self.pyramid_levels = levels;
         self
@@ -405,8 +460,15 @@ impl Farneback {
         self
     }
 
-    /// Compute dense optical flow
+    /// Compute dense optical flow.
+    ///
+    /// # Errors
+    /// Returns [`Error::InvalidInput`] when the parameters are degenerate (see
+    /// [`Farneback::validate`]) or [`Error::DimensionMismatch`] when the frames
+    /// differ in size.
     pub fn compute(&self, prev_frame: &GrayImage, next_frame: &GrayImage) -> Result<MotionField> {
+        self.validate()?;
+
         if prev_frame.width() != next_frame.width() || prev_frame.height() != next_frame.height() {
             return Err(Error::DimensionMismatch(
                 "Frames must have the same dimensions".to_string(),
@@ -716,10 +778,24 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
     }
 }
 
-/// Gaussian weight function
+/// Gaussian weight function.
+///
+/// `sigma` is validated by [`Farneback::validate`] before this is reached; the
+/// guard below is a defence in depth so a `sigma == 0` can never evaluate
+/// `0 / 0` and poison a whole frame with `NaN`.
 fn gaussian_weight(x: f32, y: f32, sigma: f32) -> f32 {
     let sigma_sq = sigma * sigma;
-    (-(x * x + y * y) / (2.0 * sigma_sq)).exp()
+    if !(sigma_sq.is_finite() && sigma_sq > 0.0) {
+        // Degenerate sigma: fall back to a uniform (box) weighting instead of
+        // returning NaN.
+        return 1.0;
+    }
+    let w = (-(x * x + y * y) / (2.0 * sigma_sq)).exp();
+    if w.is_finite() {
+        w
+    } else {
+        1.0
+    }
 }
 
 /// Scale image down

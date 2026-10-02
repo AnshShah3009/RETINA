@@ -221,26 +221,77 @@ fn hough_circles_gpu(
     gpu.hough_circles(&input_gpu, min_radius, max_radius, threshold)
 }
 
-pub fn hough_lines(src: &GrayImage, rho_res: f32, theta_res: f32, threshold: u32) -> Vec<Line> {
+/// Validate the accumulator resolutions of the Hough line transforms.
+///
+/// `rho_res` and `theta_res` are caller-supplied `f32`s that used to be used
+/// unchecked:
+/// * `theta_res == 0.0` made `num_theta = (PI / 0.0) as usize == usize::MAX`, and
+///   the subsequent `num_rho * num_theta` allocation overflowed (panic).
+/// * `rho_res == 0.0` made `num_rho` enormous in one path and, in the other,
+///   produced `Ok(vec![])` - no lines and no error - where the same image with
+///   `rho_res = 1.0` produced 5 lines.
+/// * Non-finite values (`NaN`, `inf`) saturate the same casts to nonsense
+///   accumulator sizes.
+///
+/// # Returns
+/// `Err` naming the offending resolution when it is not finite and positive.
+pub fn validate_hough_resolutions(rho_res: f32, theta_res: f32) -> crate::Result<()> {
+    if !(rho_res.is_finite() && rho_res > 0.0) {
+        return Err(crate::ImgprocError::InvalidInput(format!(
+            "hough: rho_res must be finite and > 0, got {}. \
+             A non-positive rho_res yields an empty result with no error (or an overflowing \
+             accumulator size)",
+            rho_res
+        )));
+    }
+    if !(theta_res.is_finite() && theta_res > 0.0) {
+        return Err(crate::ImgprocError::InvalidInput(format!(
+            "hough: theta_res must be finite and > 0, got {}. \
+             theta_res == 0.0 makes num_theta == usize::MAX and overflows the accumulator \
+             allocation",
+            theta_res
+        )));
+    }
+    Ok(())
+}
+
+/// Standard Hough line transform.
+///
+/// # Errors
+/// Returns [`crate::ImgprocError::InvalidInput`] if `rho_res` or `theta_res` is
+/// not finite and positive.
+pub fn hough_lines(
+    src: &GrayImage,
+    rho_res: f32,
+    theta_res: f32,
+    threshold: u32,
+) -> crate::Result<Vec<Line>> {
+    validate_hough_resolutions(rho_res, theta_res)?;
     if let Ok(s) = scheduler() {
         if let Ok(group) = s.get_default_group() {
             return hough_lines_ctx(src, rho_res, theta_res, threshold, &group);
         }
     }
     // Deep fallback
-    Vec::new()
+    Ok(Vec::new())
 }
 
+/// Standard Hough line transform with an explicit resource group.
+///
+/// # Errors
+/// Returns [`crate::ImgprocError::InvalidInput`] if `rho_res` or `theta_res` is
+/// not finite and positive.
 pub fn hough_lines_ctx(
     src: &GrayImage,
     rho_res: f32,
     theta_res: f32,
     threshold: u32,
     group: &ResourceGroup,
-) -> Vec<Line> {
+) -> crate::Result<Vec<Line>> {
+    validate_hough_resolutions(rho_res, theta_res)?;
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
         if let Ok(res) = hough_lines_gpu(gpu, src, rho_res, theta_res, threshold) {
-            return res;
+            return Ok(res);
         }
     }
 
@@ -316,7 +367,7 @@ pub fn hough_lines_ctx(
         }
     }
 
-    lines
+    Ok(lines)
 }
 
 fn hough_lines_gpu(
@@ -383,6 +434,12 @@ fn ppht_unvote(
 /// the accumulator only contains votes from unprocessed edge points. When a
 /// line is detected, all supporting pixels along the segment are removed and
 /// their votes decremented.
+///
+/// # Errors
+/// Returns [`crate::ImgprocError::InvalidInput`] if `rho_res` or `theta_res` is
+/// not finite and positive. `theta_res == 0.0` previously panicked with an
+/// overflowing accumulator allocation and `rho_res == 0.0` silently returned an
+/// empty segment list.
 #[allow(clippy::needless_range_loop)]
 pub fn hough_lines_p(
     src: &GrayImage,
@@ -391,7 +448,8 @@ pub fn hough_lines_p(
     threshold: u32,
     min_line_length: f32,
     max_line_gap: f32,
-) -> Vec<LineSegment> {
+) -> crate::Result<Vec<LineSegment>> {
+    validate_hough_resolutions(rho_res, theta_res)?;
     let edges = canny(src, 50, 150);
     let width = src.width() as usize;
     let height = src.height() as usize;
@@ -405,7 +463,7 @@ pub fn hough_lines_p(
     }
 
     if edge_points.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let max_rho = ((width * width + height * height) as f32).sqrt();
@@ -542,7 +600,7 @@ pub fn hough_lines_p(
         }
     }
 
-    line_segments
+    Ok(line_segments)
 }
 
 #[cfg(test)]
@@ -570,7 +628,7 @@ mod tests {
         for x in 0..64 {
             img.put_pixel(x, 32, Luma([255]));
         }
-        let lines = hough_lines(&img, 1.0, std::f32::consts::PI / 180.0, 10);
+        let lines = hough_lines(&img, 1.0, std::f32::consts::PI / 180.0, 10).expect("valid resolutions");
         assert!(!lines.is_empty(), "Hough should detect the horizontal line");
         // A horizontal line y=32 has theta near PI/2 (90 degrees)
         let half_pi = std::f32::consts::FRAC_PI_2;
@@ -640,7 +698,8 @@ mod tests {
             3,                            // threshold
             10.0,                         // min_line_length
             20.0,                         // max_line_gap
-        );
+        )
+        .expect("valid resolutions");
 
         assert!(
             !segments.is_empty(),

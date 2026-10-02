@@ -47,6 +47,35 @@ fn apply_linear_transform(mut img: GrayImage, scale: f32, delta: f32) -> GrayIma
     img
 }
 
+/// The `ksize` values [`sobel_ex`] can build separable Sobel kernels for.
+pub const SOBEL_SUPPORTED_KSIZES: &[usize] = &[3, 5, 7];
+
+/// Validate a Sobel kernel size.
+///
+/// Returns `Err` for any size that has no separable 1-D Sobel derivative /
+/// smoothing kernel pair. Previously an unsupported size silently fell back to
+/// the 3x3 pair, so `ksize = 4` produced bit-identical output to `ksize = 3`
+/// with no error and no warning.
+pub fn validate_sobel_ksize(ksize: usize) -> crate::Result<()> {
+    if SOBEL_SUPPORTED_KSIZES.contains(&ksize) {
+        Ok(())
+    } else {
+        Err(crate::ImgprocError::InvalidInput(format!(
+            "sobel_ex: unsupported ksize = {}; supported sizes are {:?}. \
+             An unsupported size is no longer silently treated as 3",
+            ksize, SOBEL_SUPPORTED_KSIZES
+        )))
+    }
+}
+
+/// Compute a Sobel derivative image with an explicit kernel size.
+///
+/// `ksize` must be one of [`SOBEL_SUPPORTED_KSIZES`] (3, 5, 7).
+///
+/// # Errors
+/// Returns [`crate::ImgprocError::InvalidInput`] if `ksize` is not supported,
+/// instead of silently substituting the 3x3 kernel.
+#[allow(clippy::too_many_arguments)]
 pub fn sobel_ex(
     src: &GrayImage,
     dx: i32,
@@ -55,7 +84,8 @@ pub fn sobel_ex(
     scale: f32,
     delta: f32,
     border: BorderMode,
-) -> GrayImage {
+) -> crate::Result<GrayImage> {
+    validate_sobel_ksize(ksize)?;
     match cv_runtime::best_runner() {
         Ok(runner) => sobel_ex_ctx(src, dx, dy, ksize, scale, delta, border, &runner),
         Err(_) => {
@@ -74,6 +104,12 @@ pub fn sobel_ex(
     }
 }
 
+/// Compute a Sobel derivative image with an explicit kernel size and an
+/// explicit execution group.
+///
+/// # Errors
+/// Returns [`crate::ImgprocError::InvalidInput`] if `ksize` is not one of
+/// [`SOBEL_SUPPORTED_KSIZES`].
 #[allow(clippy::too_many_arguments)]
 pub fn sobel_ex_ctx(
     src: &GrayImage,
@@ -84,7 +120,8 @@ pub fn sobel_ex_ctx(
     delta: f32,
     border: BorderMode,
     group: &RuntimeRunner,
-) -> GrayImage {
+) -> crate::Result<GrayImage> {
+    validate_sobel_ksize(ksize)?;
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
         // NOTE: GPU Sobel shader (sobel.wgsl) expects packed u8-in-u32 input but the Rust
         // host side uploads f32 tensors. The GPU path only works for ksize==3 single-axis
@@ -101,14 +138,19 @@ pub fn sobel_ex_ctx(
                 );
                 let (gx, gy) = result;
                 let target = if dx == 1 { gx } else { gy };
-                return apply_linear_transform(target, scale, delta);
+                return Ok(apply_linear_transform(target, scale, delta));
             }
         }
     }
 
     let mut out = GrayImage::new(src.width(), src.height());
-    let (deriv, smooth) =
-        sobel_kernels_1d(ksize).unwrap_or_else(|| (vec![-1.0, 0.0, 1.0], vec![1.0, 2.0, 1.0]));
+    // `ksize` was validated above, so this cannot take the fallback branch.
+    let (deriv, smooth) = sobel_kernels_1d(ksize).ok_or_else(|| {
+        crate::ImgprocError::InvalidInput(format!(
+            "sobel_ex: no separable Sobel kernel for ksize = {}",
+            ksize
+        ))
+    })?;
 
     let kx = if dx > 0 {
         deriv.as_slice()
@@ -123,7 +165,7 @@ pub fn sobel_ex_ctx(
 
     // Use separable convolution for performance
     crate::convolve::separable_convolve_into_ctx(src, &mut out, kx, ky, border, group);
-    apply_linear_transform(out, scale, delta)
+    Ok(apply_linear_transform(out, scale, delta))
 }
 
 fn sobel_gpu(
@@ -228,8 +270,8 @@ pub fn sobel_with_border(src: &GrayImage, border: BorderMode) -> (GrayImage, Gra
             .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
-    let gx = sobel_ex_ctx(src, 1, 0, 3, 1.0, 0.0, border, &runner);
-    let gy = sobel_ex_ctx(src, 0, 1, 3, 1.0, 0.0, border, &runner);
+    let gx = sobel_ex_ctx(src, 1, 0, 3, 1.0, 0.0, border, &runner).expect("ksize=3 is supported");
+    let gy = sobel_ex_ctx(src, 0, 1, 3, 1.0, 0.0, border, &runner).expect("ksize=3 is supported");
     (gx, gy)
 }
 

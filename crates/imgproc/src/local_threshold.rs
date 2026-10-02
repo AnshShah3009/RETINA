@@ -2,11 +2,61 @@ use crate::threshold::ThresholdType;
 use image::GrayImage;
 use rayon::prelude::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalThresholdMethod {
     Niblack,
     Sauvola,
 }
 
+/// Validate the parameters that would otherwise silently corrupt the result.
+///
+/// * `block_size` must be at least 1 and odd (OpenCV requires an odd window size);
+///   `block_size == 0` would make `half_block == 0` and every neighbourhood a
+///   single pixel.
+/// * `r` is the Sauvola dynamic range of the standard deviation. It is only
+///   meaningful for [`LocalThresholdMethod::Sauvola`], where the threshold is
+///   `mean * (1 + k * (std_dev / r - 1))`. With `r == 0` the term `std_dev / r`
+///   is `0/0` or `x/0`, i.e. `NaN`/`+inf`, which makes the threshold `+inf`
+///   and turns every pixel of the output into background (an all-black image).
+///
+/// # Returns
+/// `Err` with a message naming the offending parameter when validation fails.
+pub fn validate_local_threshold_params(
+    method: LocalThresholdMethod,
+    block_size: u32,
+    r: f32,
+) -> crate::Result<()> {
+    if block_size == 0 {
+        return Err(crate::ImgprocError::InvalidInput(
+            "local_threshold: block_size must be greater than 0".into(),
+        ));
+    }
+    if matches!(method, LocalThresholdMethod::Sauvola) && !(r.is_finite() && r > 0.0) {
+        return Err(crate::ImgprocError::InvalidInput(format!(
+            "local_threshold: Sauvola requires a finite r > 0 (dynamic range of the standard \
+             deviation), got r = {}. r == 0 makes `std_dev / r` infinite, so every pixel is \
+             thresholded away (all-black output)",
+            r
+        )));
+    }
+    Ok(())
+}
+
+/// Adaptive (local) thresholding.
+///
+/// # Arguments
+/// * `src` - Source grayscale image.
+/// * `max_value` - Maximum value written for "above threshold" pixels.
+/// * `method` - [`LocalThresholdMethod::Niblack`] or [`LocalThresholdMethod::Sauvola`].
+/// * `typ` - [`ThresholdType::Binary`] or [`ThresholdType::BinaryInv`].
+/// * `block_size` - Side length of the neighbourhood, must be non-zero.
+/// * `k` - Bias factor multiplying the local spread.
+/// * `r` - Sauvola dynamic range; must be finite and `> 0` for Sauvola.
+///
+/// # Errors
+/// Returns [`crate::ImgprocError::InvalidInput`] when `block_size == 0`, or when
+/// `method` is Sauvola and `r` is not finite and positive (which previously
+/// produced an all-black image instead of an error).
 pub fn local_threshold(
     src: &GrayImage,
     max_value: u8,
@@ -15,7 +65,9 @@ pub fn local_threshold(
     block_size: u32,
     k: f32,
     r: f32,
-) -> GrayImage {
+) -> crate::Result<GrayImage> {
+    validate_local_threshold_params(method, block_size, r)?;
+
     let width = src.width();
     let height = src.height();
     let mut dst = GrayImage::new(width, height);
@@ -85,5 +137,5 @@ pub fn local_threshold(
             }
         });
 
-    dst
+    Ok(dst)
 }

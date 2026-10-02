@@ -74,8 +74,71 @@ pub struct DnnNet {
     input_shape: Vec<usize>,
 }
 
+/// Derive the network input shape from the model's declared input fact.
+///
+/// The shape must be fully static (every dimension a positive integer, rank 4)
+/// because `forward` and `preprocess` both index it positionally
+/// (`self.input_shape[0..4]`) and cannot supply a value for a symbolic or
+/// absent dimension.
+///
+/// # Returns
+/// `Ok(shape)` when the model's first input fact pins a rank-4 shape,
+/// otherwise `Err` explaining exactly what could not be determined.
+fn fixed_rank4_input_shape(model: &RunnableModel) -> Result<Vec<usize>> {
+    let outlet = *model
+        .model()
+        .inputs
+        .first()
+        .ok_or_else(|| Error::InvalidInput("Model declares no input nodes".into()))?;
+
+    let fact = model
+        .model()
+        .outlet_fact(outlet)
+        .map_err(|e| {
+            Error::InvalidInput(format!(
+                "Could not read the model's input fact ({outlet:?}): {e}"
+            ))
+        })?;
+
+    let dims: &[tract_onnx::prelude::TDim] = fact.shape.dims();
+    if dims.len() != 4 {
+        return Err(Error::InvalidInput(format!(
+            "Model input must be a rank-4 tensor [batch, channels, height, width], got rank {} \
+             (shape {:?})",
+            dims.len(),
+            dims
+        )));
+    }
+    let mut shape = Vec::with_capacity(4);
+    for (axis, dim) in dims.iter().enumerate() {
+        match dim.as_i64() {
+            Some(v) if v > 0 => shape.push(v as usize),
+            Some(v) => {
+                return Err(Error::InvalidInput(format!(
+                    "Model input dimension {axis} is {v}; every dimension must be a positive \
+                     integer"
+                )))
+            }
+            None => {
+                return Err(Error::InvalidInput(format!(
+                    "Model input dimension {axis} is not statically known ({dim}); DnnNet cannot \
+                     resolve symbolic or unknown dimensions"
+                )))
+            }
+        }
+    }
+    Ok(shape)
+}
+
 impl DnnNet {
-    /// Load an ONNX neural network model from file
+    /// Load an ONNX neural network model from file.
+    ///
+    /// The network input shape is read from the model's own input fact. It is
+    /// never guessed: a model whose input is not a fully static rank-4 tensor
+    /// is rejected with an explicit error (this used to be silently hardcoded
+    /// to `[1, 3, 224, 224]` in both branches of a dead `if`, so any other model
+    /// either raised a `RuntimeError` on the first forward pass or silently got
+    /// a layout mismatch).
     ///
     /// # Arguments
     ///
@@ -84,15 +147,17 @@ impl DnnNet {
     /// # Returns
     ///
     /// * `Ok(DnnNet)` - Loaded and optimized model ready for inference
-    /// * `Err(Error)` - If model loading, optimization, or compilation fails
+    /// * `Err(Error)` - If model loading, optimization, or compilation fails, or
+    ///   if the input shape cannot be determined
     ///
     /// # Errors
     ///
-    /// May return `DnnError` if:
+    /// May return `Error` if:
     /// - File not found or cannot be read
     /// - Invalid ONNX format
     /// - Model optimization fails
     /// - Model compilation to runnable form fails
+    /// - The model's input is missing, dynamic, or not rank 4
     ///
     /// # Example
     ///
@@ -103,7 +168,7 @@ impl DnnNet {
     /// ```
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let model = tract_onnx::onnx()
-            .model_for_path(path)
+            .model_for_path(&path)
             .map_err(|e| cv_core::Error::RuntimeError(format!("Failed to load ONNX model: {}", e)))?
             .into_optimized()
             .map_err(|e| {
@@ -114,20 +179,19 @@ impl DnnNet {
                 cv_core::Error::RuntimeError(format!("Failed to create runnable ONNX model: {}", e))
             })?;
 
-        // Inspect input facts to determine shape
-        // model.model() returns reference to Graph
-        let input_shape = if let Some(_input_node_idx) = model.model().inputs.first() {
-            // Basic heuristic: check if shape is fixed
-            // For now, default to standard image net
-            vec![1, 3, 224, 224]
-        } else {
-            vec![1, 3, 224, 224]
-        };
+        let input_shape = fixed_rank4_input_shape(&model)?;
 
         Ok(Self {
             model: Arc::new(model),
             input_shape,
         })
+    }
+
+    /// The network input shape, as read from the model at load time.
+    ///
+    /// Format: `[batch, channels, height, width]`.
+    pub fn input_shape(&self) -> &[usize] {
+        &self.input_shape
     }
 
     /// Run a forward pass (inference) through the network
@@ -161,12 +225,15 @@ impl DnnNet {
     /// - 3D outputs: (C, H, W)
     /// - 4D outputs: (H, W, C) [assuming NCHW input, N=1]
     pub fn forward(&self, input: &Tensor<f32>) -> Result<Vec<Tensor<f32>>> {
-        let input_shape_vec = vec![
-            self.input_shape[0],
-            self.input_shape[1],
-            self.input_shape[2],
-            self.input_shape[3],
-        ];
+        let input_shape_vec: Vec<usize> = self.input_shape.clone();
+        if input_shape_vec.len() != 4 {
+            return Err(Error::InvalidInput(format!(
+                "DnnNet was loaded with a rank-{} input shape {:?}; forward requires a rank-4 \
+                 [batch, channels, height, width] shape",
+                input_shape_vec.len(),
+                input_shape_vec
+            )));
+        }
 
         let slice = input
             .as_slice()
@@ -236,17 +303,27 @@ impl DnnNet {
     /// # Output Format
     ///
     /// Returns f32 tensor with:
-    /// - Shape: (channels, height, width) where height/width = model input dims
+    /// - Shape: (channels, height, width) where channels/height/width are the
+    ///   model's own input dims (read from the model, not assumed)
     /// - Values: Normalized to [0.0, 1.0] range
-    /// - Channels: 1 (converted to grayscale)
+    /// - The single luma plane is replicated across `channels`
     pub fn preprocess(&self, img: &DynamicImage, runner: &ResourceGroup) -> Result<Tensor<f32>> {
-        preprocess_grayscale(
-            img,
-            self.input_shape[1],
-            self.input_shape[2],
-            self.input_shape[3],
-            runner,
-        )
+        let (channels, target_h, target_w) = self.input_chw().ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "DnnNet input shape {:?} is not rank-4 [batch, channels, height, width]",
+                self.input_shape
+            ))
+        })?;
+        preprocess_grayscale(img, channels, target_h, target_w, runner)
+    }
+
+    /// The model's `[channels, height, width]` input dims, or `None` if the
+    /// loaded shape is not rank 4.
+    pub fn input_chw(&self) -> Option<(usize, usize, usize)> {
+        match self.input_shape.as_slice() {
+            [_, c, h, w] => Some((*c, *h, *w)),
+            _ => None,
+        }
     }
 }
 
