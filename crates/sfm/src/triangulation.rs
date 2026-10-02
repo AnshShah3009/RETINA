@@ -16,12 +16,39 @@ pub type Result<T> = std::result::Result<T, SfmError>;
 /// Uses the DLT (Direct Linear Transformation) algorithm.
 /// p1, p2 are the 2D points in homogeneous coordinates (normalized or pixel).
 /// P1, P2 are the 3x4 projection matrices for each view.
+/// Reject non-finite input before it reaches an SVD.
+///
+/// The 4x4 system below is decomposed with `.svd(true, true)`, which does not
+/// return on non-finite input: nalgebra's bidiagonalisation decides convergence by
+/// comparison, and every comparison against NaN is false. This is the same defect
+/// and the same fix as `cv_calib3d::triangulation`, which hung on one NaN pixel.
+fn require_finite(
+    p1: &Point2<f64>,
+    p2: &Point2<f64>,
+    proj1: &Matrix3x4<f64>,
+    proj2: &Matrix3x4<f64>,
+) -> Result<()> {
+    if [p1.x, p1.y, p2.x, p2.y].iter().any(|v| !v.is_finite()) {
+        return Err(SfmError::TriangulationFailed(format!(
+            "triangulation correspondence is not finite ({}, {}, {}, {})",
+            p1.x, p1.y, p2.x, p2.y
+        )));
+    }
+    if proj1.iter().any(|v| !v.is_finite()) || proj2.iter().any(|v| !v.is_finite()) {
+        return Err(SfmError::TriangulationFailed(
+            "triangulation projection matrix is not finite".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn triangulate_point_dlt(
     p1: &Point2<f64>,
     p2: &Point2<f64>,
     proj1: &Matrix3x4<f64>,
     proj2: &Matrix3x4<f64>,
 ) -> Result<Point3<f64>> {
+    require_finite(p1, p2, proj1, proj2)?;
     let mut a = nalgebra::Matrix4::<f64>::zeros();
 
     // Row 1: x1 * P1[2] - P1[0]
@@ -92,6 +119,16 @@ pub fn triangulate_points_ctx(
         return Err(SfmError::TriangulationFailed(
             "Point counts must match".to_string(),
         ));
+    }
+    // Checked once for the whole batch rather than per point, so the cost stays
+    // linear in the input instead of one check per parallel task.
+    require_finite(&points1[0], &points2[0], proj1, proj2)?;
+    for (i, (a, b)) in points1.iter().zip(points2.iter()).enumerate() {
+        if [a.x, a.y, b.x, b.y].iter().any(|v| !v.is_finite()) {
+            return Err(SfmError::TriangulationFailed(format!(
+                "triangulation correspondence {i} is not finite"
+            )));
+        }
     }
 
     group.run(|| {

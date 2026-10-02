@@ -207,6 +207,25 @@ test, and the "found by" column says which.
   covariance.
 - **`RobustLossType` was a public parameter of `registration_gnc` that no caller
   could name**, since it was not re-exported from the module. Now exported.
+- **`cv_sfm::triangulate_point_dlt` hung too** — same 4×4 system, same
+  `.svd(true, true)`, and confirmed by measurement rather than by inference:
+  finite input returned `[1.032, 0.780, 2.000]` at the depth the geometry implies,
+  and one NaN pixel had to be killed at 120 s. The two triangulations are
+  near-identical implementations in different crates; only the calib3d one had been
+  guarded.
+- **`Trajectory::ate` returned `rmse = NaN`** for a trajectory holding one
+  non-finite coordinate, with every other statistic NaN too. It returns a struct of
+  plain `f64` with no error channel, so a malformed input and a genuinely poor
+  registration were indistinguishable — and since `NaN > x` is always false, any
+  `if ate.rmse > threshold` quietly took the other branch. Not reachable from a
+  dataset file (the readers reject `inf`/`nan`/`1e400` at parse time), but
+  reachable from a trajectory assembled in memory. `AteResult` now carries
+  `is_valid`.
+- **The survey is complete.** All 24 `.svd(true, true)` sites were examined; the
+  remaining ones (`aruco::solve_pnp_dlt`, `eval::umeyama`, the registration
+  covariance builders) are private helpers reached only through callers that
+  already validate, and neither hung nor returned a wrong value under the probes
+  used.
 - **`find_essential_mat_ransac_handles_outliers` is flaky.** It runs 600 RANSAC
   samples with no seed, so the sampled hypothesis varies run to run; the
   recovered translation direction is near-degenerate on that synthetic scene and
@@ -234,7 +253,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **101+** |
+| Defects fixed | **103+** |
 | Commits | 460+ |
-| Tests | 1,783 (from 1,267) |
+| Tests | 1,791 (from 1,267) |
 | Duplicate implementations removed | 12 |

@@ -232,6 +232,7 @@ impl Trajectory {
                 max: 0.0,
                 std: 0.0,
                 errors: Vec::new(),
+                is_valid: true,
                 alignment: align,
                 scale: 1.0,
                 transform: None,
@@ -240,6 +241,34 @@ impl Trajectory {
 
         let est_centers: Vec<Vector3<f64>> = self.poses[..n].iter().map(camera_center).collect();
         let gt_centers: Vec<Vector3<f64>> = gt.poses[..n].iter().map(camera_center).collect();
+
+        // A non-finite coordinate produces `rmse = NaN` and every other statistic
+        // NaN with it, which reads as a number and silently poisons any
+        // comparison built on it.
+        //
+        // The dataset readers already reject `inf`/`nan`/`1e400` at parse time,
+        // so this is not reachable from a file - it is reachable from a
+        // `Trajectory` built directly in memory. Checked here because `ate`
+        // returns a struct of plain `f64` with no error channel, so the only way
+        // to report absence is to make it visible.
+        if est_centers
+            .iter()
+            .chain(gt_centers.iter())
+            .any(|c| !c.iter().all(|v| v.is_finite()))
+        {
+            return AteResult {
+                rmse: f64::NAN,
+                mean: f64::NAN,
+                median: f64::NAN,
+                max: f64::NAN,
+                std: f64::NAN,
+                errors: Vec::new(),
+                is_valid: false,
+                alignment: align,
+                scale: f64::NAN,
+                transform: None,
+            };
+        }
 
         let transform = match align {
             Alignment::None => None,
@@ -267,6 +296,7 @@ impl Trajectory {
             max: stats.max,
             std: stats.std,
             errors,
+            is_valid: true,
             alignment: align,
             scale: transform.map(|t| t.scale).unwrap_or(1.0),
             transform,
@@ -320,7 +350,16 @@ pub struct AteResult {
     /// Standard deviation of the per-pose errors.
     pub std: f64,
     /// Per-pose errors, in trajectory order.
+    ///
+    /// Empty when the result is not valid - see [`AteResult::is_valid`].
     pub errors: Vec<f64>,
+    /// `false` when the input contained a non-finite coordinate, so every
+    /// statistic above is NaN.
+    ///
+    /// `ate` has no error channel and returns a struct of plain `f64`, so
+    /// without this a malformed trajectory is indistinguishable from one that
+    /// simply registered poorly: both report `rmse = NaN`.
+    pub is_valid: bool,
     /// Alignment that was requested.
     pub alignment: Alignment,
     /// Scale recovered by the alignment (`1.0` for `None`/`Se3`).
