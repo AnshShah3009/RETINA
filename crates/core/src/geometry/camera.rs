@@ -159,8 +159,38 @@ impl CameraIntrinsics {
         Matrix3::new(self.fx, 0.0, self.cx, 0.0, self.fy, self.cy, 0.0, 0.0, 1.0)
     }
 
+    /// Inverse of the intrinsic matrix, or `None` when it is singular.
+    ///
+    /// The intrinsic matrix has determinant `fx · fy`, so it is singular exactly
+    /// when either focal length is zero - and the fields are public, so such a
+    /// value is constructible.
+    ///
+    /// This was `try_inverse().unwrap_or(Matrix3::identity())`, and the identity
+    /// is not a neutral fallback: it is a *valid* matrix that means "this camera
+    /// has no intrinsics", so every point is used as its own pixel coordinate.
+    /// Measured, with `fx = 0`: a pixel `(123, 456, 1)` maps to
+    /// `(123, 456, 1)` unchanged. Eight call sites feed this into calibration,
+    /// essential-matrix, PnP and triangulation solves, so a degenerate focal
+    /// length would silently produce those answers in normalised coordinates and
+    /// report success.
+    ///
+    /// [`CameraIntrinsics::inverse_matrix_or_identity`] keeps the old signature
+    /// for callers that genuinely want that behaviour.
+    pub fn try_inverse_matrix(&self) -> Option<Matrix3<f64>> {
+        self.matrix().try_inverse()
+    }
+
+    /// Inverse of the intrinsic matrix, falling back to the identity when singular.
+    ///
+    /// The identity means "no intrinsics" - every point is its own pixel
+    /// coordinate. Prefer [`CameraIntrinsics::try_inverse_matrix`] unless that is
+    /// genuinely what a zero focal length should mean.
+    pub fn inverse_matrix_or_identity(&self) -> Matrix3<f64> {
+        self.try_inverse_matrix().unwrap_or_else(Matrix3::identity)
+    }
+
     pub fn inverse_matrix(&self) -> Matrix3<f64> {
-        self.matrix().try_inverse().unwrap_or(Matrix3::identity())
+        self.inverse_matrix_or_identity()
     }
 
     pub fn project(&self, point: &Point3<f64>) -> Point2<f64> {

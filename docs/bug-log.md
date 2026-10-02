@@ -303,6 +303,24 @@ splat.
 `Gaussian::new` clamps scale to `>= 1e-4`, so this only arises from a splat built
 outside that constructor: a deserialised file, or a field assigned directly.
 
+## The identity is not a neutral fallback either
+
+`CameraIntrinsics::inverse_matrix` returned `try_inverse().unwrap_or(Matrix3::identity())`.
+The intrinsic matrix has determinant `fx · fy`, so it is singular exactly when a
+focal length is zero — and the fields are public, so that value is constructible.
+The identity is a *valid* matrix meaning "this camera has no intrinsics", so
+every point is used as its own pixel coordinate. Measured with `fx = 0`: a pixel
+`(123, 456, 1)` maps to `(123, 456, 1)` unchanged.
+
+Eight call sites fed that into calibration, essential-matrix, PnP,
+triangulation and structure-from-motion solves. `solve_pnp_dlt` with `fx = fy = 0`
+returned a **confident pose** — a rotation and a translation — for an image whose
+camera had no focal length at all. Now `try_inverse_matrix` returns `Option`, and
+the four call sites that have an error channel use it; the ones that do not
+(`fundamental_from_essential`, and the private `normalize_with_intrinsics` behind
+`find_essential_mat`) keep the old behaviour, which the test file records rather
+than leaves implicit.
+
 ## ICP, FPFH and rays
 
 - **Point-to-plane ICP reported `fitness: 1.0` for a registration that never
@@ -325,7 +343,7 @@ outside that constructor: a deserialised file, or a field assigned directly.
 
 | | |
 | --- | ---: |
-| Defects fixed | **109+** |
+| Defects fixed | **111+** |
 | Commits | 460+ |
-| Tests | 1,811 (from 1,267) |
+| Tests | 1,816 (from 1,267) |
 | Duplicate implementations removed | 12 |

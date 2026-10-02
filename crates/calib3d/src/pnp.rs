@@ -69,7 +69,15 @@ pub fn solve_pnp_dlt(
     }
     require_finite_correspondences(object_points, image_points)?;
 
-    let k_inv = intrinsics.inverse_matrix();
+    // A zero focal length makes the intrinsic matrix singular. Falling back to
+    // the identity would silently treat every pixel as already normalised, which
+    // is a wrong answer rather than a visible failure.
+    let k_inv = intrinsics.try_inverse_matrix().ok_or_else(|| {
+        cv_core::Error::InvalidInput(format!(
+            "solve_pnp_dlt: intrinsics are singular (fx={}, fy={})",
+            intrinsics.fx, intrinsics.fy
+        ))
+    })?;
 
     // Normalized image coordinates (K^-1 applied once up front).
     let norm_image: Vec<(f64, f64)> = image_points

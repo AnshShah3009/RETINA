@@ -155,7 +155,15 @@ pub fn calibrate_camera_planar_with_options(
     // refinement loop below to prevent focal-length updates.
 
     let intrinsics = CameraIntrinsics::new(fx, fy, cx, cy, image_size.0, image_size.1);
-    let k_inv = intrinsics.inverse_matrix();
+    // A calibration that converged to a zero focal length would otherwise hand
+    // back the identity here, leaving every pixel un-normalised - so the
+    // extrinsic solve below ran in normalised coordinates while reporting a
+    // plausible reprojection error.
+    let k_inv = intrinsics.try_inverse_matrix().ok_or_else(|| {
+        cv_core::Error::AlgorithmError(format!(
+            "calibration produced singular intrinsics (fx={fx}, fy={fy})"
+        ))
+    })?;
     let mut extrinsics = Vec::with_capacity(homographies.len());
     for h in &homographies {
         extrinsics.push(extrinsics_from_homography(&k_inv, h)?);

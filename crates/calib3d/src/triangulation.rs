@@ -141,7 +141,15 @@ pub fn recover_pose_from_essential(
         Pose::new(r2, -t),
     ];
 
-    let k_inv = intrinsics.inverse_matrix();
+    // A zero focal length makes the intrinsic matrix singular; the identity
+    // fallback would leave every pixel un-normalised and quietly change what
+    // "positive depth" means.
+    let k_inv = intrinsics.try_inverse_matrix().ok_or_else(|| {
+        cv_core::Error::InvalidInput(format!(
+            "recover_pose_from_essential: intrinsics are singular (fx={}, fy={})",
+            intrinsics.fx, intrinsics.fy
+        ))
+    })?;
     let norm1: Vec<Point2<f64>> = pts1
         .iter()
         .map(|p| {
