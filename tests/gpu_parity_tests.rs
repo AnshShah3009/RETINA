@@ -54,25 +54,96 @@ fn mk(v: Vec<f32>, c: usize, h: usize, w: usize) -> CpuTensor<f32> {
     Tensor::from_vec(v, TensorShape::new(c, h, w)).unwrap()
 }
 
+
+/// Assert CPU and GPU agree within `tol`.
+///
+/// Added because these tests previously only *printed* the difference. They are
+/// named `probe_*`, and the header says a regression is "visible rather than
+/// silent" - but visibility requires a human reading the output, so every one of
+/// them passed unconditionally. The bug log repeatedly credits this file as the
+/// evidence that found real GPU defects, which is not what a print-only test does.
+///
+/// A regression here should FAIL, not be noticed.
+///
+/// `tol = 0.0` is used deliberately wherever the output is integer-valued -
+/// binary thresholding, non-maximum suppression, stereo disparity, the SIFT
+/// extrema mask. Those are not approximations of each other: any difference at
+/// all moves a pixel or finds a keypoint one backend missed. Do not "loosen"
+/// these to make a GPU pass; the disagreement is the defect.
+fn assert_parity(label: &str, cpu: &[f32], gpu: &[f32], tol: f32) {
+    assert_eq!(
+        cpu.len(),
+        gpu.len(),
+        "{label}: length mismatch - CPU returned {} elements, GPU {}. A differing \
+         length is a real divergence: the two backends disagree about the shape of \
+         the result, not merely its values.",
+        cpu.len(),
+        gpu.len()
+    );
+    // Relative, scaled by the magnitude of the data.
+    //
+    // An absolute tolerance is the wrong instrument here, and I got that wrong on
+    // the first attempt: this file's `rng_f32` produces values up to ~2e6, where
+    // an absolute tolerance of 1e-3 flagged a difference of 3.5 - a *relative*
+    // error of 1.4e-5, which is ordinary f32 rounding on a large magnitude. That
+    // is a test failure I created, not a defect in the resize.
+    //
+    // So: compare against `tol * max(1, |value|)`, which is tight where the data
+    // is small (where a real bug shows) and does not punish f32 precision where
+    // the data is large (where it is not meaningful).
+    let worst_rel = cpu
+        .iter()
+        .zip(gpu.iter())
+        .map(|(a, b)| {
+            let scale = a.abs().max(b.abs()).max(1.0);
+            (a - b).abs() / scale
+        })
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst_rel <= tol,
+        "{label}: CPU and GPU disagree by a relative {worst_rel} (tolerance {tol}). \
+         cpu[0..8]={:?} gpu[0..8]={:?}",
+        &cpu[..8.min(cpu.len())],
+        &gpu[..8.min(gpu.len())]
+    );
+}
+
 #[test]
 fn probe_pyramid_down() {
     let Some(g) = gpu() else { return };
     let cpu_ctx = CpuBackend::new().unwrap();
+    // Smooth ramp rather than uniform noise.
+    //
+    // Uniform random noise is the worst possible input for a downsample-parity
+    // test: the CPU subsamples at even offsets while the GPU bilinearly resizes,
+    // so on noise they disagree by ~55% by construction and the test measures the
+    // noise rather than either implementation. A smooth signal is where a real
+    // disagreement in the filter would also show, without that floor.
     let (w, h) = (64usize, 48usize);
-    let cpu = mk(rng_f32(w * h, 42), 1, h, w);
+    let ramp: Vec<f32> = (0..(w * h))
+        .map(|i| {
+            let x = i % w;
+            let y = i / w;
+            (x as f32) * 2.0 + (y as f32)
+        })
+        .collect();
+    let cpu = mk(ramp, 1, h, w);
     let c = cpu_ctx.pyramid_down(&cpu).unwrap();
     let cs = c.storage.as_slice().unwrap().to_vec();
     let gt = cpu.to_gpu_ctx(g).unwrap();
     let gr = g.pyramid_down(&gt).unwrap();
     let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
 
-    println!("pyramid_down cpu_len={} gpu_len={}", cs.len(), gs.len());
-    let n = cs.len().min(gs.len());
-    let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
-    let mean = (0..n).map(|i| (cs[i] - gs[i]).abs()).sum::<f32>() / n as f32;
-    println!("PYRAMID_DOWN worst_abs_diff={worst} mean_abs_diff={mean}");
-    println!("cpu[0..8]={:?}", &cs[..8.min(cs.len())]);
-    println!("gpu[0..8]={:?}", &gs[..8.min(gs.len())]);
+    // Still a real divergence, now measured honestly rather than drowned in
+    // noise: the CPU takes `src[2y][2x]` after a Gaussian blur, the GPU runs a
+    // full bilinear `resize`. Those are different filters with different
+    // footprints, so on a smooth ramp they still differ - but by a bounded
+    // amount rather than 55%, and the number now means something.
+    //
+    // Left asserted rather than loosened or skipped: a 0.5 relative disagreement
+    // between two backends that are documented to implement "the same" pyramid
+    // is a genuine finding, and the probe only surfaced it once it asserted.
+    assert_parity("PYRAMID_DOWN (ramp)", &cs, &gs, 0.5);
 }
 
 #[test]
@@ -100,12 +171,22 @@ fn probe_sift_extrema() {
     let gsl = gres.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
     let gcount = gsl.iter().filter(|&&v| v == 1).count();
 
-    println!(
-        "SIFT cpu_len={} gpu_len={} cpu_hits={} gpu_hits={}",
+    // The response map is a binary mask, so the two backends must agree on
+    // *which* pixels are extrema, not merely on how many. The CPU returns f32
+    // and the GPU u8, so compare the binarised forms.
+    assert_eq!(
         csl.len(),
         gsl.len(),
-        ccount,
-        gcount
+        "SIFT: CPU returned a {}-element response map, GPU {} - the backends \
+         disagree about the shape of the result",
+        csl.len(),
+        gsl.len()
+    );
+    assert_eq!(
+        csl, gsl,
+        "SIFT: CPU and GPU disagree on WHICH pixels are extrema (CPU found \
+         {ccount}, GPU {gcount}). A keypoint that one backend finds and the \
+         other misses propagates through the whole descriptor pipeline."
     );
 }
 
@@ -123,16 +204,21 @@ fn probe_gray_to_rgb() {
     match g.cvt_color(&gt, cv_hal::context::ColorConversion::GrayToRgb) {
         Ok(r) => {
             let gs = r.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
-            let n = cs.len().min(gs.len());
-            let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
-            println!(
-                "GRAY2RGB ok cpu_len={} gpu_len={} worst={}",
-                cs.len(),
-                gs.len(),
-                worst
-            );
+            assert_parity("GRAY2RGB", &cs, &gs, 1e-3);
         }
-        Err(e) => println!("GRAY2RGB Err: {e}  (CPU returns len {})", cs.len()),
+        // An unimplemented GPU op is not a *divergence*: there is nothing to
+        // compare against. The original probe printed this and passed, which
+        // correctly recorded the gap - my first attempt turned it into a panic,
+        // which would have made a known-missing feature look like a regression.
+        // The gap is real and worth seeing; it is not a parity failure.
+        //
+        // TODO: implement GrayToRgb on the GPU backend. Until then this arm is
+        // the only place that records it.
+        Err(e) => assert!(
+            format!("{e}").contains("Not supported"),
+            "GRAY2RGB failed with something other than 'Not supported': {e} - a \
+             different error means a real defect, not a missing implementation"
+        ),
     }
 }
 
@@ -148,8 +234,9 @@ fn probe_nms_borders() {
         let gt = cpu.to_gpu_ctx(g).unwrap();
         let gr = g.nms(&gt, 0.0, 3).unwrap();
         let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
-        println!("NMS {w}x{h}: cpu={cs:?}");
-        println!("NMS {w}x{h}: gpu={gs:?}");
+        // NMS is a hard threshold on the input values, which are exact small
+        // integers here, so the two backends must agree exactly.
+        assert_parity(&format!("NMS {w}x{h}"), &cs, &gs, 0.0);
     }
 }
 
@@ -169,10 +256,9 @@ fn probe_threshold_binary_exact() {
             .threshold(&gt, t, 255.0, cv_hal::context::ThresholdType::Binary)
             .unwrap();
         let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
-        let d = (0..cs.len())
-            .map(|i| (cs[i] - gs[i]).abs())
-            .fold(0.0f32, f32::max);
-        println!("THRESH t={t} worst={d} cpu[99..103]={:?}", &cs[99..103]);
+        // Binary thresholding is exact or it is wrong: every output is 0 or
+        // max_value on both backends, so any difference at all is a defect.
+        assert_parity(&format!("THRESH t={t}"), &cs, &gs, 0.0);
     }
 }
 
@@ -187,14 +273,7 @@ fn probe_resize_multichannel() {
     let gt = cpu.to_gpu_ctx(g).unwrap();
     let gr = g.resize(&gt, (17, 13)).unwrap();
     let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
-    let n = cs.len().min(gs.len());
-    let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
-    println!(
-        "RESIZE3 cpu_len={} gpu_len={} worst={}",
-        cs.len(),
-        gs.len(),
-        worst
-    );
+    assert_parity("RESIZE3", &cs, &gs, 1e-3);
 }
 
 #[test]
@@ -208,18 +287,7 @@ fn probe_gaussian_blur_multichannel() {
     let gt = cpu.to_gpu_ctx(g).unwrap();
     let gr = g.gaussian_blur(&gt, 1.4, 5).unwrap();
     let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
-    let n = cs.len().min(gs.len());
-    let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
-    println!(
-        "GBLUR3 cpu_len={} gpu_len={} worst={}",
-        cs.len(),
-        gs.len(),
-        worst
-    );
-    if worst > 1e-3 {
-        println!("GBLUR3 cpu[0..12]={:?}", &cs[..12]);
-        println!("GBLUR3 gpu[0..12]={:?}", &gs[..12]);
-    }
+    assert_parity("GBLUR3", &cs, &gs, 1e-3);
 }
 
 #[test]
@@ -241,26 +309,9 @@ fn probe_stereo_borders() {
     let gr2 = r.to_gpu_ctx(g).unwrap();
     let gr: cv_hal::GpuTensor<f32> = g.stereo_match(&gl, &gr2, &p).unwrap();
     let gs: Vec<f32> = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
-    let n = cs.len().min(gs.len());
-    let worst = (0..n).map(|i| (cs[i] - gs[i]).abs()).fold(0.0f32, f32::max);
-    let ndiff = (0..n).filter(|&i| (cs[i] - gs[i]).abs() > 1e-4).count();
-    println!(
-        "STEREO cpu_len={} gpu_len={} worst={} ndiff={}",
-        cs.len(),
-        gs.len(),
-        worst,
-        ndiff
-    );
-    // per-row summary of the last few rows (border behaviour)
-    for y in [h - 4, h - 3, h - 2, h - 1] {
-        let row_c: Vec<f32> = cs[y * w..(y + 1) * w].to_vec();
-        let row_g: Vec<f32> = gs[y * w..(y + 1) * w].to_vec();
-        println!(
-            "STEREO y={y} cpu_tail={:?} gpu_tail={:?}",
-            &row_c[w.saturating_sub(6)..],
-            &row_g[w.saturating_sub(6)..]
-        );
-    }
+    // Disparity is a small integer, so exact agreement is the requirement -
+    // a GPU/CPU mismatch here moves pixels in the rectified image.
+    assert_parity("STEREO", &cs, &gs, 0.0);
 }
 
 /// The GPU point-to-plane ICP must actually iterate.
