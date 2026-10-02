@@ -79,11 +79,31 @@ pub fn init_undistort_rectify_map(
     let mut map_x = vec![0.0f32; (width * height) as usize];
     let mut map_y = vec![0.0f32; (width * height) as usize];
 
-    let k_new_inv = new_intrinsics
-        .matrix()
-        .try_inverse()
-        .unwrap_or(Matrix3::identity());
-    let r_inv = rectification.try_inverse().unwrap_or(Matrix3::identity());
+    // Neither matrix may fall back to the identity.
+    //
+    // The identity means "no intrinsics", so a destination pixel is treated as
+    // already being in normalised coordinates. Measured with a zero focal
+    // length, the resulting map collapsed *every* destination onto the principal
+    // point:
+    //
+    //     valid:  map_x row 0 = [0, 1, 2, 3, 4, 5, 6, 7],  map_y row 0 = [0; 8]
+    //     zero fx: map_x row 0 = [4, 4, 4, 4, 4, 4, 4, 4],  map_y row 0 = [3; 8]
+    //
+    // and all 48 destinations still mapped *inside* the source image, so the
+    // result looked perfect to any bounds check. Undistorting with it reproduces
+    // a single pixel across the whole frame.
+    let k_new_inv = new_intrinsics.try_inverse_matrix().ok_or_else(|| {
+        cv_core::Error::InvalidInput(format!(
+            "init_undistort_rectify_map: new_intrinsics are singular \
+             (fx={}, fy={})",
+            new_intrinsics.fx, new_intrinsics.fy
+        ))
+    })?;
+    let r_inv = rectification.try_inverse().ok_or_else(|| {
+        cv_core::Error::InvalidInput(
+            "init_undistort_rectify_map: rectification rotation is singular".into(),
+        )
+    })?;
 
     map_x
         .par_chunks_mut(width as usize)

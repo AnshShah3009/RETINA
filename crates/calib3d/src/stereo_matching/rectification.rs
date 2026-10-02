@@ -44,7 +44,7 @@ pub fn rectify_stereo_pair(
         left_intrinsics,
         &left_rect_matrix,
         &new_intrinsics,
-    );
+    )?;
 
     let (right_map_x, right_map_y) = create_rectification_map(
         right.width(),
@@ -52,7 +52,7 @@ pub fn rectify_stereo_pair(
         right_intrinsics,
         &right_rect_matrix,
         &new_intrinsics,
-    );
+    )?;
 
     // Remap images
     let left_rectified = remap_image(left, &left_map_x, &left_map_y);
@@ -150,15 +150,22 @@ fn create_rectification_map(
     intrinsics: &CameraIntrinsics,
     rect_rotation: &Matrix3<f64>,
     new_intrinsics: &CameraIntrinsics,
-) -> (Vec<f32>, Vec<f32>) {
+) -> Result<(Vec<f32>, Vec<f32>)> {
     let size = (width * height) as usize;
     let mut map_x = vec![0.0f32; size];
     let mut map_y = vec![0.0f32; size];
 
+    // Not the identity: that means "the new camera has no intrinsics", so every
+    // destination pixel is treated as already normalised and the whole frame
+    // rectifies to a single point - while still mapping inside the source image,
+    // so no bounds check objects.
     let new_intrinsics_mat = intrinsics_matrix(new_intrinsics);
-    let inv_new_intrinsics = new_intrinsics_mat
-        .try_inverse()
-        .unwrap_or(Matrix3::identity());
+    let inv_new_intrinsics = new_intrinsics_mat.try_inverse().ok_or_else(|| {
+        cv_core::Error::InvalidInput(format!(
+            "rectify_stereo_pair: new intrinsics are singular (fx={}, fy={})",
+            new_intrinsics.fx, new_intrinsics.fy
+        ))
+    })?;
     // Orthonormal: inverse is the transpose.
     let inv_rect = rect_rotation.transpose();
 
@@ -189,7 +196,7 @@ fn create_rectification_map(
         }
     }
 
-    (map_x, map_y)
+    Ok((map_x, map_y))
 }
 
 /// Remap image using coordinate maps

@@ -321,6 +321,31 @@ the four call sites that have an error channel use it; the ones that do not
 `find_essential_mat`) keep the old behaviour, which the test file records rather
 than leaves implicit.
 
+## The same fallback, twice more, and the sibling that was already right
+
+`init_undistort_rectify_map` and the stereo rectifier both did
+`new_intrinsics.matrix().try_inverse().unwrap_or(Matrix3::identity())`, the same
+defect as `inverse_matrix`, one call layer up. Measured on an 8×6 frame:
+
+```text
+valid:   map_x row 0 = [0,1,2,3,4,5,6,7]   map_y row 0 = [0; 8]
+zero fx: map_x row 0 = [4,4,4,4,4,4,4,4]   map_y row 0 = [3; 8]
+```
+
+Every destination collapsed onto the principal point, so undistorting with that
+map reproduces a single pixel across the entire frame. And all 48 destinations
+still mapped *inside* the source image, so the result passed any bounds check —
+the failure is invisible to every validation the function already had.
+
+**`fisheye_init_undistort_rectify_map` was already correct** — same
+responsibility, same call shape, and it had always returned an error for a
+non-invertible matrix. That is the strongest available evidence that the pinhole
+version was an oversight rather than a deliberate fallback, so it now matches.
+
+The fisheye entry points were public in the `distortion` module but not
+re-exported from the crate root, so no caller outside the crate could name them —
+including the reference implementation. Now exported.
+
 ## ICP, FPFH and rays
 
 - **Point-to-plane ICP reported `fitness: 1.0` for a registration that never
@@ -343,7 +368,7 @@ than leaves implicit.
 
 | | |
 | --- | ---: |
-| Defects fixed | **111+** |
+| Defects fixed | **113+** |
 | Commits | 460+ |
-| Tests | 1,816 (from 1,267) |
+| Tests | 1,821 (from 1,267) |
 | Duplicate implementations removed | 12 |
