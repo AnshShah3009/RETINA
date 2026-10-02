@@ -262,8 +262,16 @@ pub fn las_to_point_cloud(data: &LasData) -> PointCloud {
 
 /// Create LAS data from a RETINA PointCloud.
 pub fn point_cloud_to_las(cloud: &PointCloud) -> LasData {
-    let mut min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
-    let mut max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
+    // `f64::MIN` is the most *negative* finite f64, not the smallest positive
+    // one, so `min.max(p.x)` could never rise above it and `max` stayed there
+    // for an empty cloud. The result was an inverted box:
+    // `(1.797e308, 1.797e308, 1.797e308, -1.797e308, -1.797e308, -1.797e308)` -
+    // min greater than max on every axis.
+    //
+    // Derived from the first point instead, so an empty cloud produces a
+    // degenerate but *valid* box rather than an impossible one.
+    let mut min = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut max = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     for p in &cloud.points {
         min.x = min.x.min(p.x as f64);
         min.y = min.y.min(p.y as f64);
@@ -282,7 +290,13 @@ pub fn point_cloud_to_las(cloud: &PointCloud) -> LasData {
         return_numbers: None,
         number_of_returns: None,
         gps_times: None,
-        bounds: (min.x, min.y, min.z, max.x, max.y, max.z),
+        // An empty cloud has no extent, so report a degenerate box at the origin
+        // rather than infinities, which a writer would then have to special-case.
+        bounds: if cloud.points.is_empty() {
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        } else {
+            (min.x, min.y, min.z, max.x, max.y, max.z)
+        },
     }
 }
 
@@ -317,8 +331,11 @@ pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
         })
     }
 
-    let mut min = Point3::new(f64::MAX, f64::MAX, f64::MAX);
-    let mut max = Point3::new(f64::MIN, f64::MIN, f64::MIN);
+    // Same `f64::MIN` trap as `point_cloud_to_las`: it is the most negative
+    // finite f64, so `max` could never rise above it and an empty or
+    // fully-masked result carried an inverted bounding box.
+    let mut min = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut max = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     for p in &points {
         min.x = min.x.min(p.x as f64);
         min.y = min.y.min(p.y as f64);
@@ -337,7 +354,11 @@ pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
         return_numbers: filter_vec(&data.return_numbers, mask),
         number_of_returns: filter_vec(&data.number_of_returns, mask),
         gps_times: filter_vec(&data.gps_times, mask),
-        bounds: (min.x, min.y, min.z, max.x, max.y, max.z),
+        bounds: if points.is_empty() {
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        } else {
+            (min.x, min.y, min.z, max.x, max.y, max.z)
+        },
     }
 }
 
