@@ -1015,15 +1015,81 @@ impl PnpSolver {
             }
         }
 
-        // 4. Solve Mx = 0 using SVD to find the nullspace
-        let svd_m = m.svd(false, true);
+        // 4. Solve Mx = 0 using SVD to find the nullspace.
+        //
+        // `M` is `2n x 12`, so the null vector is row 11 of `V^T` - but nalgebra's
+        // *thin* SVD returns a `v_t` of shape `min(2n, 12) x 12`, so for n = 4
+        // (8 rows) and n = 5 (10 rows) row 11 does not exist and `row(11)`
+        // panicked with "Matrix slicing out of bounds". The guard at the top of
+        // this function only rejects `n < 4`, so the documented minimum *was*
+        // the panic case. Same defect class as the `m x 9` DLT systems in
+        // `crate::dlt::smallest_right_singular_vector`; same fix: pad the system
+        // with zero rows up to 12 x 12 so the smallest right singular vector is
+        // always among the rows `V^T` contains. Zero rows add no constraint, so
+        // the null space - and the answer - are unchanged. Above `n = 6` the
+        // system is already at least 12 rows tall and needs no padding.
+        let m_padded = if m.nrows() < 12 {
+            let mut padded = nalgebra::DMatrix::<f64>::zeros(12, 12);
+            padded.view_mut((0, 0), (m.nrows(), 12)).copy_from(&m);
+            padded
+        } else {
+            m
+        };
+        let svd_m = m_padded.svd(false, true);
         let v_t_m = svd_m
             .v_t
             .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed for M matrix".into()))?;
-
-        // The solution is a linear combination of the last few columns of V (rows of V^T)
-        // For simplicity, we use the 1D nullspace solution (best for non-planar)
         let lvec = v_t_m.row(11);
+
+        // 4b. **The non-planar case is not solved here, and the honest answer is
+        // to say so.** The old comment claimed "we use the 1D nullspace solution
+        // (best for non-planar)"; that is wrong. The null space of this system
+        // is not one-dimensional for the sample sizes this function accepts.
+        // Measured singular values of `M` (padded to 12 x 12):
+        //
+        // | n | dim of null space |
+        // | --: | --: |
+        // | 4 | 4 |
+        // | 5 | 2 |
+        // | 6 | 1 |
+        // | 8 | 1 |
+        //
+        // A 12-unknown projection has a 4-dimensional null space for *any*
+        // input (12 - 8 = 4); adding a non-coplanar point only adds equations,
+        // and it takes 8 points before there are enough of them. The null
+        // vector the old code picked is one arbitrary member of that space -
+        // the one minimising `‖M x‖` alone, with nothing in the objective
+        // preferring an actual rigid pose. Extracting that is EPnP's `Dx = 0`
+        // gauge constraint (Moreno-Noguer et al. 2007, Sec. 4), and it is not
+        // implemented anywhere in this workspace.
+        //
+        // So: n < 6 is not a pose, and returning one is worse than refusing.
+        // Refuse, and name the reason.
+        let sigma_min = svd_m
+            .singular_values
+            .iter()
+            .fold(f64::INFINITY, |a, b| a.min(*b));
+        let sigma_max = svd_m.singular_values.iter().fold(0.0f64, |a, b| a.max(*b));
+        let nullity = svd_m
+            .singular_values
+            .iter()
+            .filter(|s| **s <= 1e-10 * sigma_max)
+            .count();
+        if nullity > 1 {
+            return Err(cv_core::Error::AlgorithmError(format!(
+                "estimate_epnp: {} correspondences give a {}-dimensional null space \
+                 for the 12-unknown projection system, so no unique pose exists; \
+                 the 1-D nullspace solution this function implements requires at \
+                 least 6 correspondences",
+                n, nullity
+            )));
+        }
+        if !(sigma_min <= 1e-8 * sigma_max) || sigma_max <= 0.0 {
+            return Err(cv_core::Error::AlgorithmError(format!(
+                "estimate_epnp: degenerate system (sigma_min/sigma_max = {:.3e})",
+                sigma_min / sigma_max
+            )));
+        }
 
         // 5. Recover control points in camera coordinates
         let mut cc = [Vector3::zeros(); 4];

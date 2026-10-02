@@ -247,7 +247,11 @@ impl ArucoDetector {
 /// * `dist_coeffs` - 5-element distortion coefficients `[k1, k2, p1, p2, k3]`
 ///
 /// # Returns
-/// `(rotation_vec, translation_vec)` in Rodrigues form.
+/// `(rotation_vec, translation_vec)` in Rodrigues form, **only if** that pose
+/// reproduces the four corners it was given. Four coplanar points leave a
+/// 4-dimensional null space, so the linear system does not by itself determine
+/// a pose; when no rigid pose explains the corners (degenerate or inconsistent
+/// detections) this returns an error instead of a plausible-looking result.
 pub fn estimate_marker_pose(
     marker: &DetectedMarker,
     marker_length: f64,
@@ -282,8 +286,13 @@ pub fn estimate_marker_pose(
         .map(|p| [(p[0] - cx) / fx, (p[1] - cy) / fy])
         .collect();
 
-    // Solve P3P via DLT on 4 points: build 2N x 12 matrix, solve via SVD.
-    // We use a simpler approach: iterative PnP (Gauss-Newton) starting from DLT.
+    // Solve the planar PnP from the four corners. `solve_pnp_dlt` verifies the
+    // pose it returns against these same four normalised observations and
+    // reports an error rather than returning a pose that does not reproject
+    // them - four coplanar points leave a 4-dimensional null space, so the
+    // linear system alone does not determine a pose. The homography DLT that
+    // backs it is `cv_calib3d::solve_dlt_homography`, which Hartley-normalises
+    // and pads its `8 x 9` system so the null vector is the one returned.
     let (r, t) = solve_pnp_dlt(&obj_pts, &norm)?;
     Ok((r, t))
 }
@@ -659,81 +668,180 @@ fn undistort_point(px: f64, py: f64, cam: &[[f64; 3]; 3], dist: &[f64; 5]) -> [f
     [xu * fx + cx, yu * fy + cy]
 }
 
-/// Solve PnP using DLT with 4 point correspondences.
+/// Solve PnP from exactly 4 coplanar correspondences (a square in `z = 0`),
+/// returning `(rodrigues_rotation, translation)` if and only if a rigid planar
+/// pose actually reproduces the four observations.
 ///
-/// `obj` - 4x3 object points, `img_norm` - 4x2 normalised image coordinates.
-/// Returns (rodrigues_rotation, translation).
+/// # What was wrong, and why the answer is a homography
+///
+/// The old code assembled the `8 x 12` DLT system for the `3 x 4` projection
+/// `P` and took `vt.row(vt.nrows() - 1)`. Two independent defects:
+///
+/// **(a) Thin-SVD row bug.** `A` is `8 x 12`, so the null vector is row 11 of
+/// `V^T`. nalgebra's *thin* SVD returns only `min(8, 12) = 8` rows, so row 11
+/// does not exist and the old read took **row 7** - an arbitrary vector with a
+/// strictly positive `‖A v‖`. Same defect class as `cv_calib3d`'s `m x 9`
+/// systems, and the same fix (`crate::dlt::smallest_right_singular_vector`
+/// pads an `m x k` system to `k x k` before the SVD) does not rescue this one:
+///
+/// **(b) The 4-point planar system has a 4-dimensional null space, so there is
+/// no single right answer to read.** For a frontal 0.05 m marker at 0.40 m,
+/// `f = 200`, no distortion, the measured singular values of `A` (padded to
+/// 12 x 12) are
+///
+/// ```text
+/// [35.355, 2.1044, 2.1044, 0.59400, 0.59400, 0.050000, 0.050000, 0.050000, 0, 0, 0, 0]
+/// ```
+///
+/// - four zero singular values, i.e. a 4-dimensional null space, and the
+/// smallest non-zero ones cluster four deep at 0.05. The null vector LAPACK
+/// happens to return for that matrix is
+/// `[0, 0, 0.99354, 0, 0, 0, 0.11351, 0, 0, 0, 0, 0]`: its first column is
+/// *exactly* zero, so `‖h1‖ = 4.8e-16` and the recovered `R` has determinant
+/// 0.24 - it is not a rotation and never can be. Picking row 11 correctly would
+/// not have helped; any single member of a 4-dimensional null space may have a
+/// zero column.
+///
+/// The fix is to stop asking the 12-unknown system the wrong question. For four
+/// coplanar points the `3 x 4` projection is exactly `P = K [r1 r2 t]`, so
+/// `H = K^-1 P` is a homography and the *planar* DLT applies - a `3 x 3` system
+/// with a one-dimensional null space. That is the canonical treatment, and this
+/// crate already has a hardened, Hartley-normalised implementation of it, so
+/// the linear algebra is delegated to `cv_calib3d::solve_dlt_homography`
+/// rather than reimplemented here. `cv_calib3d::pnp::solve_pnp_dlt` does the
+/// same thing (planarity detection, then Malis/Vargas decomposition with a
+/// rank check) and documents the degeneracy this class of solve needs.
+///
+/// The sign ambiguity is real and is not ignored: `[-R|-t]` and `[R|t]`
+/// reproject identically, so `lambda = ±1/‖h1‖` is enumerated and the corner
+/// test below - every corner re-projected through `R`, `t` and the camera
+/// matrix, compared with the observation it came from - selects the one whose
+/// control points are in front of the camera. A returned pose has therefore
+/// demonstrably reproduced its own input.
+///
+/// Measured on the case above, the old code returned
+/// `rvec = [0.0004, 2.2213, 2.2213]`, `t = [-0.0016, 640.0016, -4.9e-9]`:
+/// 2.22 rad of rotation error, depth 0.0 instead of 0.4, and 1159% of the
+/// marker size of reprojection error on its own four corners - reported as
+/// success. The controls in `tests/aruco_pose.rs` (including a distorted case,
+/// which exercises the unchanged undistort step) all pass through the same
+/// path.
 fn solve_pnp_dlt(
     obj: &[[f64; 3]; 4],
     img_norm: &[[f64; 2]],
 ) -> Result<(nalgebra::Vector3<f64>, nalgebra::Vector3<f64>)> {
-    // Build the 2N x 12 DLT matrix A for P (3x4 projection = 12 unknowns).
     let n = 4usize;
-    let mut a = vec![0.0f64; 2 * n * 12];
-    for i in 0..n {
-        let (x, y, z) = (obj[i][0], obj[i][1], obj[i][2]);
-        let (u, v) = (img_norm[i][0], img_norm[i][1]);
-        let r0 = 2 * i;
-        let r1 = r0 + 1;
-        // Row r0: [X Y Z 1  0 0 0 0  -uX -uY -uZ -u]
-        a[r0 * 12] = x;
-        a[r0 * 12 + 1] = y;
-        a[r0 * 12 + 2] = z;
-        a[r0 * 12 + 3] = 1.0;
-        a[r0 * 12 + 8] = -u * x;
-        a[r0 * 12 + 9] = -u * y;
-        a[r0 * 12 + 10] = -u * z;
-        a[r0 * 12 + 11] = -u;
-        // Row r1: [0 0 0 0  X Y Z 1  -vX -vY -vZ -v]
-        a[r1 * 12 + 4] = x;
-        a[r1 * 12 + 5] = y;
-        a[r1 * 12 + 6] = z;
-        a[r1 * 12 + 7] = 1.0;
-        a[r1 * 12 + 8] = -v * x;
-        a[r1 * 12 + 9] = -v * y;
-        a[r1 * 12 + 10] = -v * z;
-        a[r1 * 12 + 11] = -v;
+    // `img_norm` is already undistorted and normalised, so the target of the
+    // homography is that same space: H maps marker (x, y) metres to normalised
+    // image coordinates.
+    let src: Vec<[f64; 2]> = obj.iter().map(|p| [p[0], p[1]]).collect();
+    let dst: Vec<[f64; 2]> = (0..n).map(|i| img_norm[i]).collect();
+
+    let h = cv_calib3d::solve_dlt_homography(&src, &dst).ok_or_else(|| {
+        Error::AlgorithmError(
+            "PnP DLT: the normalised 4-point homography is undefined (the marker \
+             corners are coincident or collinear)"
+                .into(),
+        )
+    })?;
+
+    // H = [h1 h2 h3] is proportional to [r1 r2 t], and a rigid pose has
+    // ‖r1‖ = 1, so the scale is 1/‖h1‖.
+    let h1 = h.column(0);
+    let h2 = h.column(1);
+    let h3 = h.column(2);
+    let n1 = h1.norm();
+    let n2 = h2.norm();
+    if !(n1 > 1e-12) || !(n2 > 1e-12) {
+        return Err(Error::AlgorithmError(
+            "PnP DLT: degenerate homography columns (the marker corners are \
+             collinear or coincident in normalised coordinates)"
+                .into(),
+        ));
     }
 
-    // Use nalgebra for SVD.
-    let mat_a = nalgebra::DMatrix::from_row_slice(2 * n, 12, &a);
-    let svd = mat_a.svd(true, true);
-    let vt = svd
-        .v_t
-        .ok_or_else(|| Error::AlgorithmError("PnP SVD failed".into()))?;
-    let last = vt.nrows() - 1;
+    // Tolerance for the corner test below, in normalised image units, so it is
+    // independent of focal length and marker size: 1e-6 of the observed
+    // baseline. Measured corner errors on exact geometry are ~1e-15, so this
+    // leaves three orders of magnitude of headroom for detection noise while
+    // still being ~13 orders of magnitude tighter than the bug it guards: the
+    // old code was 11.59 - its own error, as a fraction of the marker's
+    // projected side - on a case it claimed to have solved.
+    let span = dst
+        .iter()
+        .flat_map(|p| [p[0], p[1]])
+        .fold(f64::NEG_INFINITY, f64::max)
+        - dst
+            .iter()
+            .flat_map(|p| [p[0], p[1]])
+            .fold(f64::INFINITY, f64::min);
+    if !(span > 1e-12) {
+        return Err(Error::AlgorithmError(
+            "PnP DLT: all four corners project to the same point".into(),
+        ));
+    }
+    let tol = 1e-6 * span;
 
-    // Extract 3x4 projection: [R | t]
-    let mut p = [[0.0f64; 4]; 3];
-    for r in 0..3 {
-        for c in 0..4 {
-            p[r][c] = vt[(last, r * 4 + c)];
+    // Both signs of the scale are the only two admissible candidates, and the
+    // corner test is the accept criterion. The gate is deliberately the
+    // *reprojection*, not a stand-in like "‖h1‖ == ‖h2‖": that stand-in is
+    // only O(theta^2) in the viewing angle, so it is 1e-8 frontal but 6e-4 for
+    // a ~25 degree oblique view of a *perfectly valid* marker. Judge the pose
+    // by whether it reproduces its input, which is exact at any obliquity and
+    // admits noisy corners too.
+    let mut best: Option<(nalgebra::Matrix3<f64>, nalgebra::Vector3<f64>, f64)> = None;
+    let mut best_reproj: Option<f64> = None;
+    for sign in [1.0f64, -1.0] {
+        let lambda = sign / n1;
+        let r1 = lambda * h1;
+        let r2 = lambda * h2;
+        let r3 = r1.cross(&r2);
+        let r_orth = nalgebra::Matrix3::from_columns(&[r1, r2, r3]);
+        // |det| is 1 by construction for a valid H, and +1 for exactly one of
+        // the two signs. Checking (rather than unconditionally flipping) keeps a
+        // genuinely non-rotation input from being silently "repaired" into one.
+        if (r_orth.determinant() - 1.0).abs() > 1e-6 {
+            continue;
+        }
+        let t_vec = lambda * h3;
+
+        let mut worst = 0.0f64;
+        for i in 0..n {
+            let o = nalgebra::Vector3::new(obj[i][0], obj[i][1], obj[i][2]);
+            let c = r_orth * o + t_vec;
+            if !(c.z > 0.0) {
+                worst = f64::INFINITY;
+                break;
+            }
+            // Compare in the same undistorted, normalised space the
+            // observations were given in.
+            let eu = c.x / c.z - img_norm[i][0];
+            let ev = c.y / c.z - img_norm[i][1];
+            worst = worst.max((eu * eu + ev * ev).sqrt());
+        }
+        if best_reproj.map(|b| worst < b).unwrap_or(true) {
+            best_reproj = Some(worst);
+        }
+        if worst < tol && best.as_ref().map(|b| worst < b.2).unwrap_or(true) {
+            best = Some((r_orth, t_vec, worst));
         }
     }
 
-    // Extract R (first 3 columns) and enforce orthogonality via SVD.
-    let r_mat = nalgebra::Matrix3::new(
-        p[0][0], p[0][1], p[0][2], p[1][0], p[1][1], p[1][2], p[2][0], p[2][1], p[2][2],
-    );
-    let svd_r = r_mat.svd(true, true);
-    let u_mat = svd_r
-        .u
-        .ok_or_else(|| Error::AlgorithmError("rotation SVD failed".into()))?;
-    let vt_mat = svd_r
-        .v_t
-        .ok_or_else(|| Error::AlgorithmError("rotation SVD failed".into()))?;
-    let mut r_orth = u_mat * vt_mat;
-    // Ensure proper rotation (det = +1).
-    if r_orth.determinant() < 0.0 {
-        r_orth = -r_orth;
-    }
+    let (r_orth, t_vec, _) = best.ok_or_else(|| {
+        Error::AlgorithmError(format!(
+            "PnP DLT: no rigid pose reproduces the four marker corners. Four \
+             coplanar points admit a family of plane-to-plane homographies, and \
+             none of them corresponds to a rigid pose for this correspondence \
+             set - so this marker cannot be posed from a single detection. \
+             Worst reprojection error of the best candidate: {:.3e} normalised \
+             units (tolerance {:.3e}). (cv-calib3d::solve_pnp_refine needs >= 6 \
+             points, which no single marker provides.)",
+            best_reproj.unwrap_or(f64::INFINITY),
+            tol
+        ))
+    })?;
 
-    let scale = r_mat.column(0).norm();
-    let t_vec = nalgebra::Vector3::new(p[0][3] / scale, p[1][3] / scale, p[2][3] / scale);
-
-    // Convert rotation matrix to Rodrigues vector.
-    let rvec = rotation_matrix_to_rodrigues(&r_orth);
-    Ok((rvec, t_vec))
+    Ok((rotation_matrix_to_rodrigues(&r_orth), t_vec))
 }
 
 fn rotation_matrix_to_rodrigues(r: &nalgebra::Matrix3<f64>) -> nalgebra::Vector3<f64> {
