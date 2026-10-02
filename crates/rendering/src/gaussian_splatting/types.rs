@@ -281,7 +281,37 @@ impl Gaussian {
             1.0 / depth,
         );
 
-        let screen_cov = jw * cov * jw.transpose();
+        // The covariance must be brought into the CAMERA frame before `jw` is applied.
+        //
+        // `cov` is `self.covariance()`, which is the world-space covariance
+        // `R S Sᵀ Rᵀ`, while `jw` is the Jacobian of camera-space -> screen: it is
+        // built from `view_pos`, which is in camera coordinates. Composing the two
+        // directly mixes frames, and the symptom is that the projected splat depends
+        // on the world frame rather than only on the relative geometry.
+        //
+        // Measured: rotating the world *and the camera together* - which must leave
+        // the image identical - changed the screen-space covariance by `3.517874e3`
+        // while leaving the centre exact. The centre was already frame-independent
+        // because it goes through the full view matrix; only the covariance skipped
+        // the rotation.
+        //
+        // With `R_view` applied the result is invariant: under a world rotation `A`
+        // the covariance becomes `A C Aᵀ` and the view rotation becomes `R Aᵀ`, so
+        // `R Aᵀ (A C Aᵀ) A Rᵀ = R C Rᵀ`, unchanged.
+        let r_view = Matrix3::new(
+            view_matrix[(0, 0)],
+            view_matrix[(0, 1)],
+            view_matrix[(0, 2)],
+            view_matrix[(1, 0)],
+            view_matrix[(1, 1)],
+            view_matrix[(1, 2)],
+            view_matrix[(2, 0)],
+            view_matrix[(2, 1)],
+            view_matrix[(2, 2)],
+        );
+        let cov_camera = r_view * cov * r_view.transpose();
+
+        let screen_cov = jw * cov_camera * jw.transpose();
 
         ProjectedGaussian {
             center: Vector2::new(px, py),
@@ -331,7 +361,9 @@ impl ProjectedGaussian {
     /// The zero-matrix fallback this replaces was actively wrong rather than
     /// merely uninformative. The rasterizer reads the inverse to evaluate
     ///
-    ///     mahalanobis = a·dx² + 2b·dx·dy + c·dy²
+    /// ```text
+    /// mahalanobis = a·dx² + 2b·dx·dy + c·dy²
+    /// ```
     ///
     /// and every coefficient of a zero matrix is 0, so `mahalanobis` was 0 at
     /// **every** pixel, and `alpha = exp(-0.5·0)·opacity` came out at full

@@ -63,6 +63,17 @@ jobs:
     - name: Run tests
       run: cargo nextest run --workspace
 
+    - name: Run doctests
+      # `cargo nextest` deliberately does not support doctests, so the 32 doc
+      # examples in this workspace were never executed by CI at all - the same
+      # shape of gap the "Build examples" step above records for examples. One
+      # was already broken and invisible: a mathematical formula written in an
+      # indented block in `gaussian_splatting::types`, which rustdoc compiles as
+      # Rust, failing on the `·` in `a·dx²`. For a library whose documentation is
+      # the first thing a user copies, a doc example that has never been run is
+      # not documentation.
+      run: cargo test --doc --workspace
+
   ci-macos:
     name: CI (macOS)
     runs-on: macos-latest
