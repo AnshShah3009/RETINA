@@ -390,12 +390,13 @@ mod tests {
         let results = index.search_knn(&query, 3);
 
         assert!(!results.is_empty(), "Should find nearest neighbors");
-        // Note: Due to approximate nature, might not find exact match
-        // Just check that we get results
-        println!("Found {} neighbors for query", results.len());
-        for (idx, dist) in &results {
-            println!("  Index {} with distance {}", idx, dist);
-        }
+        // Note: Due to approximate nature, might not find exact match.
+        // The contract that must hold is the request size and the ordering.
+        assert_eq!(results.len(), 3, "k-nearest must return exactly k results");
+        assert!(
+            results.windows(2).all(|w| w[0].1 <= w[1].1),
+            "results must come back sorted by distance"
+        );
     }
 
     #[test]
@@ -437,7 +438,6 @@ mod tests {
 
         let matches = matcher.match_descriptors(&query);
 
-        println!("FLANN found {} matches", matches.len());
         // Just verify the pipeline works - exact match count depends on data
         assert!(
             matches.len() <= query.len(),

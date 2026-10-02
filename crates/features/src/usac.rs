@@ -31,7 +31,15 @@ pub enum LocalOptimMethod {
     InnerAndIterLo,
 }
 
-/// Scoring method
+/// Scoring method — the family a scorer implements.
+///
+/// Not consumed by [`estimate_usac`]: which family a scorer belongs to is the
+/// caller's choice, expressed by which closure they pass. The variant list is
+/// kept because it names the four score measures the crate's scorers implement
+/// ([`scorers::score_ransac`], `score_msac`, [`scorers::score_magsac`] and LMedS,
+/// which has no scorer here) and a caller selecting one by name needs the set to
+/// be closed and documented. It was previously stored in a `UsacParams::score`
+/// field that nothing read.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ScoreMethod {
     /// Classic RANSAC: count inliers with hard threshold
@@ -45,26 +53,37 @@ pub enum ScoreMethod {
 }
 
 /// USAC parameters
+///
+/// # Three parameters are deliberately absent
+///
+/// `threshold`, `score` (a [`ScoreMethod`]) and `magsac_sigma_max` used to sit
+/// here as documented public fields. They were never read: [`estimate_usac`]
+/// delegates inlier classification and model ranking entirely to the
+/// caller-supplied `scorer` closure, which returns `(inliers, score, mask)`, so
+/// a threshold or a σ bound set here had no effect on anything and read as
+/// configuration that worked. They are removed rather than wired up, because
+/// threading a second, conflicting source of inlier definitions through the
+/// scorer API would reintroduce the same ambiguity in a harder-to-spot place.
+///
+/// The practical consequence for a caller: build the scorer from the values you
+/// want and pass `UsacParams` with only the sampling and iteration controls.
+/// [`scorers::score_magsac`] and [`scorers::score_ransac`] take the threshold
+/// (and σ bound) as arguments for exactly this reason.
 #[derive(Clone)]
 pub struct UsacParams {
-    /// Maximum iterations
+    /// Maximum iterations. `0` selects the adaptive count derived from
+    /// `confidence`.
     pub max_iterations: usize,
     /// Confidence level (probability of sampling all-inlier set)
     pub confidence: f64,
-    /// Inlier threshold (pixels)
-    pub threshold: f64,
     /// Sampling method
     pub sampling: UsacSampling,
     /// Local optimization method
     pub local_optim: LocalOptimMethod,
-    /// Scoring method
-    pub score: ScoreMethod,
     /// NAPSAC neighborhood size
     pub neighbor_count: usize,
     /// Minimum inlier ratio to trigger LO
     pub lo_inlier_ratio: f64,
-    /// MAGSAC: maximum σ for margin
-    pub magsac_sigma_max: f64,
 }
 
 impl Default for UsacParams {
@@ -72,13 +91,10 @@ impl Default for UsacParams {
         Self {
             max_iterations: 2000,
             confidence: 0.999,
-            threshold: 2.0,
             sampling: UsacSampling::ProgressiveNapsac,
             local_optim: LocalOptimMethod::InnerLo,
-            score: ScoreMethod::Magsac,
             neighbor_count: 8,
             lo_inlier_ratio: 0.1,
-            magsac_sigma_max: 10.0,
         }
     }
 }
@@ -419,10 +435,9 @@ mod tests {
             ));
         }
 
-        let params = UsacParams {
-            threshold: 0.3,
-            ..Default::default()
-        };
+        // The inlier threshold lives in the scorer, not in `UsacParams` — it
+        // used to be duplicated as a field that nothing read.
+        let params = UsacParams::default();
 
         let result = estimate_usac(&pts, &params, &line_model, &line_score, 2);
         assert!(result.is_some());
@@ -443,7 +458,6 @@ mod tests {
         }
 
         let params = UsacParams {
-            threshold: 0.1,
             max_iterations: 0,
             ..Default::default()
         };

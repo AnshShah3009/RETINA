@@ -596,7 +596,6 @@ mod tests {
         let kps = akaze
             .detect_ctx(&device, &tensor)
             .expect("detect_ctx failed");
-        println!("Detected {} AKAZE keypoints", kps.len());
         assert!(kps.len() > 0);
     }
 }

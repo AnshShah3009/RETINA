@@ -95,6 +95,14 @@ const ORB_PATTERN: [[i32; 4]; 256] = [
     [7,3,12,4], [9,-7,10,-2], [7,0,12,-2], [-1,-6,0,-11],
 ];
 
+/// Lower bound `with_scale_factor` clamps to: ORB's own default, and the
+/// tightest pyramid (least duplication between neighbouring levels) that still
+/// gives the pyramid more than one usable scale.
+pub const MIN_SCALE_FACTOR: f32 = 1.2;
+/// Upper bound `with_scale_factor` clamps to: 2.0 is the largest factor at which
+/// the BRIEF patch still fits inside the coarsest level of an ordinary frame.
+pub const MAX_SCALE_FACTOR: f32 = 2.0;
+
 /// ORB feature detector and descriptor
 pub struct Orb {
     n_features: usize,
@@ -144,7 +152,6 @@ impl Orb {
         Self::default()
     }
 
-    /// Set the maximum number of keypoints to retain.
     /// Measure the BRIEF pattern at each keypoint's own pyramid scale.
     ///
     /// See [`Orb::scale_aware_descriptor`] for the measurement behind this.
@@ -153,20 +160,69 @@ impl Orb {
         self
     }
 
+    /// Set the maximum number of keypoints to retain.
+    ///
+    /// A value of `0` keeps nothing, which is almost never what a caller means
+    /// and is indistinguishable from "detection found nothing", so `0` is
+    /// rejected in favour of `1`. Use [`Orb::with_n_features_opt_in`] if you
+    /// really want an empty result.
+    ///
+    /// [`Orb::with_n_features_opt_in`]: Orb::with_n_features_opt_in
     pub fn with_n_features(mut self, n: usize) -> Self {
+        self.n_features = n.max(1);
+        self
+    }
+
+    /// The unchecked form of [`Orb::with_n_features`], which lets a caller ask
+    /// for zero keypoints and get an empty result.
+    ///
+    /// Added alongside the clamping setter rather than changing that setter's
+    /// signature, so existing callers keep compiling.
+    pub fn with_n_features_opt_in(mut self, n: usize) -> Self {
         self.n_features = n;
         self
     }
 
     /// Set the number of scale pyramid levels.
+    ///
+    /// `0` builds an empty pyramid and returns zero keypoints; the setter
+    /// clamps it to `1`, which detects on the input image alone. Use
+    /// [`Orb::with_n_levels_opt_in`] if you really want an empty result.
+    ///
+    /// [`Orb::with_n_levels_opt_in`]: Orb::with_n_levels_opt_in
     pub fn with_n_levels(mut self, n: usize) -> Self {
+        self.n_levels = n.max(1);
+        self
+    }
+
+    /// The unchecked form of [`Orb::with_n_levels`].
+    ///
+    /// Added alongside the clamping setter rather than changing that setter's
+    /// signature, so existing callers keep compiling.
+    pub fn with_n_levels_opt_in(mut self, n: usize) -> Self {
         self.n_levels = n;
         self
     }
 
-    /// Set the scale factor between pyramid levels (must be > 1.0).
+    /// Set the scale factor between pyramid levels.
+    ///
+    /// The factor is applied as a *divisor* (`scale_image` resizes to
+    /// `dimension / scale`), so the pyramid only shrinks towards coarser scales
+    /// while `factor > 1.0`. A factor of `1.0` makes every one of the 8 levels a
+    /// byte-identical copy of level 0, and non-maximum suppression runs per
+    /// level *before* the levels are merged, so the same physical corner is
+    /// emitted once per level at a different `kp.size` — 8 duplicate keypoints
+    /// where there should be one. A factor below `1.0` grows the pyramid
+    /// instead, and the deeper levels have no room left for the BRIEF patch, so
+    /// every keypoint there is dropped by the descriptor's border test and the
+    /// call silently gets nothing. Both are accepted but clamped into the range
+    /// ORB is defined over, `[1.2, 2.0]`.
     pub fn with_scale_factor(mut self, factor: f32) -> Self {
-        self.scale_factor = factor;
+        self.scale_factor = if factor.is_finite() {
+            factor.clamp(MIN_SCALE_FACTOR, MAX_SCALE_FACTOR)
+        } else {
+            Self::default().scale_factor
+        };
         self
     }
 
@@ -174,6 +230,23 @@ impl Orb {
     pub fn with_fast_threshold(mut self, threshold: u8) -> Self {
         self.fast_threshold = threshold;
         self
+    }
+
+    /// The scale factor actually in effect, after [`Orb::with_scale_factor`] clamped it.
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor
+    }
+
+    /// The number of pyramid levels actually in effect, after
+    /// [`Orb::with_n_levels`] clamped it.
+    pub fn n_levels(&self) -> usize {
+        self.n_levels
+    }
+
+    /// The keypoint budget actually in effect, after [`Orb::with_n_features`]
+    /// clamped it.
+    pub fn n_features(&self) -> usize {
+        self.n_features
     }
 
     /// Detect keypoints using FAST at multiple scales
@@ -503,9 +576,9 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
                 match cpu_tensor.to_gpu_ctx(gpu) {
                     Ok(gpu_tensor) => gpu_tensor,
                     Err(e) => {
-                        eprintln!(
-                            "Warning: Failed to upload tensor to GPU: {}, falling back to CPU",
-                            e
+                        tracing::warn!(
+                            error = %e,
+                            "failed to upload ORB input to the GPU, falling back to CPU"
                         );
                         return {
                             let mut keypoints = orb.detect_ctx(ctx, image);
@@ -677,7 +750,7 @@ fn convert_to_cpu_image<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         let gpu_ctx = match ctx {
             ComputeDevice::Gpu(g) => g,
             _ => {
-                eprintln!("Warning: GpuStorage requires GPU context, returning empty tensor");
+                tracing::warn!("GpuStorage requires a GPU context; returning an empty tensor");
                 return Tensor {
                     storage: CpuStorage::new(tensor.shape.len(), 0u8)
                         .unwrap_or_else(|_| CpuStorage::from_vec(vec![]).unwrap()),
@@ -702,9 +775,7 @@ fn convert_to_cpu_image<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
             _phantom: std::marker::PhantomData,
         }
     } else {
-        eprintln!(
-            "Warning: Unsupported storage type in convert_to_cpu_image, returning empty tensor"
-        );
+        tracing::warn!("unsupported storage type in convert_to_cpu_image; returning empty tensor");
         Tensor {
             storage: CpuStorage::from_vec(vec![]).unwrap(),
             shape: tensor.shape,
@@ -1022,6 +1093,319 @@ mod tests {
             }
         }
         img
+    }
+
+    // ---- builder validation -------------------------------------------------
+    //
+    // `with_scale_factor`, `with_n_levels` and `with_n_features` used to store
+    // whatever they were given. Each of the values below produced a detector
+    // that silently returned the wrong thing: zero keypoints, or — for a scale
+    // factor of 1.0 — eight byte-identical pyramid levels whose per-level
+    // non-maximum suppression emitted the same corner eight times.
+
+    /// A 4x4 tile of unrelated intensities. FAST needs high spatial frequency to
+    /// fire (a 16-px checkerboard detects nothing), and a periodic tile keeps
+    /// the pyramid levels cheap and deterministic.
+    fn tiled_texture(w: u32, h: u32) -> GrayImage {
+        const TILE: [u8; 16] = [
+            0, 255, 90, 12, 200, 33, 250, 7, 61, 180, 5, 240, 130, 19, 99, 220,
+        ];
+        let mut img = GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                img.put_pixel(x, y, Luma([TILE[((y % 4) * 4 + x % 4) as usize]]));
+            }
+        }
+        img
+    }
+
+    fn orb_with(scale_factor: f32, n_levels: usize, n_features: usize) -> Orb {
+        Orb {
+            n_features,
+            scale_factor,
+            n_levels,
+            score_type: ScoreType::Harris,
+            scale_aware_descriptor: false,
+            patch_size: 31,
+            fast_threshold: 20,
+        }
+    }
+
+    /// Distinct reported positions of a keypoint set.
+    fn distinct_positions(kps: &[KeyPoint]) -> usize {
+        let mut p: Vec<(u64, u64)> = kps
+            .iter()
+            .map(|kp| (kp.x.to_bits(), kp.y.to_bits()))
+            .collect();
+        p.sort_unstable();
+        p.dedup();
+        p.len()
+    }
+
+    /// A scale factor of 1.0 makes every level a byte-identical copy of level 0
+    /// and, because non-maximum suppression runs per level *before* the levels
+    /// are merged, the same corner is emitted once per level at a different
+    /// `kp.size`. Before the fix this test's first assertion found 500 keypoints
+    /// spread over only a handful of distinct positions; the setter must reject
+    /// the factor instead.
+    #[test]
+    fn a_unit_scale_factor_cannot_duplicate_the_corner_across_levels() {
+        let img = tiled_texture(128, 128);
+
+        // The defect itself, reached by bypassing the setter. The budget is
+        // unbounded here so the truncation cannot hide the duplication.
+        let raw = orb_with(1.0, 8, usize::MAX).detect(&img).keypoints;
+        assert_eq!(
+            raw.len(),
+            481 * 8,
+            "the defect needs every level to contribute its full candidate list"
+        );
+        assert!(
+            distinct_positions(&raw) * 4 < raw.len(),
+            "a unit scale factor must duplicate corners across levels; \
+             found {} keypoints at only {} distinct positions",
+            raw.len(),
+            distinct_positions(&raw)
+        );
+        // ... reported as several distinct detections of the same physical
+        // point, one per pyramid level. (With a factor of exactly 1.0 the level
+        // scale never grows, so `kp.size` is the same 31 at every level; what
+        // separates the copies is their octave, and what makes them wrong is
+        // that the pyramid contains only one scale to begin with.)
+        let mut by_position: std::collections::HashMap<(u64, u64), Vec<i32>> =
+            std::collections::HashMap::new();
+        for kp in &raw {
+            by_position
+                .entry((kp.x.to_bits(), kp.y.to_bits()))
+                .or_default()
+                .push(kp.octave);
+        }
+        let repeated: Vec<&Vec<i32>> = by_position.values().filter(|v| v.len() > 1).collect();
+        assert!(
+            !repeated.is_empty()
+                && repeated
+                    .iter()
+                    .all(|octaves| octaves.windows(2).all(|w| w[0] != w[1])),
+            "each duplicated position must be reported once per level, which is \
+             what makes it several detections of one corner: {:?}",
+            &repeated[..repeated.len().min(4)]
+        );
+
+        // The setter must reject it: a clamped factor builds a real pyramid.
+        let clamped = Orb::new().with_scale_factor(1.0);
+        assert_eq!(
+            clamped.scale_factor(),
+            MIN_SCALE_FACTOR,
+            "1.0 must be clamped out of the pyramid range"
+        );
+        let kps = clamped.detect(&img).keypoints;
+        assert!(
+            !kps.is_empty(),
+            "a clamped detector must still find keypoints"
+        );
+        assert_eq!(
+            distinct_positions(&kps),
+            kps.len(),
+            "a clamped detector must not report the same position twice"
+        );
+    }
+
+    /// A factor below 1.0 grows the pyramid instead of shrinking it: `scale_image`
+    /// resizes to `dimension / scale`, so every level is twice the size of the
+    /// last, `kp.size` shrinks below the 31-pixel patch, and the levels run out
+    /// of detectable structure entirely. All sub-1.0 and non-finite factors must
+    /// be rejected.
+    #[test]
+    fn a_growing_or_non_finite_scale_factor_is_rejected() {
+        let img = tiled_texture(96, 96);
+
+        // The defect: a growing pyramid reports *coarser* levels as smaller
+        // keypoints, which is exactly backwards.
+        let raw = orb_with(0.5, 4, 500).detect(&img).keypoints;
+        let raw_deep = raw.iter().filter(|kp| kp.octave > 0).map(|kp| kp.size);
+        let coarsest = raw_deep.clone().fold(f64::MIN, f64::max);
+        assert!(
+            coarsest < 31.0,
+            "the defect this guards is a growing pyramid, whose deeper levels \
+             report a patch smaller than the base one; coarsest was {coarsest}"
+        );
+
+        // The clamped detector shrinks, so a coarser level is a larger keypoint.
+        let clamped = Orb::new().with_n_features(500).with_scale_factor(0.5);
+        assert_eq!(clamped.scale_factor(), MIN_SCALE_FACTOR);
+        let kps = clamped.detect(&img).keypoints;
+        let base = kps
+            .iter()
+            .filter(|kp| kp.octave == 0)
+            .map(|kp| kp.size)
+            .fold(f64::MIN, f64::max);
+        let deep = kps
+            .iter()
+            .filter(|kp| kp.octave > 0)
+            .map(|kp| kp.size)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            deep > base,
+            "a shrinking pyramid must report a larger kp.size at a coarser level \
+             ({deep} vs {base})"
+        );
+
+        for bad in [
+            0.5f32,
+            1.0,
+            0.0,
+            -3.0,
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ] {
+            assert_eq!(
+                Orb::new().with_scale_factor(bad).scale_factor(),
+                MIN_SCALE_FACTOR,
+                "scale factor {bad} must be rejected"
+            );
+        }
+        assert_eq!(
+            Orb::new().with_scale_factor(9.0).scale_factor(),
+            MAX_SCALE_FACTOR,
+            "an over-large factor must be clamped to the top of the range"
+        );
+        assert_eq!(
+            Orb::new().with_scale_factor(1.5).scale_factor(),
+            1.5,
+            "a valid factor must be kept exactly"
+        );
+    }
+
+    /// `0` levels and `0` features produced an empty result with no error. Both
+    /// are clamped, with an explicit opt-in escape hatch for callers who do mean
+    /// it.
+    #[test]
+    fn zero_levels_and_zero_features_are_rejected_with_an_opt_in_escape() {
+        let img = tiled_texture(96, 96);
+
+        // The defect: zero levels detects nothing at all.
+        assert!(
+            orb_with(1.2, 0, 500).detect(&img).keypoints.is_empty(),
+            "the defect this guards is that 0 levels detects nothing"
+        );
+
+        assert_eq!(Orb::new().with_n_levels(0).n_levels(), 1);
+        let clamped_levels = Orb::new().with_n_levels(0).detect(&img);
+        assert!(
+            clamped_levels.keypoints.iter().any(|kp| kp.octave == 0),
+            "a clamped level count must still detect on the input image"
+        );
+
+        assert_eq!(Orb::new().with_n_features(0).n_features(), 1);
+        assert!(
+            !Orb::new()
+                .with_n_features(0)
+                .detect(&img)
+                .keypoints
+                .is_empty(),
+            "a clamped feature budget must still return keypoints"
+        );
+
+        // The escape hatch really is unchecked.
+        assert_eq!(Orb::new().with_n_levels_opt_in(0).n_levels(), 0);
+        assert!(Orb::new().with_n_levels_opt_in(0).detect(&img).is_empty());
+        assert_eq!(Orb::new().with_n_features_opt_in(0).n_features(), 0);
+        assert!(Orb::new()
+            .with_n_features_opt_in(0)
+            .detect(&img)
+            .keypoints
+            .is_empty());
+    }
+
+    /// Control: ordinary values are stored verbatim and detection is unchanged.
+    #[test]
+    fn valid_builder_values_still_work() {
+        let img = tiled_texture(128, 128);
+        // A budget above the level-0 candidate count, so the coarser levels are
+        // represented in the result rather than truncated away.
+        let orb = Orb::new()
+            .with_n_features(2000)
+            .with_n_levels(4)
+            .with_scale_factor(1.6);
+        assert_eq!(orb.n_features(), 2000);
+        assert_eq!(orb.n_levels(), 4);
+        assert_eq!(orb.scale_factor(), 1.6);
+
+        let kps = orb.detect(&img);
+        assert!(
+            !kps.keypoints.is_empty() && kps.keypoints.len() <= 2000,
+            "expected up to 2000 keypoints, got {}",
+            kps.keypoints.len()
+        );
+        assert!(
+            kps.keypoints
+                .iter()
+                .all(|kp| kp.octave >= 0 && kp.octave < 4),
+            "no level outside the requested pyramid may be reported"
+        );
+        assert!(
+            kps.keypoints.iter().all(|kp| kp.size >= 31.0),
+            "a shrinking pyramid never reports a patch smaller than the base one"
+        );
+        let base = kps
+            .keypoints
+            .iter()
+            .filter(|kp| kp.octave == 0)
+            .map(|kp| kp.size)
+            .fold(f64::MIN, f64::max);
+        let deep = kps
+            .keypoints
+            .iter()
+            .filter(|kp| kp.octave > 0)
+            .map(|kp| kp.size)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            deep > base,
+            "a coarser level must report a larger kp.size ({deep} vs {base})"
+        );
+    }
+
+    /// All three fields are read by `detect`, so none of them is dead
+    /// configuration. This pins it: each one changes the result.
+    #[test]
+    fn every_builder_field_is_actually_read() {
+        let img = tiled_texture(128, 128);
+        let reference = Orb::new().with_n_features(200).detect(&img).len();
+        let fewer = Orb::new().with_n_features(20).detect(&img).len();
+        assert!(
+            fewer < reference,
+            "n_features must bound the output: {fewer} vs {reference}"
+        );
+
+        let levels: Vec<usize> = (1..=3)
+            .map(|n| {
+                Orb::new()
+                    .with_n_features(2000)
+                    .with_n_levels(n)
+                    .detect(&img)
+                    .len()
+            })
+            .collect();
+        assert!(
+            levels.windows(2).any(|w| w[0] != w[1]),
+            "n_levels must change the detected set: {levels:?}"
+        );
+
+        let scales: Vec<usize> = [1.2f32, 1.4, 2.0]
+            .iter()
+            .map(|&f| {
+                Orb::new()
+                    .with_n_features(2000)
+                    .with_scale_factor(f)
+                    .detect(&img)
+                    .len()
+            })
+            .collect();
+        assert!(
+            scales.windows(2).any(|w| w[0] != w[1]),
+            "scale_factor must change the detected set: {scales:?}"
+        );
     }
 
     #[test]
