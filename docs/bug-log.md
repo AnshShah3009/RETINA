@@ -193,6 +193,20 @@ test, and the "found by" column says which.
 - **`undistort_points` returned `Ok([NaN, 10.0])`** for a NaN pixel — not a hang,
   but a NaN coordinate handed back as a successful result, which then flows into
   every downstream metric computed from it.
+- **The survey continued past those, and found two more.** `find_essential_mat`
+  hung on one NaN correspondence among ten, the same mechanism, now guarded in
+  the shared 8-point solver so the RANSAC wrappers are covered too.
+  `registration_gnc` did not hang — it was quieter. A NaN coordinate makes that
+  point's residual NaN, `exp(-NaN)` is 0, so every robust loss gave it weight 0
+  and it contributed nothing. Measured, clouds differing only in that coordinate:
+  `finite -> fitness 1.000000`, `one NaN -> fitness 0.983333`, both `Some`, both
+  with a correct identity transform. The answer was right, but the caller was
+  told a malformed cloud registered cleanly, and the vanished point (1 of 60) was
+  visible only by comparing 0.983333 against 59/60 — an accident of `exp`, not a
+  contract, and a loss whose weight does not saturate would instead poison the
+  covariance.
+- **`RobustLossType` was a public parameter of `registration_gnc` that no caller
+  could name**, since it was not re-exported from the module. Now exported.
 - **`find_essential_mat_ransac_handles_outliers` is flaky.** It runs 600 RANSAC
   samples with no seed, so the sampled hypothesis varies run to run; the
   recovered translation direction is near-degenerate on that synthetic scene and
@@ -220,7 +234,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **99+** |
+| Defects fixed | **101+** |
 | Commits | 460+ |
-| Tests | 1,777 (from 1,267) |
+| Tests | 1,783 (from 1,267) |
 | Duplicate implementations removed | 12 |
