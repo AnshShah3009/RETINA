@@ -230,7 +230,7 @@ struct Both {
     gpu: Vec<f32>,
 }
 
-fn run_both(pose: [[f32; 4]; 4]) -> Both {
+fn run_both(pose: [[f32; 4]; 4]) -> Option<Both> {
     let cpu = CpuBackend::new().expect("cpu backend");
     let cpu_out = cpu
         .tsdf_raycast(
@@ -245,7 +245,17 @@ fn run_both(pose: [[f32; 4]; 4]) -> Both {
         .expect("cpu raycast");
     let cpu = cpu_out.as_slice().unwrap().to_vec();
 
-    let gpu = get_gpu_context().expect("test requires a GPU adapter");
+    // Skip rather than fail when there is no GPU adapter.
+    //
+    // CI runners have no adapter, so `.expect(...)` turned this test red there
+    // while it passes locally. The convention elsewhere in this crate
+    // (`perf_tests.rs`, `tests/gpu_parity_tests.rs`) is an early return, and a
+    // GPU-only comparison has nothing to assert without one - so it reports
+    // "skipped", not "failed".
+    let Some(gpu) = get_gpu_context() else {
+        eprintln!("no GPU adapter: skipping the cross-backend comparison");
+        return None;
+    };
     let vol_gpu: Tensor<f32, cv_hal::storage::GpuStorage<f32>> =
         cpu_volume().to_gpu_ctx(gpu).expect("upload volume");
     let gpu_out = gpu
@@ -268,7 +278,7 @@ fn run_both(pose: [[f32; 4]; 4]) -> Both {
 
     assert_eq!(cpu.len(), 4 * IMG_W as usize * IMG_H as usize);
     assert_eq!(gpu.len(), cpu.len());
-    Both { cpu, gpu }
+    Some(Both { cpu, gpu })
 }
 
 /// `|dir_cam|` for a pixel, from the intrinsics alone - no pose, so nothing
@@ -446,7 +456,10 @@ fn compare(label: &str, pose: &[[f32; 4]; 4], b: &Both) -> Report {
 
 #[test]
 fn identity_pose_is_the_control_both_backends_agree() {
-    let b = run_both(IDENTITY);
+    let Some(b) = run_both(IDENTITY) else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
     let rep = compare("identity", &IDENTITY, &b);
     assert_eq!(
         rep.hit,
@@ -492,7 +505,10 @@ fn identity_pose_is_the_control_both_backends_agree() {
 #[test]
 fn yawed_pose_matches_between_backends() {
     let pose = yawed_pose();
-    let b = run_both(pose);
+    let Some(b) = run_both(pose) else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
     compare("yawed", &pose, &b);
 }
 
@@ -501,7 +517,10 @@ fn yawed_pose_matches_between_backends() {
 #[test]
 fn tilted_pose_matches_between_backends() {
     let pose = tilted_pose();
-    let b = run_both(pose);
+    let Some(b) = run_both(pose) else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
     compare("tilted", &pose, &b);
 }
 
