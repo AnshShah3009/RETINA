@@ -226,6 +226,30 @@ test, and the "found by" column says which.
   covariance builders) are private helpers reached only through callers that
   already validate, and neither hung nor returned a wrong value under the probes
   used.
+
+## One idiom, three more sites
+
+The LAS `f64::MIN` defect turned out to be an idiom rather than a one-off, so the
+whole tree was searched for it. Fourteen sites seed a running `max` with `f32::MIN`
+or `f64::MIN`. Ten already guard the empty case and are correct. Three were not:
+
+- **`Aabb::empty()` had no way to express "empty"** — it seeded
+  `min = f32::MAX, max = f32::MIN`, so an Aabb that never received a point reported
+  `min = 3.403e38 > max = -3.403e38` and nothing distinguished it from a real box.
+  Three measured consequences: `from_points(&[])` returned exactly that;
+  `longest_axis()` computed `max - min = -6.8e38`, which **overflows to -inf** in
+  f32, so both comparisons went false and it returned axis 2 for *every* input,
+  letting a degenerate face (repeated vertex index) silently pick the split axis of
+  a subtree; and `intersect_ray` returned `true` for an empty box from **every**
+  origin and direction, because the overflow made `tmin`/`tmax` non-finite and the
+  final comparison was decided by NaN ordering. Emptiness is now an explicit field.
+- **`write_glb` wrote the sentinel pair into the file.** An empty mesh produced a
+  876-byte GLB whose POSITION accessor read
+  `"min": [3.4028235e38, ...], "max": [-3.4028235e38, ...]`. glTF requires both
+  when they are written, so an empty mesh now records a degenerate box at the
+  origin — valid, and the file drops to 644 bytes.
+- **`bounding_box.rs` projected onto its own axes with the same seed**, guarded on
+  a non-empty `points` slice, so it is correct as written.
 - **`find_essential_mat_ransac_handles_outliers` is flaky.** It runs 600 RANSAC
   samples with no seed, so the sampled hypothesis varies run to run; the
   recovered translation direction is near-degenerate on that synthetic scene and
@@ -253,7 +277,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **103+** |
+| Defects fixed | **105+** |
 | Commits | 460+ |
-| Tests | 1,791 (from 1,267) |
+| Tests | 1,800 (from 1,267) |
 | Duplicate implementations removed | 12 |

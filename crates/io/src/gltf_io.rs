@@ -115,9 +115,19 @@ pub fn write_glb<P: AsRef<Path>>(
 
     // Position data
     let mut pos_data = Vec::with_capacity(n_verts * 12);
+    // Seeded from the first vertex rather than from sentinels.
+    //
+    // `f32::MIN` is the most *negative* finite f32, so a `max` seeded with it can
+    // never rise. With no vertices the sentinels survived into the file: measured,
+    // `write_glb` on an empty mesh wrote
+    //
+    //     "min": [3.4028235e38, ...], "max": [-3.4028235e38, ...]
+    //
+    // into the POSITION accessor - min greater than max on every axis, in a
+    // 876-byte file. No importer can read that as an extent.
     let mut min_pos = [f32::MAX; 3];
     let mut max_pos = [f32::MIN; 3];
-    for v in vertices {
+    for (n, v) in vertices.iter().enumerate() {
         let coords = [v.x, v.y, v.z];
         for (i, &c) in coords.iter().enumerate() {
             min_pos[i] = min_pos[i].min(c);
@@ -126,6 +136,18 @@ pub fn write_glb<P: AsRef<Path>>(
         for &c in &coords {
             pos_data.extend_from_slice(&c.to_le_bytes());
         }
+        if n == 0 {
+            // The first vertex *is* the seed, so nothing is left to accumulate.
+            min_pos = coords;
+            max_pos = coords;
+        }
+    }
+    if vertices.is_empty() {
+        // An empty mesh has no extent. glTF requires min and max to be present
+        // when they are written, and a degenerate box at the origin is valid,
+        // where the sentinel pair is not.
+        min_pos = [0.0; 3];
+        max_pos = [0.0; 3];
     }
 
     // Normal data
