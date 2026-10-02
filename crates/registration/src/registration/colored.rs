@@ -51,6 +51,12 @@ pub fn registration_colored_icp(
     let mut transformation = *init_transformation;
     let mut best_fitness = 0.0;
     let mut best_rmse = f32::MAX;
+    // The transform `best_fitness`/`best_rmse` were measured at.
+    //
+    // Without it the function returned the *live* `transformation` - the last
+    // iterate - beside metrics recorded for whichever iterate last improved the
+    // fitness, so the two described different poses.
+    let mut best_transformation = *init_transformation;
 
     for iter in 0..max_iterations {
         // Build linear system
@@ -127,8 +133,19 @@ pub fn registration_colored_icp(
             }
         }
 
+        // Too few correspondences to constrain the 6-DoF update. Returning
+        // `None`, not `break`.
+        //
+        // This used to `break`, which fell through to the `Some(..)` below with
+        // `best_fitness` still at its 0.0 initialiser and `best_rmse` still at
+        // f32::MAX - because the body that lowers them sits *after* the solve.
+        // Verified: 60-point source and target, no normals on the target, and
+        // `max_correspondence_distance = 0.01` returned
+        // `Some(ColoredICPResult { transformation: identity, fitness: 0.0,
+        // inlier_rmse: 3.4028235e38 })`. A target without normals is the ordinary
+        // case, since `PointCloud.normals` is optional.
         if valid_points < 10 {
-            break;
+            return None;
         }
 
         // Solve for update.
@@ -158,13 +175,27 @@ pub fn registration_colored_icp(
         let update = exponential_map(&delta);
         transformation = update * transformation;
 
-        // Track best
+        // Track best, and return the transform the metrics describe.
+        //
+        // `fitness = valid_points / source.points.len()` is a correspondence-count
+        // ratio with no dependence on rmse. It saturates at 1.0 as soon as every
+        // source point finds a neighbour, so `fitness > best_fitness` was false
+        // from iteration 1 onward: best_fitness/best_rmse froze at iteration 0
+        // while `transformation` kept moving. Measured at lambda = 0.5 on the
+        // crate's own coloured cube: reported inlier_rmse 9.999997e-3 against an
+        // actual residual of 9.688581e-1 at the returned transform - two
+        // different poses.
+        //
+        // Scored on rmse, which is what actually measures the fit, with fitness
+        // as a tie-break. This is the same rule the CPU `registration_icp_point_to_plane`
+        // uses; its comment at mod.rs ~266-279 describes exactly this failure.
         let rmse = (total_residual / valid_points as f32).sqrt();
         let fitness = valid_points as f32 / source.points.len() as f32;
 
-        if fitness > best_fitness {
+        if rmse < best_rmse || (rmse == best_rmse && fitness > best_fitness) {
             best_fitness = fitness;
             best_rmse = rmse;
+            best_transformation = transformation;
         }
 
         // Convergence check
@@ -173,8 +204,13 @@ pub fn registration_colored_icp(
         }
     }
 
+    if best_rmse == f32::MAX {
+        // No iteration ever produced a valid solve.
+        return None;
+    }
+
     Some(ColoredICPResult {
-        transformation,
+        transformation: best_transformation,
         fitness: best_fitness,
         inlier_rmse: best_rmse,
     })

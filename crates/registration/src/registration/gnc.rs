@@ -16,12 +16,19 @@ pub struct GNCOptimizer {
     pub gnc_iterations: usize,
     pub convergence_threshold: f32,
     pub geometric_cost_threshold: f32,
+    /// The correspondence-distance budget the caller asked for.
+    ///
+    /// Kept separately because the robust-loss scale is a *squared* quantity
+    /// (`mu: max_residual * max_residual`), so it cannot be used as the inlier
+    /// gate without comparing a distance against a distance-squared.
+    pub max_correspondence_distance: f32,
 }
 
 impl GNCOptimizer {
     /// Create new GNC optimizer with Geman-McClure loss
     pub fn new_geman_mcclure(max_residual: f32) -> Self {
         Self {
+            max_correspondence_distance: max_residual,
             loss: RobustLoss::GemanMcClure {
                 mu: max_residual * max_residual,
             },
@@ -35,6 +42,7 @@ impl GNCOptimizer {
     /// Create new GNC optimizer with Truncated Least Squares (best for outlier rejection)
     pub fn new_tls(max_residual: f32) -> Self {
         Self {
+            max_correspondence_distance: max_residual,
             loss: RobustLoss::TruncatedLeastSquares { c: max_residual },
             max_iterations: 50,
             gnc_iterations: 10,
@@ -46,6 +54,7 @@ impl GNCOptimizer {
     /// Create new GNC optimizer with Welsch loss
     pub fn new_welsch(max_residual: f32) -> Self {
         Self {
+            max_correspondence_distance: max_residual,
             loss: RobustLoss::Welsch {
                 mu: max_residual * max_residual,
             },
@@ -147,7 +156,7 @@ impl GNCOptimizer {
                 // parameter here described a different function than the one the
                 // returned pose was chosen for, so `inlier_count` and `fitness`
                 // were measured against a mixture of two parameterisations.
-                residual < reference_param
+                residual < self.max_correspondence_distance
             })
             .copied()
             .collect();
@@ -222,13 +231,26 @@ impl GNCOptimizer {
     /// Check for convergence
     fn has_converged(&self, residuals: &[f32], weights: &[f32]) -> bool {
         // Check if cost change is small
+        if residuals.is_empty() {
+            return true;
+        }
         let weighted_residual: f32 = residuals
             .iter()
             .zip(weights.iter())
             .map(|(r, w)| r * w)
             .sum();
 
-        weighted_residual < self.convergence_threshold * residuals.len() as f32
+        // The MEAN, not the sum.
+        //
+        // The sum runs over every correspondence but was compared against a
+        // threshold inflated only by `len()`, so the test asked whether the mean
+        // per-point residual was below `eps / N` rather than `eps`. Verified: 60
+        // correspondences at 5e-7 each triggered convergence with
+        // `transformation` still equal to `init_transform` - not one
+        // Gauss-Newton step taken - while reporting a cost as though a solve had
+        // completed.
+        let mean_weighted_residual = weighted_residual / residuals.len() as f32;
+        mean_weighted_residual < self.convergence_threshold
     }
 
     /// Solve weighted least squares problem

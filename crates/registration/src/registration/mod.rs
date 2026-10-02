@@ -337,6 +337,10 @@ pub fn registration_icp_point_to_plane_ctx(
     let mut transformation = *init_transformation;
     let mut best_fitness = 0.0;
     let mut best_rmse = f32::MAX;
+    // The transform / were measured at. Returning the
+    // live  instead made every reported metric describe a
+    // different pose than the one returned.
+    let mut best_transformation = *init_transformation;
     let mut final_iterations = 0;
 
     // Convert point clouds to tensors for GPU processing
@@ -448,8 +452,17 @@ pub fn registration_icp_point_to_plane_ctx(
                 Error::RuntimeError(format!("Failed to compute correspondences: {:?}", e))
             })?;
 
+        // Too few correspondences to determine a rigid motion. This used to
+        // `break`, which fell through to the unconditional `Ok(ICPResult { .. })`
+        // below with `fitness` at its 0.0 initialiser and `inlier_rmse` at
+        // f32::MAX - a successful registration that never happened. Verified with
+        // `max_correspondence_distance = 0.0`, which matches nothing.
         if correspondences_raw.len() < 3 {
-            break;
+            return Err(Error::AlgorithmError(format!(
+                "registration_icp_point_to_plane_ctx: {} correspondences found, \
+                 at least 3 are required to determine a rigid motion",
+                correspondences_raw.len()
+            )));
         }
 
         let correspondences: Vec<(u32, u32)> = correspondences_raw
@@ -474,20 +487,58 @@ pub fn registration_icp_point_to_plane_ctx(
                 Error::RuntimeError(format!("Failed to accumulate normal equations: {:?}", e))
             })?;
 
-        // Solve for update on CPU (Matrix6 is small)
-        if let Some(ata_inv) = ata.try_inverse() {
-            let delta = -(ata_inv * atb);
-            let update = exponential_map_se3(&delta);
-            transformation = update * transformation;
+        // Solve for update on CPU (Matrix6 is small).
+        //
+        // A singular `ata` used to be detected by `if let Some(..)` with no
+        // `else`, so the pose simply stayed where it was, the loop kept going,
+        // and the tail reported that pose as a registration. Reached by a
+        // collinear target, or a planar one whose normals are all identical.
+        // Now: exact inverse, else pseudo-inverse, else an error - the same
+        // ladder the CPU function uses at ~213-260.
+        match ata.try_inverse() {
+            Some(ata_inv) => {
+                let delta = -(ata_inv * atb);
+                let update = exponential_map_se3(&delta);
+                transformation = update * transformation;
+            }
+            None => {
+                let Ok(pinv) = ata.clone().pseudo_inverse(1e-6) else {
+                    return Err(Error::AlgorithmError(
+                        "registration_icp_point_to_plane_ctx: normal equations are \
+                         singular and the pseudo-inverse failed, so no motion can \
+                         be determined from these correspondences"
+                            .to_string(),
+                    ));
+                };
+                let delta = -(pinv * atb);
+                if !delta.iter().all(|v| v.is_finite()) {
+                    return Err(Error::AlgorithmError(
+                        "registration_icp_point_to_plane_ctx: pseudo-inverse \
+                         produced a non-finite update"
+                            .to_string(),
+                    ));
+                }
+                let update = exponential_map_se3(&delta);
+                transformation = update * transformation;
+            }
         }
 
         // Evaluation (could be optimized on GPU too)
         let (fitness, rmse) =
             evaluate_registration(source, target, &transformation, max_correspondence_distance);
 
-        if fitness > best_fitness {
+        // Track the *best fit*, not the best fitness.
+        //
+        // `fitness` is a correspondence-count ratio, so it saturates at 1.0 and
+        // `fitness > best_fitness` was false from iteration 1 onward: the record
+        // froze at the first iterate while the transform kept moving, so the
+        // reported rmse described a different pose than the one returned. Same
+        // rule as the CPU function at ~290-306.
+        let better = fitness > best_fitness || (fitness == best_fitness && rmse < best_rmse);
+        if better {
             best_fitness = fitness;
             best_rmse = rmse;
+            best_transformation = transformation;
             final_iterations = iter + 1;
         }
 
@@ -497,7 +548,7 @@ pub fn registration_icp_point_to_plane_ctx(
     }
 
     Ok(ICPResult {
-        transformation,
+        transformation: best_transformation,
         fitness: best_fitness,
         inlier_rmse: best_rmse,
         num_iterations: final_iterations,
