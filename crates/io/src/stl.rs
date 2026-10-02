@@ -60,7 +60,7 @@ pub fn read_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
 fn parse_ascii_stl(content: &str) -> Result<TriangleMesh> {
     let mut vertices: Vec<Point3<f32>> = Vec::new();
     let mut faces: Vec<[usize; 3]> = Vec::new();
-    let mut saw_facet = false;
+    let mut saw_endsolid = false;
     let mut loop_open = false;
     let mut loop_vertices: Vec<Point3<f32>> = Vec::new();
 
@@ -76,7 +76,6 @@ fn parse_ascii_stl(content: &str) -> Result<TriangleMesh> {
         }
 
         if line.starts_with("facet normal") {
-            saw_facet = true;
             i += 1;
             continue;
         }
@@ -151,6 +150,7 @@ fn parse_ascii_stl(content: &str) -> Result<TriangleMesh> {
         }
 
         if line.starts_with("endsolid") {
+            saw_endsolid = true;
             break;
         }
 
@@ -167,9 +167,35 @@ fn parse_ascii_stl(content: &str) -> Result<TriangleMesh> {
             "STL ASCII: unexpected EOF inside a loop (no 'endloop')".to_string(),
         ));
     }
-    if saw_facet && faces.len() * 3 != vertices.len() {
+
+    // `endsolid` is the only terminator the format has, so its absence is
+    // truncation - and it is the *only* signal for a file cut cleanly *between*
+    // two facets, where every other invariant still holds:
+    //
+    //     solid x / facet / outer loop / 3 vertices / endloop / endfacet / <EOF>
+    //
+    // is byte-for-byte a complete one-facet mesh apart from the missing
+    // `endsolid`, and the old check could not tell them apart.
+    //
+    // A binary STL declaring `triangle_count = 10 000 000` while carrying one
+    // triangle reads the same way: declared and actual agree with what was
+    // found, and only the terminator's absence says the file is incomplete.
+    if !saw_endsolid {
         return Err(Error::ParseError(format!(
-            "STL ASCII: unexpected EOF: {} vertices for {} closed facets",
+            "STL ASCII: unexpected EOF: no 'endsolid' terminator after {} facets",
+            faces.len()
+        )));
+    }
+
+    // Declared-vs-actual, independent of whether a `facet normal` line was ever
+    // seen. The old guard was `if saw_facet && faces.len() * 3 != vertices.len()`,
+    // so `saw_facet` was never actually required and the invariant was checked
+    // only on files that happened to spell out their normals. That let three
+    // orphan `vertex` lines - no facet, no loop - through as a mesh with zero
+    // faces.
+    if faces.len() * 3 != vertices.len() {
+        return Err(Error::ParseError(format!(
+            "STL ASCII: {} vertices for {} closed facets",
             vertices.len(),
             faces.len()
         )));

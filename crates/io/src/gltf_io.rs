@@ -11,7 +11,7 @@
 //! }
 //! ```
 
-use cv_core::Result;
+use cv_core::{Error, Result};
 use nalgebra::{Point3, Vector3};
 use std::path::Path;
 
@@ -62,8 +62,28 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
                 .map(|iter| iter.into_f32().collect());
 
             // Indices
+            //
+            // A primitive's `indices` accessor is a *separate* accessor from
+            // `POSITION`, and nothing in the file ties it to the vertex count:
+            // an index of 5000 against a POSITION accessor of one vertex is a
+            // perfectly loadable file. The conversion below did no check at
+            // all, so such an index survived into `GltfMesh::faces`, and from
+            // there into `TriangleMesh`, which stores no bound either - the
+            // panic surfaced much later in `cv_3d`, at
+            // `TriangleMesh::compute_face_normals`'s `self.vertices[face[0]]`.
+            // `read_obj` already rejects out-of-range face indices; do the same.
             let faces: Vec<[usize; 3]> = if let Some(indices) = reader.read_indices() {
                 let idx: Vec<usize> = indices.into_u32().map(|i| i as usize).collect();
+                for &i in &idx {
+                    if i >= positions.len() {
+                        return Err(cv_core::Error::ParseError(format!(
+                            "glTF: face index {i} is out of range: mesh {:?} has only {} \
+                             vertex/vertices in its POSITION accessor",
+                            mesh_name,
+                            positions.len()
+                        )));
+                    }
+                }
                 idx.chunks(3)
                     .filter(|c| c.len() == 3)
                     .map(|c| [c[0], c[1], c[2]])
@@ -113,6 +133,19 @@ pub fn write_glb<P: AsRef<Path>>(
     let n_verts = vertices.len();
     let n_faces = faces.len();
 
+    // glTF accessors count in u32, and so does the index buffer. A mesh past
+    // either limit used to be written anyway with `mesh.faces.len() as u32`,
+    // which wraps: the accessor would declare a small count while the BIN chunk
+    // carried gigabytes of index data, and every later offset in the file would
+    // be wrong. Reject instead of truncating.
+    if n_verts > u32::MAX as usize || n_faces > u32::MAX as usize / 3 {
+        return Err(Error::ParseError(format!(
+            "glTF: mesh is too large to write: {} vertices / {} faces exceed the u32 index and \
+             accessor-count range of glTF 2.0",
+            n_verts, n_faces
+        )));
+    }
+
     // Position data
     let mut pos_data = Vec::with_capacity(n_verts * 12);
     // Seeded from the first vertex rather than from sentinels.
@@ -161,9 +194,20 @@ pub fn write_glb<P: AsRef<Path>>(
     }
 
     // Index data (u32)
+    //
+    // This used to be a silent `i as u32` per index, with no check that the
+    // index addresses a written vertex at all. Such a file has no correct
+    // encoding - the reader has to reject it - so reject it here too, where the
+    // caller can still see which face was wrong.
     let mut idx_data = Vec::with_capacity(n_faces * 12);
     for f in faces {
         for &i in f {
+            if i >= n_verts {
+                return Err(Error::ParseError(format!(
+                    "glTF: face index {i} is out of range: only {n_verts} vertex/vertices were \
+                     given"
+                )));
+            }
             idx_data.extend_from_slice(&(i as u32).to_le_bytes());
         }
     }
@@ -264,13 +308,21 @@ pub fn write_glb<P: AsRef<Path>>(
     // GLB header: magic + version + length
     let total_length = 12 + 8 + json_padded.len() + 8 + total_bin_len;
 
+    // The GLB header stores its own length in a u32. A larger mesh would wrap
+    // and produce a file whose declared length disagrees with its contents.
+    let total_length = u32::try_from(total_length).map_err(|_| {
+        Error::ParseError(format!(
+            "glTF: GLB would be {total_length} bytes, past the 4 GiB the container can describe"
+        ))
+    })?;
+
     let mut file = std::fs::File::create(path.as_ref())
         .map_err(|e| cv_core::Error::IoError(format!("Failed to create GLB: {}", e)))?;
 
     // Header
     file.write_all(&0x46546C67u32.to_le_bytes())?; // magic "glTF"
     file.write_all(&2u32.to_le_bytes())?; // version
-    file.write_all(&(total_length as u32).to_le_bytes())?;
+    file.write_all(&total_length.to_le_bytes())?;
 
     // JSON chunk
     file.write_all(&(json_padded.len() as u32).to_le_bytes())?;

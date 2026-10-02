@@ -131,24 +131,34 @@ fn stl_ascii_truncated_before_endloop_is_reported() {
     }
 }
 
-/// An ASCII file with no `endsolid` at all. The parser never checks for one, so
-/// a file truncated after its last `endfacet` is indistinguishable from a
-/// complete one.
+/// An ASCII file with no `endsolid` at all.
+///
+/// This test used to assert the opposite: it took a valid one-facet ASCII STL,
+/// removed the `endsolid x\n` terminator, and required the result to still read
+/// as one face - documenting "a file truncated after its last `endfacet` is
+/// indistinguishable from a complete one" as *observed behaviour*. That was
+/// defect 1 in `crates/io/src/stl.rs`: a file cut cleanly *between* two facets
+/// satisfies every other invariant in the parser, so the missing terminator was
+/// the only thing distinguishing a truncated file from a complete one, and it
+/// was never checked. `parse_ascii_stl` now requires `endsolid`, so a file
+/// without one is reported rather than silently accepted as complete.
+///
+/// The control for that change is `stl_ascii_baseline`, which still requires a
+/// *complete* file to parse.
 #[test]
 fn stl_ascii_missing_endsolid_is_reported() {
     let complete = stl_ascii();
     let truncated = &complete[..complete.len() - b"endsolid x\n".len()];
     assert_ne!(truncated, complete.as_slice(), "the slice must be shorter");
-    let m = stl_expect_ok(truncated, "no endsolid");
-    assert_eq!(
-        m.faces.len(),
-        1,
-        "the truncated file is read as a complete one - the only difference between this and the \
-         valid file is the missing 'endsolid' terminator"
-    );
     assert!(
         !String::from_utf8_lossy(truncated).contains("endsolid"),
         "sanity: the test input really has no endsolid"
+    );
+
+    let err = stl_expect_err(truncated, "a file with no endsolid terminator");
+    assert!(
+        err.contains("endsolid"),
+        "the error should name the missing terminator, got: {err}"
     );
 }
 
