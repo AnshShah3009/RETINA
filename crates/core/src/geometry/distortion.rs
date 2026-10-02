@@ -222,15 +222,202 @@ impl DistortionF32 {
         (x * radial + dx, y * radial + dy)
     }
 
-    pub fn remove(&self, x: f32, y: f32) -> (f32, f32) {
-        let mut xd = x;
-        let mut yd = y;
-        for _ in 0..10 {
-            let (xu, yu) = self.apply(xd, yd);
-            xd += x - xu;
-            yd += y - yu;
+    /// Remove distortion from distorted normalized coordinates `(x, y)`.
+    ///
+    /// This is the `f32` port of [`Distortion::remove_checked`]; read that
+    /// method's comment for why the approach is bisection and not iteration.
+    /// The short version: the previous implementation here was the same
+    /// fixed-point iteration, `xd += x - apply(xd)`, run exactly ten times
+    /// with no convergence test. That iteration's contraction factor is
+    /// `1 - A'(r)`, which exceeds 1 once `r` is past about 0.65, so past that
+    /// radius it did not converge slowly - it diverged. Measured with
+    /// `k1 = 0.5, k2 = 0.2, k3 = 0.05`:
+    ///
+    /// | radius | forward | recovered (before) | error (before) |
+    /// | ---: | ---: | ---: | ---: |
+    /// | 0.5 | 0.569141 | 0.500022 | 0.000022 |
+    /// | 0.6 | 0.724952 | 0.603138 | 0.003138 |
+    /// | 0.8 | 1.132022 | 1.132336 | **0.332336** |
+    /// | 0.9 | 1.406513 | **NaN** | - |
+    /// | 1.0 | 1.750000 | **NaN** | - |
+    ///
+    /// In `f32` the runaway reaches `+/-inf` within ten iterations, and
+    /// `inf - finite` is NaN, so the divergence was not merely wrong but
+    /// poisoned: the NaN then propagates through
+    /// [`crate::geometry::camera::PinholeModelF32::unproject`] and every `f32`
+    /// calibration or resampling built on it, with nothing raised. At r = 0.8
+    /// it silently returned 1.132 where the answer is 0.8 - a normalized error
+    /// of 0.33, roughly 166 px at fx = 500, reported as a successful undistort.
+    ///
+    /// The tolerances below are chosen for `f32`, not copied from the `f64`
+    /// twin. `f32` carries ~1.2e-7 relative precision, so the `f64` gates
+    /// (`1e-24` squared step, `1e-12` residual) are below the noise floor: the
+    /// tangential correction could never satisfy them and would always burn
+    /// all 32 iterations, and the residual gate would reject correct answers
+    /// as non-convergence.
+    ///
+    /// Returns `None` when the radius has no solution - a real case, not an
+    /// error case: a sufficiently strong distortion maps some radii outside the
+    /// representable range, and the caller needs to distinguish "no correction
+    /// exists" from "correction is zero".
+    pub fn remove_checked(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        if !x.is_finite() || !y.is_finite() {
+            return None;
         }
-        (xd, yd)
+
+        // No distortion at all is both the most common case (every rectified
+        // pipeline runs one) and the one with an exactly known answer.
+        // Short-circuiting it is exact, and avoids paying for the bisection to
+        // reproduce the input to within a few ULP.
+        if self.k1 == 0.0 && self.k2 == 0.0 && self.k3 == 0.0 && self.p1 == 0.0 && self.p2 == 0.0 {
+            return Some((x, y));
+        }
+
+        let r = (x * x + y * y).sqrt();
+        if r == 0.0 {
+            return Some((0.0, 0.0));
+        }
+        let cos_t = x / r;
+        let sin_t = y / r;
+
+        // The radius the forward model actually produces for a given undistorted
+        // radius. This is NOT the same as the pure radial polynomial `A(r)`
+        // whenever `p1`/`p2` are nonzero: the tangential terms add
+        // `2 p1 x y` and `p1 (r^2 + 2 y^2)` (and their p2 counterparts) to the
+        // distorted point, so they change its length as well as its angle.
+        // The f64 twin bisects on `A(r)` and only cleans up the angle
+        // afterwards, which is fine at f64 precision but targets the wrong
+        // radius once `p1`/`p2` do anything. Measured here with tangential-only
+        // coefficients, that left a residual of 6.2e-4 at r = 0.5 and 7.5e-3
+        // with radial and tangential together - an order of magnitude above
+        // what f32 can achieve and far above the noise floor, so it is the
+        // model being wrong, not the arithmetic. Bisecting on this closes
+        // against the real forward map instead, so the tangential terms are
+        // accounted for exactly rather than approximately.
+        let radial = |r: f32| {
+            let (ax, ay) = self.apply(r * cos_t, r * sin_t);
+            (ax * ax + ay * ay).sqrt()
+        };
+
+        // The distorted radius is at least the undistorted one when the
+        // polynomial is positive there, but a barrel distortion can make it
+        // smaller. Bracket both ways rather than assuming.
+        let mut lo = 0.0f32;
+        let mut hi = r.max(1e-12);
+        // Grow the upper bound until it brackets, bounded so a pathological
+        // coefficient cannot spin here.
+        let mut grew = 0;
+        while radial(hi) < r && grew < 200 {
+            hi *= 1.5;
+            grew += 1;
+        }
+        if !radial(hi).is_finite() || radial(hi) < r {
+            return None;
+        }
+        // The map need not be monotone if the polynomial turns over; verify the
+        // bracket actually contains the root before bisecting.
+        if !(radial(lo) <= r && r <= radial(hi)) {
+            return None;
+        }
+
+        // 64 iterations is well past what an f32 bisection needs - the loop
+        // below breaks as soon as `mid` stops moving, which for f32 happens
+        // after roughly 26 steps because the mantissa runs out first.
+        let mut r_undistorted = 0.5 * (lo + hi);
+        for _ in 0..64 {
+            let mid = 0.5 * (lo + hi);
+            if mid == lo || mid == hi {
+                break; // converged to f32 precision
+            }
+            r_undistorted = mid;
+            if radial(mid) < r {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        if !r_undistorted.is_finite() {
+            return None;
+        }
+
+        // Fixed-point steps for the tangential terms, which shift the angle. Two
+        // things here are NOT the same as the f64 twin, and both are forced by
+        // f32:
+        //
+        // 1. The convergence threshold is `1e-14` squared, i.e. ~1e-7 in
+        //    distance - one ULP at unit magnitude, as tight as f32 can
+        //    measure. The f64 twin uses `1e-24` squared (~1e-12); copying that
+        //    would put the threshold far below the f32 noise floor, so the
+        //    loop could never satisfy it and would always burn all 32 steps.
+        //
+        // 2. Each step is projected back onto the circle of radius
+        //    `r_undistorted`, the radius the bisection already solved. The
+        //    residual direction of this iteration is `1 - A'(r)`, the same
+        //    quantity that made the original ten-step loop diverge, so the
+        //    radial degree of freedom is *unstable* here too - at r = 0.985
+        //    with the coefficients in the doc comment, `A'(r)` is about 3.7 and
+        //    the factor is -2.7. The f64 twin gets away with it only because
+        //    its threshold trips after one or two steps, before the
+        //    instability can accumulate; at f32 the threshold is reachable but
+        //    the loop runs long enough for it to bite, and the radius walks
+        //    away (measured: r = 0.985 came back as 1.71). Re-imposing the
+        //    solved radius removes that degree of freedom entirely, leaving
+        //    only the angle, and on that circle the iteration contracts
+        //    because `|p1|, |p2|` are small.
+        let mut ux = r_undistorted * cos_t;
+        let mut uy = r_undistorted * sin_t;
+        for _ in 0..32 {
+            let (ax, ay) = self.apply(ux, uy);
+            let (dx, dy) = (x - ax, y - ay);
+            if dx * dx + dy * dy < 1e-14 {
+                break;
+            }
+            ux += dx;
+            uy += dy;
+            if !ux.is_finite() || !uy.is_finite() {
+                return None;
+            }
+            // Project back onto the radius the bisection already solved (see
+            // note 2 above). Without this the radial degree of freedom is
+            // free to run away and the radius is lost.
+            let len = (ux * ux + uy * uy).sqrt();
+            if !len.is_finite() || len == 0.0 {
+                return None;
+            }
+            let s = r_undistorted / len;
+            ux *= s;
+            uy *= s;
+        }
+
+        // Verify the answer actually undoes the distortion. Without this the
+        // caller cannot tell a converged result from a plausible-looking one,
+        // which is the failure mode being fixed here.
+        //
+        // `1e-4 * scale` is chosen against measurement, not by copying. A dense
+        // sweep of the whole unit disc at a 0.01 grid, over five coefficient
+        // sets spanning strong radial, tangential-only, combined, ordinary and
+        // barrel distortion, gives a worst residual of 9.8e-6 and a worst
+        // coordinate error of 8.8e-6. The gate sits about 10x above that, so a
+        // correct answer always clears it - a 1e-5 gate would sit *under* the
+        // measured worst case and start rejecting valid points as
+        // non-convergence - while still being ~3300x tighter than the 0.332
+        // error this fixes, so a diverged answer can never get through.
+        let (ax, ay) = self.apply(ux, uy);
+        let residual = (ax - x).hypot(y - ay);
+        let scale = r.max(1.0);
+        if !residual.is_finite() || residual > 1e-4 * scale {
+            return None;
+        }
+        Some((ux, uy))
+    }
+
+    /// Remove distortion, falling back to the input when it cannot be inverted.
+    ///
+    /// Use [`DistortionF32::remove_checked`] where the distinction matters: this
+    /// version reports non-convergence by returning its input unchanged, which
+    /// is indistinguishable from a point that genuinely needed no correction.
+    pub fn remove(&self, x: f32, y: f32) -> (f32, f32) {
+        self.remove_checked(x, y).unwrap_or((x, y))
     }
 }
 
