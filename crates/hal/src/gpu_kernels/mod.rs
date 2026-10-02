@@ -512,6 +512,92 @@ pub mod buffer_utils {
 
 #[cfg(test)]
 mod tests {
+    /// A non-finite coordinate must be reported, not panicked on.
+    ///
+    /// Reproduced before the fix: four points, one of them `[NaN, 0, 0]`, and
+    /// `batch_nearest_neighbors` **panicked** — `norm_squared()` of a vector with a
+    /// NaN component is NaN, so `partial_cmp(..).unwrap()` in the distance sort
+    /// hit `None`. One bad point in a cloud took down the caller.
+    #[test]
+    fn a_non_finite_point_is_reported() {
+        use super::spatial_gpu::validate_finite_points;
+        use nalgebra::Vector3;
+
+        for (label, bad) in [
+            ("NaN", f32::NAN),
+            ("+inf", f32::INFINITY),
+            ("-inf", f32::NEG_INFINITY),
+        ] {
+            let points = vec![
+                Vector3::new(0.0f32, 0.0, 0.0),
+                Vector3::new(bad, 0.0, 0.0),
+                Vector3::new(2.0, 0.0, 0.0),
+            ];
+            let err = validate_finite_points(&points)
+                .expect_err("a non-finite coordinate must be rejected");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("point 1") && msg.contains("not finite"),
+                "{label}: the error must name the offending index; got: {msg}"
+            );
+        }
+
+        // It must be the *coordinate* that is checked, in every axis.
+        use nalgebra::Vector3 as V;
+        for p in [
+            V::new(0.0f32, f32::NAN, 0.0),
+            V::new(0.0, 0.0, f32::NAN),
+            V::new(f32::INFINITY, 0.0, 0.0),
+        ] {
+            assert!(
+                validate_finite_points(&[p]).is_err(),
+                "each axis must be checked, missed {p:?}"
+            );
+        }
+    }
+
+    /// CONTROL: a finite cloud passes, so the check cannot reject everything.
+    #[test]
+    fn a_finite_point_cloud_is_accepted() {
+        use super::spatial_gpu::validate_finite_points;
+        use nalgebra::Vector3;
+
+        let points = vec![
+            Vector3::new(0.0f32, 0.0, 0.0),
+            Vector3::new(1.5, -2.0, 3.25),
+            Vector3::new(f32::MAX, f32::MIN, 0.0),
+        ];
+        assert!(
+            validate_finite_points(&points).is_ok(),
+            "finite coordinates must be accepted; f32::MAX/MIN are finite, not sentinels"
+        );
+        assert!(
+            validate_finite_points(&[]).is_ok(),
+            "an empty slice is vacuously finite"
+        );
+    }
+
+    /// The sort itself must not panic on a NaN distance, independently of the
+    /// guard above — it is defence in depth for a panic that took down the caller.
+    #[test]
+    fn sorting_distances_tolerates_nan() {
+        let mut d: Vec<(u32, f32)> = vec![
+            (0, 1.0),
+            (1, f32::NAN),
+            (2, 0.5),
+            (3, f32::INFINITY),
+            (4, f32::NEG_INFINITY),
+        ];
+        d.sort_by(|a, b| a.1.total_cmp(&b.1));
+        // -inf, 0.5, 1.0, +inf, NaN — NaN sorts last, so it is never a near
+        // neighbour, which is the meaningful answer for an undefined distance.
+        assert_eq!(
+            d.iter().map(|x| x.0).collect::<Vec<_>>(),
+            vec![4, 2, 0, 3, 1],
+            "total_cmp must order finite values normally and place NaN last"
+        );
+    }
+
     use super::buffer_utils::*;
 
     #[test]
@@ -1053,6 +1139,36 @@ pub mod spatial_gpu {
     use std::sync::Arc;
     use wgpu::BufferUsages;
 
+    /// Reject a point cloud containing a non-finite coordinate.
+    ///
+    /// Guards the boundary where caller data enters, rather than every internal
+    /// consumer. Two things used to go wrong silently with a NaN coordinate:
+    ///
+    /// * The bounding box below is accumulated with `f32::min`/`max`, which
+    ///   *return the non-NaN operand*, so a NaN point is quietly skipped in the
+    ///   box while remaining in the buffer. An all-NaN cloud leaves the sentinels
+    ///   in place and the box becomes `min > max`.
+    /// * `batch_nearest_neighbors` sorts distances with
+    ///   `partial_cmp(..).unwrap()`, and `norm_squared()` of a vector with a NaN
+    ///   component is NaN, so `partial_cmp` returns `None` and the query
+    ///   **panics**. Reproduced with four points, one of them `[NaN, 0, 0]`.
+    ///
+    /// A nearest-neighbour query over a non-finite cloud has no meaningful answer,
+    /// so this is reported rather than approximated.
+    pub(crate) fn validate_finite_points(points: &[Vector3<f32>]) -> crate::Result<()> {
+        if let Some(i) = points
+            .iter()
+            .position(|p| !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()))
+        {
+            return Err(crate::Error::InvalidInput(format!(
+                "point {i} is not finite ({}, {}, {}); a spatial query over a \
+                 non-finite point cloud is undefined",
+                points[i].x, points[i].y, points[i].z
+            )));
+        }
+        Ok(())
+    }
+
     /// Build KDTree on GPU (parallel construction) - simplified version
     /// Returns sorted Morton codes as a basic spatial index
     pub fn build_kdtree(
@@ -1062,6 +1178,7 @@ pub mod spatial_gpu {
         if points.is_empty() {
             return Err(crate::Error::InvalidInput("Empty point cloud".into()));
         }
+        validate_finite_points(points)?;
 
         let device = gpu.device.clone();
 
@@ -1148,7 +1265,18 @@ pub mod spatial_gpu {
                 })
                 .collect();
 
-            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            // `total_cmp`, not `partial_cmp(..).unwrap()`.
+            //
+            // The unwrap panicked on any NaN distance, which one non-finite point
+            // was enough to produce. `total_cmp` is a total order that cannot
+            // panic; it agrees with `partial_cmp` on every finite value, and
+            // `sort_by` is stable, so the order of a valid cloud is unchanged. NaN
+            // sorts last, i.e. a NaN-distance point is never a near neighbour, which
+            // is the right answer.
+            //
+            // `validate_finite_points` above should make this unreachable. It is
+            // kept as defence in depth because the panic took down the caller.
+            distances.sort_by(|a, b| a.1.total_cmp(&b.1));
             distances.truncate(k as usize);
             results.push(distances);
         }
