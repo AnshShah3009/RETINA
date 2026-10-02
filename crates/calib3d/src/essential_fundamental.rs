@@ -227,21 +227,32 @@ fn estimate_essential_8_point(pts1: &[Point2<f64>], pts2: &[Point2<f64>]) -> Res
         a[(i, 8)] = 1.0;
     }
 
-    let svd = a.svd(true, true);
-    let vt = svd.v_t.ok_or_else(|| {
+    // Via the shared helper, not `v_t.row(v_t.nrows() - 1)` directly.
+    //
+    // nalgebra returns a *thin* `v_t` of shape `min(m, 9)`, so with exactly 8
+    // correspondences - the documented minimum, accepted by the guard above - the
+    // null vector the 8-point algorithm needs is row 8 and simply is not among
+    // the 8 rows returned. Row 7 is an arbitrary vector with a strictly positive
+    // `‖A v‖`, and `enforce_essential_constraints` then projects it onto the
+    // rank-2 manifold, producing a well-formed, plausible, wrong `E`.
+    //
+    // Measured on noise-free correspondences from a known relative pose, worst
+    // Sampson residual in pixels at f = 800:
+    //
+    //     n =  8: 21.71 px     <- the minimal sample, the only broken case
+    //     n =  9:  4.01e-12 px
+    //     n = 12:  1.50e-12 px
+    //     n = 16:  3.35e-13 px
+    //
+    // This matters beyond the direct call: `EssentialEstimator::min_sample_size()`
+    // is 8, and `find_essential_mat_ransac` drives it with `Ransac::run`, which
+    // samples exactly that many - so *every* minimal sample in RANSAC was drawn
+    // from a solver returning a wrong `E`.
+    let evec = crate::dlt::smallest_right_singular_vector(a).ok_or_else(|| {
         cv_core::Error::AlgorithmError("SVD failed in estimate_essential_8_point".to_string())
     })?;
-    let evec = vt.row(vt.nrows() - 1);
     let e = Matrix3::new(
-        evec[(0, 0)],
-        evec[(0, 1)],
-        evec[(0, 2)],
-        evec[(0, 3)],
-        evec[(0, 4)],
-        evec[(0, 5)],
-        evec[(0, 6)],
-        evec[(0, 7)],
-        evec[(0, 8)],
+        evec[0], evec[1], evec[2], evec[3], evec[4], evec[5], evec[6], evec[7], evec[8],
     );
     enforce_essential_constraints(&e)
 }

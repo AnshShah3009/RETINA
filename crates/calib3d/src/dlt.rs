@@ -77,7 +77,11 @@ pub fn hartley_normalize(pts: &[[f64; 2]]) -> Option<(Matrix3<f64>, Vec<[f64; 2]
 /// `‖A v‖`. Padding the system with (zero) rows up to `9 x 9` makes the null
 /// vector part of `v_t`, which is what the pre-consolidation `cv-features`
 /// RANSAC solver did and what every path here now does.
-fn smallest_right_singular_vector(a: DMatrix<f64>) -> Option<DVector<f64>> {
+///
+/// `pub(crate)` because `essential_fundamental` has the same `m x 9` design
+/// matrix and the same defect: it read `v_t.row(v_t.nrows() - 1)` directly, which
+/// is row 7 - not the null vector - when `m == 8`.
+pub(crate) fn smallest_right_singular_vector(a: DMatrix<f64>) -> Option<DVector<f64>> {
     let a = if a.nrows() < 9 {
         let mut padded = DMatrix::<f64>::zeros(9, 9);
         padded.view_mut((0, 0), (a.nrows(), 9)).copy_from(&a);
