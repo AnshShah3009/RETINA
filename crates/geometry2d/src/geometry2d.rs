@@ -527,13 +527,23 @@ pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
 }
 
 /// Convex hull using Andrew's monotone chain algorithm.  O(n log n).
+///
+/// Non-finite points are dropped. A NaN coordinate has no position, so it cannot
+/// be inside or outside any hull; including one made the cross-product test below
+/// compare against NaN, and every such comparison is false, so the hull silently
+/// gained or dropped a vertex depending on the input order. Measured on eight
+/// points where one carried a NaN x: the hull came back with nine vertices,
+/// more than the seven for the same input without it.
 pub fn convex_hull(points: &[Point2D]) -> Polygon {
-    let mut pts: Vec<Point2D> = points.to_vec();
-    pts.sort_by(|a, b| {
-        a.x.partial_cmp(&b.x)
-            .unwrap()
-            .then(a.y.partial_cmp(&b.y).unwrap())
-    });
+    let mut pts: Vec<Point2D> = points
+        .iter()
+        .cloned()
+        .filter(|p: &Point2D| p.x.is_finite() && p.y.is_finite())
+        .collect();
+    // `total_cmp` rather than `partial_cmp(..).unwrap()`: it orders every bit
+    // pattern, so this line cannot panic even if a non-finite value is ever
+    // reintroduced upstream. Before the fix, one NaN coordinate panicked here.
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
     pts.dedup_by(|a, b| (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS);
 
     let n = pts.len();
@@ -1021,7 +1031,7 @@ impl STRtree {
                 let cy = (b.2 + b.4) * 0.5;
                 (cx - x).powi(2) + (cy - y).powi(2)
             };
-            da.partial_cmp(&db).unwrap()
+            da.total_cmp(&db)
         });
         all.into_iter().take(k).map(|item| item.0).collect()
     }
@@ -1040,7 +1050,7 @@ fn str_build(mut items: Vec<(usize, f64, f64, f64, f64)>, capacity: usize) -> ST
     items.sort_by(|a, b| {
         let ca = (a.1 + a.3) * 0.5;
         let cb = (b.1 + b.3) * 0.5;
-        ca.partial_cmp(&cb).unwrap()
+        ca.total_cmp(&cb)
     });
 
     let mut children = Vec::new();

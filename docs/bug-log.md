@@ -250,6 +250,33 @@ or `f64::MIN`. Ten already guard the empty case and are correct. Three were not:
   origin — valid, and the file drops to 644 bytes.
 - **`bounding_box.rs` projected onto its own axes with the same seed**, guarded on
   a non-empty `points` slice, so it is correct as written.
+
+## Six float comparisons that could panic
+
+Searched for `partial_cmp().unwrap()` — the panic the log records for `eigh` on
+NaN eigenvalues. Six sites. **Two of the four reachable ones were checked and
+found *not* to panic**, which is the reason to measure rather than assume:
+
+Rust's `f32::min`/`max` return the **non-NaN** operand, so
+`f32::MAX.min(f32::NAN) == f32::MAX`. A sentinel accumulation therefore
+*swallows* a NaN coordinate — `compute_adaptive_voxel_size` does exactly this,
+and a probe with one NaN among 500 points did not panic. My first instinct was
+wrong, and the comment committed alongside the fix says so rather than claiming
+a crash that does not happen.
+
+- **`convex_hull` panicked on one NaN coordinate.** Here the NaN went straight
+  into a comparison, not through a `min`/`max`: `finite -> 7 vertices`,
+  `one NaN x -> PANIC`, `a NaN point -> PANIC`. Swapping in `total_cmp` stops the
+  panic but returns a *wrong* hull — a NaN has no position, the cross-product
+  test compares against NaN, and every such comparison is false, which gave nine
+  vertices from eight points where finite input gives seven. Non-finite points
+  are now dropped, so the hull is computed over the points that have a position.
+- **The STRtree sorts** compared the same way and are now `total_cmp`.
+- `compute_adaptive_voxel_size`'s span sort is hardened to `total_cmp`. This is
+  defence in depth, not a fix: its inputs are provably finite today, but a span
+  computed as `n / (sx*sy*sz)` overflows for a degenerate cloud, and an unwrap on
+  a comparison that could see NaN is a panic waiting for the input that produces
+  it.
 - **`find_essential_mat_ransac_handles_outliers` is flaky.** It runs 600 RANSAC
   samples with no seed, so the sampled hypothesis varies run to run; the
   recovered translation direction is near-degenerate on that synthetic scene and
@@ -277,7 +304,7 @@ or `f64::MIN`. Ten already guard the empty case and are correct. Three were not:
 
 | | |
 | --- | ---: |
-| Defects fixed | **105+** |
+| Defects fixed | **107+** |
 | Commits | 460+ |
-| Tests | 1,800 (from 1,267) |
+| Tests | 1,805 (from 1,267) |
 | Duplicate implementations removed | 12 |

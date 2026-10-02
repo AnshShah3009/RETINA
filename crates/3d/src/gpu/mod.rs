@@ -319,8 +319,23 @@ pub mod point_cloud {
         let sz = (max_z - min_z).max(1e-9_f32);
 
         // Sort spans smallest → largest.
+        //
+        // `total_cmp` rather than `partial_cmp(..).unwrap()`. This is hardening,
+        // not a fix for an observed panic: Rust's `f32::min`/`max` return the
+        // *non-NaN* operand, so a single NaN coordinate is silently swallowed by
+        // the sentinel accumulation above and never reaches this sort - verified,
+        // `f32::MAX.min(f32::NAN) == f32::MAX`. The spans are therefore finite
+        // today for any input whose coordinates are finite or NaN.
+        //
+        // `total_cmp` orders every bit pattern, so this line cannot panic even if
+        // a NaN reaches it - which it could, since a span computed as
+        // `n / (sx * sy * sz)` overflows to infinity or NaN for a degenerate
+        // cloud, and `.max(1e-9)` on a NaN that is already the left operand
+        // returns the finite bound rather than repairing it. An unwrap on a
+        // comparison that can see NaN is a panic waiting for the input that
+        // produces it.
         let mut spans = [sx, sy, sz];
-        spans.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        spans.sort_by(|a, b| a.total_cmp(b));
         let (s0, s1, s2) = (spans[0], spans[1], spans[2]);
 
         let vs = if s0 > s2 * 0.01 {
