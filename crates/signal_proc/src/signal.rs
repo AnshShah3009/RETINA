@@ -102,9 +102,17 @@ pub fn lfilter(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
     assert!(!a.is_empty() && a[0] != 0.0, "a[0] must be nonzero");
     assert!(!b.is_empty(), "b must be non-empty");
 
-    let a0 = a[0];
     let order = b.len().max(a.len());
     let mut z = vec![0.0; order]; // delay line
+    lfilter_state(b, a, x, &mut z)
+}
+
+/// `lfilter` with an explicit delay-line state (length `max(b.len(), a.len())`).
+///
+/// The state is advanced in place, so the caller can chain passes.
+fn lfilter_state(b: &[f64], a: &[f64], x: &[f64], z: &mut [f64]) -> Vec<f64> {
+    let a0 = a[0];
+    let order = b.len().max(a.len());
 
     let mut y = Vec::with_capacity(x.len());
     for &xi in x {
@@ -121,13 +129,55 @@ pub fn lfilter(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
     y
 }
 
+/// Delay-line state that puts the filter in the steady state of a *constant*
+/// input, i.e. the fixed point `zi = A*zi + B` of the transposed direct form II
+/// (scipy's `lfilter_zi`, MATLAB's `filtic`).
+///
+/// For a held unit input the output settles at `y_ss = sum(b) / sum(a)` and the
+/// state can be accumulated backwards in closed form:
+/// `zi[i] = sum_{j > i} (b[j] - a[j] * y_ss) / a[0]`.
+///
+/// Starting a pass from this instead of from zeros removes the start-up
+/// transient: a normalised lowpass applied to a constant must return that
+/// constant, not a ringing edge.
+fn lfilter_zi(b: &[f64], a: &[f64]) -> Vec<f64> {
+    assert!(!a.is_empty() && a[0] != 0.0, "a[0] must be nonzero");
+    assert!(!b.is_empty(), "b must be non-empty");
+
+    let a0 = a[0];
+    let order = b.len().max(a.len());
+    let coeff = |c: &[f64], i: usize| if i < c.len() { c[i] / a0 } else { 0.0 };
+
+    let num: f64 = (0..order).map(|i| coeff(b, i)).sum();
+    let den: f64 = (0..order).map(|i| coeff(a, i)).sum();
+    let y_ss = if den == 0.0 { 0.0 } else { num / den };
+
+    let mut zi = vec![0.0; order];
+    let mut acc = 0.0;
+    for i in (0..order.saturating_sub(1)).rev() {
+        acc += coeff(b, i + 1) - coeff(a, i + 1) * y_ss;
+        zi[i] = acc;
+    }
+    zi
+}
+
 /// Zero-phase IIR filtering (forward + reverse pass).
 ///
-/// The signal is padded with reflected edges to reduce transient artifacts.
+/// The signal is padded with reflected edges to reduce transient artifacts, and
+/// each pass starts from the steady state of the sample it starts on
+/// (`lfilter_zi` scaled by `x[0]` forward and by the forward pass's last output
+/// backwards), so a constant input comes out unchanged. Without that
+/// initialisation the forward pass's transient was mirrored by the reverse pass
+/// and survived inside the *unpadded* region: on 300 samples of the constant
+/// 3.25 with `butter(4, 50, 1000)` the output reached 3.6113 at index 297
+/// (deviation 3.613e-1), 3.1689 at index 288 and 3.1846 at index 5; for a
+/// 10-sample constant the error reached 9.9976e-1 (the last sample came back as
+/// 0.00077 instead of 3.25).
 pub fn filtfilt(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
     if x.is_empty() {
         return Vec::new();
     }
+    let zi = lfilter_zi(b, a);
     let nfilt = b.len().max(a.len());
     let pad_len = 3 * nfilt;
 
@@ -135,9 +185,11 @@ pub fn filtfilt(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
     let n = x.len();
     if n <= pad_len {
         // Signal too short for padding; just do forward+reverse without padding
-        let fwd = lfilter(b, a, x);
+        let mut z: Vec<f64> = zi.iter().map(|v| v * x[0]).collect();
+        let fwd = lfilter_state(b, a, x, &mut z);
         let mut rev: Vec<f64> = fwd.into_iter().rev().collect();
-        rev = lfilter(b, a, &rev);
+        let mut z2: Vec<f64> = zi.iter().map(|v| v * rev[0]).collect();
+        rev = lfilter_state(b, a, &rev, &mut z2);
         rev.reverse();
         return rev;
     }
@@ -153,11 +205,13 @@ pub fn filtfilt(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
         padded.push(2.0 * x[n - 1] - x[n - 1 - i]);
     }
 
-    // Forward pass
-    let fwd = lfilter(b, a, &padded);
-    // Reverse pass
+    // Forward pass, started in the steady state of the first padded sample.
+    let mut z: Vec<f64> = zi.iter().map(|v| v * padded[0]).collect();
+    let fwd = lfilter_state(b, a, &padded, &mut z);
+    // Reverse pass, started in the steady state of the last forward output.
     let mut rev: Vec<f64> = fwd.into_iter().rev().collect();
-    rev = lfilter(b, a, &rev);
+    let mut z2: Vec<f64> = zi.iter().map(|v| v * rev[0]).collect();
+    rev = lfilter_state(b, a, &rev, &mut z2);
     rev.reverse();
 
     // Trim padding
@@ -1193,6 +1247,15 @@ pub fn dwt(signal: &[f64], wavelet: Wavelet) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// 1D Inverse Discrete Wavelet Transform (single level) with periodic boundary.
+///
+/// The output length is `2 * approx.len()`.
+///
+/// # Preconditions
+///
+/// `approx.len()` must equal `detail.len()`. A longer `approx` indexes past the
+/// end of `detail` and panics; a longer `detail` is silently truncated to
+/// `approx.len()` — so an odd-length signal cannot be rebuilt (the filter bank
+/// below is even-length only).
 pub fn idwt(approx: &[f64], detail: &[f64], wavelet: Wavelet) -> Vec<f64> {
     let lo = wavelet.lo_r();
     let hi = wavelet.hi_r();
@@ -1214,7 +1277,13 @@ pub fn idwt(approx: &[f64], detail: &[f64], wavelet: Wavelet) -> Vec<f64> {
 
 /// Multi-level DWT decomposition.
 ///
-/// Returns `[detail_level_n, ..., detail_level_1, approx_level_n]`.
+/// Returns `[approx_level_n, detail_level_n, detail_level_{n-1}, ..., detail_level_1]`
+/// — the multi-resolution pyramid, coarsest approximation first, each following
+/// entry being the detail of the level *above* it. Note that the lengths *grow*
+/// down the list (`n/2^levels` for the approximation, then `2 *` per step), and
+/// that this is exactly what `waverec` consumes. The order used to be documented
+/// as the reverse (`[detail_n, ..., detail_1, approx_n]`), which would have made
+/// `waverec` reconstruct a different signal.
 pub fn wavedec(signal: &[f64], wavelet: Wavelet, levels: usize) -> Vec<Vec<f64>> {
     let mut coeffs = Vec::with_capacity(levels + 1);
     let mut current = signal.to_vec();
@@ -1231,7 +1300,13 @@ pub fn wavedec(signal: &[f64], wavelet: Wavelet, levels: usize) -> Vec<Vec<f64>>
 
 /// Multi-level DWT reconstruction.
 ///
-/// Input format: `[approx, detail_1, detail_2, ..., detail_n]` (same as wavedec output).
+/// Input format is `wavedec`'s output, coarsest first:
+/// `[approx_level_n, detail_level_n, ..., detail_level_1]` — each `idwt` pairs
+/// the running approximation with the detail of the level that produced it.
+/// (The doc used to say `[approx, detail_1, ..., detail_n]`, i.e. the details in
+/// the opposite order; `idwt` would then have paired each approximation with
+/// the wrong detail. The implementation has always used the coarsest-first
+/// order — see `test_wavedec_levels`, which pins it.)
 #[allow(clippy::needless_range_loop)]
 pub fn waverec(coeffs: &[Vec<f64>], wavelet: Wavelet) -> Vec<f64> {
     if coeffs.is_empty() {

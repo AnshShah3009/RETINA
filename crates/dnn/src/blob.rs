@@ -12,12 +12,42 @@ pub fn image_to_blob(image: &GrayImage) -> Vec<f32> {
     blob
 }
 
+/// Convert a `[0, 1]` blob back into a `width x height` luma image.
+///
+/// The blob is consumed in row-major order, exactly `width * height` values.
+///
+/// # Panics
+///
+/// Panics when `blob.len() != width * height`. Both mismatch directions used to
+/// be silently absorbed:
+///
+/// * **too few values** — `image::GrayImage::from_raw` rejects a short buffer,
+///   and the fallback was `GrayImage::new(width, height)`, a well-formed
+///   **all-black** image. Measured: `blob_to_image(&[0.25, 0.5, 0.75], 2, 2)`
+///   returned pixels `[0, 0, 0, 0]` — a plausible observation, so nothing
+///   downstream could tell that every value it supplied had been dropped.
+/// * **too many values** — `from_raw` accepts a buffer that is *at least*
+///   `width * height` long, so the extra values were silently discarded
+///   (`blob_to_image(&[1.0; 5], 2, 2)` returned `[255, 255, 255, 255]`).
+///
+/// There is no honest value to substitute for a missing sample, so the size
+/// mismatch is reported instead.
 pub fn blob_to_image(blob: &[f32], width: u32, height: u32) -> GrayImage {
-    let mut raw = Vec::with_capacity((width * height) as usize);
-    for val in blob {
-        raw.push((val * 255.0).clamp(0.0, 255.0) as u8);
+    let expected = width as usize * height as usize;
+    assert_eq!(
+        blob.len(),
+        expected,
+        "blob_to_image: blob has {} values but {width}x{height} needs {expected}",
+        blob.len()
+    );
+
+    // Pixel-for-pixel copy in row-major order (same order as the blob), so
+    // there is no fallible buffer rebuild that could silently fall back.
+    let mut img = GrayImage::new(width, height);
+    for (px, val) in img.pixels_mut().zip(blob.iter()) {
+        *px = image::Luma([(val * 255.0).clamp(0.0, 255.0) as u8]);
     }
-    GrayImage::from_raw(width, height, raw).unwrap_or_else(|| GrayImage::new(width, height))
+    img
 }
 
 #[cfg(test)]

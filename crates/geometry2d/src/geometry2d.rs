@@ -151,7 +151,17 @@ fn ring_perimeter(ring: &[Point2D]) -> f64 {
     if ring.len() < 2 {
         return 0.0;
     }
-    ring.windows(2).map(|w| w[0].distance(&w[1])).sum()
+    let mut total: f64 = ring.windows(2).map(|w| w[0].distance(&w[1])).sum();
+    // A ring that is not explicitly closed still has a closing edge. Every
+    // other ring helper wraps (`ring_signed_area` uses `(i + 1) % n`,
+    // `close_ring` appends the first point), so without this the same ring
+    // reported its full area but a perimeter short by one edge — e.g. a unit
+    // square with an open ring measured 3.0 instead of 4.0.
+    let (first, last) = (&ring[0], ring.last().unwrap());
+    if (first.x - last.x).abs() > EPS || (first.y - last.y).abs() > EPS {
+        total += first.distance(last);
+    }
+    total
 }
 
 fn ring_centroid(ring: &[Point2D]) -> Point2D {
@@ -273,17 +283,24 @@ pub fn segments_intersect(a1: &Point2D, a2: &Point2D, b1: &Point2D, b2: &Point2D
         return true;
     }
 
-    // Collinear / touching cases
-    if d1.abs() <= EPS && on_segment(a1, b1, a2) {
+    // Collinear / touching cases. Each `d` says which segment's *line* the
+    // other segment's endpoint lies on, so the bounding-box test must be run
+    // against that line's own segment: `d1 == 0` means `a1` is on the line
+    // through `b`, so it is on segment `b` exactly when it falls inside `b`'s
+    // bounding box. The arguments used to be crossed (`d1` tested against
+    // `a`'s box and `d3` against `b`'s box), which reported
+    // `(0,0)-(6,3)` vs `(5,0)-(10,0)` as intersecting and missed both shared
+    // endpoints and T-touches.
+    if d1.abs() <= EPS && on_segment(b1, a1, b2) {
         return true;
     }
-    if d2.abs() <= EPS && on_segment(a1, b2, a2) {
+    if d2.abs() <= EPS && on_segment(b1, a2, b2) {
         return true;
     }
-    if d3.abs() <= EPS && on_segment(b1, a1, b2) {
+    if d3.abs() <= EPS && on_segment(a1, b1, a2) {
         return true;
     }
-    if d4.abs() <= EPS && on_segment(b1, a2, b2) {
+    if d4.abs() <= EPS && on_segment(a1, b2, a2) {
         return true;
     }
     false
@@ -383,13 +400,80 @@ pub fn polygons_intersect(a: &Polygon, b: &Polygon) -> bool {
 }
 
 /// Whether `outer` completely contains `inner`.
+///
+/// A vertices-only test is not a containment test: a polygon whose vertices are
+/// all inside can still bulge out through a concavity, and it can also swallow a
+/// hole of `outer` — both measured before this was fixed (an 8x8 ring covering a
+/// 4x4 hole was reported contained). So, in addition to the vertex test, no edge
+/// of `inner` may *properly* cross `outer`'s boundary (touching is allowed) and
+/// no hole of `outer` may lie inside `inner`.
 pub fn polygon_contains_polygon(outer: &Polygon, inner: &Polygon) -> bool {
     for p in &inner.exterior {
-        if !point_in_polygon(p, outer) {
+        if !point_in_polygon(p, outer) && !point_on_boundary(p, outer) {
             return false;
         }
     }
+    let outer_edges: Vec<(&Point2D, &Point2D)> = ring_edges(&outer.exterior)
+        .into_iter()
+        .chain(outer.holes.iter().flat_map(|h| ring_edges(h)))
+        .collect();
+    for (a, b) in ring_edges(&inner.exterior) {
+        for (c, d) in &outer_edges {
+            if segments_intersect_proper(a, b, c, d) {
+                return false;
+            }
+        }
+    }
+    for hole in &outer.holes {
+        if let Some(h) = hole.first() {
+            if point_in_polygon(h, inner) {
+                return false;
+            }
+        }
+    }
     true
+}
+
+/// The edges of a ring, whether or not it is explicitly closed (first == last).
+fn ring_edges(ring: &[Point2D]) -> Vec<(&Point2D, &Point2D)> {
+    let n = ring.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let open = if (ring[0].x - ring[n - 1].x).abs() < EPS && (ring[0].y - ring[n - 1].y).abs() < EPS
+    {
+        n - 1
+    } else {
+        n
+    };
+    if open < 2 {
+        return Vec::new();
+    }
+    (0..open)
+        .map(|i| (&ring[i], &ring[(i + 1) % open]))
+        .collect()
+}
+
+/// Distance from `p` to the segment `(a, b)`.
+fn distance_to_segment(p: &Point2D, a: &Point2D, b: &Point2D) -> f64 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < EPS * EPS {
+        return p.distance(a);
+    }
+    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len_sq).clamp(0.0, 1.0);
+    p.distance(&Point2D::new(a.x + t * dx, a.y + t * dy))
+}
+
+/// Whether `p` lies exactly on the boundary of `poly` (exterior or a hole).
+fn point_on_boundary(p: &Point2D, poly: &Polygon) -> bool {
+    let on = |ring: &[Point2D]| {
+        ring_edges(ring)
+            .iter()
+            .any(|(a, b)| distance_to_segment(p, a, b) <= EPS)
+    };
+    on(&poly.exterior) || poly.holes.iter().any(|h| on(h))
 }
 
 // ─── Boolean Operations ──────────────────────────────────────────────────────
@@ -1056,11 +1140,13 @@ fn str_build(mut items: Vec<(usize, f64, f64, f64, f64)>, capacity: usize) -> ST
     let mut children = Vec::new();
     for slice in items.chunks(slice_size) {
         let mut s = slice.to_vec();
-        // Sort slice by y-center
+        // Sort slice by y-center. `total_cmp` rather than
+        // `partial_cmp(..).unwrap()`, which panics on a NaN centre (a NaN
+        // coordinate in an item's y-range makes the centre NaN).
         s.sort_by(|a, b| {
             let ca = (a.2 + a.4) * 0.5;
             let cb = (b.2 + b.4) * 0.5;
-            ca.partial_cmp(&cb).unwrap()
+            ca.total_cmp(&cb)
         });
         for chunk in s.chunks(capacity) {
             children.push(str_build(chunk.to_vec(), capacity));
