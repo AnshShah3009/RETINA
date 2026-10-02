@@ -22,6 +22,12 @@ struct Voxel {
 @group(0) @binding(0) var<storage, read> voxels: array<Voxel>;
 @group(0) @binding(1) var<storage, read_write> output_data: array<vec4<f32>>; // x: depth, yzw: normal
 @group(0) @binding(2) var<uniform> params: Params;
+// Camera-to-world. The host API (`ComputeContext::tsdf_raycast`) takes the pose
+// WORLD-to-camera - the same convention `tsdf_integrate` uses to project world
+// points into the camera, and the one `CpuBackend::tsdf_raycast` documents - so
+// `gpu_kernels::tsdf::raycast` inverts it before uploading. Do not reinterpret
+// this binding as a world-to-camera matrix: the ray below would start at -C
+// instead of C and march in the transposed direction.
 @group(0) @binding(3) var<uniform> camera_to_world: mat4x4<f32>;
 @group(0) @binding(4) var<uniform> intrinsics_inv: vec4<f32>; // 1/fx, 1/fy, cx, cy
 
@@ -95,7 +101,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let p = origin_world + dir_world * t;
         let tsdf_val = get_tsdf(p);
         
-        if (prev_tsdf > 0.0 && tsdf_val < 0.0 && tsdf_val > -0.8) {
+        // Zero crossing only - matches the CPU predicate exactly. This previously also
+        // required the sample to be outside a lower band at -0.8, i.e. inside the
+        // truncation distance of the surface. Nothing about those samples is
+        // unreliable: they are ordinary interior samples whose sign is as
+        // trustworthy as any other, and a ray that *enters* the band legitimately
+        // crosses into it - a ray starting inside unobserved space already reads
+        // -1.0 on its first step. The guard only removed surfaces the CPU finds,
+        // which is what made a partially observed volume's boundary look
+        // different between the two backends.
+        if (prev_tsdf > 0.0 && tsdf_val < 0.0) {
             let t_surf = t - t_step * (tsdf_val / (tsdf_val - prev_tsdf));
             let p_surf_world = origin_world + dir_world * t_surf;
             
