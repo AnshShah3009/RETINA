@@ -1,10 +1,12 @@
 // LBVH build, phase 2: compute leaf AABBs and propagate them up the tree.
 //
-// Split out from the combined `lbvh_build.wgsl`; see that file for why. This
-// phase genuinely needs four storage buffers plus a uniform, which is exactly at
-// the device limit, so it cannot share a module with the tree phase - WGSL
-// would derive one layout covering the union of both and push every entry point
-// over.
+// Split out from the combined `lbvh_build.wgsl`. This phase genuinely needs four
+// storage buffers plus a uniform, which is exactly at the device limit
+// (`max_storage_buffers_per_shader_stage` = 4, from
+// `wgpu::Limits::downlevel_defaults()`), so it cannot be merged back into a
+// module whose entry points also reach four - not because layouts are derived
+// per module, but because then those entry points would reach more than four.
+// See that file for the details.
 
 struct LbvhNode {
     parent: i32,

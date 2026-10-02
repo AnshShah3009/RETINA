@@ -16,22 +16,40 @@ pub fn voxel_downsample(
         return Err(crate::Error::InvalidInput("Empty point cloud".into()));
     }
 
+    // Storage-buffer budget: this device caps
+    // `max_storage_buffers_per_shader_stage` at 4 (from
+    // `wgpu::Limits::downlevel_defaults()`), and wgpu-core derives the layout
+    // per ENTRY POINT. `main` used to reach five storage bindings and could not
+    // have a pipeline created at all.
+    //
+    // `output_count` (one atomic) and `claim_table` (the open-addressed slot
+    // table) are packed into a single `claim_data` buffer, with the count at
+    // word 0 and the table from word 1 onwards. Keeping the atomic on `claim_data`
+    // rather than aliasing it keeps the type `array<atomic<u32>>`, which is what
+    // `atomicCompareExchangeWeak` / `atomicAdd` require; a separate
+    // `var<storage, read_write> output_count: atomic<u32>` would additionally
+    // consume a fifth binding.
     let voxel_shader = r#"
 struct VoxelParams {
     voxel_size: f32,
     num_points: u32,
-    table_size: u32,   // power of two, >= 2 * num_points
+    table_size: u32,
     padding: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_points: array<vec3<f32>>;
-@group(0) @binding(1) var<storage, read> params: VoxelParams;
+// The host allocates this with BufferUsages::UNIFORM only, so the shader must
+// declare it `uniform`: a buffer bound to a storage binding is rejected unless
+// it carries STORAGE usage.
+@group(0) @binding(1) var<uniform> params: VoxelParams;
 @group(0) @binding(2) var<storage, read_write> voxel_indices: array<u32>;
 @group(0) @binding(3) var<storage, read_write> output_points: array<vec3<f32>>;
-@group(0) @binding(4) var<storage, read_write> output_count: array<atomic<u32>>;
-@group(0) @binding(5) var<storage, read_write> claim_table: array<atomic<u32>>;
+// Word 0 is the emitted-point counter; words [1, 1 + table_size) are the claim
+// slots.
+@group(0) @binding(4) var<storage, read_write> claim_data: array<atomic<u32>>;
 
 const EMPTY: u32 = 0xFFFFFFFFu;
+const CLAIM_BASE: u32 = 1u;
 
 fn voxel_of(p: vec3<f32>) -> vec3<i32> {
     return vec3<i32>(
@@ -60,10 +78,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // points in the same voxel are dropped.
     var slot = voxel_hash(my_voxel);
     loop {
-        let res = atomicCompareExchangeWeak(&claim_table[slot], EMPTY, idx);
+        let res = atomicCompareExchangeWeak(&claim_data[CLAIM_BASE + slot], EMPTY, idx);
         if (res.exchanged) {
             // We claimed an empty slot: this point represents its voxel.
-            let out_slot = atomicAdd(&output_count[0], 1u);
+            let out_slot = atomicAdd(&claim_data[0], 1u);
             if (out_slot < params.num_points) {
                 output_points[out_slot] = p;
             }
@@ -72,7 +90,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
 
         // Slot held by another point: same voxel -> duplicate, else probe on.
-        let holder = atomicLoad(&claim_table[slot]);
+        let holder = atomicLoad(&claim_data[CLAIM_BASE + slot]);
         if (holder != EMPTY && voxel_of(input_points[holder]) == my_voxel) {
             voxel_indices[idx] = 0xFFFFFFFFu; // dropped duplicate
             break;
@@ -125,23 +143,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         mapped_at_creation: false,
     });
 
-    let count_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Voxel Count"),
-        size: 4,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let claim_table = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Voxel Claim Table"),
-        size: 4 * table_size as u64,
+    // One word for the output counter, then `table_size` claim slots. Keeping
+    // them in one buffer is what brings `main` down to four storage bindings.
+    let claim_data = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Voxel Claim Data (count + table)"),
+        size: 4 * (1 + table_size as usize) as u64,
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
-    // Initialize every slot to the EMPTY sentinel (0xFFFFFFFF); freshly
-    // created buffers contain arbitrary bits.
-    let empty_fill = vec![0xFFu8; 4 * table_size as usize];
-    ctx.queue.write_buffer(&claim_table, 0, &empty_fill);
+    // The counter is bumped with atomicAdd so word 0 must start at zero, and
+    // freshly created buffers contain arbitrary bits - so the whole buffer is
+    // written: word 0 zero, every slot the EMPTY sentinel (0xFFFFFFFF).
+    let mut claim_init = vec![0xFFu8; 4 * (1 + table_size as usize)];
+    claim_init[0..4].copy_from_slice(&0u32.to_le_bytes());
+    ctx.queue.write_buffer(&claim_data, 0, &claim_init);
 
     let pipeline = ctx.create_compute_pipeline(voxel_shader, "main");
 
@@ -167,11 +182,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             },
             wgpu::BindGroupEntry {
                 binding: 4,
-                resource: count_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 5,
-                resource: claim_table.as_entire_binding(),
+                resource: claim_data.as_entire_binding(),
             },
         ],
     });
@@ -192,16 +203,27 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let count_data: Vec<u32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
         ctx.device.clone(),
         &ctx.queue,
-        &count_buffer,
+        &claim_data,
         0,
         4,
     ))?;
 
-    let actual_count = count_data[0] as usize;
+    // The shader only emits a slot when `out_slot < params.num_points`, so the
+    // counter can never exceed the input count; clamp anyway so a corrupt count
+    // cannot describe memory past the buffer.
+    let actual_count = (count_data[0] as usize).min(num_points);
 
+    // Shape and storage length have to agree, and the shader writes
+    // `array<vec3<f32>>`, whose stride is 16 bytes - not 12. A (1, N, 3) tensor
+    // is N*3 elements; at 4 bytes each that is N*12 bytes, so the storage length
+    // is N*4 elements (N*16 bytes), one element of padding per point.
+    //
+    // Declaring N*3 instead meant `to_cpu_ctx` copied only the first N*12 bytes
+    // of a buffer holding N*16 and then reinterpreted them as N*3 dense floats,
+    // i.e. every point from the second onwards was read at the wrong offset and
+    // the tail was cut mid-element. It did not merely lose the last quarter.
     Ok(Tensor {
-        // Storage length must match the (1, actual_count, 3) shape below.
-        storage: GpuStorage::from_buffer(Arc::new(output_points), actual_count * 3),
+        storage: GpuStorage::from_buffer(Arc::new(output_points), actual_count * 4),
         shape: cv_core::TensorShape::new(1, actual_count, 3),
         dtype: points.dtype,
         _phantom: std::marker::PhantomData,

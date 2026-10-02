@@ -4,12 +4,15 @@
 // Phase 1 of the LBVH build. The AABB phase, which also needs the point cloud, is
 // in `lbvh_aabb.wgsl`.
 //
-// It is a separate module because WGSL derives one bind group layout per
-// *module*, not per entry point, and the device reports four storage buffers per
-// stage. Holding all three phases together declared five, so a binding only
-// `compute_aabbs` touched still counted against `init_nodes` and
-// `build_radix_tree` and no pipeline in the file could be created: "Too many
-// bindings of type StorageBuffers, limit is 4, count was 5".
+// On the storage-buffer budget: the device reports four storage buffers per
+// stage (from `wgpu::Limits::downlevel_defaults()`), and wgpu-core derives the
+// bind group layout per ENTRY POINT, walking only the global variables that
+// entry point reaches. Unused declarations in the same module therefore cost
+// nothing. Holding all three phases together was not what broke the limit, so
+// the split into two modules is harmless rather than load-bearing: this file's
+// two entry points reach one and two storage buffers respectively, well inside
+// the limit. `lbvh.rs` correctly derives a separate bind group per pipeline and
+// gives `init_nodes` only the two entries its own layout derives.
 //
 // Neither entry point here touches `points`, `sorted_indices` or
 // `node_counters`, so this module declares only the two it needs.

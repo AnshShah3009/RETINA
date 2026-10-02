@@ -1,5 +1,22 @@
 // kdtree_search.wgsl
 // GPU KD-Tree search kernel (NN and Radius search)
+//
+// Storage-buffer budget: this device caps
+// `max_storage_buffers_per_shader_stage` at 4 (from
+// `wgpu::Limits::downlevel_defaults()`). This file previously declared five,
+// all reached by `kdtree_nn_main`, so `create_compute_pipeline` for it would
+// fail with "Too many bindings of type StorageBuffers, limit is 4".
+//
+// It is currently LATENT: the only reference in the workspace is the
+// `ShaderLibrary` registry in `gpu_kernels/mod.rs`, which has no consumers, so
+// no pipeline is ever created for it today. That is one call site away from a
+// panic, so the budget is fixed here rather than left for the next caller.
+//
+// The fix packs `results` (nearest point index) and `dists` (squared distance)
+// into one interleaved `search_results` buffer of `struct SearchResult
+// { index: u32, dist: f32 }` - 8 bytes, which is a whole number of the 4-byte
+// atomic/word granularity and needs no padding. `points` stays `array<vec4<f32>>`
+// ([x, y, z, w]) and is untouched.
 
 struct KdNode {
     left: i32,
@@ -10,11 +27,15 @@ struct KdNode {
     _padding: f32,
 };
 
+struct SearchResult {
+    index: u32,  // Closest point index, 0xFFFFFFFF if none found
+    dist: f32,   // Squared distance
+};
+
 @group(0) @binding(0) var<storage, read> nodes: array<KdNode>;
 @group(0) @binding(1) var<storage, read> points: array<vec4<f32>>; // [x,y,z,1]
 @group(0) @binding(2) var<storage, read> queries: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read_write> results: array<u32>; // Closest point index
-@group(0) @binding(4) var<storage, read_write> dists: array<f32>;   // Squared distance
+@group(0) @binding(3) var<storage, read_write> search_results: array<SearchResult>;
 
 @compute @workgroup_size(256)
 fn kdtree_nn_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -68,6 +89,6 @@ fn kdtree_nn_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
     
-    results[query_idx] = best_idx;
-    dists[query_idx] = best_dist;
+    search_results[query_idx].index = best_idx;
+    search_results[query_idx].dist = best_dist;
 }

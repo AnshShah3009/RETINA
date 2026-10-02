@@ -76,18 +76,26 @@ pub fn build_lbvh(
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-    // Two modules rather than one. WGSL derives a bind group layout per module,
-    // not per entry point, and the device allows four storage buffers per stage:
-    // the combined file declared five, so no pipeline in it could be created.
-    // The tree phase needs two buffers and the AABB phase four, so splitting
-    // them puts each at or under the limit.
+    // Two modules rather than one. The device allows four storage buffers per
+    // stage (from `wgpu::Limits::downlevel_defaults()`), and wgpu-core derives
+    // the bind group layout per ENTRY POINT, walking only the global variables
+    // that entry point reaches - not per module. So the split is not what makes
+    // the phases fit: the tree phase reaches two storage buffers and the AABB
+    // phase four, both already at or under the limit.
+    //
+    // What would break is merging them the other way round: if the AABB phase's
+    // four buffers were declared alongside the tree phase's in one module, each
+    // entry point would still only be charged for what it reaches, but the
+    // phases have disjoint bindings and would need duplicated declarations and
+    // conflicting numbers. Keeping them separate keeps each phase's binding
+    // numbering honest.
     let tree_source = include_str!("../../shaders/lbvh_build.wgsl");
     let aabb_source = include_str!("../../shaders/lbvh_aabb.wgsl");
     let pipeline_init = ctx.create_compute_pipeline(tree_source, "init_nodes");
     let pipeline_tree = ctx.create_compute_pipeline(tree_source, "build_radix_tree");
     let pipeline_aabb = ctx.create_compute_pipeline(aabb_source, "compute_aabbs");
 
-    // Init/Tree Bind Group (uses 2, 3, 5) - we reuse the same layout
+    // `build_radix_tree`'s layout: morton_codes + nodes + params.
     let bg_tree = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("LBVH Tree Bind Group"),
         layout: &pipeline_tree.get_bind_group_layout(0),

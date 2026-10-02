@@ -1,16 +1,55 @@
 // Ray-Mesh Intersection Shader
 // Möller-Trumbore ray-triangle intersection for batch ray casting
+//
+// Storage-buffer budget: this device requests
+// `wgpu::Limits::downlevel_defaults()`, which caps
+// `max_storage_buffers_per_shader_stage` at 4, and wgpu-core derives the bind
+// group layout per ENTRY POINT from the bindings that entry point reaches. This
+// file previously declared seven `@group(0)` storage buffers, all of them
+// reached by `main`, so `create_compute_pipeline` failed outright with
+// "Too many bindings of type StorageBuffers, limit is 4".
+//
+// Two pairs are packed into single buffers to get to four:
+//   * `ray_origins` + `ray_directions` -> `rays`, interleaved as
+//     `struct Ray { origin: vec3<f32>, dir: vec3<f32> }` (32-byte stride).
+//   * `hit_points` + `hit_normals` + `hit_distances` -> `hits`, interleaved as
+//     `struct Hit { point: vec3<f32>, normal: vec3<f32>, dist: f32, _pad: f32 }`
+//     (48-byte stride).
+//
+// The 16-byte strides of `vec3<f32>` are unchanged: `origin`/`dir` sit at byte
+// 0 and 16 within a 32-byte `Ray`, and `point`/`normal` at byte 0 and 16 within
+// a 48-byte `Hit`, so the host's `GpuVec3 { [f32; 3], padding: f32 }` packing
+// still describes them exactly.
 
-@group(0) @binding(0) var<storage, read> ray_origins: array<vec3<f32>>;
-@group(0) @binding(1) var<storage, read> ray_directions: array<vec3<f32>>;
-@group(0) @binding(2) var<storage, read> mesh_vertices: array<vec3<f32>>;
-@group(0) @binding(3) var<storage, read> mesh_faces: array<vec3<u32>>; // Triangle indices
-@group(0) @binding(4) var<storage, read_write> hit_distances: array<f32>;
-@group(0) @binding(5) var<storage, read_write> hit_points: array<vec3<f32>>;
-@group(0) @binding(6) var<storage, read_write> hit_normals: array<vec3<f32>>;
+struct Ray {
+    origin: vec3<f32>,
+    dir: vec3<f32>,
+};
 
-@group(1) @binding(0) var<uniform> num_rays: u32;
-@group(1) @binding(1) var<uniform> num_faces: u32;
+// `Hit` packs the distance into `w` and pads the normal with a fourth float so
+// the record is two whole vec4s. A struct of three `vec3<f32>` plus an `f32`
+// would not line up: WGSL places the trailing `f32` at byte 28, not 32, and
+// rounds the struct up to 48, so the distance would not sit where a `#[repr(C)]`
+// host struct puts it. Two `vec4`s give offsets 0 and 16 and a 32-byte stride
+// with no padding on either side.
+struct Hit {
+    point_dist: vec4<f32>, // xyz = hit point, w = distance (-1 when no hit)
+    normal_pad: vec4<f32>, // xyz = hit normal, w unused
+};
+
+@group(0) @binding(0) var<storage, read> rays: array<Ray>;
+@group(0) @binding(1) var<storage, read> mesh_vertices: array<vec3<f32>>;
+@group(0) @binding(2) var<storage, read> mesh_faces: array<vec3<u32>>; // Triangle indices
+@group(0) @binding(3) var<storage, read_write> hits: array<Hit>;
+
+struct RaycastParams {
+    num_rays: u32,
+    num_faces: u32,
+    _pad0: u32,
+    _pad1: u32,
+};
+
+@group(1) @binding(0) var<uniform> params: RaycastParams;
 
 const EPSILON: f32 = 0.00001;
 
@@ -59,12 +98,13 @@ fn ray_triangle_intersect(
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let ray_idx = global_id.x;
     
-    if (ray_idx >= num_rays) {
+    if (ray_idx >= params.num_rays) {
         return;
     }
     
-    let orig = ray_origins[ray_idx];
-    let dir = normalize(ray_directions[ray_idx]);
+    let ray = rays[ray_idx];
+    let orig = ray.origin;
+    let dir = normalize(ray.dir);
     
     var closest_t = 999999.0;
     var hit_found = false;
@@ -73,7 +113,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var hit_face_idx = 0u;
     
     // Test against all triangles
-    for (var face_idx = 0u; face_idx < num_faces; face_idx = face_idx + 1u) {
+    for (var face_idx = 0u; face_idx < params.num_faces; face_idx = face_idx + 1u) {
         let face = mesh_faces[face_idx];
         let v0 = mesh_vertices[face.x];
         let v1 = mesh_vertices[face.y];
@@ -98,10 +138,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let v2 = mesh_vertices[face.z];
         let normal = normalize(cross(v1 - v0, v2 - v0));
         
-        hit_distances[ray_idx] = closest_t;
-        hit_points[ray_idx] = hit_point;
-        hit_normals[ray_idx] = normal;
+        hits[ray_idx].point_dist = vec4<f32>(hit_point, closest_t);
+        hits[ray_idx].normal_pad = vec4<f32>(normal, 0.0);
     } else {
-        hit_distances[ray_idx] = -1.0; // No hit
+        hits[ray_idx].point_dist = vec4<f32>(0.0, 0.0, 0.0, -1.0); // w = no hit
+        hits[ray_idx].normal_pad = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
 }

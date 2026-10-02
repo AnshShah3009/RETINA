@@ -529,6 +529,25 @@ impl Default for ColoredICPConfig {
     }
 }
 
+// Storage-buffer budget: this device caps
+// `max_storage_buffers_per_shader_stage` at 4 (from
+// `wgpu::Limits::downlevel_defaults()`), and wgpu-core derives the layout per
+// ENTRY POINT. `main` previously reached eight storage bindings and so had no
+// creatable pipeline at all. Three changes bring it to four:
+//
+//   * `params` and `transform` were host constants in storage buffers; they are
+//     now `uniform`, which is limited separately.
+//   * `target_points` and `target_normals` are always read at the same index
+//     (`[nearest]`), so they are interleaved into `target_verts`.
+//   * `target_colors` and `color_gradients` are likewise both indexed by
+//     `nearest`, so they are interleaved into `target_colors`.
+//
+// Each interleaved record is a whole number of `vec4`s, so the `vec3<f32>`
+// members keep their 16-byte offsets and the host's
+// `{ [f32; 3], padding: f32 }` packing still describes them exactly.
+//
+// LATENT: this kernel is referenced only by `perf_tests.rs`, which calls the
+// accessor and discards the string; no pipeline is created for it today.
 pub fn colored_icp_kernel() -> &'static str {
     r#"
 struct ColoredICPParams {
@@ -538,14 +557,33 @@ struct ColoredICPParams {
     _pad1: f32,
 }
 
+// Target point and its normal, interleaved. Both are indexed by `nearest`.
+struct TargetVert {
+    pos: vec3<f32>,
+    _pad: f32,
+    nrm: vec3<f32>,
+    _pad1: f32,
+};
+
+// Target colour and its precomputed image gradient, interleaved. Both are
+// indexed by `nearest`.
+struct TargetColor {
+    rgb: vec3<f32>,
+    _pad: f32,
+    grad: ColorGradient,
+};
+
+struct ColorGradient {
+    xyz: vec3<f32>,
+    _pad: f32,
+};
+
 @group(0) @binding(0) var<storage, read> source_points: array<vec3<f32>>;
-@group(0) @binding(1) var<storage, read> target_points: array<vec3<f32>>;
-@group(0) @binding(2) var<storage, read> target_normals: array<vec3<f32>>;
-@group(0) @binding(3) var<storage, read> target_colors: array<vec3<f32>>;
-@group(0) @binding(4) var<storage, read> color_gradients: array<vec3<f32>>;
-@group(0) @binding(5) var<storage, read> transform: mat4x4<f32>;
-@group(0) @binding(6) var<storage, read> params: ColoredICPParams;
-@group(0) @binding(7) var<storage, read_write> output: array<f32>;
+@group(0) @binding(1) var<storage, read> target_verts: array<TargetVert>;
+@group(0) @binding(2) var<storage, read> target_colors: array<TargetColor>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> transform: mat4x4<f32>;
+@group(0) @binding(5) var<uniform> params: ColoredICPParams;
 
 fn transform_point(p: vec3<f32>, transform: mat4x4<f32>) -> vec3<f32> {
     let q = transform * vec4(p, 1.0);
@@ -568,13 +606,16 @@ fn skew(v: vec3<f32>) -> mat3x3<f32> {
     );
 }
 
-fn find_nearest_point(src: vec3<f32>, targets: array<vec3<f32>>, max_dist: f32) -> u32 {
+// Brute-force nearest-target scan. `target_verts` is `array<TargetVert>`, whose
+// stride is a whole number of vec4s, so its element offsets are exactly the
+// `target_points` offsets this loop used to index.
+fn find_nearest_point(src: vec3<f32>, targets: array<TargetVert>, max_dist: f32) -> u32 {
     var min_dist = max_dist;
     var nearest_idx = 0u;
     
     let n = arrayLength(&targets);
     for (var i = 0u; i < n; i = i + 1u) {
-        let diff = targets[i] - src;
+        let diff = targets[i].pos - src;
         let dist = dot(diff, diff);
         if (dist < min_dist) {
             min_dist = dist;
@@ -595,9 +636,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let sp = source_points[idx];
     let transformed = transform_point(sp, transform);
     
-    let nearest = find_nearest_point(transformed, target_points, params.max_dist_sq);
-    let tp = target_points[nearest];
-    let tn = target_normals[nearest];
+    let nearest = find_nearest_point(transformed, target_verts, params.max_dist_sq);
+    let tp = target_verts[nearest].pos;
+    let tn = target_verts[nearest].nrm;
     
     let diff = transformed - tp;
     let dist_sq = dot(diff, diff);
@@ -619,8 +660,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     let residual_geo = dot(diff, tn);
     
-    let color_grad = color_gradients[nearest];
-    let tc = target_colors[nearest];
+    let color_grad = target_colors[nearest].grad.xyz;
+    let tc = target_colors[nearest].rgb;
     
     let grad_c = vec3<f32>(color_grad.x, color_grad.y, 0.0);
     let dIdx = dot(grad_c, tn);
@@ -666,6 +707,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 "#
 }
 
+// `params` was a storage binding holding a 16-byte struct of host constants,
+// pushing `main` to five storage bindings against a limit of four. It is now a
+// uniform, which is limited separately.
 pub fn compute_color_gradients_kernel() -> &'static str {
     r#"
 struct GradientParams {
@@ -678,8 +722,8 @@ struct GradientParams {
 @group(0) @binding(0) var<storage, read> points: array<vec3<f32>>;
 @group(0) @binding(1) var<storage, read> colors: array<vec3<f32>>;
 @group(0) @binding(2) var<storage, read> normals: array<vec3<f32>>;
-@group(0) @binding(3) var<storage, read> params: GradientParams;
-@group(0) @binding(4) var<storage, read_write> gradients: array<vec3<f32>>;
+@group(0) @binding(3) var<storage, read_write> gradients: array<vec3<f32>>;
+@group(0) @binding(4) var<uniform> params: GradientParams;
 
 fn get_color(colors: array<vec3<f32>>, width: u32, idx: u32) -> vec3<f32> {
     if (idx >= arrayLength(&colors)) {
@@ -760,6 +804,9 @@ impl Default for GeneralizedICPConfig {
     }
 }
 
+// `transform` and `params` were storage bindings holding host constants,
+// pushing `main` to six storage bindings against a limit of four. Both are now
+// uniforms, which are limited separately, leaving four storage bindings.
 pub fn generalized_icp_kernel() -> &'static str {
     r#"
 struct GICPParams {
@@ -770,9 +817,9 @@ struct GICPParams {
 @group(0) @binding(0) var<storage, read> source_points: array<vec3<f32>>;
 @group(0) @binding(1) var<storage, read> target_points: array<vec3<f32>>;
 @group(0) @binding(2) var<storage, read> target_cov: array<mat3x3<f32>>;
-@group(0) @binding(3) var<storage, read> transform: mat4x4<f32>;
-@group(0) @binding(4) var<storage, read> params: GICPParams;
-@group(0) @binding(5) var<storage, read_write> output: array<f32>;
+@group(0) @binding(3) var<storage, read_write> output: array<f32>;
+@group(0) @binding(4) var<uniform> transform: mat4x4<f32>;
+@group(0) @binding(5) var<uniform> params: GICPParams;
 
 fn transform_point(p: vec3<f32>, transform: mat4x4<f32>) -> vec3<f32> {
     let q = transform * vec4(p, 1.0);
