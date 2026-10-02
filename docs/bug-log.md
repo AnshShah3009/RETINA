@@ -283,6 +283,56 @@ a crash that does not happen.
   recovered translation direction is near-degenerate on that synthetic scene and
   the assertion fails intermittently. Pre-existing, and left alone here.
 
+## Two claims I made that measurement disproved
+
+Recorded because the corrections are the substance, and because both errors
+shipped inside a commit before being caught.
+
+- **"`U·Wᵀ·Vᵀ` is not a rotation at all."** Wrong. `Wᵀ ≠ ±W`, but the two
+  permutations involved sit symmetrically in `U Wᵀ Vᵀ = (U P)(W)(Pᵀ Vᵀ)` and
+  cancel, leaving a proper rotation — measured `max ||R Rᵀ − I|| = 1.6e-15`,
+  `min det = 1.0`.
+- **"It duplicates `U·W·Vᵀ`, so nothing was mis-recovered."** Also wrong, and this
+  one mattered. The two are complementary — 203/400 and 197/400 recoveries of the
+  true rotation — and together they cover essentially every input, which is why
+  the original worked. A fix built on my second claim replaced `Wᵀ` with
+  `diag(1,-1,-1)`, which recovers the pose in **0/400** cases, and cost three
+  valid scenes in six: "no valid pose candidate" while the true pose scored 12/12
+  on cheirality when substituted by hand.
+
+A third, found by an agent and initially disbelieved by me: **within one
+`a` entry's candidate window the `|difference|` values form a V, not a sorted
+sequence.** With `a = [1.0]` and `b = [0, 0.5, 0.5, 1.0, 1.0, 1.5, 1.5]` they are
+`[1.0, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5]` — descending then ascending. So a k-way
+merge over per-`a` windows, treating each as a sorted run, cannot work, however
+careful the merge. Three implementations were discarded on that reasoning before
+the fourth succeeded.
+
+## A test that pinned the bug it was named for
+
+`tum_associate_finite_timestamps_with_infinite_tolerance_never_match` asserted
+`matches.is_empty()` and its own failure message began `KNOWN BUG: ... returned 50
+matches; the documented 'every pair within max_dt' rule does not hold`. Under a
+name that read as a specification rather than a bug report. Inverted.
+
+Writing its replacement took three attempts, and **the first two controls were
+wrong**: `max_dt = 1.0` does not shrink the result (consecutive integer stamps,
+every adjacent pair qualifies) and neither does `0.5` (each `a[i]`/`b[i]` pair is
+at difference 0, inside any positive tolerance). No positive tolerance can
+exclude a zero-difference pair, so a shrinking control has to come from the
+negative side. Both dead ends are in the test.
+
+## Two tests that failed CI while passing locally
+
+Both were GPU-only and used `expect("no GPU adapter")`. They pass here — this
+machine has a GPU — and failed on every runner without one, and nextest cancels a
+binary's remaining tests on first failure, so one took three more down with it.
+The convention elsewhere in the crate (`perf_tests.rs`, `gpu_parity_tests.rs`,
+`gpu_feature_detection.rs`) is an early return; these now match it.
+
+Worth stating plainly: a test that cannot run in CI reporting *failure* there is
+how people learn to ignore red.
+
 ## Turning the probes into tests, and what that immediately found
 
 `tests/gpu_parity_tests.rs` carried eleven `probe_*` tests that computed a CPU/GPU
@@ -481,7 +531,7 @@ instead, allocating a buffer of the wrong size.
 
 | | |
 | --- | ---: |
-| Defects fixed | **114+** |
+| Defects fixed | **121+** |
 | Commits | 460+ |
 | Tests | 1,824 (from 1,267) |
 | Duplicate implementations removed | 12 |
