@@ -25,7 +25,7 @@ pub use global::{
     registration_fgr_based_on_feature_matching, registration_ransac_based_on_feature_matching,
     FPFHFeature, FastGlobalRegistrationOption, GlobalRegistrationResult,
 };
-pub use gnc::{registration_gnc, GNCOptimizer, GNCResult};
+pub use gnc::{registration_gnc, GNCOptimizer, GNCResult, RobustLossType};
 
 use cv_core::point_cloud::PointCloud;
 use nalgebra::{Matrix4, Point3};

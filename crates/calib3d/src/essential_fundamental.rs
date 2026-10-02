@@ -177,6 +177,28 @@ fn normalize_with_intrinsics(
 
 /// Estimate Essential matrix using the 8-point algorithm.
 ///
+/// Reject non-finite correspondences before they reach an SVD.
+///
+/// Both 8-point solvers build an `n x 9` design matrix and decompose it with
+/// `.svd(true, true)`, which does not return on non-finite input: nalgebra's
+/// bidiagonalisation decides convergence by comparison, and every comparison
+/// against NaN is false. Measured: `find_essential_mat` with one NaN
+/// correspondence among ten hangs indefinitely and has to be killed.
+///
+/// Checked in the shared solver rather than at each public entry point, so the
+/// RANSAC wrappers that reach these internals are covered too.
+fn require_finite_pairs(pts1: &[Point2<f64>], pts2: &[Point2<f64>]) -> Result<()> {
+    for (i, (a, b)) in pts1.iter().zip(pts2.iter()).enumerate() {
+        if [a.x, a.y, b.x, b.y].iter().any(|v| !v.is_finite()) {
+            return Err(cv_core::Error::InvalidInput(format!(
+                "correspondence {i} is not finite ({}, {}, {}, {})",
+                a.x, a.y, b.x, b.y
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Solves the linear system and applies rank-2 constraint enforcement
 /// (two equal singular values, third is zero).
 fn estimate_essential_8_point(pts1: &[Point2<f64>], pts2: &[Point2<f64>]) -> Result<Matrix3<f64>> {
@@ -185,6 +207,7 @@ fn estimate_essential_8_point(pts1: &[Point2<f64>], pts2: &[Point2<f64>]) -> Res
             "estimate_essential_8_point needs >=8 paired points".to_string(),
         ));
     }
+    require_finite_pairs(pts1, pts2)?;
 
     let n = pts1.len();
     let mut a = DMatrix::<f64>::zeros(n, 9);

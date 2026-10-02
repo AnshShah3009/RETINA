@@ -158,3 +158,46 @@ fn undistort_points_rejects_a_non_finite_pixel() {
     let err = undistort_points(&bad, &k, &d).expect_err("a NaN pixel must be reported");
     assert!(format!("{err}").contains("not finite"), "got: {err}");
 }
+
+#[test]
+fn find_essential_mat_rejects_a_non_finite_correspondence() {
+    // A collinear-ish but valid enough set: the 8-point solver must still be
+    // reached, so the control below is meaningful.
+    let mut pts1: Vec<Point2<f64>> = (0..10)
+        .map(|i| Point2::new(i as f64 * 11.0, i as f64 * 6.0))
+        .collect();
+    let pts2: Vec<Point2<f64>> = pts1
+        .iter()
+        .map(|p| Point2::new(p.x + 4.0, p.y + 2.0))
+        .collect();
+
+    let k = intrinsics();
+    // Control: finite input gets past the input checks. It may still fail the
+    // geometric solve on this synthetic configuration, which is fine - what
+    // matters is that it is not rejected as non-finite.
+    let finite_result = cv_calib3d::find_essential_mat(&pts1, &pts2, &k);
+    assert!(
+        !format!("{finite_result:?}").contains("not finite"),
+        "control: finite input must not be rejected as non-finite"
+    );
+
+    pts1[3].y = f64::NAN;
+    let err = cv_calib3d::find_essential_mat(&pts1, &pts2, &k)
+        .expect_err("a NaN correspondence must be reported, not decomposed");
+    assert!(format!("{err}").contains("not finite"), "got: {err}");
+}
+
+#[test]
+fn find_essential_mat_rejects_an_infinite_correspondence() {
+    let mut pts1: Vec<Point2<f64>> = (0..10)
+        .map(|i| Point2::new(i as f64 * 11.0, i as f64 * 6.0))
+        .collect();
+    let pts2: Vec<Point2<f64>> = pts1
+        .iter()
+        .map(|p| Point2::new(p.x + 4.0, p.y + 2.0))
+        .collect();
+    pts1[2].x = f64::INFINITY;
+    let err = cv_calib3d::find_essential_mat(&pts1, &pts2, &intrinsics())
+        .expect_err("an infinite correspondence must be reported");
+    assert!(format!("{err}").contains("not finite"), "got: {err}");
+}

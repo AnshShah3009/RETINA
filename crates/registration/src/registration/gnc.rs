@@ -321,6 +321,38 @@ pub fn registration_gnc(
     max_correspondence_distance: f32,
     loss_type: RobustLossType,
 ) -> Option<GNCResult> {
+    // Reject non-finite input explicitly.
+    //
+    // Without this the malformed point is dropped *by accident* rather than by
+    // design: its residual is NaN, `exp(-NaN)` is 0, so every robust loss
+    // assigns it weight 0 and it quietly contributes nothing. Measured, clouds
+    // differing only in one NaN coordinate:
+    //
+    //     finite  -> fitness 1.000000, rmse 0.000000
+    //     one NaN -> fitness 0.983333, rmse 0.000000
+    //
+    // Both `Some`, with a correct-looking identity transform. So the answer is
+    // right, but the caller is told a malformed cloud registered cleanly, and
+    // the point count that vanished (1 of 60 here) is only visible by comparing
+    // `fitness` against 59/60. That is an accident of `exp`, not a contract, and
+    // a loss whose weight does not saturate would poison the covariance instead.
+    for (i, &(src_idx, tgt_idx)) in correspondences.iter().enumerate() {
+        let src_finite = source
+            .get(src_idx)
+            .is_some_and(|p| p.coords.iter().all(|v| v.is_finite()));
+        let tgt_finite = target
+            .get(tgt_idx)
+            .is_some_and(|p| p.coords.iter().all(|v| v.is_finite()));
+        if !src_finite || !tgt_finite {
+            return None;
+        }
+    }
+    for (i, p) in source.iter().chain(target.iter()).enumerate() {
+        if !p.coords.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+    }
+
     let mut optimizer = match loss_type {
         RobustLossType::GemanMcClure => {
             GNCOptimizer::new_geman_mcclure(max_correspondence_distance)
