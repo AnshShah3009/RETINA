@@ -272,17 +272,19 @@ pub fn to_html(figure: &Figure) -> String {
     )
 }
 
-/// Save figure to SVG file
-pub fn save_svg(figure: &Figure, path: &str) -> Result<(), crate::PlotError> {
-    // A figure with no plottable points leaves the bounds at their sentinels, and
-    // `f64::MIN - f64::MAX` overflows to a range the axis code then treats as
-    // 1.0 - so the SVG comes out valid, with an empty plot area, and no error.
-    // `PlotError::InvalidData` exists and was never constructed; this is what it
-    // was added for.
-    //
-    // The check lives here rather than in `to_svg` because that returns a plain
-    // `String` and changing it would break every caller for a case a caller can
-    // reasonably produce.
+/// Whether a figure has at least one point to draw.
+///
+/// A figure with no plottable points leaves the bounds at their sentinels, and
+/// `f64::MIN - f64::MAX` overflows to a range the axis code then treats as 1.0
+/// - so the output comes out valid, with an empty plot area, and no error.
+/// `PlotError::InvalidData` exists and was never constructed; this is what it
+/// was added for.
+///
+/// This lives in a helper rather than in `to_svg` because `to_svg` (and
+/// `to_html`, which wraps it) return a plain `String`, and changing that would
+/// break every caller for a case a caller can reasonably produce. It is instead
+/// enforced by each `save_*` function, which can report the error.
+fn ensure_has_points(figure: &Figure) -> Result<(), crate::PlotError> {
     let has_points = figure
         .subplots
         .iter()
@@ -292,6 +294,12 @@ pub fn save_svg(figure: &Figure, path: &str) -> Result<(), crate::PlotError> {
             "figure contains no plottable points".to_string(),
         ));
     }
+    Ok(())
+}
+
+/// Save figure to SVG file
+pub fn save_svg(figure: &Figure, path: &str) -> Result<(), crate::PlotError> {
+    ensure_has_points(figure)?;
     let svg = to_svg(figure);
     let mut file = File::create(path)?;
     file.write_all(svg.as_bytes())?;
@@ -300,6 +308,9 @@ pub fn save_svg(figure: &Figure, path: &str) -> Result<(), crate::PlotError> {
 
 /// Save figure to HTML file
 pub fn save_html(figure: &Figure, path: &str) -> Result<(), crate::PlotError> {
+    // Same guard as `save_svg`: without it the same empty figure produced an
+    // SVG error here and a silently written, empty HTML file.
+    ensure_has_points(figure)?;
     let html = to_html(figure);
     let mut file = File::create(path)?;
     file.write_all(html.as_bytes())?;

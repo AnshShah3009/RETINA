@@ -36,6 +36,22 @@ pub fn disparity_to_pointcloud(
     left_image: &image::GrayImage,
     params: &StereoParams,
 ) -> cv_core::Result<PointCloud> {
+    // The loop below indexes `left_image` with coordinates taken from
+    // `disparity`, so a mismatch between the two would walk `get_pixel` off the
+    // end of the image and panic. That mismatch is an ordinary caller mistake
+    // (a matcher and an image from different captures), so it is reported as an
+    // error instead. Validated up front, before any indexing happens.
+    if left_image.width() != disparity.width || left_image.height() != disparity.height {
+        return Err(Error::InvalidInput(format!(
+            "disparity map is {}x{} but the left image is {}x{}; \
+             they must have identical dimensions",
+            disparity.width,
+            disparity.height,
+            left_image.width(),
+            left_image.height()
+        )));
+    }
+
     let estimated_capacity = (disparity.width * disparity.height / 4) as usize;
     let mut points = Vec::with_capacity(estimated_capacity);
     let mut colors = Vec::with_capacity(estimated_capacity);

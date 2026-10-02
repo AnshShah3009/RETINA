@@ -5,7 +5,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
+//! ```no_run
 //! use cv_plot::three_d::{PointCloud3D, Plot3D};
 //!
 //! // Create a point cloud from (x, y, z) coordinates
@@ -16,6 +16,11 @@
 //! let plot = Plot3D::new()
 //!     .add_point_cloud(pc)
 //!     .title("3D Point Cloud");
+//! // `no_run`: this example writes a file, and doctests execute with the
+//! // crate root as the working directory, so running it during `cargo test`
+//! // deposited `pointcloud.html` into the source tree. That is how a 3 KB
+//! // generated artifact ended up committed. `no_run` still type-checks the
+//! // example, which is the part worth testing.
 //! plot.save_html("pointcloud.html").unwrap();
 //! ```
 
@@ -369,6 +374,50 @@ impl Plot3D {
         (x_proj, y_proj)
     }
 
+    /// Whether this plot has at least one point to draw.
+    ///
+    /// Empty is more than "a plot with nothing in it": `to_svg` short-circuits
+    /// an empty cloud list to an empty `String`, and a cloud with no points
+    /// leaves `bounding_box_all` at its degenerate unit-cube default, so the
+    /// save functions would write a blank or meaningless file without ever
+    /// reporting a problem. `PlotError::InvalidData` is the right error here.
+    fn has_points(&self) -> bool {
+        self.point_clouds.iter().any(|pc| !pc.points.is_empty())
+    }
+
+    /// Camera position for the Three.js viewer, derived from `camera_angle`.
+    ///
+    /// The viewer is user-rotatable by dragging, so the camera placement only
+    /// sets the initial viewpoint. It follows the same convention as `project`:
+    /// azimuth rotates the x/z axes, elevation lifts the eye above the
+    /// x/z plane, and the distance is scaled from the data so the default view
+    /// frames the plot instead of hiding it inside the unit cube.
+    fn camera_position(&self) -> (f64, f64, f64) {
+        let (elev, azim) = self.camera_angle;
+        let elev_rad = elev.to_radians();
+        let azim_rad = azim.to_radians();
+
+        let (min_x, max_x, min_y, max_y, min_z, max_z) = self.bounding_box_all();
+        let span = (max_x - min_x)
+            .abs()
+            .max((max_y - min_y).abs())
+            .max((max_z - min_z).abs());
+        // No points, or a single degenerate point: fall back to a radius that
+        // frames the unit cube the AxesHelper is drawn at.
+        let radius = if span.is_finite() && span > 0.0 {
+            span
+        } else {
+            1.0
+        };
+
+        let distance = radius * 2.5;
+        (
+            distance * elev_rad.sin() * azim_rad.sin(),
+            distance * elev_rad.sin() * azim_rad.cos(),
+            distance * elev_rad.cos(),
+        )
+    }
+
     /// Generate HTML with 3D visualization using Three.js
     pub fn to_html(&self) -> String {
         let mut js_points = String::new();
@@ -381,6 +430,10 @@ impl Plot3D {
                 js_colors.push_str(&format!("[{},{},{}],", c.0, c.1, c.2));
             }
         }
+
+        let (cam_x, cam_y, cam_z) = self.camera_position();
+        // `show_axes` gates the SVG axes; keep the helper in step with it.
+        let axes_size = if self.show_axes { 2.0 } else { 0.0 };
 
         format!(
             r#"<!DOCTYPE html>
@@ -402,7 +455,7 @@ impl Plot3D {
         scene.background = new THREE.Color(0x1a1a2e);
         
         const camera = new THREE.PerspectiveCamera(75, {width}/{height}, 0.1, 1000);
-        camera.position.set(5, 5, 5);
+        camera.position.set({cam_x:.4}, {cam_y:.4}, {cam_z:.4});
         camera.lookAt(0, 0, 0);
         
         const renderer = new THREE.WebGLRenderer({{antialias: true}});
@@ -432,7 +485,7 @@ impl Plot3D {
         const pointCloud = new THREE.Points(geometry, material);
         scene.add(pointCloud);
         
-        const axesHelper = new THREE.AxesHelper(2);
+        const axesHelper = new THREE.AxesHelper({axes_size});
         scene.add(axesHelper);
         
         let isDragging = false;
@@ -468,12 +521,23 @@ impl Plot3D {
             height = self.height,
             js_points = js_points,
             js_colors = js_colors,
-            point_size = self.point_size
+            point_size = self.point_size,
+            cam_x = cam_x,
+            cam_y = cam_y,
+            cam_z = cam_z,
+            axes_size = axes_size
         )
     }
 
     /// Save 3D plot as interactive HTML
     pub fn save_html(&self, path: &str) -> Result<(), PlotError> {
+        // Same reasoning as `export::save_svg`: a plot with no points would
+        // otherwise write a viewer that renders an empty scene.
+        if !self.has_points() {
+            return Err(PlotError::InvalidData(
+                "3D plot contains no points to plot".to_string(),
+            ));
+        }
         let html = self.to_html();
         let mut file = std::fs::File::create(path)?;
         file.write_all(html.as_bytes())?;
@@ -529,6 +593,48 @@ impl Plot3D {
             self.width / 2.0,
             self.title
         );
+
+        if self.show_grid {
+            // A ground-plane grid, drawn through the same view rotation as the
+            // points and scaled to the data. `show_grid` used to be write-only:
+            // `grid(bool)` had no effect on this output at all.
+            let mut grid_min = f64::INFINITY;
+            let mut grid_max = f64::NEG_INFINITY;
+            for pc in &self.point_clouds {
+                for point in &pc.points {
+                    grid_min = grid_min.min(point.x).min(point.z);
+                    grid_max = grid_max.max(point.x).max(point.z);
+                }
+            }
+            if grid_min.is_finite() && grid_max.is_finite() {
+                let steps = 4;
+                for i in 0..=steps {
+                    let v = grid_min + (i as f64 / steps as f64) * (grid_max - grid_min);
+
+                    let (gx1, gy1) = self.project(v, grid_min, grid_min);
+                    let (gx2, gy2) = self.project(v, grid_max, grid_min);
+                    svg.push_str(&format!(
+                        r##"  <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="#3a3a5e" stroke-width="0.5"/>
+"##,
+                        gx1 * scale + offset_x,
+                        -gy1 * scale + offset_y,
+                        gx2 * scale + offset_x,
+                        -gy2 * scale + offset_y
+                    ));
+
+                    let (hx1, hy1) = self.project(grid_min, v, grid_min);
+                    let (hx2, hy2) = self.project(grid_max, v, grid_min);
+                    svg.push_str(&format!(
+                        r##"  <line x1="{:.1}" y1="{:.1}" x2="{:.1}" y2="{:.1}" stroke="#3a3a5e" stroke-width="0.5"/>
+"##,
+                        hx1 * scale + offset_x,
+                        -hy1 * scale + offset_y,
+                        hx2 * scale + offset_x,
+                        -hy2 * scale + offset_y
+                    ));
+                }
+            }
+        }
 
         if self.show_axes {
             let origin = self.project(0.0, 0.0, 0.0);
@@ -609,6 +715,11 @@ impl Plot3D {
 
     /// Save as SVG file
     pub fn save_svg(&self, path: &str) -> Result<(), PlotError> {
+        if !self.has_points() {
+            return Err(PlotError::InvalidData(
+                "3D plot contains no points to plot".to_string(),
+            ));
+        }
         let svg = self.to_svg();
         let mut file = std::fs::File::create(path)?;
         file.write_all(svg.as_bytes())?;
