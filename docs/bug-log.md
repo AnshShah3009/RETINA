@@ -283,6 +283,62 @@ a crash that does not happen.
   recovered translation direction is near-degenerate on that synthetic scene and
   the assertion fails intermittently. Pre-existing, and left alone here.
 
+## What a parallel audit found, and what it got wrong
+
+Eight agents swept the tree by crate. Every finding below was re-verified by hand
+before acting, because **the audit's confident claims were sometimes false** —
+and the two most confident ones were the false ones.
+
+**Disproved on measurement** (both would have been "fixes" of a non-bug):
+
+- *"A near-black PLY vertex round-trips to white: only 0 and 1 survive, every
+  interior value is shifted by 255x."* False. Measured the real round trip: black,
+  white, red, green, blue, orange and mid-grey all survive. `255 > 1.0` divides
+  correctly, and byte 0 divides to 0. But the claim was **directionally right and
+  one step short** — byte `1` does read as `1.0`, because `1/255` is a legitimate
+  near-black *and* is what a normalised `1.0` looks like. That single byte was a
+  real 255x inversion, now fixed by scaling on the *declared* property type.
+- *"The 3-D spherical-flip test is wrong; 298/300 points survive on a closed
+  sphere."* The follow-up agent traced this to the wrong file. The spherical-flip
+  HPR implementation is **correct** (measured: 0 of 40, 80, 120 and 200
+  back-hemisphere points survive at four sample sizes); the "almost everything
+  survives" result came from a different, depth-buffer-based file.
+
+**Real, and worse than reported:**
+
+- **The PLY colour bug is only the bottom 1/255 of the range.** The primary-colour
+  cases pass, which is exactly why a hand-written test misses it.
+- **`spherical_jn` had the wrong sign parity for even `n`.** `j_n` is an
+  (n+1)-order function, so `j_n(-x) = (-1)^n j_n(x)`, but every branch negated
+  unconditionally. Right for odd `n`, wrong for even: `j_2(-1)/j_2(1) = -1`
+  where it must be `+1`.
+- **`log_gamma` returned NaN for every negative argument in (-1,0), (-3,-2), …**
+  `pi/sin(pi x)` is negative there and `ln()` of a negative is NaN. The existing
+  test covered `gamma(-1.5)` only — the one negative non-integer that happens to
+  land on an interval where `sin(-1.5pi) = +1`.
+- **`qr_solve` and `cond` used absolute thresholds** against quantities that scale
+  with the input, so a well-conditioned system scaled by 1e-14 was declared
+  rank-deficient.
+- **The 3-D visibility depth-buffer marks occluded points visible.** Measured on a
+  300-point closed sphere at 512²: 300/300 visible, including every back-hemisphere
+  point. A projected point is a sub-pixel dot with no area, so occlusion depends
+  only on sampling density vs. buffer resolution — and *raising* the resolution
+  makes it worse, which is the tell. The existing test asserts only
+  `visible_count < points.len()`, which 247/300 satisfies.
+- **The 8-point essential solver was wrong at its own minimum sample.** nalgebra's
+  thin SVD returns `min(m, n)` right singular vectors, so with exactly 8
+  correspondences the null vector is not among them and row `nrows()-1` picked an
+  arbitrary vector. Measured: worst Sampson residual 21.7 px at n = 8 against
+  ~1e-12 px at n = 9, 12 and 16 — where the true `E` gives ~4.5e-14 px. Because
+  `EssentialEstimator::min_sample_size()` is 8 and RANSAC samples exactly that
+  many, *every* minimal sample in RANSAC was drawn from a broken solver. `dlt.rs`
+  had already documented and fixed this for the homography and fundamental solvers.
+
+**A note on how the two 3-D claims interacted:** the first agent ran out of turns
+mid-claim and reported the headline number without isolating it; the second had to
+re-derive which file it came from before the real defect could be separated from
+the spurious one. Neither number was trustworthy on its own.
+
 ## A zero matrix is not a neutral fallback
 
 `Gaussian::inverse_covariance` and `ProjectedGaussian::inv_cov_2d` both returned
