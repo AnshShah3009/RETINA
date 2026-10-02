@@ -327,6 +327,13 @@ impl Bvh {
     }
 }
 
+/// Angular tolerance for "this ray is parallel to this triangle", as a
+/// dimensionless bound on `|cos(angle between ray and triangle normal)|`.
+///
+/// Chosen to match the absolute constant this test used to be, so the fix
+/// changes *scale* behaviour only and leaves the angular sharpness alone.
+const PARALLEL_EPS: f32 = 1e-9;
+
 /// Möller-Trumbore ray-triangle intersection.
 fn moller_trumbore(
     origin: &Point3<f32>,
@@ -339,7 +346,21 @@ fn moller_trumbore(
     let e2 = v2 - v0;
     let h = dir.cross(&e2);
     let a = e1.dot(&h);
-    if a.abs() < 1e-9 {
+    // `a` is twice the projected triangle area, so for a genuine hit it scales
+    // as L^2 - the *square* of the edge length. Comparing it against a fixed
+    // constant is therefore not an angular test, it is a size test, and the
+    // size it rejects moves with the world units the mesh happens to be stored
+    // in. Measured: an equilateral triangle of edge 1 hit dead-on gives
+    // |a| = 0.866; of edge 1e-3, |a| = 8.66e-7, below the 1e-6 threshold used
+    // to be in `raycasting::ray_triangle_intersection`; of edge 1e-5,
+    // |a| = 8.66e-11, below this function's own 1e-9. A metre-unit mesh of
+    // 1 mm triangles - exactly what a surface reconstruction emits - was
+    // rejected as "parallel to triangle".
+    //
+    // Normalising by |e1||e2| turns it back into what it was meant to be: a
+    // dimensionless bound on the angle between the ray and the normal.
+    let denom = e1.norm() * e2.norm();
+    if denom == 0.0 || a.abs() < PARALLEL_EPS * denom {
         return None;
     }
     let f = 1.0 / a;

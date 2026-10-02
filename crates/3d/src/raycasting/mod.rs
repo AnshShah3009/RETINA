@@ -89,7 +89,20 @@ pub fn cast_ray_mesh_bvh(ray: &Ray, mesh: &TriangleMesh, bvh: &Bvh) -> Option<Ra
             let e2 = v2 - v0;
             let mut normal = e1.cross(&e2);
             let len = normal.norm();
-            if len > 1e-9 {
+            // Same scale trap as the Möller-Trumbore parallel guard, in its
+            // `|a| < eps` form: `e1.cross(&e2)` is the *unnormalised* normal, so
+            // its length is the triangle area and goes as L². Measured: an
+            // equilateral triangle of edge 1 gives len = 0.866 and is
+            // normalised; of edge 1e-5, len = 8.66e-11, which is below 1e-9, so
+            // the division was skipped and the caller received a "normal" of
+            // [[0, 0, 8.66e-11]] — a unit vector of length 1e-10, not a
+            // direction. `RayHit::normal` is documented as a normal, and every
+            // lighting, back-face and shading consumer normalises it itself.
+            //
+            // `len > 0.0` is the correct test: a non-zero cross product is
+            // already a direction, however short. It degenerates to the same
+            // refusal on a zero-area triangle, where `len` is exactly 0.
+            if len > 0.0 {
                 normal /= len;
             }
             RayHit {
@@ -172,7 +185,23 @@ fn ray_triangle_intersection(
     let h = ray.direction.cross(&edge2);
     let a = edge1.dot(&h);
 
-    if a.abs() < epsilon {
+    // `a` is twice the projected triangle area, so for a genuine hit it scales
+    // as L^2 - the *square* of the edge length. `a.abs() < epsilon` was
+    // therefore never an angular tolerance; it was a test for "edge length
+    // below about 1e-3", and the length it rejected moved with the world units
+    // the mesh happened to be stored in. Measured on an equilateral triangle
+    // hit dead-on: edge 1.0 gives |a| = 8.66e-1 (hit), edge 1e-3 gives
+    // |a| = 8.66e-7 (MISS), edge 1e-5 gives |a| = 8.66e-11 (MISS). A
+    // metre-unit mesh of 1 mm triangles is exactly what a surface
+    // reconstruction emits, and every ray through it was rejected as
+    // "parallel to triangle".
+    //
+    // Dividing by |e1||e2| makes the test what it says it is: a dimensionless
+    // bound on the angle between the ray and the triangle normal. `epsilon` is
+    // kept at its previous value, so the angular sharpness is unchanged and
+    // only the scale dependence is removed.
+    let denom = edge1.norm() * edge2.norm();
+    if denom == 0.0 || a.abs() < epsilon * denom {
         return None; // Ray parallel to triangle
     }
 
