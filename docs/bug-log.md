@@ -365,7 +365,29 @@ downstream treats as data. If the degraded result is *detectable* by the caller
 design choice rather than a lie, and changing it is not automatically an
 improvement.
 
-## CORRECTED: the LM/CG mismatch, and how my first account of it was wrong
+## FIXED: the LM/CG mismatch, and how my first account of it was wrong
+
+**Status: fixed.** `CgSolver` gained `solve_relaxed`, returning the iterate reached
+together with whether the tolerance was met, as a *provided* trait method so a
+solver that cannot report a partial result keeps its behaviour. `CgSolver` now has
+one CG loop shared by both entry points. `sfm`'s LM step uses it and no longer
+substitutes a zero step.
+
+Measured on the system LM actually solves, `J^T J + lambda*diag(J^T J)`, 200x200,
+`lambda = 10`, one allowed iteration:
+
+```
+ k   damped iterate ||Ax-b||   the zero step ||A*0-b||
+ 1             7.03e-2                      1.41e1
+ 2             3.20e-3                      1.41e1
+ 5             3.02e-7                      1.41e1
+```
+
+A single damped iteration is **200x better** than the zero step that replaced it.
+
+### The corrections below still stand, and one more was added
+
+
 
 An earlier entry here claimed `SparseLMSolver::minimize` in `cv-optimize` discards
 `CgSolver`'s non-convergence report. **That was wrong in two ways**, and both
@@ -408,6 +430,15 @@ The fix needs an interface that can carry a partial solution — `Ok(iterate,
 converged: bool)`, or a tolerant-enough default and a documented contract — which
 is a decision for `cv-optimize` rather than a patch at the call site. Left
 unfixed deliberately, with the reasoning here.
+
+**A third error, found while writing the test.** My first test asserted the same
+property on an *undamped* Laplacian and it is **false** there: the residual grows
+from `1.41e1` to `1.28e2` over ten iterations, so by that criterion the iterate is
+*worse* than the zero step. Measuring it also showed the implementation matches an
+independently written dense reference CG to the last digit at every iteration — no
+CG bug, it is CG's nature, and it is precisely why the linear residual is the wrong
+gate for an optimizer step. Damping is what makes the system well-conditioned. The
+test now uses the damped system, which is the one the code solves.
 
 ## Sweeping the whole workspace for the fabrication pattern
 
