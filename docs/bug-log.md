@@ -346,6 +346,25 @@ The fisheye entry points were public in the `distortion` module but not
 re-exported from the crate root, so no caller outside the crate could name them —
 including the reference implementation. Now exported.
 
+## A volume larger than its data, padded into looking valid
+
+`tsdf_gpu::raycast_volume` fetched each element with `.get(i).unwrap_or(..)`, so a
+`vol_dims` larger than the supplied arrays silently padded them. Two constants made
+that padding look correct rather than absent:
+
+- a missing TSDF value became `0.0`, and **0.0 is the iso-surface**, so unobserved
+  space reported a surface hit;
+- a missing weight became `1.0`, i.e. one observation.
+
+The weight turned out never to be read at all — `tsdf_raycast.wgsl` declares the
+buffer as interleaved `(sdf, weight)` but every mention is either the `sdf` half or a
+comment naming the layout. So the padding was invisible even in shape.
+
+Both arrays are now length-checked against the volume they describe, and the voxel
+count uses `saturating_mul`: `(vol_x * vol_y * vol_z) as usize` wrapped to a small
+number on overflowing dimensions, and the loop would then have iterated over *that*
+instead, allocating a buffer of the wrong size.
+
 ## ICP, FPFH and rays
 
 - **Point-to-plane ICP reported `fitness: 1.0` for a registration that never
@@ -368,7 +387,7 @@ including the reference implementation. Now exported.
 
 | | |
 | --- | ---: |
-| Defects fixed | **113+** |
+| Defects fixed | **114+** |
 | Commits | 460+ |
-| Tests | 1,821 (from 1,267) |
+| Tests | 1,824 (from 1,267) |
 | Duplicate implementations removed | 12 |

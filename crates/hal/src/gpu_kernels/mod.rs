@@ -762,12 +762,43 @@ pub mod tsdf_gpu {
         let queue = &gpu.queue;
 
         let (vol_x, vol_y, vol_z) = vol_dims;
+        let voxel_count = (vol_x as usize)
+            .saturating_mul(vol_y as usize)
+            .saturating_mul(vol_z as usize);
 
-        // Pack TSDF and weights into voxel struct array
-        let voxel_count = (vol_x * vol_y * vol_z) as usize;
+        // The arrays must match the volume they describe.
+        //
+        // Previously each element was fetched with `.get(i).unwrap_or(..)`, so a
+        // `vol_dims` larger than the data silently padded it: missing TSDF values
+        // became `0.0` — which *is* the iso-surface, so unobserved space reported
+        // a surface hit — and missing weights became `1.0`, i.e. one observation.
+        //
+        // The weight is in fact never read: `tsdf_raycast.wgsl` declares the
+        // buffer as interleaved `(sdf, weight)` but every reference is either the
+        // `sdf` half or a comment naming the layout. So the padding was invisible
+        // even in the shape it took.
+        if tsdf_volume.len() != voxel_count {
+            return Err(crate::Error::InvalidInput(format!(
+                "tsdf_gpu::raycast_volume: volume is {} voxels but \
+                 tsdf_volume has {} entries",
+                voxel_count,
+                tsdf_volume.len()
+            )));
+        }
+        if !weights.is_empty() && weights.len() != voxel_count {
+            return Err(crate::Error::InvalidInput(format!(
+                "tsdf_gpu::raycast_volume: volume is {} voxels but \
+                 weights has {} entries",
+                voxel_count,
+                weights.len()
+            )));
+        }
+
         let mut voxel_data: Vec<[f32; 2]> = Vec::with_capacity(voxel_count);
         for i in 0..voxel_count {
-            let tsdf = tsdf_volume.get(i).copied().unwrap_or(0.0);
+            let tsdf = tsdf_volume[i];
+            // An absent weight array means "all voxels equally weighted"; a
+            // present one is length-checked above.
             let weight = weights.get(i).copied().unwrap_or(1.0);
             voxel_data.push([tsdf, weight]);
         }
