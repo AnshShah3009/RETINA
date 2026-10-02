@@ -40,6 +40,10 @@ impl GpuCgSolver {
 
     /// CPU fallback implementation of CG solver.
     /// Used when GPU is not available or for small systems.
+    ///
+    /// Returns `Err` when the iteration cap is reached with a residual above
+    /// `tolerance`: an unconverged iterate is not a solution of `A x = b`, and
+    /// "return the best solution anyway" hides that from the caller.
     fn solve_cpu(&self, a: &SparseMatrix, b: &DVector<f64>) -> Result<DVector<f64>, String> {
         let n = b.len();
 
@@ -87,8 +91,15 @@ impl GpuCgSolver {
             rr = rr_new;
         }
 
-        // Return best solution even if not fully converged
-        Ok(x)
+        let residual = r.norm();
+        if residual < self.tolerance {
+            Ok(x)
+        } else {
+            Err(format!(
+                "CG did not converge in {} iterations (tolerance {:.3e}): ||A x - b|| = {:.3e}",
+                self.max_iterations, self.tolerance, residual
+            ))
+        }
     }
 }
 
@@ -150,7 +161,11 @@ impl LinearSolver for GpuCgSolver {
             let mut rr =
                 cv_hal::gpu_kernels::sparse::dot(gpu, &r_gpu, &r_gpu).map_err(|e| e.to_string())?;
 
+            let mut converged = rr.sqrt() < self.tolerance as f32;
             for _ in 0..self.max_iterations {
+                if converged {
+                    break;
+                }
                 let ap_gpu = cv_hal::gpu_kernels::sparse::spmv(
                     gpu,
                     &row_ptr_u32,
@@ -177,6 +192,7 @@ impl LinearSolver for GpuCgSolver {
                 let rr_new = cv_hal::gpu_kernels::sparse::dot(gpu, &r_gpu, &r_gpu)
                     .map_err(|e| e.to_string())?;
                 if rr_new.sqrt() < self.tolerance as f32 {
+                    converged = true;
                     break;
                 }
 
@@ -188,6 +204,20 @@ impl LinearSolver for GpuCgSolver {
                     .map_err(|e| e.to_string())?;
 
                 rr = rr_new;
+            }
+
+            // The iteration cap is not convergence.
+            if !converged {
+                let rr_final = cv_hal::gpu_kernels::sparse::dot(gpu, &r_gpu, &r_gpu)
+                    .map_err(|e| e.to_string())?;
+                let residual = (rr_final as f64).sqrt();
+                if residual >= self.tolerance {
+                    return Err(format!(
+                        "GPU CG did not converge in {} iterations (tolerance {:.3e}): \
+                         ||A x - b|| = {:.3e}",
+                        self.max_iterations, self.tolerance, residual
+                    ));
+                }
             }
 
             // Read back x
@@ -290,6 +320,88 @@ mod tests {
                 b[i]
             );
         }
+    }
+
+    /// An iteration cap is not convergence: a 200x200 Laplacian with
+    /// `max_iterations = 10, tolerance = 1e-10` stalled at `||Ax - b|| = 1.28e2`
+    /// and the old code called it `Ok` anyway ("return best solution even if not
+    /// fully converged").
+    #[test]
+    fn cg_solver_iteration_cap_is_not_reported_as_a_solution() {
+        let n = 200;
+        let mut triplets = Vec::new();
+        for i in 0..n {
+            triplets.push(Triplet {
+                row: i,
+                col: i,
+                val: 2.0,
+            });
+            if i > 0 {
+                triplets.push(Triplet {
+                    row: i,
+                    col: i - 1,
+                    val: -1.0,
+                });
+                triplets.push(Triplet {
+                    row: i - 1,
+                    col: i,
+                    val: -1.0,
+                });
+            }
+        }
+        let a = SparseMatrix::from_triplets(n, n, &triplets);
+        let b = DVector::from_element(n, 1.0);
+
+        let solver = GpuCgSolver::new()
+            .with_tolerance(1e-10)
+            .with_max_iterations(10);
+        let ctx = cv_hal::compute::get_device().unwrap();
+        match solver.solve(&ctx, &a, &b) {
+            Ok(x) => {
+                let residual = (&spmv_cpu(&a, &x) - &b).norm();
+                panic!("unconverged solve returned Ok with ||Ax - b|| = {residual:.3e}");
+            }
+            Err(e) => assert!(e.contains("did not converge"), "unexpected error: {e}"),
+        }
+    }
+
+    /// Control: the same system with a realistic budget solves.
+    #[test]
+    fn cg_solver_converges_with_an_adequate_budget() {
+        let n = 200;
+        let mut triplets = Vec::new();
+        for i in 0..n {
+            triplets.push(Triplet {
+                row: i,
+                col: i,
+                val: 2.0,
+            });
+            if i > 0 {
+                triplets.push(Triplet {
+                    row: i,
+                    col: i - 1,
+                    val: -1.0,
+                });
+                triplets.push(Triplet {
+                    row: i - 1,
+                    col: i,
+                    val: -1.0,
+                });
+            }
+        }
+        let a = SparseMatrix::from_triplets(n, n, &triplets);
+        let b = DVector::from_element(n, 1.0);
+
+        let solver = GpuCgSolver::new()
+            .with_tolerance(1e-10)
+            .with_max_iterations(2000);
+        let ctx = cv_hal::compute::get_device().unwrap();
+        let x = solver.solve(&ctx, &a, &b).expect("must converge");
+        let residual = (&spmv_cpu(&a, &x) - &b).norm();
+        assert!(
+            residual < 1e-10,
+            "returned solution violates its own tolerance: {residual:.3e}"
+        );
     }
 
     #[test]

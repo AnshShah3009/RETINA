@@ -285,6 +285,32 @@ pub struct CgSolver {
 mod tests {
     use super::*;
 
+    /// A tridiagonal SPD system of size `n` (a 1-D Laplacian), which is what a
+    /// bundle-adjustment normal-equations matrix looks like at low rank.
+    fn laplacian(n: usize) -> SparseMatrix {
+        let mut triplets = Vec::new();
+        for i in 0..n {
+            triplets.push(Triplet {
+                row: i,
+                col: i,
+                val: 2.0,
+            });
+            if i > 0 {
+                triplets.push(Triplet {
+                    row: i,
+                    col: i - 1,
+                    val: -1.0,
+                });
+                triplets.push(Triplet {
+                    row: i - 1,
+                    col: i,
+                    val: -1.0,
+                });
+            }
+        }
+        SparseMatrix::from_triplets(n, n, &triplets)
+    }
+
     #[test]
     fn test_cg_solves_simple_system() {
         // 3x3 SPD tridiagonal matrix: [2,-1,0; -1,2,-1; 0,-1,2]
@@ -354,6 +380,52 @@ mod tests {
             );
         }
     }
+
+    /// An iteration cap is not convergence. Measured on the old code: a 200x200
+    /// Laplacian with `max_iters = 10, tolerance = 1e-10` returned `Ok` with
+    /// `||Ax - b|| = 1.28e2` — twelve orders of magnitude above the tolerance it
+    /// was asked for, and the LM step that consumes it gets a silently wrong
+    /// direction.
+    #[test]
+    fn cg_iteration_cap_is_not_reported_as_a_solution() {
+        let a = laplacian(200);
+        let b = DVector::from_element(200, 1.0);
+        let cpu = cv_hal::cpu::CpuBackend::new().unwrap();
+        let device = ComputeDevice::Cpu(&cpu);
+
+        let solver = CgSolver {
+            max_iters: 10,
+            tolerance: 1e-10,
+        };
+        match solver.solve(&device, &a, &b) {
+            Ok(x) => {
+                let residual = (&a.spmv_native(&x).unwrap() - &b).norm();
+                panic!("unconverged solve returned Ok with ||Ax - b|| = {residual:.3e}");
+            }
+            Err(e) => assert!(e.contains("did not converge"), "unexpected error: {e}"),
+        }
+    }
+
+    /// Control: the same system with a realistic budget must still solve, and the
+    /// returned vector must satisfy the residual bound it was given.
+    #[test]
+    fn cg_converges_with_an_adequate_budget() {
+        let a = laplacian(200);
+        let b = DVector::from_element(200, 1.0);
+        let cpu = cv_hal::cpu::CpuBackend::new().unwrap();
+        let device = ComputeDevice::Cpu(&cpu);
+
+        let solver = CgSolver {
+            max_iters: 2000,
+            tolerance: 1e-10,
+        };
+        let x = solver.solve(&device, &a, &b).expect("must converge");
+        let residual = (&a.spmv_native(&x).unwrap() - &b).norm();
+        assert!(
+            residual < 1e-10,
+            "returned solution violates its own tolerance: {residual:.3e}"
+        );
+    }
 }
 
 impl LinearSolver for CgSolver {
@@ -372,6 +444,8 @@ impl LinearSolver for CgSolver {
             let ap = a.spmv_ctx(ctx, &p)?;
             let pap = p.dot(&ap);
             if pap.abs() < 1e-10 {
+                // Breakdown: `A` has no energy along `p`. This is not
+                // convergence, so let the final residual check decide.
                 break;
             }
             let alpha = rsold / pap;
@@ -380,12 +454,24 @@ impl LinearSolver for CgSolver {
 
             let rsnew = residual.dot(&residual);
             if rsnew.sqrt() < self.tolerance {
-                break;
+                return Ok(x);
             }
             p = &residual + (rsnew / rsold) * &p;
             rsold = rsnew;
         }
 
-        Ok(x)
+        // The iteration cap is not convergence: an unconverged `x` is a wrong
+        // answer for `A x = b`, and the caller (a Levenberg-Marquardt step, for
+        // instance) has no way to see it. Report it.
+        let final_residual = residual.norm();
+        if final_residual < self.tolerance {
+            Ok(x)
+        } else {
+            Err(format!(
+                "conjugate gradient did not converge in {} iterations (tolerance {:.3e}): \
+                 ||A x - b|| = {:.3e}",
+                self.max_iters, self.tolerance, final_residual
+            ))
+        }
     }
 }

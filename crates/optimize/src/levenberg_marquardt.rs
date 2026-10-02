@@ -140,12 +140,35 @@ pub fn curve_fit(
     let dof = if m > np { m - np } else { 1 };
     let s2 = cost / dof as f64;
 
+    // Covariance approximation: (J^T J)^{-1} * cost / (m - np).
+    //
+    // When J^T J is singular — two parameters that only appear in a product, a
+    // parameter the model ignores, a redundant parameterisation — the inverse
+    // does not exist, but `(J^T J)^+` (the Moore-Penrose pseudo-inverse) is the
+    // correct limit: it is the minimum-norm solution of the normal equations and
+    // its diagonal is large exactly where the parameters are unidentifiable. A
+    // zero matrix is not: it reports a covariance of zero, i.e. parameters known
+    // exactly, in the one case where they are not determined at all.
     let covariance = match invert_matrix(&jtj) {
         Some(inv) => inv
             .iter()
             .map(|row| row.iter().map(|v| v * s2).collect())
             .collect(),
-        None => vec![vec![0.0; np]; np],
+        None => {
+            // SVD failed to converge: leave the covariance at zero rather than
+            // fabricate numbers, but say so on stderr.
+            match DMatrix::from_fn(np, np, |i, j| jtj[i][j]).pseudo_inverse(1e-12) {
+                Ok(pinv) => (0..np)
+                    .map(|i| (0..np).map(|j| pinv[(i, j)] * s2).collect())
+                    .collect(),
+                Err(e) => {
+                    eprintln!(
+                        "curve_fit: pseudo-inverse of J^T J failed ({e:?}); covariance unset"
+                    );
+                    vec![vec![0.0; np]; np]
+                }
+            }
+        }
     };
 
     // R-squared
@@ -246,5 +269,91 @@ mod tests {
             res.params[1]
         );
         assert!(res.r_squared > 0.999);
+    }
+
+    /// The covariance must be `(JᵀJ)⁻¹ · cost/(m-np)` for a well-conditioned
+    /// problem: check it against the closed form for a straight-line fit, where
+    /// `JᵀJ = [[Σx², Σx], [Σx, m]]`.
+    #[test]
+    fn curve_fit_covariance_matches_the_closed_form() {
+        // Deterministic pseudo-noise so the residual variance is non-trivial.
+        let x_data: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let noise = |i: usize| ((i * 37 % 11) as f64 - 5.0) * 0.01;
+        let y_data: Vec<f64> = x_data
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| 2.0 * x + 1.0 + noise(i))
+            .collect();
+
+        let model = |x: f64, p: &[f64]| p[0] * x + p[1];
+        let res = curve_fit(model, &x_data, &y_data, &[0.0, 0.0], 100).unwrap();
+
+        let m = x_data.len() as f64;
+        let sxx: f64 = x_data.iter().map(|x| x * x).sum();
+        let sx: f64 = x_data.iter().sum();
+        let det = sxx * m - sx * sx;
+        let cost: f64 = res.residuals.iter().map(|r| r * r).sum();
+        let s2 = cost / (m - 2.0);
+
+        let expected = [
+            [m / det * s2, -sx / det * s2],
+            [-sx / det * s2, sxx / det * s2],
+        ];
+        let scale = expected[0][0].abs() + expected[1][1].abs();
+        assert!(
+            scale > 0.0,
+            "the control needs a non-zero residual variance"
+        );
+        // The tolerance is loose because the model is differentiated by forward
+        // differences: `(f(p+h) - f(p))/h` with `h = 1e-8·|p|` carries ~1e-8
+        // relative error, which the covariance inherits. Five significant digits
+        // against the closed form is still a real check.
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (res.covariance[i][j] - expected[i][j]).abs() <= 1e-5 * scale,
+                    "cov[{i}][{j}] = {} but the closed form is {}",
+                    res.covariance[i][j],
+                    expected[i][j]
+                );
+            }
+        }
+    }
+
+    /// A singular `JᵀJ` (here `y = a·b·x` with the two parameters identified only
+    /// up to a common scale) has no inverse. A zero covariance is *not* its
+    /// limit: zeros mean the parameters are known exactly, in the one case where
+    /// the data cannot separate them at all. Measured before the fix: the whole
+    /// 2x2 covariance came back `[[0, 0], [0, 0]]`.
+    #[test]
+    fn curve_fit_singular_normal_matrix_does_not_report_zero_covariance() {
+        let x_data: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+        // Noise keeps the residual variance non-zero, so a correct covariance is
+        // non-zero and the test cannot pass on `s2 == 0` alone.
+        let noise = |i: usize| ((i * 29 % 7) as f64 - 3.0) * 0.05;
+        let y_data: Vec<f64> = x_data
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| 6.0 * x + noise(i))
+            .collect();
+        let model = |x: f64, p: &[f64]| p[0] * p[1] * x;
+
+        let res = curve_fit(model, &x_data, &y_data, &[2.0, 3.0], 100).unwrap();
+        assert!(
+            (res.params[0] * res.params[1] - 6.0).abs() < 0.1,
+            "the fit itself is still right: {:?}",
+            res.params
+        );
+        let covariance = nalgebra::DMatrix::from_fn(2, 2, |i, j| res.covariance[i][j]);
+        assert!(
+            covariance.iter().any(|v| v.abs() > 0.0),
+            "singular JᵀJ reported an all-zero covariance: {:?}",
+            res.covariance
+        );
+        assert!(
+            covariance[(0, 0)] > 0.0 && covariance[(1, 1)] > 0.0,
+            "the unidentifiable directions must have positive variance: {:?}",
+            res.covariance
+        );
     }
 }

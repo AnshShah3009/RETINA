@@ -23,6 +23,22 @@ pub struct LocalizationStats {
 }
 
 /// Translation error `||a.t - b.t||` between two poses.
+///
+/// # Convention
+///
+/// This is the difference of the poses' own translation parameters, which for a
+/// **world-to-camera** pose (`x_cam = R·x_world + t`, the convention
+/// [`crate::LocalizationResult::pose`] uses) is *not* the distance between the
+/// camera centres: `t = -R·C` depends on the rotation, so two estimates of the
+/// same camera position at different orientations report a non-zero error, and
+/// two poses at different positions can report zero. Measured for a camera at
+/// `C = (1, 0, 0)`: 0.5176 at 30° of yaw, 1.4142 at 90°, both with a camera-centre
+/// distance of 0.
+///
+/// Callers that want the camera-centre error — the TUM/absolute-trajectory
+/// convention — should invert world-to-camera poses into camera-to-world poses
+/// first, where `t` *is* the centre (`benchmark.rs` does exactly that before
+/// calling [`evaluate_localization`]).
 pub fn translation_error(a: &Pose, b: &Pose) -> f64 {
     (a.translation - b.translation).norm()
 }
@@ -43,6 +59,9 @@ pub fn rotation_error_degrees(a: &Pose, b: &Pose) -> f64 {
 /// ground-truth pose exists at `i`. Queries beyond the shorter of the two slices
 /// are ignored. Error statistics cover successful queries only; when none
 /// succeed they are `NaN` (`success_rate` is still reported as `0.0`).
+///
+/// `results` and `ground_truth` must use the same pose convention; see
+/// [`translation_error`] for what "translation error" means under each one.
 pub fn evaluate_localization(
     results: &[Option<LocalizationResult>],
     ground_truth: &[Pose],

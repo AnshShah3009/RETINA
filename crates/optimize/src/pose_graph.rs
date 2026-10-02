@@ -74,8 +74,6 @@ impl PoseGraph {
             return Ok(0.0);
         }
 
-        let mut error_sum = 0.0;
-
         // Validate edges up front: `optimize` returns Result, so an edge
         // referencing an unknown node must yield an error, not a panic.
         for edge in &self.edges {
@@ -90,7 +88,7 @@ impl PoseGraph {
         for _ in 0..iterations {
             let mut h_mat = DMatrix::zeros(system_size, system_size);
             let mut b_vec = DVector::zeros(system_size);
-            error_sum = 0.0;
+            let mut error_sum = 0.0;
 
             for edge in &self.edges {
                 let pose_i = self.nodes[&edge.from];
@@ -183,7 +181,36 @@ impl PoseGraph {
             }
         }
 
-        Ok(error_sum)
+        // `error_sum` was last evaluated *before* the final pose update (and
+        // before the loop break), so it describes poses that are no longer the
+        // ones being returned. A caller comparing it against a threshold — as
+        // `cv-slam` does — was reading a stale cost that can differ from the
+        // returned poses' cost by orders of magnitude. Report the cost of the
+        // poses actually returned.
+        Ok(self.total_error())
+    }
+
+    /// Weighted sum of squared edge residuals at the current node estimates.
+    fn total_error(&self) -> f64 {
+        let mut total = 0.0;
+        for edge in &self.edges {
+            let (Some(pose_i), Some(pose_j)) =
+                (self.nodes.get(&edge.from), self.nodes.get(&edge.to))
+            else {
+                continue;
+            };
+            let error_se3 = edge.measurement.inverse() * (pose_i.inverse() * pose_j);
+            let error = Vector6::new(
+                error_se3.translation.vector.x,
+                error_se3.translation.vector.y,
+                error_se3.translation.vector.z,
+                error_se3.rotation.scaled_axis().x,
+                error_se3.rotation.scaled_axis().y,
+                error_se3.rotation.scaled_axis().z,
+            );
+            total += error.dot(&(edge.information * error));
+        }
+        total
     }
 }
 
@@ -218,5 +245,61 @@ mod tests {
             result.is_err(),
             "an edge referencing an unknown node must return an error, not panic"
         );
+    }
+
+    fn chain_graph() -> PoseGraph {
+        let mut graph = PoseGraph::new();
+        graph.add_node(0, Isometry3::identity());
+        graph.set_fixed(0);
+        graph.add_node(1, Isometry3::translation(1.6, 0.4, 0.0));
+        graph.add_node(2, Isometry3::translation(3.4, -0.2, 0.0));
+        graph.add_edge(
+            0,
+            1,
+            Isometry3::translation(1.0, 0.0, 0.0),
+            Matrix6::identity(),
+        );
+        graph.add_edge(
+            1,
+            2,
+            Isometry3::translation(1.0, 0.0, 0.0),
+            Matrix6::identity(),
+        );
+        graph
+    }
+
+    /// The returned cost must describe the poses that are returned. The old code
+    /// returned the `error_sum` evaluated at the *start* of the final iteration,
+    /// before that iteration's update: for a single iteration it returned
+    /// `1.52e0` while the poses it handed back had a cost of `7.15e-12`.
+    #[test]
+    fn test_returned_error_matches_the_returned_poses() {
+        for iterations in [1usize, 2, 3, 30] {
+            let mut graph = chain_graph();
+            let before = graph.total_error();
+            let returned = graph.optimize(iterations).unwrap();
+            let actual = graph.total_error();
+            assert!(
+                (returned - actual).abs() <= 1e-12 * actual.max(1.0),
+                "iterations={iterations}: optimize returned {returned:.3e} but the returned poses \
+                 cost {actual:.3e}"
+            );
+            assert!(
+                actual < before,
+                "iterations={iterations}: the optimization must still make progress \
+                 ({before:.3e} -> {actual:.3e})"
+            );
+        }
+    }
+
+    /// Control: the solver still reaches the closed-form answer (a chain of unit
+    /// translations along +x, first node fixed), and reports a cost near zero.
+    #[test]
+    fn test_optimize_converges_to_the_known_chain_solution() {
+        let mut graph = chain_graph();
+        let error = graph.optimize(30).unwrap();
+        assert!(error < 1e-12, "final cost {error:.3e} should be ~0");
+        assert!((graph.nodes[&1].translation.vector - Vector3::new(1.0, 0.0, 0.0)).norm() < 1e-6);
+        assert!((graph.nodes[&2].translation.vector - Vector3::new(2.0, 0.0, 0.0)).norm() < 1e-6);
     }
 }
