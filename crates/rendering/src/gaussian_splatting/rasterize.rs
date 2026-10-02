@@ -274,8 +274,15 @@ impl GaussianRasterizer {
                         let dx = pixel_x - pg.center.x;
                         let dy = pixel_y - pg.center.y;
 
-                        // Full Mahalanobis distance using inverse covariance
-                        let inv_cov_2d = pg.inv_cov_2d();
+                        // Full Mahalanobis distance using inverse covariance.
+                        //
+                        // A singular covariance means the splat has no defined
+                        // footprint, so it is skipped. The previous fallback -
+                        // a zero matrix - made `mahalanobis` 0 at every pixel, so
+                        // the splat painted its entire tile at full opacity.
+                        let Some(inv_cov_2d) = pg.inv_cov_2d() else {
+                            continue;
+                        };
                         let a = inv_cov_2d[(0, 0)];
                         let b = inv_cov_2d[(0, 1)];
                         let c = inv_cov_2d[(1, 1)];

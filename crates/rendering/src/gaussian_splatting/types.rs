@@ -187,8 +187,18 @@ impl Gaussian {
         r * s * s * r.transpose()
     }
 
-    pub fn inverse_covariance(&self) -> Matrix3<f32> {
-        self.covariance().try_inverse().unwrap_or(Matrix3::zeros())
+    /// Inverse covariance, or `None` when the covariance is singular.
+    ///
+    /// This was `try_inverse().unwrap_or(Matrix3::zeros())`, and the zero matrix
+    /// is not a neutral fallback - it is read as "this splat has no extent", so
+    /// the conic evaluation collapses it. `Gaussian::new` clamps scale to
+    /// `>= 1e-4`, so a singular covariance only arises from a splat built outside
+    /// that constructor - a deserialised file, or a field overwritten directly.
+    ///
+    /// Reporting absence lets the caller skip the splat, which is right: a splat
+    /// with no invertible covariance has no defined footprint.
+    pub fn inverse_covariance(&self) -> Option<Matrix3<f32>> {
+        self.covariance().try_inverse()
     }
 
     pub fn project(
@@ -281,7 +291,19 @@ impl ProjectedGaussian {
         self.depth > 0.0 && self.depth < f32::MAX && self.opacity > 0.001
     }
 
-    pub fn inv_cov_2d(&self) -> Matrix3<f32> {
+    /// Inverse of the 2-D screen-space covariance, or `None` when singular.
+    ///
+    /// The zero-matrix fallback this replaces was actively wrong rather than
+    /// merely uninformative. The rasterizer reads the inverse to evaluate
+    ///
+    ///     mahalanobis = a·dx² + 2b·dx·dy + c·dy²
+    ///
+    /// and every coefficient of a zero matrix is 0, so `mahalanobis` was 0 at
+    /// **every** pixel, and `alpha = exp(-0.5·0)·opacity` came out at full
+    /// opacity across the splat's whole tile - measured 0.8 at pixel offsets of
+    /// (0,0), (10,10), (100,100) and (1000,1000) alike. A splat with no defined
+    /// footprint painted the entire tile instead of vanishing.
+    pub fn inv_cov_2d(&self) -> Option<Matrix3<f32>> {
         let cov_2d = Matrix3::new(
             self.covariance[(0, 0)],
             self.covariance[(0, 1)],
@@ -293,7 +315,7 @@ impl ProjectedGaussian {
             0.0,
             1.0,
         );
-        cov_2d.try_inverse().unwrap_or(Matrix3::zeros())
+        cov_2d.try_inverse()
     }
 }
 
