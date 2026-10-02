@@ -336,6 +336,103 @@ downstream treats as data. If the degraded result is *detectable* by the caller
 design choice rather than a lie, and changing it is not automatically an
 improvement.
 
+## CORRECTED: the LM/CG mismatch, and how my first account of it was wrong
+
+An earlier entry here claimed `SparseLMSolver::minimize` in `cv-optimize` discards
+`CgSolver`'s non-convergence report. **That was wrong in two ways**, and both
+corrections matter more than the original claim.
+
+**Wrong #1 — the wrong function.** `SparseLMSolver::minimize` calls
+`solve_lm_step(&j, &r, lambda)?` and `solve_lm_step` propagates its errors with
+`?` too. `cv-optimize` is clean; the `unwrap_or_else(|_| DVector::zeros(n_params))`
+lives only in `sfm`'s `bundle_adjust_sequential`, which duplicates the LM loop
+instead of calling `SparseLMSolver`. I had read the two loops and conflated them.
+
+**Wrong #2 — the wrong mechanism.** I framed it as "the linear system is never
+solved". Measured, by running the case with the error printed:
+
+```text
+conjugate gradient did not converge in 200 iterations (tolerance 1.000e-10):
+||A x - b|| = 1.301e-7
+```
+
+That is not a broken system. It is a *solvable* one that CG brought to `1.3e-7`
+against a strict `1e-10` tolerance. The step was almost certainly usable — LM
+validates steps by whether the cost decreases, not by whether the linear solve was
+exact.
+
+**The real shape is an interface problem, not a local patch.**
+`CgSolver::solve` returns `Result<DVector<f64>, String>`, so an unconverged solve
+*cannot* hand back its approximate iterate. That leaves the caller two options:
+propagate `Err` and abandon an optimisation that was working, or fabricate — and it
+fabricates a zero step, which is also exactly what a rejected step looks like.
+
+**I tried the local patch and it was wrong.** Changing
+`bundle_adjust_sequential` to return `false` on a failed solve turned a
+*legitimate* refinement into a reported failure — `map_ba`'s
+`local_ba_writes_back_only_the_selected_subset` caught it, because its config uses
+`ba_max_iterations: 1` and the single solve lands at `1.3e-7`. An existing test
+caught a bad fix, which is the point of having them. Reverted in full; `sfm` is
+back to 0 failures.
+
+The fix needs an interface that can carry a partial solution — `Ok(iterate,
+converged: bool)`, or a tolerant-enough default and a documented contract — which
+is a decision for `cv-optimize` rather than a patch at the call site. Left
+unfixed deliberately, with the reasoning here.
+
+## Sweeping the whole workspace for the fabrication pattern
+
+Grepped every `unwrap_or`/`unwrap_or_else` whose fallback constructs a matrix or
+vector, then triaged each by hand. The pattern is worth sweeping because it has
+already produced five real defects — but *most* hits are correct, and saying which
+is the point of this section.
+
+### Fixed from this sweep
+
+- **`hal` GPU undistort** — `Matrix3::identity()` for `Inv(NewK)` and `Inv(R)`.
+  Measured `try_inverse() -> None`, `det = 0`, fallback exactly the identity, so the
+  intrinsics normalisation vanished and the call returned `Ok`.
+- **`3d` TSDF integration** — `Matrix4::identity()` for a singular `extrinsics`, so
+  every world voxel was treated as already in camera space. Measured: a world voxel
+  passed through unchanged.
+- **`video` Kalman update** — `SMatrix::zeros()` for a singular innovation
+  covariance, which means *ignore the measurement*. Measured `state moved
+  0.000e0`. See its own section above.
+
+### CHECKED AND CLEAN — deliberately not changed
+
+- **`registration::colored`** — `unwrap_or(Vector3::zeros())` for a missing surface
+  normal. A zero normal contributes nothing to the point-to-plane Jacobian, which
+  is the correct amount when there is no normal, and the alternative (`normalize`
+  on a zero difference vector) is NaN. A zero *normal* is a meaningful value; a
+  zero *inverse matrix* is not. Already carries the reasoning.
+- **`3d` TSDF gradient normal** — `try_normalize(1e-8).unwrap_or(Vector3::zeros())`
+  for a locally flat region. Zero is the honest "no gradient here" and the caller
+  can test for it. Documented.
+- **`sfm::mapper` homography fallback** —
+  `unwrap_or((Matrix3::identity(), vec![false; n]))`. This *looks* like the
+  fabrication pattern and is not: the all-false mask makes `h_inliers == 0`, and
+  the planar decision requires `h_inliers > f_inliers`, which zero cannot satisfy.
+  So the fallback can only ever degrade to "not planar" — the safe direction. The
+  identity `homography_score` is recorded in the diagnostic but does not drive the
+  decision. A fabricated value that can only make a model *less* likely to be
+  chosen is not the same hazard as one that is chosen.
+- **`io::las_to_point_cloud`** — `unwrap_or_else(|_| PointCloud::new(points))`
+  drops colours when `with_colors` rejects a length mismatch. Lower severity than
+  the others for a specific reason: the degraded result has `colors == None`, which
+  the caller *can* detect after asking for colours. It is a detectable loss, not a
+  well-formed lie. Left as-is; noted because the LAS reader's own consistency
+  checks are `debug_assert_eq!` and so compiled out in release.
+
+### The distinction that separates these
+
+A fallback is only in this bug class when the substituted value is **well-formed
+and indistinguishable from a real answer** — an identity or zero matrix, which
+downstream treats as data. If the degraded result is *detectable* by the caller
+(`Option::None`, an out-of-band flag, a strictly-worse model score), it is a
+design choice rather than a lie, and changing it is not automatically an
+improvement.
+
 ## CONFIRMED, NOT YET FIXED: the LM step discards the solver's own failure report
 
 Two halves of an intent mismatch, both readable in the code but in *different*
