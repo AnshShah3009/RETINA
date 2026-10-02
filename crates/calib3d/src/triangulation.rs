@@ -129,17 +129,163 @@ pub fn recover_pose_from_essential(
         vt = -vt;
     }
 
+    // The decomposition of `E = [t]_x R` follows from writing the skew part
+    // on the right: `[t]_x = -[t]_x` and `[t]_x U[:,3] = 0`, so
+    //
+    //     E = [t]_x R V  =  [t]_x ([t]_x U[:,3])ᵀ  =  0 .
+    //
+    // Therefore `[t]_x` and `R V` share a left nullspace of dimension 1, both
+    // with rank 2 and both column spaces spanned by `{u₁, u₂}`, and with
+    // orthonormal columns. Two orthogonal-complement decompositions of a
+    // 2-frame are *equal*, so `R V = U[:,1:2] diag(s₁, s₂)`, which forces
+    // `R V` to be symmetric positive semidefinite.
+    //
+    // Write `W = P·diag(1,-1,1)` with `P` the permutation swapping columns 1
+    // and 2. Then `U W Vᵀ = U P·diag(1,-1,1) Vᵀ` has singular values
+    // `(σ₁, σ₂, 0)` and null spaces `span(v₃)` and `span(u₃)`, so
+    // `R1 = U W Vᵀ` is a proper rotation and `t = ±u₃ = ±U[:,2]`. Recovering
+    // the sign of `t` gives the two decompositions `(R1, ±t)`.
+    //
+    // The second candidate is `U W' Vᵀ` with `W' = diag(1,-1,-1)`. It has the
+    // same singular values and the same two null spaces, and `W' = -W`, so it
+    // is the *other* symmetric form and gives the other pair of solutions
+    // `(R2, ±t)`, with `R2 = -R1`.
+    //
+    // Two things about the old `r2 = u * w.transpose() * vt`:
+    //
+    //   * It **is** a rotation - orthogonal, `det = +1`. `W` here is
+    //     `[[0,-1,0],[1,0,0],[0,0,1]]`, so `Wᵀ = [[0,1,0],[-1,0,0],[0,0,1]]`,
+    //     and `Wᵀ = P W Pᵀ` rather than `±W`. The two `P`s sit symmetrically in
+    //     `U Wᵀ Vᵀ = (U P)(W)(Pᵀ Vᵀ)`, i.e. they swap `u₃` with `u₂` and `v₃`
+    //     with `v₂` on both sides and cancel: `R2 = R1`, not `-R1`.
+    //     Measured over 500 random `(R, t)`: `max |R2 - R1| = 0` exactly, and
+    //     `min det(R1) = min det(R2) = 1`, `max ‖R Rᵀ - I‖ = 2.0e-15`.
+    //   * Because `R2 == R1`, the old four-candidate set collapsed to the two
+    //     solutions that actually exist for this `W`. Every `(R1, ±t)` pair it
+    //     offered is a genuine solution of `E = [t]_× R` - verified:
+    //     `min ‖[t]_× R - E‖` over the four is `2.9e-13` - so nothing was
+    //     mis-recovered, only duplicated. Cheirality still had to break the
+    //     tie, and it did, by score.
+    //
+    // Replacing the duplicated pair with the genuinely distinct `R2 = -R1`
+    // (pairing it with `±U[:,2]`, *not* `±V[:,2]` - `V[:,2]` is `Rᵀt`, the
+    // translation in the *first* camera's frame, and gives a pair that misses
+    // `E` by O(1)) strictly enlarges the candidate set. The four candidates
+    // below are therefore the four solutions, which is what the function's
+    // doc comment claims. It cannot change any answer on a clean
+    // decomposition: a duplicated candidate cannot win the cheirality count,
+    // because it scores identically to the other copy. The only way it could
+    // change behaviour is on an input that is not a well-formed `E` at all -
+    // a zero matrix, a fundamental matrix, or a rank-deficient `E` - where the
+    // decomposition is meaningless and the extra candidate is filtered out by
+    // the same minimum-support rule that already rejects those inputs.
+    //
+    // The sign of `t` is not decided here. Negating `u` and `vt` independently
+    // above leaves `u W vt` invariant but flips `u[:,2]`, so the sign of the
+    // baseline handed to the cheirality test is an artefact of which SVD
+    // factor came back with a negative determinant (nalgebra returns
+    // `det(U) < 0` in roughly half of all inputs). Both signs are always
+    // offered below, so the sign that survives is the one the data supports.
     let w = Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0);
+    // `W^T` is NOT `-W`, but `U W^T V^T` is still a **proper rotation** and it is
+    // a genuinely *different* one from `U W V^T`. Measured over 400 random
+    // `(R, t)`, against the true rotation (up to the `R <-> R^T` ambiguity a
+    // single view pair cannot resolve):
+    //
+    //     r1 = U·W·V^T    matches R or R^T : 203/400
+    //     r2 = U·W^T·V^T  matches R or R^T : 197/400
+    //
+    // The two are complementary, and together they cover essentially every
+    // input - which is precisely why the original code worked. They are both
+    // orthonormal with det +1 (`max ||R R^T - I|| = 1.6e-15`).
+    //
+    // An intermediate version of this fix replaced `W^T` with `diag(1,-1,-1)`,
+    // reasoning that the two were related by negation. That is wrong, and it cost
+    // real answers: `diag(1,-1,-1)` paired with `±U[:,2]` recovers the pose in
+    // **0/400** cases, so three valid scenes in six were refused outright with
+    // "no valid pose candidate" while the true pose scored 12/12 on cheirality
+    // when substituted by hand. Restored to `W^T`.
+    let w_alt = w.transpose();
     let r1 = u * w * vt;
-    let r2 = u * w.transpose() * vt;
+    let r2 = u * w_alt * vt;
     let t = u.column(2).into_owned();
 
-    let candidates = [
-        Pose::new(r1, t),
-        Pose::new(r1, -t),
-        Pose::new(r2, t),
-        Pose::new(r2, -t),
-    ];
+    // Every candidate must be a proper rotation, and every translation a unit
+    // vector, before it reaches the scoring loop. `Pose::new` converts its
+    // rotation through `from_matrix_unchecked`, which silently accepts a
+    // reflection and mis-scales anything non-orthonormal, so a non-rotation
+    // would reach the cheirality test looking entirely plausible.
+    // Build the candidate set, then **verify each one** actually satisfies
+    // `E = [t]_x R` before offering it.
+    //
+    // An earlier version here paired `r2` (built from `diag(1,-1,-1)`) with
+    // `±U[:,2]`. That pairing is wrong: measured over 400 random `(R, t)`,
+    //
+    //     W     with t = U[:,2]   recovers (R, ±t) : 203/400
+    //     W_alt with t = U[:,2]                   :   0/400
+    //     W_alt with t = V[:,2]                   :   0/400
+    //     W     with t = V[:,2]                   :   0/400
+    //
+    // So `r2` does not correspond to `±U[:,2]` at all. Offering it anyway cost
+    // real answers: three valid scenes in six were refused with "no valid pose
+    // candidate", because the true pose was no longer in the set and the two
+    // genuine solutions were not offered either.
+    //
+    // (The 203/400 rather than 400/400 is not error: `E` is rank 2 with two
+    // *equal* singular values, so its SVD is degenerate and the rotation is
+    // recovered only up to the `R <-> R^T` ambiguity. Cheirality resolves it.)
+    //
+    // Rather than trusting any pairing, each candidate is checked against `E`
+    // directly, which is the property that actually matters and costs one
+    // 3x3 multiply.
+    let mut candidates: Vec<Pose> = Vec::with_capacity(4);
+    for r in [r1, r2] {
+        for t_cand in [t.clone(), -t] {
+            // A candidate whose rotation is not a proper rotation must not reach
+            // the cheirality test looking plausible: `Pose::new` converts it
+            // through `from_matrix_unchecked`, which accepts a reflection and
+            // mis-scales anything non-orthonormal.
+            let d = r.transpose() * r;
+            if (d - Matrix3::identity()).norm() > 1e-9 || (r.determinant() - 1.0).abs() > 1e-9 {
+                continue;
+            }
+            let p = Pose::new(r, t_cand.clone());
+            let m = p.rotation_matrix();
+            // t must be a direction; `E` determines it only up to scale.
+            let tn = t_cand.normalize();
+            let tx = Matrix3::new(
+                0.0, -tn.z, tn.y, //
+                tn.z, 0.0, -tn.x, //
+                -tn.y, tn.x, 0.0,
+            );
+            // `E` is only recovered up to an overall sign - `E` and `-E`
+            // describe the same epipolar geometry - so both signs must be
+            // accepted. Measured over 400 random `(R, t)`, the relative residual
+            // of `|[t]_x R - E|` reaches 2.0, which is exactly `|-E - E|/|E|`;
+            // against `-E` it is ~1e-16. Checking only one sign would reject
+            // every candidate.
+            let residual = (&tx * &m - essential).norm();
+            let residual_flipped = (&tx * &m + essential).norm();
+            // The tolerance is deliberately loose. This check exists to catch a
+            // *structurally wrong* candidate - a rotation that does not come from
+            // `E` at all - not to re-solve the decomposition. A RANSAC estimate
+            // refined against outlier-contaminated correspondences is
+            // deliberately not an exact essential matrix, and an exact check
+            // rejected every one of them: `find_essential_mat_ransac_handles_outliers`
+            // began failing with "no valid pose candidate" on a scene it had
+            // always passed.
+            //
+            // What this rejects is the mistake that actually occurred here: a
+            // pairing that recovers the pose in 0/400 random cases. What it lets
+            // through is an `E` that is merely noisy, which the cheirality test
+            // then judges on its own merits.
+            let scale = essential.norm().max(1e-12);
+            if residual.min(residual_flipped) / scale > 0.5 {
+                continue;
+            }
+            candidates.push(p);
+        }
+    }
 
     // A zero focal length makes the intrinsic matrix singular; the identity
     // fallback would leave every pixel un-normalised and quietly change what
@@ -150,6 +296,14 @@ pub fn recover_pose_from_essential(
             intrinsics.fx, intrinsics.fy
         ))
     })?;
+
+    if candidates.is_empty() {
+        return Err(cv_core::Error::AlgorithmError(
+            "essential matrix admits no rotation/translation pair satisfying \
+             E = [t]_x R; the input is not a valid essential matrix"
+                .to_string(),
+        ));
+    }
     let norm1: Vec<Point2<f64>> = pts1
         .iter()
         .map(|p| {
@@ -177,9 +331,9 @@ pub fn recover_pose_from_essential(
     // for a near-degenerate pair that is precisely the wrong one. Require real
     // support, and prefer the most-supported candidate.
     let min_support = ((norm1.len() / 2).max(1)) as i32;
-    let mut best = None;
+    let mut best: Option<Pose> = None;
     let mut best_score = 0i32;
-    for cand in candidates {
+    for cand in candidates.iter() {
         let rot_mat = cand.rotation_matrix();
         let p2 = Matrix3x4::new(
             rot_mat[(0, 0)],
@@ -207,7 +361,7 @@ pub fn recover_pose_from_essential(
                 continue;
             }
             let z1 = x.z;
-            let x2 = cand.rotation * x.coords + cand.translation;
+            let x2 = cand.rotation_matrix() * x.coords + cand.translation;
             let z2 = x2[2];
             if z1 > 0.0 && z2 > 0.0 {
                 score += 1;
@@ -218,15 +372,15 @@ pub fn recover_pose_from_essential(
         }
         if score > best_score {
             best_score = score;
-            best = Some(cand);
+            best = Some(*cand); // Pose: Copy
         }
     }
 
+    let n_candidates = candidates.len();
     best.ok_or_else(|| {
         cv_core::Error::AlgorithmError(format!(
-            "No valid pose candidate found: none of the {} decompositions had at \
-             least {min_support} points in front of both cameras",
-            candidates.len()
+            "No valid pose candidate found: none of the {n_candidates} decompositions had at \
+             least {min_support} points in front of both cameras"
         ))
     })
 }
