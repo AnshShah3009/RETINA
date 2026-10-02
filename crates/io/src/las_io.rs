@@ -345,8 +345,9 @@ pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
         max.z = max.z.max(p.z as f64);
     }
 
+    let num_points = points.len();
     LasData {
-        num_points: points.len(),
+        num_points,
         points,
         colors: filter_vec(&data.colors, mask),
         intensities: filter_vec(&data.intensities, mask),
@@ -354,7 +355,7 @@ pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
         return_numbers: filter_vec(&data.return_numbers, mask),
         number_of_returns: filter_vec(&data.number_of_returns, mask),
         gps_times: filter_vec(&data.gps_times, mask),
-        bounds: if points.is_empty() {
+        bounds: if num_points == 0 {
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         } else {
             (min.x, min.y, min.z, max.x, max.y, max.z)
