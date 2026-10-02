@@ -47,7 +47,12 @@ pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
         .map_err(|e| cv_core::Error::IoError(format!("Failed to open LAS file: {}", e)))?;
 
     let header = reader.header();
-    let bounds = header.bounds();
+    // `header` borrows `reader`, which the point loop below needs mutably, so
+    // take the two header values needed up front by value. The bounding box is
+    // deliberately NOT taken here: it is unvalidated file input and is handled
+    // after the points are read - see the `compute_bounds` call below.
+    let format = *header.point_format();
+
     // The header's point count is a file-controlled u64. Reserving for it up
     // front means a 4-byte field claiming four billion points commits ~48 GB
     // before a single point has been read, and the file need not contain any -
@@ -65,12 +70,20 @@ pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
     let mut number_of_returns_vec: Vec<u8> = Vec::new();
     let mut gps_times_vec: Vec<f64> = Vec::new();
 
-    let mut has_color = false;
-    let mut has_intensity = false;
-    let mut has_classification = false;
-    let mut has_returns = false;
-    let mut has_gps = false;
-    let mut first = true;
+    // The point format is a file-wide, header-level declaration, so whether a
+    // record *can* carry a colour or a GPS time is one answer for the whole
+    // file. Detect that up front, and then demand one push per record for every
+    // present field. Deciding from the first point alone and reusing the answer
+    // let a record that failed to supply a field skip its push, leaving
+    // `points` longer than `colors`/`gps_times` and desynchronising every
+    // downstream `data[i]` index.
+    let has_color = format.has_color;
+    let has_gps = format.has_gps_time;
+    // Intensity, classification and return numbers are mandatory in every LAS
+    // point format, so they are always pushed and need no detection.
+    let has_intensity = true;
+    let has_classification = true;
+    let has_returns = true;
 
     for point_result in reader.points() {
         let point = point_result
@@ -78,28 +91,28 @@ pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
 
         points.push(Point3::new(point.x as f32, point.y as f32, point.z as f32));
 
-        // Detect available fields from first point
-        if first {
-            has_color = point.color.is_some();
-            has_intensity = true; // intensity is always present in LAS
-            has_classification = true;
-            has_returns = true;
-            has_gps = point.gps_time.is_some();
-            first = false;
-        }
-
         if has_intensity {
             intensities_vec.push(point.intensity as f32 / 65535.0);
         }
 
         if has_color {
-            if let Some(color) = point.color {
-                colors_vec.push(Point3::new(
-                    color.red as f32 / 65535.0,
-                    color.green as f32 / 65535.0,
-                    color.blue as f32 / 65535.0,
-                ));
-            }
+            // A record in a colour-carrying format that yields no colour is a
+            // malformed file. Substituting black would fabricate data, and
+            // skipping the push is what desynchronises the vectors, so the
+            // file is rejected instead.
+            let color = point.color.ok_or_else(|| {
+                cv_core::Error::ParseError(format!(
+                    "LAS record {} declares point format {} (which carries RGB) but \
+                     supplies no colour, so colors would desynchronize from points",
+                    points.len() - 1,
+                    format.to_u8().unwrap_or(0xFF)
+                ))
+            })?;
+            colors_vec.push(Point3::new(
+                color.red as f32 / 65535.0,
+                color.green as f32 / 65535.0,
+                color.blue as f32 / 65535.0,
+            ));
         }
 
         if has_classification {
@@ -113,14 +126,98 @@ pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
         }
 
         if has_gps {
-            if let Some(t) = point.gps_time {
-                gps_times_vec.push(t);
-            }
+            // Same reasoning as colour: a missing GPS time would skip a push
+            // and leave `gps_times` short.
+            let t = point.gps_time.ok_or_else(|| {
+                cv_core::Error::ParseError(format!(
+                    "LAS record {} declares point format {} (which carries GPS time) \
+                     but supplies none, so gps_times would desynchronize from points",
+                    points.len() - 1,
+                    format.to_u8().unwrap_or(0xFF)
+                ))
+            })?;
+            gps_times_vec.push(t);
         }
     }
 
+    // The loop above pushes exactly one value per record into every field it
+    // declares, so these are equal by construction. Assert it anyway: this is
+    // the boundary the returned `LasData` crosses, and a short vector here is
+    // precisely the `read_pcd` bug where `colors` was attached to a cloud
+    // without a `len() == points.len()` gate and then panicked in the writer.
+    // Every one of these fields is indexed by point index downstream
+    // (`las_to_point_cloud`, `filter_by_mask`, and the writer), so a short
+    // vector silently mislabels data rather than failing.
+    //
+    // Each check is conditional on the field being collected at all: a file
+    // whose format carries no colour legitimately leaves `colors_vec` empty.
+    let n = points.len();
+    if has_color {
+        debug_assert_eq!(colors_vec.len(), n, "colors desynchronized from points");
+    }
+    if has_gps {
+        debug_assert_eq!(
+            gps_times_vec.len(),
+            n,
+            "gps_times desynchronized from points"
+        );
+    }
+    for (name, len) in [
+        ("intensities", intensities_vec.len()),
+        ("classifications", classifications_vec.len()),
+        ("return_numbers", return_numbers_vec.len()),
+        ("number_of_returns", number_of_returns_vec.len()),
+    ] {
+        debug_assert_eq!(len, n, "{name} desynchronized from points");
+    }
+
+    // Bounds are recomputed from the points that were actually read, rather
+    // than copied from `header.bounds()`.
+    //
+    // The header box is unvalidated file input and every consumer uses it to
+    // size an ROI or a voxel grid, so an inverted (`min > max`) or saturated
+    // (`max = f64::MAX`) box propagates straight into geometry. It is also
+    // routinely *wrong* without being hostile: many writers leave it at its
+    // default or as the bounds of a pre-filtered subset, so a file can be
+    // perfectly valid and still under-report its extent.
+    //
+    // The extra pass is a single min/max over data already resident in
+    // `points`, i.e. it is O(n) arithmetic against an O(n) parse that has
+    // already been paid, and it is what `point_cloud_to_las` and
+    // `filter_by_mask` both do for the same reason. Recomputing is therefore
+    // both stricter (it cannot propagate a bad box) and more accurate (it
+    // cannot propagate a stale one) at negligible cost. The header value is
+    // still read below purely so a genuinely inverted box can be reported -
+    // a bad box is worth telling the caller about, and recomputing silently
+    // would hide that the file is malformed.
+    // The header box is read back here, after the loop, so that reporting an
+    // inverted one does not need `reader` to still be borrowed by `header`.
+    let hb = reader.header().bounds();
+    let header_bounds = (hb.min.x, hb.min.y, hb.min.z, hb.max.x, hb.max.y, hb.max.z);
+    if n > 0 {
+        let (i, f) = (header_bounds.0, header_bounds.3);
+        let (j, g) = (header_bounds.1, header_bounds.4);
+        let (k, h) = (header_bounds.2, header_bounds.5);
+        if !(i <= f && j <= g && k <= h) {
+            return Err(cv_core::Error::ParseError(format!(
+                "LAS header declares an inverted bounding box: min=({i}, {j}, {k}) \
+                 max=({f}, {g}, {h}); falling back to the extent of the points read"
+            )));
+        }
+    }
+
+    // Computed before `points` is moved into the struct below.
+    let computed_bounds = if n == 0 {
+        // An empty file has no extent, so report a degenerate box at the origin
+        // rather than infinities, matching `point_cloud_to_las` and
+        // `filter_by_mask`.
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    } else {
+        compute_bounds(&points)
+    };
+
     Ok(LasData {
-        num_points: points.len(),
+        num_points: n,
         points,
         colors: if has_color && !colors_vec.is_empty() {
             Some(colors_vec)
@@ -152,15 +249,31 @@ pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
         } else {
             None
         },
-        bounds: (
-            bounds.min.x,
-            bounds.min.y,
-            bounds.min.z,
-            bounds.max.x,
-            bounds.max.y,
-            bounds.max.z,
-        ),
+        // An empty file has no extent, so report a degenerate box at the origin
+        // rather than infinities, matching `point_cloud_to_las` and
+        // `filter_by_mask`.
+        bounds: computed_bounds,
     })
+}
+
+/// The true extent of `points` as `(min_x, min_y, min_z, max_x, max_y, max_z)`.
+///
+/// Seeded with infinities rather than `f64::MIN`, which is the most *negative*
+/// finite f64 and would leave an inverted box for an empty slice - the same
+/// trap already fixed in `point_cloud_to_las` and `filter_by_mask`. Callers
+/// must handle the empty case before calling.
+fn compute_bounds(points: &[Point3<f32>]) -> (f64, f64, f64, f64, f64, f64) {
+    let mut min = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+    let mut max = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for p in points {
+        min.x = min.x.min(p.x as f64);
+        min.y = min.y.min(p.y as f64);
+        min.z = min.z.min(p.z as f64);
+        max.x = max.x.max(p.x as f64);
+        max.y = max.y.max(p.y as f64);
+        max.z = max.z.max(p.z as f64);
+    }
+    (min.x, min.y, min.z, max.x, max.y, max.z)
 }
 
 /// Write a LAS file (uncompressed).
@@ -268,19 +381,8 @@ pub fn point_cloud_to_las(cloud: &PointCloud) -> LasData {
     // `(1.797e308, 1.797e308, 1.797e308, -1.797e308, -1.797e308, -1.797e308)` -
     // min greater than max on every axis.
     //
-    // Derived from the first point instead, so an empty cloud produces a
-    // degenerate but *valid* box rather than an impossible one.
-    let mut min = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
-    let mut max = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for p in &cloud.points {
-        min.x = min.x.min(p.x as f64);
-        min.y = min.y.min(p.y as f64);
-        min.z = min.z.min(p.z as f64);
-        max.x = max.x.max(p.x as f64);
-        max.y = max.y.max(p.y as f64);
-        max.z = max.z.max(p.z as f64);
-    }
-
+    // `compute_bounds` seeds with infinities instead, so an empty cloud produces
+    // a degenerate but *valid* box rather than an impossible one.
     LasData {
         num_points: cloud.points.len(),
         points: cloud.points.clone(),
@@ -295,24 +397,65 @@ pub fn point_cloud_to_las(cloud: &PointCloud) -> LasData {
         bounds: if cloud.points.is_empty() {
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         } else {
-            (min.x, min.y, min.z, max.x, max.y, max.z)
+            compute_bounds(&cloud.points)
         },
     }
 }
 
 /// Filter LAS data by classification code.
+///
+/// The mask is derived from `data.classifications`, so if that vector is not
+/// index-parallel with `data.points` the mask is not parallel either and every
+/// result below would be wrong. That is a caller error - a `LasData` built by
+/// this crate always satisfies the invariant - so a mismatch is reported as an
+/// empty result rather than propagated.
 pub fn filter_by_classification(data: &LasData, class: u8) -> LasData {
     let classifications = match &data.classifications {
         Some(c) => c,
         None => return data.clone(),
     };
 
+    if classifications.len() != data.points.len() {
+        return empty_las_like();
+    }
+
     let mask: Vec<bool> = classifications.iter().map(|&c| c == class).collect();
     filter_by_mask(data, &mask)
 }
 
 /// Filter LAS data by a boolean mask.
+///
+/// `mask` must be index-parallel with `data.points`: one entry per point. This
+/// used to `zip`, which silently truncated to the shorter of the two, so a mask
+/// one entry short dropped trailing points and a longer mask had its tail
+/// ignored - both with no error, and with a per-field vector ending up indexed
+/// against a point that is no longer there.
+///
+/// A length mismatch is a caller error rather than something to absorb, so it
+/// is reported by returning an empty `LasData` (zero points, no optional
+/// fields) instead of a plausible-looking but wrong subset. The alternative
+/// - padding the short side with `false` - was rejected because it invents data
+/// to paper over a bug in the caller. The behaviour deliberately changes the
+/// signature: silently producing a cloud that indexes one field against the
+/// wrong point is the exact failure this guards against.
 pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
+    if mask.len() != data.points.len() {
+        return empty_las_like();
+    }
+
+    // Index rather than `zip`: with the lengths checked above, `enumerate`
+    // keeps every optional vector index-parallel with `points` by construction,
+    // and would panic loudly rather than truncate if the invariant were broken.
+    fn filter_vec<T: Clone>(opt: &Option<Vec<T>>, mask: &[bool]) -> Option<Vec<T>> {
+        opt.as_ref().map(|v| {
+            mask.iter()
+                .enumerate()
+                .filter(|(_, &m)| m)
+                .map(|(i, _)| v[i].clone())
+                .collect()
+        })
+    }
+
     let points: Vec<_> = data
         .points
         .iter()
@@ -321,31 +464,16 @@ pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
         .map(|(p, _)| *p)
         .collect();
 
-    fn filter_vec<T: Clone>(opt: &Option<Vec<T>>, mask: &[bool]) -> Option<Vec<T>> {
-        opt.as_ref().map(|v| {
-            v.iter()
-                .zip(mask.iter())
-                .filter(|(_, &m)| m)
-                .map(|(val, _)| val.clone())
-                .collect()
-        })
-    }
-
-    // Same `f64::MIN` trap as `point_cloud_to_las`: it is the most negative
-    // finite f64, so `max` could never rise above it and an empty or
-    // fully-masked result carried an inverted bounding box.
-    let mut min = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
-    let mut max = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for p in &points {
-        min.x = min.x.min(p.x as f64);
-        min.y = min.y.min(p.y as f64);
-        min.z = min.z.min(p.z as f64);
-        max.x = max.x.max(p.x as f64);
-        max.y = max.y.max(p.y as f64);
-        max.z = max.z.max(p.z as f64);
-    }
-
     let num_points = points.len();
+    // Computed before `points` is moved into the struct below.
+    let bounds = if num_points == 0 {
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    } else {
+        // Same `f64::MIN` trap as `point_cloud_to_las`: it is the most negative
+        // finite f64, so a running `max` seeded with it could never rise above
+        // it and an empty result carried an inverted box.
+        compute_bounds(&points)
+    };
     LasData {
         num_points,
         points,
@@ -355,11 +483,26 @@ pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
         return_numbers: filter_vec(&data.return_numbers, mask),
         number_of_returns: filter_vec(&data.number_of_returns, mask),
         gps_times: filter_vec(&data.gps_times, mask),
-        bounds: if num_points == 0 {
-            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        } else {
-            (min.x, min.y, min.z, max.x, max.y, max.z)
-        },
+        bounds,
+    }
+}
+
+/// A zero-point `LasData`.
+///
+/// Used to report a rejected filter request: zero points and no optional
+/// fields, so nothing can be indexed against a point that is not there, and a
+/// degenerate (but valid) box at the origin so the result is still writable.
+fn empty_las_like() -> LasData {
+    LasData {
+        num_points: 0,
+        points: Vec::new(),
+        colors: None,
+        intensities: None,
+        classifications: None,
+        return_numbers: None,
+        number_of_returns: None,
+        gps_times: None,
+        bounds: (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
     }
 }
 
