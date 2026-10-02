@@ -63,16 +63,19 @@ pub fn open_video(path: &str) -> Result<Box<dyn VideoCapture>> {
         return Ok(Box::new(cap));
     }
 
-    // 3. Try FFmpeg if enabled
+    // 3. Try FFmpeg if enabled. Its error, when there is one, is what the
+    //    caller needs: reporting the fallback message below instead would tell
+    //    them to enable a feature that is already enabled.
     #[cfg(feature = "ffmpeg")]
-    {
-        if let Ok(cap) = backends::NativeFfmpegCapture::new(path) {
-            return Ok(Box::new(cap));
-        }
-    }
+    let reason = match backends::NativeFfmpegCapture::new(path) {
+        Ok(cap) => return Ok(Box::new(cap)),
+        Err(e) => format!("FFmpeg could not open '{}': {}", path, e),
+    };
+    #[cfg(not(feature = "ffmpeg"))]
+    let reason = "Could not open video. Supported Pure Rust formats: GIF, Image Sequence (Dir). Enable 'ffmpeg' feature for MP4/AVI support.".to_string();
 
     // 4. Failure
-    Err(VideoError::Backend("Could not open video. Supported Pure Rust formats: GIF, Image Sequence (Dir). Enable 'ffmpeg' feature for MP4/AVI support.".to_string()))
+    Err(VideoError::Backend(reason))
 }
 
 /// Open a camera device
