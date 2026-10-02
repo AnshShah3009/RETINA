@@ -91,14 +91,11 @@ fn fixed_rank4_input_shape(model: &RunnableModel) -> Result<Vec<usize>> {
         .first()
         .ok_or_else(|| Error::InvalidInput("Model declares no input nodes".into()))?;
 
-    let fact = model
-        .model()
-        .outlet_fact(outlet)
-        .map_err(|e| {
-            Error::InvalidInput(format!(
-                "Could not read the model's input fact ({outlet:?}): {e}"
-            ))
-        })?;
+    let fact = model.model().outlet_fact(outlet).map_err(|e| {
+        Error::InvalidInput(format!(
+            "Could not read the model's input fact ({outlet:?}): {e}"
+        ))
+    })?;
 
     let dims: &[tract_onnx::prelude::TDim] = fact.shape.dims();
     if dims.len() != 4 {

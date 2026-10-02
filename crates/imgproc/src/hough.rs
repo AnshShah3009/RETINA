@@ -628,7 +628,8 @@ mod tests {
         for x in 0..64 {
             img.put_pixel(x, 32, Luma([255]));
         }
-        let lines = hough_lines(&img, 1.0, std::f32::consts::PI / 180.0, 10).expect("valid resolutions");
+        let lines =
+            hough_lines(&img, 1.0, std::f32::consts::PI / 180.0, 10).expect("valid resolutions");
         assert!(!lines.is_empty(), "Hough should detect the horizontal line");
         // A horizontal line y=32 has theta near PI/2 (90 degrees)
         let half_pi = std::f32::consts::FRAC_PI_2;
