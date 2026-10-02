@@ -277,10 +277,31 @@ a crash that does not happen.
   computed as `n / (sx*sy*sz)` overflows for a degenerate cloud, and an unwrap on
   a comparison that could see NaN is a panic waiting for the input that produces
   it.
+
 - **`find_essential_mat_ransac_handles_outliers` is flaky.** It runs 600 RANSAC
   samples with no seed, so the sampled hypothesis varies run to run; the
   recovered translation direction is near-degenerate on that synthetic scene and
   the assertion fails intermittently. Pre-existing, and left alone here.
+
+## A zero matrix is not a neutral fallback
+
+`Gaussian::inverse_covariance` and `ProjectedGaussian::inv_cov_2d` both returned
+`try_inverse().unwrap_or(Matrix3::zeros())`. The rasterizer reads the 2-D inverse
+to evaluate `mahalanobis = a·dx² + 2b·dx·dy + c·dy²`, so every coefficient being 0
+made `mahalanobis` 0 at **every** pixel of the splat's tile — and
+`alpha = exp(-0.5·0)·opacity` is full opacity, not zero. Measured 0.8 at pixel
+offsets of (0,0), (10,10), (100,100) and (1000,1000) alike. A splat with no
+defined footprint painted its **entire tile** — the opposite of vanishing, and
+something a render gives no hint of.
+
+This is the `compute_hybrid` shape the log records — a fabricated value where a
+caller cannot tell absence from data — but worse than the ones already fixed,
+because the fabricated value here is read as a *valid conic* and yields a
+confidently wrong image. Both now return `Option`, and the rasterizer skips the
+splat.
+
+`Gaussian::new` clamps scale to `>= 1e-4`, so this only arises from a splat built
+outside that constructor: a deserialised file, or a field assigned directly.
 
 ## ICP, FPFH and rays
 
@@ -304,7 +325,7 @@ a crash that does not happen.
 
 | | |
 | --- | ---: |
-| Defects fixed | **107+** |
+| Defects fixed | **109+** |
 | Commits | 460+ |
-| Tests | 1,805 (from 1,267) |
+| Tests | 1,811 (from 1,267) |
 | Duplicate implementations removed | 12 |
