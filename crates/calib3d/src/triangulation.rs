@@ -27,6 +27,32 @@ pub fn triangulate_points(
         ));
     }
 
+    // Reject non-finite input before the SVD below.
+    //
+    // `.svd(true, true)` does not return on non-finite input: nalgebra's
+    // bidiagonalisation decides convergence by comparison, and every comparison
+    // against NaN is false. Measured: one NaN pixel among the pairs hangs here
+    // indefinitely and has to be killed.
+    //
+    // Checked once for the whole call rather than per point, so the cost is
+    // linear in the input rather than in the number of decompositions.
+    for (i, (a, b)) in pts1.iter().zip(pts2.iter()).enumerate() {
+        if [a.x, a.y, b.x, b.y].iter().any(|v| !v.is_finite()) {
+            return Err(cv_core::Error::InvalidInput(format!(
+                "triangulate_points: correspondence {i} is not finite \
+                 ({}, {}, {}, {})",
+                a.x, a.y, b.x, b.y
+            )));
+        }
+    }
+    for (name, m) in [("p1", p1), ("p2", p2)] {
+        if m.iter().any(|v| !v.is_finite()) {
+            return Err(cv_core::Error::InvalidInput(format!(
+                "triangulate_points: projection matrix {name} is not finite"
+            )));
+        }
+    }
+
     let mut out = Vec::with_capacity(pts1.len());
     for (a, b) in pts1.iter().zip(pts2.iter()) {
         let mut m = Matrix4::<f64>::zeros();

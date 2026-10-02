@@ -21,6 +21,15 @@ pub fn undistort_points(
         ));
     }
 
+    for (i, p) in distorted_points.iter().enumerate() {
+        if !p.x.is_finite() || !p.y.is_finite() {
+            return Err(cv_core::Error::InvalidInput(format!(
+                "undistort_points: point {i} is not finite ({}, {})",
+                p.x, p.y
+            )));
+        }
+    }
+
     let mut out = Vec::with_capacity(distorted_points.len());
     for p in distorted_points {
         let xd = (p.x - intrinsics.cx) / intrinsics.fx;

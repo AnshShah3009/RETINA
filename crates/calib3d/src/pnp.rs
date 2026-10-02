@@ -9,6 +9,43 @@ use cv_runtime::RuntimeRunner;
 use nalgebra::{DMatrix, Matrix3, Matrix3x4, Matrix4, Point2, Point3, Rotation3, Vector3};
 use rayon::prelude::*;
 
+/// Reject non-finite correspondence input before it reaches an SVD.
+///
+/// Every solve below assembles a design matrix and decomposes it with
+/// `.svd(true, true)`, and that call does not return on non-finite input:
+/// nalgebra's bidiagonalisation decides convergence by comparison, and every
+/// comparison against NaN is false. Measured: `solve_pnp_dlt` with one NaN
+/// image point among twelve never returns and has to be killed.
+///
+/// A hang is worse than a wrong answer, because nothing reports it. So the
+/// check is here, at the boundary where caller data enters, rather than
+/// repeated at each of the eight SVD call sites below - a guard that has to be
+/// remembered at each site is a guard that will be missed at the ninth.
+fn require_finite_correspondences(
+    object_points: &[Point3<f64>],
+    image_points: &[Point2<f64>],
+) -> Result<()> {
+    let bad_object = object_points
+        .iter()
+        .position(|p| !p.coords.iter().all(|v| v.is_finite()));
+    if let Some(i) = bad_object {
+        return Err(cv_core::Error::InvalidInput(format!(
+            "object_points[{i}] is not finite: {:?}",
+            object_points[i].coords
+        )));
+    }
+    let bad_image = image_points
+        .iter()
+        .position(|p| !p.x.is_finite() || !p.y.is_finite());
+    if let Some(i) = bad_image {
+        return Err(cv_core::Error::InvalidInput(format!(
+            "image_points[{i}] is not finite: ({}, {})",
+            image_points[i].x, image_points[i].y
+        )));
+    }
+    Ok(())
+}
+
 /// Solves the Perspective-n-Point problem using Direct Linear Transform (DLT)
 ///
 /// Object points are Hartley-normalized before assembly. Planar inputs (the
@@ -30,6 +67,7 @@ pub fn solve_pnp_dlt(
             "solve_pnp_dlt needs at least 6 correspondences".to_string(),
         ));
     }
+    require_finite_correspondences(object_points, image_points)?;
 
     let k_inv = intrinsics.inverse_matrix();
 
@@ -364,6 +402,7 @@ pub fn solve_pnp_ransac(
             "solve_pnp_ransac needs >=6 paired points".to_string(),
         ));
     }
+    require_finite_correspondences(object_points, image_points)?;
 
     let n = object_points.len();
     let sample_k = 6usize;
@@ -493,6 +532,7 @@ pub fn solve_pnp_refine_ctx(
             "solve_pnp_refine needs >=6 paired points".to_string(),
         ));
     }
+    require_finite_correspondences(object_points, image_points)?;
 
     let mut params = extrinsics_to_params(initial);
     let mut lambda = 0.001;

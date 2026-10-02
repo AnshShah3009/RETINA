@@ -177,10 +177,22 @@ test, and the "found by" column says which.
   360 s waiting on it. `solve_dlt_fundamental` had the identical exposure and is
   now guarded the same way.
 - Verified: against the unfixed code the new tests time out; with the guard they
-  pass in under a second. 26 other `.svd(true, true)` call sites exist across the
-  workspace and are **not** individually guarded — any of them reachable with
-  non-finite input would hang the same way. That is recorded rather than asserted
-  safe.
+  pass in under a second.
+- **The exposure was still live, and two sites were reachable from the public
+  API.** The remaining 24 `.svd(true, true)` call sites were re-measured rather
+  than assumed: a 3×3 with one NaN returns (with NaN singular values), a 4×4 with
+  one NaN still had to be killed at 200 s. `solve_pnp_dlt` and
+  `triangulate_points` each hung on a *single* NaN correspondence among twelve —
+  a malformed detector output, which is exactly how this is reached in practice.
+  Both, plus `solve_pnp_ransac` and `undistort_points`, now reject non-finite
+  input at the boundary where caller data enters, rather than at each SVD site: a
+  guard that has to be remembered in eight places is a guard that will be missed in
+  the ninth. `cv_math::linalg::try_svd` adds the guarded primitive for new code.
+  Six tests; against the unfixed code the suite **hangs** rather than failing,
+  which is the honest signal for this class.
+- **`undistort_points` returned `Ok([NaN, 10.0])`** for a NaN pixel — not a hang,
+  but a NaN coordinate handed back as a successful result, which then flows into
+  every downstream metric computed from it.
 - **`find_essential_mat_ransac_handles_outliers` is flaky.** It runs 600 RANSAC
   samples with no seed, so the sampled hypothesis varies run to run; the
   recovered translation direction is near-degenerate on that synthetic scene and
@@ -208,7 +220,7 @@ test, and the "found by" column says which.
 
 | | |
 | --- | ---: |
-| Defects fixed | **95+** |
+| Defects fixed | **99+** |
 | Commits | 460+ |
-| Tests | 1,748 (from 1,267) |
+| Tests | 1,777 (from 1,267) |
 | Duplicate implementations removed | 12 |

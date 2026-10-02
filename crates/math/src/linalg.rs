@@ -138,9 +138,50 @@ pub fn qr_solve(a: &DMatrix<f64>, b: &DVector<f64>) -> Result<DVector<f64>, Stri
     Ok(x)
 }
 
+/// Whether every entry of a matrix is finite.
+///
+/// The load-bearing question before any LAPACK call: nalgebra's SVD
+/// bidiagonalisation decides convergence by *comparison*, and every comparison
+/// against NaN is false. So one NaN makes the iteration unable to terminate -
+/// the call does not return, and nothing reports it. Measured on the current
+/// nalgebra 0.33: a 3x3 with one NaN returns (with NaN singular values), but a
+/// 4x4 with one NaN had to be killed at 200 s.
+///
+/// A hang is worse than a wrong answer, so this must be checked before the call
+/// rather than after.
+pub fn is_finite(a: &DMatrix<f64>) -> bool {
+    a.iter().all(|v| v.is_finite())
+}
+
+/// Guarded singular value decomposition.
+///
+/// Returns `(U, sigma, Vt)` where `A = U * diag(sigma) * Vt`, or an error if the
+/// input is empty or holds any non-finite entry.
+///
+/// This exists because [svd] - and every direct `.svd(true, true)` call - hangs
+/// forever on non-finite input rather than failing. Callers that build a design
+/// matrix from user data should prefer this.
+pub fn try_svd(a: &DMatrix<f64>) -> Result<(DMatrix<f64>, DVector<f64>, DMatrix<f64>), String> {
+    let (m, n) = a.shape();
+    if m == 0 || n == 0 {
+        return Err("Matrix must be non-empty".into());
+    }
+    if !is_finite(a) {
+        return Err(
+            "SVD input holds a non-finite entry; LAPACK would not                      terminate"
+                .into(),
+        );
+    }
+    svd(a)
+}
+
 /// Singular Value Decomposition.
 ///
 /// Returns `(U, sigma, Vt)` where `A = U * diag(sigma) * Vt`.
+///
+/// **Unguarded.** Passes non-finite input straight to LAPACK, which does not
+/// terminate - see [is_finite]. Prefer [try_svd] for any matrix built from
+/// external data.
 #[allow(clippy::type_complexity)]
 pub fn svd(a: &DMatrix<f64>) -> Result<(DMatrix<f64>, DVector<f64>, DMatrix<f64>), String> {
     let (m, n) = a.shape();
