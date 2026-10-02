@@ -35,9 +35,3 @@ required-features = ["synthetic"]
 [[example]]
 name = "tum_benchmark"
 required-features = ["synthetic"]
-
-# Scratch probe used to measure the metric functions and the 6-DoF pipeline
-# against independent checks.
-[[example]]
-name = "probe_metrics"
-required-features = ["synthetic"]
