@@ -1870,4 +1870,61 @@ mod tests {
             }
         }
     }
+    /// The projection must be isotropic in **pixels**, not in NDC.
+    ///
+    /// `#[ignore]`d deliberately: this documents a real, measured gap that cannot be
+    /// closed without a rendering change, and asserting it would fail CI. Left
+    /// ignored rather than deleted so the property is not lost, and rather than
+    /// "fixed" blind.
+    ///
+    /// Both camera axes are scaled by the same `1 / FOV_SCALE` in `look_at`, and the
+    /// shader computes `clip = (eye.x + offset_x, eye.y + offset_y, z, eye.w)` with
+    /// **no aspect term**. NDC spans -1..1 across each axis independently, so equal
+    /// camera-space extents land on `W/2` and `H/2` pixels respectively - i.e. a
+    /// sphere of points renders as an ellipse whose axis ratio is the window's.
+    ///
+    /// The sprite path does it correctly: the offsets use `half_width` and
+    /// `half_height` separately, so a marker disc stays circular. Discs circular
+    /// while their layout is stretched is the inconsistency that shows only one of
+    /// the two can be right.
+    ///
+    /// Not fixed here because the correction belongs to the *pair* - either the
+    /// viewport must be threaded into `look_at`, or the shader must scale x by
+    /// `height / width` - and neither can be verified without driving the GUI, which
+    /// CI cannot do. The shader's viewport uniform has already been misread once: an
+    /// earlier attempt divided by it believing it held pixel dimensions when it
+    /// carried the NDC half-extent `(1, 1)`. Guessing a second time would be the
+    /// same mistake with the same absence of evidence.
+    #[test]
+    #[ignore = "documents an aspect-ratio gap; the fix needs a rendering change that cannot be verified in CI"]
+    fn the_projection_is_isotropic_in_pixels_across_a_non_square_viewport() {
+        // Camera 10 units along +z looking at the origin, so `forward` is -z.
+        let m = NativeViewer::look_at([0.0, 0.0, 10.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+
+        // Row-vector convention: `eye = world @ m`, then divide by `eye.w`.
+        let project = |p: [f32; 4]| -> [f32; 2] {
+            let mut eye = [0.0f32; 4];
+            for r in 0..4 {
+                eye[r] = (0..4).map(|c| m[c][r] * p[c]).sum();
+            }
+            [eye[0] / eye[3], eye[1] / eye[3]]
+        };
+
+        // The same camera-space offset along x and along y, at the same depth.
+        let ndc_x = project([1.0, 0.0, 0.0, 1.0])[0];
+        let ndc_y = project([0.0, 1.0, 0.0, 1.0])[1];
+
+        // Into pixels for a 2:1 viewport.
+        let (w, h) = (800.0f32, 400.0f32);
+        let px_x = ndc_x * w / 2.0;
+        let px_y = ndc_y * h / 2.0;
+
+        assert!(
+            (px_x - px_y).abs() < 1e-3,
+            "equal camera-space extents must cover equal pixel extents; got {px_x:.3} px \
+             along x and {px_y:.3} px along y for an {w:.0}x{h:.0} viewport, a ratio of \
+             {:.3} - the aspect ratio. The projection carries no aspect term.",
+            px_x / px_y
+        );
+    }
 }
