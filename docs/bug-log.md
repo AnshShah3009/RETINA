@@ -283,6 +283,35 @@ a crash that does not happen.
   recovered translation direction is near-degenerate on that synthetic scene and
   the assertion fails intermittently. Pre-existing, and left alone here.
 
+## OPEN, measured, not fixed: `gaussian_blur` at `sigma = 0` returns an all-zero image
+
+Found while judging a `ctx`-variant test whose expectation turned out to be
+mis-framed. The observation under it is real. Measured on a constant 123 image:
+
+```text
+sigma 0:   non-ctx -> min 0     ctx -> min 0
+sigma 0.5: non-ctx -> min 122   ctx -> min 122
+sigma 1:   non-ctx -> min 123   ctx -> min 123
+sigma 3:   non-ctx -> min 123   ctx -> min 123
+```
+
+Two things follow, and only the first is a defect.
+
+**`sigma = 0` destroys the image.** A zero-sigma Gaussian is a delta, so the
+correct output is the input unchanged; instead the whole image becomes `0`. Both
+paths agree, so this is a property of the shared kernel construction rather than of
+the `_ctx` entry points — which is why the test that surfaced it, asserting of a
+`ctx` variant "the blur broke a constant image" while its non-`ctx` reference
+behaved identically, was the wrong framing.
+
+**`sigma = 0.5` off by one is not a defect.** `123 -> 122` is rounding in a
+near-delta kernel, and it is stable across both paths.
+
+Left unfixed because the fix belongs in the shared kernel builder and changes
+behaviour for every caller of both entry points — a decision about whether
+`sigma = 0` means "identity" or "invalid". The latter would want an error channel
+that `gaussian_blur(&GrayImage, f32) -> GrayImage` does not have.
+
 ## Sweeping the whole workspace for the fabrication pattern
 
 Grepped every `unwrap_or`/`unwrap_or_else` whose fallback constructs a matrix or
