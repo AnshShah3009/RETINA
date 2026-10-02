@@ -18,8 +18,16 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     let mut num_vertices = 0usize;
     // Vertex properties in declared order — PLY allows any property order,
     // so data must be indexed by name rather than assumed position.
-    /// Property names in declared order, with whether each is a `list`.
-    let mut props: Vec<(String, bool)> = Vec::new();
+    /// Property names in declared order, with whether each is a `list` and
+    /// whether it is declared as an integer type.
+    ///
+    /// The integer flag is what makes colour normalisation exact. A colour
+    /// property declared `uchar` holds a byte 0..255 and must be divided by 255;
+    /// one declared `float` already holds 0..1 and must not be. Guessing from
+    /// the value instead cannot distinguish the two: a byte value of `1` is a
+    /// legitimate near-black (`1/255`) and is also what an already-normalised
+    /// `1.0` looks like, so the reader called near-black white.
+    let mut props: Vec<(String, bool, bool)> = Vec::new();
     // Whether the header declared an element after the vertices, meaning the
     // body must not be read past the vertex count.
     let mut vertex_block_ends = false;
@@ -80,8 +88,35 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
             // This reader cannot represent a list, so the property is recorded
             // and flagged, and the element is rejected below. Returning
             // plausible-looking wrong geometry would be worse than an error.
-            let is_list = line.split_whitespace().nth(1) == Some("list");
-            props.push((name, is_list));
+            // `property <type> <name>`, or `property list <count_type> <value_type> <name>`.
+            let mut parts = line.split_whitespace();
+            let _property = parts.next();
+            // The token after `property` is the type, and is `list` only for a
+            // list property - so testing it for `list` does not consume a
+            // separate token in the non-list case.
+            let first = parts.next().unwrap_or("");
+            let is_list = first == "list";
+            let declared_type = if is_list {
+                parts.next().unwrap_or("")
+            } else {
+                first
+            };
+            let is_integer = matches!(
+                declared_type,
+                "char"
+                    | "uchar"
+                    | "short"
+                    | "ushort"
+                    | "int"
+                    | "uint"
+                    | "int8"
+                    | "uint8"
+                    | "int16"
+                    | "uint16"
+                    | "int32"
+                    | "uint32"
+            );
+            props.push((name, is_list, is_integer));
         } else if line == "end_header" {
             in_header = false;
         }
@@ -99,7 +134,7 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     let pos_of = |names: &[&str]| -> Option<usize> {
         props
             .iter()
-            .position(|(p, is_list)| !is_list && names.contains(&p.as_str()))
+            .position(|(p, is_list, _)| !is_list && names.contains(&p.as_str()))
     };
 
     let xi =
@@ -161,7 +196,7 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
     // So the file is reported rather than mis-parsed. Reading list properties
     // properly needs a full element/property model, which is the same change
     // that would make `property list` first-class.
-    if let Some((name, _)) = props.iter().find(|(_, is_list)| *is_list) {
+    if let Some((name, _, _)) = props.iter().find(|(_, is_list, _)| *is_list) {
         return Err(Error::ParseError(format!(
             "PLY: vertex property {name:?} is a `property list`, which this reader \
              does not support. Parsing it would misplace every scalar property \
@@ -218,12 +253,31 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
             let r = values[ri.unwrap()];
             let g = values[gi.unwrap()];
             let b = values[bi.unwrap()];
-            // Normalize if stored as 0-255.
-            let norm = |v: f32| if v > 1.0 { v / 255.0 } else { v };
-            colors
-                .as_mut()
-                .unwrap()
-                .push(Point3::new(norm(r), norm(g), norm(b)));
+            // Scale by the *declared* type, not by guessing from the value.
+            //
+            // The previous heuristic was `if v > 1.0 { v / 255.0 } else { v }`,
+            // which cannot tell a byte from an already-normalised float: the
+            // legitimate byte value `1` is a near-black `1/255`, but it is also
+            // what a normalised `1.0` looks like, so it was read as pure white.
+            // Measured through `write_ply` -> `read_ply`: a vertex coloured
+            // `1/255` came back `(1.0, 1.0, 1.0)` - near-black became white, a
+            // factor of 255.
+            //
+            // Byte 0 is also ambiguous but harmless: dividing 0 by 255 is 0.
+            let scale = |idx: usize| -> f32 {
+                match props.get(idx) {
+                    // An integer-declared property holds a byte; divide by 255.
+                    Some((_, _, true)) => values[idx] / 255.0,
+                    // A float-declared property is already 0..1 by the spec, so
+                    // dividing would darken the whole cloud.
+                    _ => values[idx],
+                }
+            };
+            colors.as_mut().unwrap().push(Point3::new(
+                scale(ri.unwrap()),
+                scale(gi.unwrap()),
+                scale(bi.unwrap()),
+            ));
         }
     }
 
