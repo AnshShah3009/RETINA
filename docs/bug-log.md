@@ -312,6 +312,65 @@ behaviour for every caller of both entry points — a decision about whether
 `sigma = 0` means "identity" or "invalid". The latter would want an error channel
 that `gaussian_blur(&GrayImage, f32) -> GrayImage` does not have.
 
+## Sweep: `partial_cmp(..).unwrap()` across the workspace
+
+Ten hits, triaged individually. The interesting result is that **four of the five
+source-level ones are safe by accident of a preceding comparison**, which is a
+fragile kind of safety worth writing down.
+
+### Fixed
+
+- **`hal`'s `batch_nearest_neighbors`** — sorted squared distances with
+  `partial_cmp(..).unwrap()`. `norm_squared()` of a vector with a NaN component is
+  NaN, so one bad coordinate in a caller-supplied cloud panicked the whole query.
+  Reproduced on a real adapter with four points, one `[NaN, 0, 0]`:
+
+  ```
+  PANICKED on a NaN point
+  old expression on a NaN distance: PANICKED
+  total_cmp order: [0.5, 1.0, NaN]
+  ```
+
+  Fixed at the boundary (`build_kdtree` now rejects a non-finite coordinate, naming
+  the index) *and* in the sort, since the failure mode was a panic rather than a
+  wrong number. That guard also covers a quieter defect on the same input: the
+  bounding box is accumulated with `f32::min`/`max`, which *return the non-NaN
+  operand*, so a NaN point was skipped in the box while staying in the buffer, and
+  an all-NaN cloud left the `f32::MAX`/`f32::MIN` sentinels in place — `min > max`.
+
+### CHECKED AND CLEAN — each protected by a comparison that excludes NaN
+
+- **`features::gftt`** — `candidates.sort_by(..)` over corner scores. Safe because
+  `response[i]` is only ever assigned when `lambda_min > 0.0`, and that comparison is
+  **false for NaN**, so a NaN score never enters `response`. The sort can only see
+  finite values.
+- **`signal_proc`'s peak finder** — safe for the same reason: a peak requires
+  `data[i] > data[i-1] && data[i] > data[i+1]`, both false when any operand is NaN,
+  so `data` at every index in `peaks` is non-NaN before the sort.
+- **`rendering`'s gaussian rasterizer** — filters tiles with `d < f32::MAX` first,
+  which is false for NaN *and* for `+inf`, so neither reaches the sort.
+- **`math::spatial`** — the hit is inside `#[cfg(test)]`.
+
+**This is safety by coincidence, not by construction.** Each of those three works
+only because a preceding filter happens to be a comparison that NaN fails. Delete
+or reorder that filter in a refactor and the sort starts panicking on input it
+previously accepted — with no test failing, because no test feeds NaN. Any of them
+would be worth `total_cmp` on its own merits; none is a live defect today.
+
+### CONFIRMED by reading, NOT measured — `math::sparse::eigsh`
+
+`indices.sort_by(..)` sorts eigenvalues from `symmetric_eigen()` with
+`partial_cmp(..).unwrap()`, in all three `EigWhich` arms. `eigsh` takes a
+caller-supplied `SparseMatrix` and returns `Result`, and it has no finite-input
+guard: a NaN in the matrix propagates through the Lanczos coefficients into the
+tridiagonal `t`, so the eigenvalues are NaN and the sort panics — where the function
+had a channel to report it.
+
+Recorded as **read, not measured**: `crates/math` was owned by a concurrent agent so
+a probe would have collided, and this workspace's record says unmeasured claims are
+the ones that turn out wrong. Fixing it needs a finite-input check at the boundary,
+matching `build_kdtree`.
+
 ## Sweeping the whole workspace for the fabrication pattern
 
 Grepped every `unwrap_or`/`unwrap_or_else` whose fallback constructs a matrix or
