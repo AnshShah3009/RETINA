@@ -283,6 +283,59 @@ a crash that does not happen.
   recovered translation direction is near-degenerate on that synthetic scene and
   the assertion fails intermittently. Pre-existing, and left alone here.
 
+## Sweeping the whole workspace for the fabrication pattern
+
+Grepped every `unwrap_or`/`unwrap_or_else` whose fallback constructs a matrix or
+vector, then triaged each by hand. The pattern is worth sweeping because it has
+already produced five real defects — but *most* hits are correct, and saying which
+is the point of this section.
+
+### Fixed from this sweep
+
+- **`hal` GPU undistort** — `Matrix3::identity()` for `Inv(NewK)` and `Inv(R)`.
+  Measured `try_inverse() -> None`, `det = 0`, fallback exactly the identity, so the
+  intrinsics normalisation vanished and the call returned `Ok`.
+- **`3d` TSDF integration** — `Matrix4::identity()` for a singular `extrinsics`, so
+  every world voxel was treated as already in camera space. Measured: a world voxel
+  passed through unchanged.
+- **`video` Kalman update** — `SMatrix::zeros()` for a singular innovation
+  covariance, which means *ignore the measurement*. Measured `state moved
+  0.000e0`. See its own section above.
+
+### CHECKED AND CLEAN — deliberately not changed
+
+- **`registration::colored`** — `unwrap_or(Vector3::zeros())` for a missing surface
+  normal. A zero normal contributes nothing to the point-to-plane Jacobian, which
+  is the correct amount when there is no normal, and the alternative (`normalize`
+  on a zero difference vector) is NaN. A zero *normal* is a meaningful value; a
+  zero *inverse matrix* is not. Already carries the reasoning.
+- **`3d` TSDF gradient normal** — `try_normalize(1e-8).unwrap_or(Vector3::zeros())`
+  for a locally flat region. Zero is the honest "no gradient here" and the caller
+  can test for it. Documented.
+- **`sfm::mapper` homography fallback** —
+  `unwrap_or((Matrix3::identity(), vec![false; n]))`. This *looks* like the
+  fabrication pattern and is not: the all-false mask makes `h_inliers == 0`, and
+  the planar decision requires `h_inliers > f_inliers`, which zero cannot satisfy.
+  So the fallback can only ever degrade to "not planar" — the safe direction. The
+  identity `homography_score` is recorded in the diagnostic but does not drive the
+  decision. A fabricated value that can only make a model *less* likely to be
+  chosen is not the same hazard as one that is chosen.
+- **`io::las_to_point_cloud`** — `unwrap_or_else(|_| PointCloud::new(points))`
+  drops colours when `with_colors` rejects a length mismatch. Lower severity than
+  the others for a specific reason: the degraded result has `colors == None`, which
+  the caller *can* detect after asking for colours. It is a detectable loss, not a
+  well-formed lie. Left as-is; noted because the LAS reader's own consistency
+  checks are `debug_assert_eq!` and so compiled out in release.
+
+### The distinction that separates these
+
+A fallback is only in this bug class when the substituted value is **well-formed
+and indistinguishable from a real answer** — an identity or zero matrix, which
+downstream treats as data. If the degraded result is *detectable* by the caller
+(`Option::None`, an out-of-band flag, a strictly-worse model score), it is a
+design choice rather than a lie, and changing it is not automatically an
+improvement.
+
 ## CONFIRMED, NOT YET FIXED: the LM step discards the solver's own failure report
 
 Two halves of an intent mismatch, both readable in the code but in *different*
