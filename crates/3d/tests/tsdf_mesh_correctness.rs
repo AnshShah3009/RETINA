@@ -73,7 +73,8 @@ fn mesh_yawed_plane() -> Vec<Triangle> {
         }
     }
 
-    vol.integrate(&depth, Some(&colors), &intrinsics, &extrinsics, W, H);
+    vol.integrate(&depth, Some(&colors), &intrinsics, &extrinsics, W, H)
+        .expect("integration must succeed for a well-formed frame");
     vol.extract_mesh()
 }
 

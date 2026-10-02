@@ -94,18 +94,26 @@ impl TSDFVolume {
         extrinsics: &Matrix4<f32>,
         width: usize,
         height: usize,
-    ) {
-        if let Ok(runner) = cv_runtime::best_runner() {
-            self.integrate_ctx(
-                depth_image,
-                color_image,
-                intrinsics,
-                extrinsics,
-                width,
-                height,
-                &runner,
-            );
-        }
+    ) -> cv_core::Result<()> {
+        // The runner failure used to be swallowed by `if let Ok(runner)`, so a
+        // machine where even the CPU registry could not initialize got a silent
+        // no-op: `integrate` returned as though the frame had been merged, and
+        // the volume simply never changed. Dropping a frame without saying so is
+        // indistinguishable from a frame that contributed nothing.
+        let runner = cv_runtime::best_runner().map_err(|e| {
+            cv_core::Error::AlgorithmError(format!(
+                "no compute runner is available, so the frame was not integrated: {e}"
+            ))
+        })?;
+        self.integrate_ctx(
+            depth_image,
+            color_image,
+            intrinsics,
+            extrinsics,
+            width,
+            height,
+            &runner,
+        )
     }
 
     /// Integrate a single RGBD frame with explicit context
@@ -119,7 +127,7 @@ impl TSDFVolume {
         width: usize,
         height: usize,
         group: &RuntimeRunner,
-    ) {
+    ) -> cv_core::Result<()> {
         // NOTE: A previous revision dispatched GPU integration into a freshly
         // allocated 256^3 dense volume and returned early. Without a
         // read-back/merge step into the sparse block storage, every frame was
@@ -130,8 +138,69 @@ impl TSDFVolume {
 
         // CPU Fallback (Rayon)
         // Compute inverse extrinsics for projective distance
-        let extrinsics_inv = extrinsics.try_inverse().unwrap_or_else(Matrix4::identity);
+        // A singular `extrinsics` has no camera frame, and the identity is not a
+        // neutral substitute: `extrinsics_inv` is used below to bring each world
+        // voxel into camera space, so the identity means "every world point is
+        // already a camera point". The projection distances - and therefore every
+        // TSDF value in the volume - would be computed from the wrong position,
+        // silently, with the call reporting success.
+        //
+        // `extrinsics` is caller-supplied (`Matrix4<f32>`, with no validation up
+        // the stack), so a degenerate rotation is a caller bug that must be
+        // reported rather than absorbed.
+        let extrinsics_inv = extrinsics.try_inverse().ok_or_else(|| {
+            cv_core::Error::InvalidInput(
+                "extrinsics is singular, so the camera frame is undefined and the \
+                 projective distances cannot be computed; the identity would \
+                 silently integrate every frame at the wrong pose"
+                    .to_string(),
+            )
+        })?;
         let camera_origin = extrinsics.transform_point(&Point3::origin());
+
+        // Validate the frame up front, at the boundary where caller data enters.
+        //
+        // The parallel loop below allocates a `Vec`, not a `Result`, so a length
+        // problem discovered inside it can only be swallowed - which is why this
+        // function used to `continue` past a short buffer. That was the best
+        // available option while `integrate_ctx` returned `()`, and the comment
+        // here said so; it returns `Result` now, so the honest answer is
+        // reachable and the workaround is unnecessary.
+        //
+        // A partial frame integrated without a word is the failure mode this
+        // prevents: the caller sees a volume that looks successfully updated from
+        // whatever part of the frame happened to fit.
+        let expected = width.saturating_mul(height);
+        if depth_image.len() < expected {
+            return Err(cv_core::Error::InvalidInput(format!(
+                "depth_image has {} samples but the frame is declared {width}x{height} \
+                 ({expected}); a short buffer would otherwise integrate a partial \
+                 frame and report success",
+                depth_image.len()
+            )));
+        }
+        if let Some(colors) = color_image {
+            if colors.len() < expected {
+                return Err(cv_core::Error::InvalidInput(format!(
+                    "color_image has {} samples but the frame is declared {width}x{height} \
+                     ({expected}); the missing samples would be replaced with a \
+                     fabricated mid-grey",
+                    colors.len()
+                )));
+            }
+        }
+
+        // A zero focal length makes the backprojection below divide by zero, so
+        // every ray direction becomes NaN and the TSDF values are silently
+        // corrupted. The fields are public, so this is constructible.
+        if intrinsics.fx == 0.0 || intrinsics.fy == 0.0 {
+            return Err(cv_core::Error::InvalidInput(format!(
+                "intrinsics has a zero focal length (fx = {}, fy = {}); the \
+                 backprojection would divide by zero and every TSDF value would be \
+                 NaN",
+                intrinsics.fx, intrinsics.fy
+            )));
+        }
 
         let updates: Vec<_> = group.run(|| {
             (0..height)
@@ -141,15 +210,10 @@ impl TSDFVolume {
 
                     for u in 0..width {
                         let idx = v * width + u;
-                        // Both images are bounds-checked against their *slice*
-                        // rather than the declared `width`/`height`. A caller
-                        // passing a short slice indexed past the end and
-                        // panicked. `integrate_ctx` returns `()`, so it cannot
-                        // report the problem - skipping the row is the only
-                        // option left, and it beats aborting the caller.
-                        if idx >= depth_image.len() {
-                            continue;
-                        }
+                        // No bounds check here: the lengths are validated above,
+                        // before the parallel region, so every `idx` is in range.
+                        // The previous check existed because this function could
+                        // not report the problem - see the note there.
                         let depth = depth_image[idx] / self.depth_scale;
 
                         if depth <= 0.0 || depth > 10.0 {
@@ -166,6 +230,10 @@ impl TSDFVolume {
                         let point_world = extrinsics.transform_point(&point_camera);
 
                         // Get color
+                        // Length-checked above, so this cannot fall back - and it
+                        // used to fabricate a mid-grey for every missing sample,
+                        // which is a plausible colour a caller cannot distinguish
+                        // from a measured one.
                         let color = color_image
                             .and_then(|c| c.get(idx).copied())
                             .unwrap_or(Vector3::new(128, 128, 128));
@@ -202,6 +270,8 @@ impl TSDFVolume {
         for (pos, tsdf, color) in updates {
             self.update_voxel(pos, tsdf, color);
         }
+
+        Ok(())
     }
 
     /// Update a single voxel with new TSDF value
