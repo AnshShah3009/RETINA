@@ -831,7 +831,24 @@ impl ComputeContext for CpuBackend {
         let min_disp = params.min_disparity;
         let num_disp = params.num_disparities;
 
-        let mut output_storage = OS::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
+        // Border pixels are "no match", and the sentinel says so explicitly.
+        //
+        // The buffer was previously initialised to `T::ZERO`, so a border pixel
+        // read back as disparity 0.0 - which is a *valid* disparity for any
+        // matcher whose range includes 0. The GPU shader writes -1.0 for the same
+        // pixels (`crates/hal/shaders/stereo_match.wgsl` line ~47), so the two
+        // backends disagreed: measured, CPU `[0,0,0,...]` against GPU
+        // `[-1,-1,-1,...]` around the border ring.
+        //
+        // `disparity_to_depth` happens to filter `d < 0.5`, which catches both, so
+        // nothing downstream was corrupted - but a caller reading the raw map
+        // cannot tell a border pixel from a genuine zero-disparity match, and the
+        // two backends returning different values for the same input is exactly
+        // the divergence the parity suite exists to catch. That suite only found
+        // it once the probe actually asserted instead of printing.
+        const NO_MATCH: f32 = -1.0;
+        let mut output_storage =
+            OS::new(h * w, T::from_f32(NO_MATCH)).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
