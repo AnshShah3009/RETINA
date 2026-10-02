@@ -20,14 +20,26 @@
 use cv_core::PointCloud;
 use nalgebra::Point3;
 
+/// A process-unique suffix.
+///
+/// The suite runs tests concurrently inside one process, and a temp file left
+/// behind by an aborted earlier run is indistinguishable from one just written.
+/// Both have bitten this file: the first version shared one filename across
+/// tests, so they overwrote each other's cloud; a later run then read a stale
+/// file and reported a colour failure that no longer existed.
+fn unique_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let seq = N.fetch_add(1, Ordering::Relaxed);
+    std::process::id() as u64 * 1_000_000 + seq
+}
+
 fn roundtrip(colour: [f32; 3]) -> [f32; 3] {
     // A distinct path per call: nextest runs tests concurrently in one process,
     // so a shared filename has the tests overwriting each other's file.
-    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join("ply_colour_tests");
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join(format!("rt_{n}.ply"));
+    let path = dir.join(format!("rt_{}.ply", unique_id()));
 
     let points: Vec<Point3<f32>> = (0..3).map(|i| Point3::new(i as f32, 0.0, 0.0)).collect();
     let colors: Vec<Point3<f32>> = (0..3)
@@ -101,7 +113,7 @@ fn interior_colours_round_trip() {
 fn a_float_declared_colour_is_not_rescaled() {
     let dir = std::env::temp_dir().join("ply_colour_tests");
     std::fs::create_dir_all(&dir).expect("temp dir");
-    let path = dir.join("float_colour_u8.ply");
+    let path = dir.join(format!("float_u8_{}.ply", unique_id()));
 
     let header = "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n";
     let body = "0 0 0 255 128 0\n";
@@ -117,7 +129,7 @@ fn a_float_declared_colour_is_not_rescaled() {
     // Now the same file with `float` colour properties: 1.0 must stay 1.0, not
     // become 1/255. This is the branch the old threshold heuristic got wrong in
     // the other direction, for a third-party writer.
-    let path2 = dir.join("float_colour_f32.ply");
+    let path2 = dir.join(format!("float_f32_{}.ply", unique_id()));
     let header2 = "ply\nformat ascii 1.0\nelement vertex 1\nproperty float x\nproperty float y\nproperty float z\nproperty float red\nproperty float green\nproperty float blue\nend_header\n";
     // The body has to hold *normalised* values here: a `float` colour property
     // is already 0..1, so writing 255 into it declares a colour far outside the

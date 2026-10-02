@@ -233,47 +233,35 @@ fn pcd_hostile_points_does_not_commit_gigabytes() {
 // 4. Arithmetic overflow in the size / offset computation
 // ===========================================================================
 
-/// `WIDTH`/`HEIGHT` are multiplied at `pcd.rs:142` with no overflow check:
-/// `points_count = width * height`. Both operands are file-controlled, the
-/// product feeds a `vec![0u8; total]`, and a `POINTS` line is optional, so a
-/// header of
+/// `WIDTH`/`HEIGHT` used to be multiplied at `pcd.rs:142` with no overflow
+/// check: `points_count = width * height`. Both operands are file-controlled
+/// and a `POINTS` line is optional, so a header of
 ///
 /// ```text
-/// WIDTH 18446744073709551615
+/// WIDTH 9223372036854775808
 /// HEIGHT 2
 /// DATA binary
 /// ```
 ///
-/// is enough.
+/// is enough. `2^63 * 2` is `2^64`, which is one past `usize::MAX`:
 ///
-/// Consequences, both verified by the standalone reproducer
-/// `scratchpad/pcd_width_height_overflow_repro.rs`:
+/// * overflow checks off (this repo's release profile): the product WRAPS to 0,
+///   the reader reads no records at all and returns `Ok` with **zero points**
+///   while a complete, valid body sits unread - a silently empty cloud that no
+///   caller can tell from a file that really is empty;
+/// * overflow checks on (debug): the same line panics with "attempt to
+///   multiply with overflow" from inside a library that promises errors.
 ///
-/// * overflow checks on (debug, and any profile with `overflow-checks = true`):
-///   panic "attempt to multiply with overflow" from inside the parser;
-/// * overflow checks off (release): the product wraps to `2^64 - 2`, `stride *
-///   count` wraps again to `2^64 - 1`, `checked_mul` at pcd.rs:297 reports no
-///   overflow, the 8 GiB cap rejects it - so the wrapped value happens to be
-///   caught *here*, by luck of the byte cap rather than by a guard.
-///
-/// The unguarded multiply itself is the defect: it is a panic on one line of
-/// input in a library that promises errors, and the safety of the surrounding
-/// code depends on an unrelated 8 GiB cap. A 32-bit target wraps far sooner and
-/// is not saved by the cap.
+/// Either way the product is now rejected where it is computed.
+/// (`crates/io/tests/pcd_defect_regressions.rs` covers the same defect
+/// behaviourally, writing the file to a temp path and reading it back.)
 #[test]
-fn pcd_width_times_height_multiply_is_unguarded() {
-    let source = include_str!("../../src/pcd.rs");
-    let line_no = source
-        .lines()
-        .position(|l| l.contains("points_count = width * height"))
-        .expect("the width*height expression moved; re-check this test");
-    let line = source.lines().nth(line_no).unwrap();
+fn pcd_width_times_height_overflow_is_rejected() {
+    let file = b"# .PCD v0.7\nVERSION 0.7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nWIDTH 9223372036854775808\nHEIGHT 2\nDATA binary\n".to_vec();
+    let err = parse_err(run_pcd, &file, "WIDTH * HEIGHT overflow");
     assert!(
-        !line.contains("checked_mul")
-            && !line.contains("saturating_mul")
-            && !line.contains("wrapping_mul"),
-        "pcd.rs:{} looked unguarded before but is now: {line:?} - re-evaluate this test",
-        line_no + 1
+        err.contains("WIDTH") && err.contains("HEIGHT"),
+        "the error should name the product that did not fit, got: {err}"
     );
 }
 
