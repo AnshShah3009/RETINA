@@ -483,3 +483,33 @@ keypoint index; `math/geometry.rs:291` (inside a test); `examples/src/bin/orb_ma
 dummy mask in an example binary.
 
 ---
+
+---
+
+## Follow-up: the facade gap, verified and left for a deliberate decision
+
+The root crate `rust-cv-native` re-exports **11 of 30** crates, and the list is
+alphabetical up to `video`:
+
+```
+3d calib3d core features hal imgproc optimize runtime sfm slam video
+```
+
+so it reads as a snapshot taken when those were the crates that existed, not as a
+selection. Evidence that it is drift rather than curation: **none** of the omitted
+crates sets `publish = false`, and the four named competitive targets are among the
+omissions — `plot` (Matplotlib), `math` (SciPy), `registration` (Open3D) and
+`localization` (VSLoc-RS). A user of the facade cannot reach four of the five things
+the project says it replaces.
+
+**Not closed here, deliberately.** The re-export lines alone do not compile — the
+omitted crates are not declared as dependencies of `rust-cv-native`, so completing the
+facade means adding **16 dependencies** to the root `Cargo.toml`. That changes the
+facade's build graph and feature unification for every downstream user, which is an
+architectural decision rather than a fix, and one that deserves a build-and-test pass
+on its own rather than being tacked onto an audit.
+
+**If someone closes it:** add the dependencies, re-export all 26 library crates, and
+exclude `cli` (a binary) and `python` (a PyO3 cdylib) — neither is a library API
+surface. Then confirm `cargo build -p rust-cv-native` and the full suite, since 16 new
+edges into one crate is exactly where a feature-unification problem would surface.
