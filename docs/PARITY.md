@@ -171,3 +171,39 @@ numbers, and **most of those numbers are not yet explained**. That is stated rat
 than smoothed over, because the alternative — a table of unexplained deviations
 labelled as findings — is exactly what makes a parity harness get ignored.
 
+---
+
+## calib3d — BUILT BUT NOT RUNNING. No results claimed.
+
+A harness exists and its **Rust side works**: `crates/calib3d/examples/parity_calib.rs`
+emits clean, parseable output — intrinsics, radtan and kannala distortion
+coefficients, image dimensions, homography estimates, and the collinear case
+correctly refusing (`H_collinear_est 0`, which is the rank-gate behaviour fixed
+earlier in this repo).
+
+**The Python comparison layer is incomplete and I am not quoting numbers from it.**
+An agent hit its turn limit partway through; I fixed eight distinct breakages in
+what it left — a 1-D comparison in the shared `compare`, a stale loop variable, a
+`ZEPIPOLES` unpacking mismatch, array-truthiness checks, a `tvec` arriving as a 9-vector
+where a 3-vector was expected, and three more shape mismatches — and **each fix
+exposed the next one**. That pattern says the remaining work is *intent*, not typos:
+deciding which comparisons matter and what each one's reference should be.
+
+Reporting a deviation count from a harness that does not run to completion would be
+worse than reporting nothing, because it reads as evidence.
+
+**To finish it:** the Rust side needs no work. On the Python side, work through
+`parity/parity_calib.py` section by section, running it after each, and only then
+write results here. The sections in order: `K` composition, distortion round-trips
+(`radtan`, `kannala`), homography/DLT including the collinear refusal, essential and
+fundamental matrices, and planar (Zhang) composition.
+
+**One thing worth carrying forward regardless of whether that finishes:** the collinear
+homography case is a place where both sides must *refuse*, and the Rust side already
+does. A parity harness that assumed a solution existed indexed into an empty result —
+which is a good reminder that "both must fail" is a real behaviour to assert, not a
+gap to skip.
+
+**Coverage unchanged at 2 of ~30 crates** (`imgproc`, `math`). Nothing in this section
+should be read as a calib3d result.
+
