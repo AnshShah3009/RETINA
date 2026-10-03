@@ -462,8 +462,19 @@ kinds of machine.
 ## FIXED after further measurement: the `3d` visibility aspect correction
 
 An earlier entry here recorded this as **not committed**, because the audit agent's
-measurement did not reproduce. That judgement was right at the time and **wrong on
-the merits** — a direct check settles it.
+measurement did not reproduce. Two things about that were wrong, and both are worth
+correcting plainly.
+
+**First, it was committed** — commit `f20934a`, whose *message* describes the change
+as uncommitted. The `git add crates/3d` in that commit swept in the agent's whole
+`3d` source diff (`gpu/mesh.rs`, `gpu/raycasting.rs`, `mesh/mod.rs`,
+`mesh/reconstruction/mod.rs`, `odometry/mod.rs`, `visibility.rs`), because I had
+told the agent "record rather than commit" in its brief but did not stage-check my
+own subsequent `git add`. **A commit message is not a manifest of what is in the
+commit**, and I read mine as one.
+
+**Second, and more important, the decision was wrong on the merits.** A direct check
+settles it:
 
 ### The decisive argument
 
