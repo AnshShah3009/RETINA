@@ -459,6 +459,91 @@ behaviour for every tensor a caller passes. Recording it with the mechanism and 
 reproduction is more useful than shipping a change I could not verify across both
 kinds of machine.
 
+## CHECKED AND CLEAN: `core` and `calib3d`, after every candidate was refuted
+
+An audit of the two most foundational crates (`core` 297 public items, `calib3d` 113)
+found **zero defects**. Both crates are byte-identical to HEAD. Recorded because
+"measured, found nothing" is a result, and because *how* nothing was found is the
+useful part.
+
+### The agent's own fixes, reverted after measurement
+
+**1. `Triangulator::refine_pnp` "wrong rotation Jacobian sign."** `dpc_domega` is
+built as `-[p]×` and then negated; the audit predicted catastrophic failure.
+Measured: rotation error **2.950e-1 → 2.107e-8 rad**, translation **2.70e-13**,
+reprojection **184.5 px → 6.89e-11 px**. Clean — and the first probe *claimed* a
+failure because it generated synthetic points with the identity pose instead of the
+true one. The "catastrophic" numbers were the algorithm correctly fitting a different
+scene. That is the single most common way to manufacture a false bug report.
+
+**2. `LMedS` "double-squaring `compute_error`."** A change was made and a 4-test
+regression file written — which **passed against the original source**, so the "fix"
+was a no-op. Measuring what actually differs on deterministic data over 400 runs:
+
+```
+              model   inliers    residual
+HEAD          0.0     13/19      2.5e-3
+the change    0.0     19/19      8.8e-3     <- admitted every outlier
+```
+
+HEAD is right. Reproduced independently: the pre-squaring is **required**. With
+`r_in = 0.05`, `r_out = 0.15`, 13 inliers and 6 outliers,
+
+```
+single-squared : median = 2.50e-3,  sigma = 9.36e-2   -> outlier rejected
+double-squared : median = 6.25e-6,  sigma = 4.68e-3   -> outlier ADMITTED
+```
+
+`compute_error` returns Euclidean distances, and the sigma formula takes `sqrt` of a
+median, so it requires squared residuals under the median. Squaring twice collapses
+sigma by a factor of 20. Reverted, and the test deleted.
+
+**Left a note in the source, though:** the code is correct only because every in-repo
+caller passes *squared* errors, and nothing says so. That is a documentation gap in
+a file whose correctness depends on an unwritten precondition.
+
+### Other candidates refuted
+
+- **`intrinsics_from_planar_homographies` v-matrix pair.** Zhang says `v_ij(h,1,0)`;
+  the code uses `v_ij(h,0,1)`. Over 300 random `(K, pose)` sets, **both give 17/300
+  wrong, identical worst relative error 2.0** — `v₁₂` is antisymmetric so the
+  nullspace is the same projective line and only `b`'s sign flips, which the
+  existing `λ ≤ 0` branch absorbs. End-to-end over 60 trials: 0/60 bad, worst
+  relative error **5.90e-14**.
+- **BlockMatcher vs SGM disparity range.** CPU block matcher on a 6-px scene at
+  `max_disparity` 8 and 16 gives the histogram `{6: 1680}` both times — the maximum
+  is reachable and nothing is fabricated.
+- **`recover_pose_from_essential`.** 40/40 random `(R, t)` recovered exactly, worst
+  `|Δt| = 3.71e-16`, worst rotation `2.11e-8 rad`; rejects zero and identity `E`
+  with a specific error.
+
+### Clean, with numbers
+
+`Pose` compose∘inverse `|t| = 8.9e-16`; `matrix()` vs `transform_point` `1.8e-15`;
+`Isometry3` roundtrip `0`. `K·K⁻¹ − I = 0`; the inverse-intrinsics ray equals
+`unproject(depth = 1)`. Tensor grayscale roundtrip max difference `0`, RGB
+deinterleave exact. Also verified: `skew_symmetric`/`twist_to_se3`, `Rect::iou`,
+`polygon_iou`/`rotated_iou` winding, the hand-eye A/B derivation, `sampson_error`,
+the relative tolerances in `dlt.rs`, `stereo_rectify_matrices` against
+`compute_rectification_transforms`, and `pattern.rs`'s spacing gate guarding its
+`unwrap_or(0.0)`.
+
+### Maintainer items left, with reasons
+
+- `disparity_to_pointcloud` with `focal_length = 0` yields `(NaN, NaN, 0.0)` — z stays
+  finite, so a z-filtering caller keeps the point. Callers pass their own
+  `StereoParams`, and the documented scope is the disparity skip.
+- `compute_depth_stats` returns `None` for empty and all-`None` correctly, but
+  `[Some(1.0), Some(NaN), Some(inf)]` yields `Some((1.0, inf, NaN))` — a
+  plausible-looking tuple with a `NaN` mean. **The most likely real defect in
+  this list.**
+- `BlockMatcher::compute_gpu` passes `num_disparities = max - min` while SGM passes
+  `+ 1` and every CPU path is inclusive. The CPU path is measured correct; the GPU
+  parameter's meaning is defined by `cv-hal`, which this audit did not own.
+- `Point3Wrapper::transform` divides by `w` for `|w| > f32::EPSILON` — a
+  scale-dependent absolute threshold, on a dead path, but changing it alters
+  documented public trait behaviour.
+
 ## Sweep: `partial_cmp(..).unwrap()` across the workspace
 
 Ten hits, triaged individually. The interesting result is that **four of the five
