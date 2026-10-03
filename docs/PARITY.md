@@ -233,3 +233,53 @@ in the translation accumulation was caught by mutation at a 0.92 m error.) **No 
 and the deviations listed as "not attributable" must not be read as defects until
 their normalisation is fixed.
 
+---
+
+## features (ORB) — invariants only; descriptors are NOT comparable
+
+`crates/features/tests/orb_detector_parity.rs`. Descriptors **cannot** be compared
+against OpenCV and pretending otherwise is the classic way to make a parity report
+useless: `Descriptor.data` is `Vec<u8>` — quantised bytes — and a correct ORB
+rotates the patch by the dominant orientation and packs orientation bits into the
+top of the keypoint. Two correct implementations produce different bit patterns for
+the same corner.
+
+What is comparable, and is measured: repeatability across calls, keypoint count
+relative to the scene, in-image finite coordinates, one descriptor per keypoint, and
+a uniform 32-byte dimension.
+
+### The input size was the whole difficulty — a false failure I diagnosed as a defect
+
+My first draft used a 64x64 synthetic image and the control test failed at 0.25
+recall. The obvious reading was "ORB misses corners". Measured against OpenCV on the
+same image:
+
+```
+  64x64   checkerboard -> cv2 ORB detections: 0
+ 128x128  checkerboard -> cv2 ORB detections: 76
+ 256x256  checkerboard -> cv2 ORB detections: 240
+```
+
+**OpenCV finds zero on the 64x64 image too.** ORB builds a scale pyramid with a
+fixed level count and base scale, so below roughly 128 px nothing sits at a usable
+scale. The failure was in the *premise* of my test, not in the detector — and the
+Python was what distinguished them.
+
+### Counts on the corrected 128x128 image
+
+```
+planted corners: 64
+rust ORB:        205 detections
+cv2 ORB:          30 detections
+```
+
+Both find structure where there is structure, which is the meaningful comparison; the
+absolute counts differ, and that difference is **not attributed here**. Plausible
+causes include the FAST threshold, the pyramid level count, and non-maximum
+suppression radius — each of which changes the count without changing whether the
+detector works. Anyone following this up should establish which before treating the
+gap as a defect.
+
+Five tests, all passing. The control (`orb_finds_the_planted_corners`) runs the
+image-size reasoning rather than assuming it.
+
