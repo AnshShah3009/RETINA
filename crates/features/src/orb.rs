@@ -1608,6 +1608,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn test_orb_detect_and_compute() {
         // Use a larger image so most keypoints are far enough from edges
         // to get a valid descriptor.

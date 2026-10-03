@@ -498,6 +498,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn cg_iteration_cap_is_not_reported_as_a_solution() {
         let a = laplacian(200);
         let b = DVector::from_element(200, 1.0);
