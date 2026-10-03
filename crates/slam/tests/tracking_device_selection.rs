@@ -114,9 +114,19 @@ fn a_cpu_tensor_is_tracked_even_while_a_global_gpu_context_exists() {
     // assert that precondition rather than trusting it: if it silently becomes
     // CPU-only this test would pass vacuously.
     let device = cv_hal::compute::get_device().expect("a compute device");
+    //
+    // `ComputeDevice` has **three** variants — `Cpu`, `Gpu` and `Mlx` — and
+    // `get_device()` resolves to whichever the platform publishes. On the macOS MLX
+    // runner it is `Mlx`, so a guard written for `Gpu` alone *panics* there, which
+    // is how this test failed on CI while passing locally:
+    //
+    //   this test only means anything when a global GPU context is published, but
+    //   get_device() resolved to Mlx(MlxContext { device_id: DeviceId(2), .. })
+    //
+    // The precondition is "an accelerator device", not "a `Gpu` device".
     assert!(
-        matches!(device, ComputeDevice::Gpu(_)),
-        "this test only means anything when a global GPU context is published, \
+        !matches!(device, ComputeDevice::Cpu(_)),
+        "this test only means anything when an accelerator device is published, \
          but get_device() resolved to {device:?}"
     );
 
