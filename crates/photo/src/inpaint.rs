@@ -107,7 +107,36 @@ pub fn inpaint_telea<T: Float + Default + 'static>(
     let mut flags = vec![INSIDE; n];
     let mut heap = BinaryHeap::new();
 
+    // `radius` is a *neighbourhood* radius, and the two places it is used below
+    // disagreed about what a non-positive one means:
+    //
+    // * `r` bounds the scanned window,
+    // * `geom_dist > radius as f64` (in the accumulation loop) excludes every
+    //   neighbour once `radius <= 0`, because the nearest in-bounds neighbour is
+    //   at distance 1.
+    //
+    // With `radius == 0` (or negative) the window says "look one pixel out", the
+    // exclusion says "admit nothing", `sum_w` stays 0, and the `if sum_w > 0.0`
+    // guard leaves `result[c][idx]` at *the value the damaged pixel already had*.
+    // The routine then returns `Ok` with the hole untouched - a fabricated
+    // answer, and the most plausible kind: the inpainting region is byte-identical
+    // to the hole.
+    //
+    // Measured on a 9x9 image, left half 0.1, right half 0.9, one masked pixel
+    // just right of the step whose input value is 0.9:
+    //
+    //     radius = 0.0  -> out = 0.9       (unchanged)
+    //     radius = -1.0 -> out = 0.9       (unchanged)
+    //     radius = 1.0  -> out = 0.7       (blended)
+    //     radius = 3.0  -> out = 0.59678614 (blended)
+    //
+    // `r` already clamped to 1, i.e. the author meant a non-positive radius to
+    // behave like a radius of one. Make the exclusion use the same clamped value
+    // so the two agree, rather than reporting the whole call as invalid: this is
+    // the "clamp that hides a defect" shape, and the cheap consistent reading is
+    // also the one the existing `r` documents.
     let r = (radius.ceil() as usize).max(1);
+    let r_eff = r as f64;
 
     // Initialize: mark KNOWN pixels and find BAND (boundary of inpaint region).
     for y in 0..height {
@@ -194,7 +223,7 @@ pub fn inpaint_telea<T: Float + Default + 'static>(
                     let dy = ny as f64 - entry.y as f64;
                     let dx = nx as f64 - entry.x as f64;
                     let geom_dist = (dy * dy + dx * dx).sqrt();
-                    if geom_dist > radius as f64 {
+                    if geom_dist > r_eff {
                         continue;
                     }
 
@@ -362,7 +391,17 @@ pub fn inpaint_ns<T: Float + Default + 'static>(
 
                     // Smoothness Laplacian (second derivative of the smoothness field).
                     // Approximate Laplacian of the Laplacian for NS-like behavior.
-                    let lap_up = prev[(y - 2).max(0) * width + x]
+                    //
+                    // `y.saturating_sub(2)`, not `(y - 2).max(0)`: `y` is a
+                    // `usize`, so `y - 2` *underflows* at `y == 1` before `.max(0)`
+                    // ever sees it - `.max` only clamps the result of the
+                    // subtraction, and the subtraction has already panicked. The
+                    // diffusion loop runs for `y in 1..height - 1`, so `y == 1` is
+                    // visited for *every* image the moment any pixel on that row is
+                    // masked. Measured: a 7x7 image with the centre masked panicked
+                    // with "attempt to subtract with overflow" at this line, in a
+                    // debug build and (via `usize::MAX` wrapping) in release.
+                    let lap_up = prev[y.saturating_sub(2) * width + x]
                         + prev[y * width + x]
                         + prev[(y - 1) * width + x.saturating_sub(1)]
                         + prev[(y - 1) * width + (x + 1).min(width - 1)]

@@ -54,7 +54,7 @@ pub fn read_pcd<R: BufRead>(mut reader: R) -> Result<PointCloud> {
     match header.data_format {
         PcdData::Ascii => {
             let lines = reader.lines();
-            parse_pcd_ascii(lines, header.points_count, &header.fields)
+            parse_pcd_ascii(lines, header.points_count, &header.fields, &header.types)
         }
         PcdData::Binary => parse_pcd_binary(reader, &header),
         PcdData::BinaryCompressed => parse_pcd_binary_compressed(reader, &header),
@@ -213,7 +213,16 @@ fn check_finite(x: f32, y: f32, z: f32, point_index: usize) -> Result<()> {
     )))
 }
 
-fn parse_pcd_ascii<I>(lines: I, count: usize, fields: &[String]) -> Result<PointCloud>
+/// Parse ASCII PCD data after the header has been read.
+///
+/// `types` is the header's `TYPE` line, which is what decides whether an
+/// integer-typed colour field holds a byte or an already-normalised float.
+fn parse_pcd_ascii<I>(
+    lines: I,
+    count: usize,
+    fields: &[String],
+    types: &[char],
+) -> Result<PointCloud>
 where
     I: Iterator<Item = std::io::Result<String>>,
 {
@@ -230,9 +239,24 @@ where
     let mut normals: Option<Vec<Vector3<f32>>> = None;
     let mut colors: Option<Vec<Point3<f32>>> = None;
 
-    // Check for normal and color fields
-    let has_normals =
-        fields.contains(&"normal_x".to_string()) || fields.contains(&"nx".to_string());
+    // A normal is a *triple*. Deciding from `normal_x`/`nx` alone - as this used
+    // to - means `FIELDS x y z nx` alone turned normal reading on, and the three
+    // `values[ny_idx.expect("normals are only read when all three exist")]`
+    // lookups below then panicked on `None`. That is the "truncated / malformed
+    // input accepted" class taken to its limit: a file the header itself
+    // describes as incomplete killed the process instead of being reported.
+    //
+    // The binary path already required all three (`nx_field.is_some() && ...`);
+    // only the ASCII path decided on one.
+    let has_normals = ["normal_x", "nx"]
+        .iter()
+        .any(|n| fields.iter().any(|f| f == n))
+        && ["normal_y", "ny"]
+            .iter()
+            .any(|n| fields.iter().any(|f| f == n))
+        && ["normal_z", "nz"]
+            .iter()
+            .any(|n| fields.iter().any(|f| f == n));
     let has_colors = fields.contains(&"rgb".to_string())
         || fields.contains(&"rgba".to_string())
         || (fields.contains(&"r".to_string())
@@ -341,17 +365,36 @@ where
                 let b = (packed & 0xFF) as f32 / 255.0;
                 c.push(Point3::new(r, g, b));
             } else if let (Some(ri), Some(gi), Some(bi)) = (r_idx, g_idx, b_idx) {
-                // Separate R, G, B fields
-                let r = values[ri];
-                let g = values[gi];
-                let b = values[bi];
-
-                // Assume 0-255 range if values are large
-                let r_norm = if r > 1.0 { r / 255.0 } else { r };
-                let g_norm = if g > 1.0 { g / 255.0 } else { g };
-                let b_norm = if b > 1.0 { b / 255.0 } else { b };
-
-                c.push(Point3::new(r_norm, g_norm, b_norm));
+                // Normalise by the *declared* (TYPE, SIZE) pair, not by
+                // guessing from the value.
+                //
+                // `if v > 1.0 { v / 255.0 } else { v }` cannot tell a byte from an
+                // already-normalised float: the legitimate byte value `1` is a
+                // near-black `1/255`, but it is also what a normalised `1.0`
+                // looks like, so a near-black red vertex came back pure white -
+                // a factor of 255, on the most common first colour in the
+                // spectrum.
+                //
+                // Measured on `FIELDS x y z r g b`, `SIZE 4 4 4 1 1 1`,
+                // `TYPE F F F U U U`, body row `0 0 0 1 128 255`:
+                //     before -> (1.000000, 0.501961, 1.000000)   <- r is 255x too big
+                //     after  -> (0.003922, 0.501961, 1.000000)
+                // and on the float-declared equivalent the value is untouched.
+                // This is the same fix `ply.rs` already carries for the same
+                // defect, and its comment there explains why byte 0 is ambiguous
+                // but harmless.
+                let norm = |idx: usize| -> f32 {
+                    let is_integer = types
+                        .get(idx)
+                        .copied()
+                        .is_some_and(|t| matches!(t, 'U' | 'I'));
+                    if is_integer {
+                        values[idx] / 255.0
+                    } else {
+                        values[idx]
+                    }
+                };
+                c.push(Point3::new(norm(ri), norm(gi), norm(bi)));
             }
         }
 
@@ -520,10 +563,21 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
                 let r = read(ri)?;
                 let g = read(gi)?;
                 let b = read(bi)?;
-                // Normalize if in 0-255 range
-                let r_norm = if r > 1.0 { r / 255.0 } else { r };
-                let g_norm = if g > 1.0 { g / 255.0 } else { g };
-                let b_norm = if b > 1.0 { b / 255.0 } else { b };
+                // Same declared-type normalisation as the ASCII path above, for
+                // the same reason: a `U1` byte value of `1` is `1/255`, not white.
+                // Measured on `TYPE F F F U U U` / `SIZE 4 4 4 1 1 1` with an
+                // `(1, 128, 255)` body: before -> (1.0, 0.501961, 1.0),
+                // after -> (0.003922, 0.501961, 1.0).
+                let is_integer = |idx: usize| {
+                    header
+                        .types
+                        .get(idx)
+                        .copied()
+                        .is_some_and(|t| matches!(t, 'U' | 'I'))
+                };
+                let r_norm = if is_integer(ri) { r / 255.0 } else { r };
+                let g_norm = if is_integer(gi) { g / 255.0 } else { g };
+                let b_norm = if is_integer(bi) { b / 255.0 } else { b };
                 cols.push(Point3::new(r_norm, g_norm, b_norm));
             }
         }
