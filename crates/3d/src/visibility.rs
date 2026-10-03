@@ -335,6 +335,107 @@ mod tests {
             .collect()
     }
 
+    /// The footprint radius must be the **same** Jacobian the placement code uses.
+    ///
+    /// `project_point` places a point with `cx = (ndc_x + 1) * 0.5 * w`, where
+    /// `ndc_x` already carries the aspect because `perspective_matrix(aspect, ..)`
+    /// sets `P[0][0] = 1 / (aspect * tan(fov_y / 2))`. So the local scale actually
+    /// used to place a point is
+    ///
+    /// ```text
+    /// d(cx)/dx = 0.5 * w * P[0][0] = w / (2 * aspect * tan(fov_y / 2))
+    /// ```
+    ///
+    /// and the footprint **must** be that same derivative. It was
+    /// `w / (2 * tan(fov_y / 2))` — dividing by `tan` but not by `aspect` — so for
+    /// any non-square viewport each splat was sized for a *different projection than
+    /// the one placing it*: twice too large in portrait, half-size in landscape.
+    ///
+    /// **This lives inline because `ProjectedPoint` is private.** An integration test
+    /// in `crates/3d/tests/` cannot reach `project_point` or the returned `radius`,
+    /// so every version written there asserted an identity between its own helpers
+    /// and **passed against the unfixed source**. The caveat is that an inline test
+    /// cannot be verified by `git show HEAD:<path> > <path>` — that restore deletes
+    /// it too — so the check below was made by hand: removing `aspect` from the
+    /// expression in `project_point` fails `footprint_is_the_placement_jacobian`.
+    #[test]
+    fn footprint_is_the_placement_jacobian() {
+        let fov = std::f64::consts::FRAC_PI_3; // 60 degrees, as the tests above use
+        let tan_half = (fov / 2.0).tan();
+
+        for (w, h) in [(64usize, 64usize), (64, 128), (128, 64), (100, 200)] {
+            let aspect = w as f64 / h as f64;
+
+            // Exactly what `depth_buffer_visibility` builds. The view matrix must
+            // come from `look_at_matrix` and not `identity` — an identity view
+            // leaves the camera at the origin looking down -z, so a point on the
+            // world origin is *behind* it and the near/far clip test rejects it.
+            // That is the failure I hit first, and it is why the construction here
+            // mirrors the caller rather than improvising.
+            let viewpoint = Point3::new(0.0, 0.0, 5.0);
+            let look_at = Point3::new(0.0, 0.0, 0.0);
+            let up = Vector3::new(0.0, 1.0, 0.0);
+            let view = look_at_matrix(&viewpoint, &look_at, &up);
+            let proj = perspective_matrix(fov, aspect, 0.01, 1e6);
+            let vp = proj * view;
+            let point = Point3::new(0.0, 0.0, 0.0);
+
+            let projected = project_point(point, &viewpoint, &vp, w, h, fov, aspect)
+                .expect("a point straight ahead must project");
+            let depth = (point - viewpoint).norm();
+
+            // The placement scale, derived from the projection the point was placed
+            // with: `cx = (ndc_x + 1) * 0.5 * w`, so `d(cx)/dx = 0.5 * w * P00`.
+            //
+            // `nalgebra::Matrix4` is **column-major**, so `P00` is `m[(0, 0)]` on the
+            // `proj` matrix. Reading `vp[(0, 0)]` picks a different entry and the
+            // point then fails the near/far clip test below - which is how I found
+            // the indexing convention rather than assuming it.
+            let p00 = proj[(0, 0)];
+            let placement_scale = 0.5 * w as f64 * p00;
+
+            // The footprint of a unit-radius splat at that depth is
+            // `placement_scale / depth`, and the code floors it at 1 px.
+            let want = (placement_scale / depth).max(1.0);
+            assert!(
+                (projected.radius - want).abs() < 1e-9,
+                "{w}x{h} (aspect {aspect:.3}): the footprint radius is {} but the \
+                 placement Jacobian implies {want:.6}. A splat sized on a different \
+                 scale than the one placing it is drawn at the wrong size.",
+                projected.radius
+            );
+
+            // And the closed form, so the intent is on the record rather than
+            // implied: `w / (2 * aspect * tan(fov_y / 2)) / depth`.
+            let closed_form = (w as f64 / (2.0 * aspect * tan_half) / depth).max(1.0);
+            assert!(
+                (projected.radius - closed_form).abs() < 1e-9,
+                "{w}x{h}: radius {} does not match w/(2*aspect*tan)/depth = \
+                 {closed_form:.6}",
+                projected.radius
+            );
+        }
+    }
+
+    /// The square viewport is the control: at `aspect = 1` the factor is 1, so the
+    /// missing term changes nothing. Stated explicitly so the non-square cases are
+    /// not the only evidence — and because this is *why* the defect survived.
+    #[test]
+    fn a_square_viewport_hides_the_missing_aspect_factor() {
+        let fov = std::f64::consts::FRAC_PI_3;
+        let tan_half = (fov / 2.0).tan();
+        let w = 64.0;
+        let h = 64.0;
+        let with = w / (2.0 * (w / h) * tan_half);
+        let without = w / (2.0 * tan_half);
+        assert!(
+            (with - without).abs() < 1e-12,
+            "at aspect 1 the two forms coincide ({with} vs {without}) - which is \
+             exactly why the defect is invisible at a square viewport and needs a \
+             non-square case to be caught"
+        );
+    }
+
     #[test]
     fn test_depth_buffer_sphere() {
         let points = sphere_points(500, 1.0);
