@@ -106,11 +106,8 @@ fn control_a_cloud_with_normals_still_reports_them_verbatim() {
 /// that *do* carry normals, so the common path is unaffected.
 #[test]
 fn control_the_sphere_generator_still_reports_one_normal_per_point() {
-    let cloud = cv_3d::mesh::reconstruction::create_sphere_point_cloud(
-        Point3::new(0.0, 0.0, 0.0),
-        1.0,
-        50,
-    );
+    let cloud =
+        cv_3d::mesh::reconstruction::create_sphere_point_cloud(Point3::new(0.0, 0.0, 0.0), 1.0, 50);
     let normals = compute_point_normals(&cloud, 5);
     assert_eq!(
         normals.len(),

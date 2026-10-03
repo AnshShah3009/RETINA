@@ -110,9 +110,22 @@ impl Polygon {
 
     /// Basic validity check: at least 3 distinct vertices and no self-intersection
     /// of the exterior ring.
+    ///
+    /// Closure-independent, like [`Polygon::area`]: an exterior ring with three
+    /// distinct vertices is the same triangle whether or not it carries the
+    /// repeated closing vertex, so both forms are judged identically.
+    /// [`Polygon::area`] follows.
+    ///
+    /// A ring of three or more vertices that encloses no area (three or more
+    /// collinear vertices) is *not* valid: it has three distinct vertices but
+    /// every angle in it is zero or straight, which cannot bound a region. The
+    /// count alone reported it as valid - a zero-area ring is not a polygon.
+    /// (GEOS agrees: `Polygon([(0,0),(1,0),(2,0),(3,0)]).is_valid` is `False`.)
     pub fn is_valid(&self) -> bool {
-        if self.exterior.len() < 4 {
-            // Need at least 3 distinct + closing vertex
+        if self.exterior.len() < 3 {
+            return false;
+        }
+        if ring_signed_area(&self.exterior).abs() <= EPS {
             return false;
         }
         !ring_self_intersects(&self.exterior)
@@ -370,6 +383,17 @@ fn point_in_ring(point: &Point2D, ring: &[Point2D]) -> bool {
 }
 
 /// Whether any edges of the two polygons cross, or one contains the other.
+///
+/// Edge pairs come from [`ring_edges`], which closes an *open* ring: `0..len-1`
+/// skips the edge between the last and the first vertex, so a ring written
+/// without its repeated closing vertex - a form this crate accepts everywhere,
+/// since `area` and `perimeter` both close it - had that edge missing from the
+/// sweep. Only then could the containment fallbacks decide the answer, and they
+/// inspect a single vertex each: measured on an open 4x4 square against a
+/// triangle meeting it exactly across the omitted edge, the two polygons
+/// returned `false` here while the closed forms returned `true` (and the two
+/// reported intersection areas differed). GEOS: `Polygon([(0,0),(4,0),(4,4),(0,4)])
+/// .intersects(Polygon([(-1,1),(-1,3),(0,2)]))` is `True`.
 pub fn polygons_intersect(a: &Polygon, b: &Polygon) -> bool {
     // Quick AABB rejection
     let ba = a.bbox();
@@ -378,12 +402,21 @@ pub fn polygons_intersect(a: &Polygon, b: &Polygon) -> bool {
         return false;
     }
 
-    // Edge-edge intersection
-    let ea = &a.exterior;
-    let eb = &b.exterior;
-    for i in 0..ea.len().saturating_sub(1) {
-        for j in 0..eb.len().saturating_sub(1) {
-            if segments_intersect(&ea[i], &ea[i + 1], &eb[j], &eb[j + 1]) {
+    // Edge-edge intersection, over every edge of both rings (holes included).
+    // Pairs are formed across the two polygons only: a polygon's own adjacent
+    // edges share an endpoint, and `segments_intersect` counts touching, so
+    // pairing a ring with itself reports every polygon as self-intersecting.
+    let a_edges: Vec<(&Point2D, &Point2D)> = ring_edges(&a.exterior)
+        .into_iter()
+        .chain(a.holes.iter().flat_map(|h| ring_edges(h)))
+        .collect();
+    let b_edges: Vec<(&Point2D, &Point2D)> = ring_edges(&b.exterior)
+        .into_iter()
+        .chain(b.holes.iter().flat_map(|h| ring_edges(h)))
+        .collect();
+    for (p, q) in &a_edges {
+        for (c, d) in &b_edges {
+            if segments_intersect(p, q, c, d) {
                 return true;
             }
         }
@@ -407,7 +440,14 @@ pub fn polygons_intersect(a: &Polygon, b: &Polygon) -> bool {
 /// 4x4 hole was reported contained). So, in addition to the vertex test, no edge
 /// of `inner` may *properly* cross `outer`'s boundary (touching is allowed) and
 /// no hole of `outer` may lie inside `inner`.
+///
+/// There is nothing to contain when `inner` has no vertices: with the loop
+/// below vacuously satisfied, an *empty* ring was reported as contained by any
+/// polygon (and by itself). Containment of nothing is not true.
 pub fn polygon_contains_polygon(outer: &Polygon, inner: &Polygon) -> bool {
+    if inner.exterior.is_empty() {
+        return false;
+    }
     for p in &inner.exterior {
         if !point_in_polygon(p, outer) && !point_on_boundary(p, outer) {
             return false;
@@ -777,11 +817,20 @@ pub fn buffer_polygon(polygon: &Polygon, distance: f64, segments: usize) -> Poly
 }
 
 /// Douglas-Peucker line simplification.
+///
+/// `tolerance` is a length, so it must be non-negative; a negative one is
+/// clamped to `0.0` (keep only the points that lie exactly on the line through
+/// the first and the last). Left unchecked it was an unbounded recursion: the
+/// loop below starts at index 1, and with a negative tolerance even a fully
+/// collinear input satisfies `max_dist > tolerance` at the initial index 0, so
+/// the split returned the whole slice and the next level recursed forever -
+/// measured as `fatal runtime error: stack overflow` and a SIGABRT, not a
+/// catchable unwind.
 pub fn simplify(coords: &[Point2D], tolerance: f64) -> Vec<Point2D> {
     if coords.len() <= 2 {
         return coords.to_vec();
     }
-    dp_simplify(coords, tolerance)
+    dp_simplify(coords, tolerance.max(0.0))
 }
 
 #[allow(clippy::needless_range_loop)]
@@ -1358,6 +1407,17 @@ fn parse_ring(s: &str) -> Result<Vec<Point2D>, String> {
         let y: f64 = coords[1]
             .parse()
             .map_err(|_| format!("Invalid y: '{}'", coords[1]))?;
+        // `f64::from_str` accepts `inf`, `infinity` and `NaN` (in any case), and
+        // overflows `1e400` to `+inf`. A ring could therefore be parsed whose
+        // vertices have no position: measured, `POLYGON((nan 0, 1 0, 1 1, 0 1,
+        // 0 0))` parsed `Ok`, its `area()` came back `NaN`, and its `bbox()`
+        // silently dropped the NaN vertex and reported a finite box.
+        if !x.is_finite() || !y.is_finite() {
+            return Err(format!(
+                "Non-finite coordinate in WKT: '{} {}'",
+                coords[0], coords[1]
+            ));
+        }
         points.push(Point2D::new(x, y));
     }
     Ok(points)

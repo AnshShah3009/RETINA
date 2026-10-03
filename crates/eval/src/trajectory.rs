@@ -93,8 +93,18 @@ impl ErrorStats {
     /// it (`if stats.rmse < best_so_far` selects the trajectory that was never
     /// measured). Callers that have to distinguish "no samples" from "a large
     /// error" can test `errors.is_empty()` on the error list they passed in.
+    ///
+    /// A slice holding a non-finite value is rejected the same way. `rmse`,
+    /// `mean` and `std` propagated it on their own, but `max` did not: it is a
+    /// `fold` with `f64::max`, and `f64::max` returns *the non-NaN operand*, so
+    /// `max` walked straight past the NaN. Measured on `[1.0, NaN, 3.0]` the
+    /// result was `mean = NaN, rmse = NaN, std = NaN` but `max = 3.0` - one
+    /// plausible-looking number in a struct whose every other field says
+    /// "unmeasurable", and one a caller would print as the worst error.
+    /// The returned median is likewise `NaN` for such a slice, because the sort
+    /// places the NaN at one end of the order.
     pub fn from_errors(errors: &[f64]) -> Self {
-        if errors.is_empty() {
+        if errors.is_empty() || !errors.iter().all(|e| e.is_finite()) {
             return Self {
                 rmse: f64::NAN,
                 mean: f64::NAN,
