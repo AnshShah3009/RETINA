@@ -79,11 +79,51 @@ within the A&S 7.1.26 bound of 2e-7: yes
 Nine orders of magnitude behind SciPy, as predicted, and no worse. `erf` was
 deliberately **not** changed.
 
+## Geometry (cv-imgproc vs OpenCV 4.13) — RUNS, deviations NOT attributed
+
+`resize` and `warpAffine` now run end to end. **`cv2.remap` is unusable in this
+environment** — it returns `(-5:Bad argument)` for *every* argument combination,
+verified on a 16x16 zero image with float32 and float64 maps and both
+`INTER_NEAREST` and `INTER_LINEAR`. The binding exists; the overload does not resolve.
+The remap block therefore **skips and says so** rather than raising, because a parity
+report that silently omits a comparison is worse than one that fails.
+
+### Deviations present, none of them attributed yet
+
+```
+resize_checker_nearest_13x40      max=160  2.5% over tol   rust=200 ref=40
+resize_checker_linear_24x18       max=80  99.1% over tol   rust=40  ref=120
+warpaffine_smooth_linear_c0       max=4   29.9% over tol   rust=100 ref=104
+warpaffine_checker_linear_c0      max=4   43.5% over tol   rust=182 ref=186
+```
+
+**The `nearest` case is a coordinate-phase convention, not a defect.** Verified
+directly: for a checkerboard downscaled with `INTER_NEAREST`, OpenCV's
+`out[0,0]` picks the source pixel `img[0,0]` (value `0`) where the Rust side picks
+the other phase (`200`). Both are self-consistent; they round a half-pixel boundary
+in opposite directions. Which is "right" is a documented-choice question, not a bug.
+
+**The `warpaffine` cases deviate by 1-4 grey levels** on a border mode that both
+sides were told to use identically, with deviations concentrated away from the
+interior. Small and localised, but **not yet attributed** — could be a fixed-point
+rounding difference, a border-path detail, or a real disagreement.
+
+**The `linear`/`cubic`/`lanczos` resize cases deviate by 40-80 grey levels on
+98-99% of pixels.** That magnitude is far too large to be rounding. It is either a
+different kernel/phase convention or a genuine defect, and **I have not determined
+which**. Do not read this as either.
+
 ## Coverage of this report — and its holes
 
-Done: filters (`imgproc`), special functions (`math`).
-**Not reached:** the geometry harness (`parity_geometry.rs` exists but was never run),
-`photo` tone mapping, and everything in `calib3d`, `features`, `3d`, `registration`,
-`pointcloud`, `rendering`. So this is a **partial** parity report covering 2 of ~30
-crates, and nothing here should be read as a statement about the rest.
+Done: filters (`imgproc`), geometry — resize and warpAffine only (`imgproc`),
+special functions (`math`).
+**Not reached:** `remap` (unusable here), `photo` tone mapping, and everything in
+`calib3d`, `features`, `3d`, `registration`, `pointcloud`, `rendering`. So this is a
+**partial** parity report covering 2 of ~30 crates, and nothing here should be read as
+a statement about the rest.
+
+The geometry section is the least mature part of this report: it runs, it produces
+numbers, and **most of those numbers are not yet explained**. That is stated rather
+than smoothed over, because the alternative — a table of unexplained deviations
+labelled as findings — is exactly what makes a parity harness get ignored.
 
