@@ -10,6 +10,25 @@ Targets claimed by the workspace README/root crate: OpenCV, Open3D, Matplotlib, 
 
 ---
 
+> **Currency.** This survey was taken at a point in time; entries are marked
+> **CLOSED** where the defect has since been fixed. The coverage table reflects the
+> moment of measurement and is **not** refreshed as tests are added — re-measure
+> before planning work from it. Fixes since the survey, marked inline below:
+>
+> - `photo::Stitcher::stitch` fabricating a panorama — **closed**, see (b1) #1.
+> - `rendering`'s projected covariance being in the world frame while its Jacobian
+>   was camera-space, and opacity round-tripping complemented — **fixed**.
+> - `hal`'s `batch_nearest_neighbors` panicking on a NaN coordinate — **fixed**; the
+>   GPU-in-name / CPU-in-the-body downgrade in (d1) remains open.
+> - `imgproc`'s normalised Gaussian not preserving a constant (kernel summing to
+>   `0.99999964`, so `128` blurred to `127`) — **fixed**. It was not in this survey;
+>   found later by the numerical parity harness.
+>
+> Still open and worth reading before planning: the facade re-exports 11 of 30
+> crates, `erf` is accurate to ~1.5e-7 against SciPy's ~1e-16, `Interpolation::Linear`
+> aliases when downscaling, and `score_msac` is the workspace's only
+> `unimplemented!()`.
+
 ## (a) Coverage table — public items vs `#[test]` functions, per crate
 
 Method: `grep -rc "pub fn \|pub struct \|pub enum \|pub trait " <crate>/src` and
@@ -71,7 +90,7 @@ stubs now return `Err`/`None`/empty **loudly** and say so in a doc comment. Thos
 
 | # | location | what it does | severity |
 |---|---|---|---|
-| 1 | `crates/photo/src/stitcher.rs:23-24` | `Stitcher::stitch()` does `if images.is_empty() { Ok(GrayImage::new(0,0)) } // Return first image as placeholder for Phase 4` then `Ok(images[0].clone())`. **Returns the input image, unmodified, as the "panorama".** `Ok()`, no warning, no log. `Stitcher` is public (`photo/src/lib.rs:52,60`) and `stitch` is its only method. | **HIGH — silent** |
+| 1 | `crates/photo/src/stitcher.rs` | **CLOSED.** Was: `stitch()` returned `images[0].clone()` — the input unmodified, as the "panorama", with `Ok()` and no warning. Now a real estimator: it finds the horizontal offset that maximises overlap agreement and cross-fades the seam. Verified numerically — two ramps 24 apart, aligned with a one-column overlap, give `33 = 31 + ⅔·(34−31)` at the seam, which only a blend produces. | **was HIGH — now fixed** |
 | 2 | `crates/hal/src/gpu_kernels/pointcloud.rs:29-39` | `normals_cpu_analytic(points, k)` → `Vec::new()`. Doc admits "Not implemented". But its only caller `compute_normals_morton_gpu_or_cpu` (`:11-20`) uses it as the **silent CPU fallback**: if `GpuContext::global()` fails or the GPU kernel errs, the function returns an **empty Vec** with no error and no log — a point cloud of N points yields 0 normals and the caller cannot tell. | **HIGH — silent fallback** |
 | 3 | `crates/hal/src/gpu_kernels/mod.rs:1238-1248` | `batch_nearest_neighbors` is documented "on GPU" but the body says `// Simplified: just return k nearest using brute force on CPU`. Takes `gpu: &GpuContext` and reads the buffer back to host (`read_buffer` + `pollster::block_on`) then loops on CPU. GPU in the name and signature, CPU in the body, no record returned. | **HIGH — silent downgrade** |
 | 4 | `crates/hal/src/gpu_kernels/mod.rs:1619-1624` | `simplify_mesh(_gpu: &GpuContext, ...)` — the GPU parameter is `_gpu` (unused); body is uniform voxel-grid decimation on CPU. Doc calls it "Simplify mesh on GPU". Other GPU kernels in this file do use `gpu`; this one only borrows the name. | MED — silent downgrade |
@@ -237,7 +256,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 | d6 | `crates/features/src/usac.rs:342-366` | `score_magsac(model, points, threshold, sigma_max)` — `threshold` is **unused** (compiler: `warning: unused variable: 'threshold'`, `usac.rs:345`). The loop sets its own `t = s as f64` from `sigma_max`; a caller's calibration is discarded. It also panics via (b1) #7. | **No** |
 | d7 | `crates/hal/src/gpu/compute_context_impl.rs:607` | Morphology GPU path proceeds on an assumption in a comment ("Let's assume for now morphology on GPU is f32-compatible or we use casts") and has no dtype check before the `GpuStorage<u8>` downcast; failure surfaces only as a late `"Failed to downcast GPU result"`. | Partially (late error) |
 | d8 | `crates/hal/src/gpu_kernels/undistort.rs:140` | `_ => 1, // Default to bilinear for now` — an unrecognised interpolation mode silently becomes bilinear instead of erroring. | **No** |
-| d9 | `crates/photo/src/stitcher.rs:23-24` | `Stitcher::stitch` returns `images[0]` (see (b1) #1) — a stitched panorama that is not stitched. | **No** |
+| d9 | `crates/photo/src/stitcher.rs` | **CLOSED** — was returning `images[0]`; see (b1) #1. | n/a |
 | d10 | `crates/optimize/src/sparse.rs:109,263` / `hal/.../compute_context_impl.rs:473,548,563` | The *opposite* pattern, for contrast: MLX SpMV and three GPU ops return `Err(NotSupported("…use CPU backend"))` rather than downgrading silently. **These are correct**; listed so the two patterns are not confused. | Yes — loud |
 
 ---
@@ -469,7 +488,7 @@ deliberately absent and previously dead fields.
 **calib3d (4)**: `essential.rs:35,72,75` Nistér 5-point absent; `project.rs:305` Jacobian by
 **numerical differentiation** "for now".
 
-**photo (3)**: `stitcher.rs:24` (see b1 #1), `hdr.rs:132` simplified Debevec, `inpaint.rs:260`
+**photo (2, was 3)**: `stitcher.rs` is **closed** (see b1 #1); `hdr.rs:132` simplified Debevec, `inpaint.rs:260`
 "simplified Navier-Stokes-like equation".
 
 **registration (2)**: `registration/colored.rs:99` and `registration/mod.rs:644` "Compute jacobian
