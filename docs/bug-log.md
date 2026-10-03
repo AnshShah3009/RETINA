@@ -312,6 +312,46 @@ behaviour for every caller of both entry points — a decision about whether
 `sigma = 0` means "identity" or "invalid". The latter would want an error channel
 that `gaussian_blur(&GrayImage, f32) -> GrayImage` does not have.
 
+## OPEN: `erf` is accurate to ~1.5e-7, where SciPy is ~1e-16
+
+Found from a failing `scientific` test, and the diagnosis is not the obvious one.
+
+```
+erf(0) is exactly 0
+  left: 9.999999717180685e-10
+  right: 0.0
+```
+
+`9.999999717180685e-10` looks like the f32 representation of `1e-9`, which would mean
+a single-precision epsilon leaking into an f64 function. It is not. `math::special::erf`
+is the Abramowitz & Stegun 7.1.26 rational approximation, and its coefficients sum to
+
+```
+0.254829592 - 0.284496736 + 1.421413741 - 1.453152027 + 1.061405429 = 0.999999999
+```
+
+so at `x = 0` the expression is `1 - 0.999999999 * exp(0)` = `1e-9`. The residue is the
+approximation's own truncation error, not a type-precision mistake, and it is inside
+A&S 7.1.26's documented maximum absolute error of ~1.5e-7.
+
+**So the test's expectation is too strict for the implementation, and the
+implementation is a real gap for the SciPy target.** Both statements are true and the
+second is the one that matters: `scipy.special.erf` is accurate to roughly machine
+precision, so this is nine orders of magnitude behind, and a replacement library
+cannot ship it as `erf`. The visible symptom is that the function is not odd about
+zero — `erf(0) != 0`, and `erf(-x) != -erf(x)` at that scale.
+
+**Not fixed here, deliberately.** Substituting a machine-precision `erf` (a rational
+minimax, or the `erfc` continued fraction with a series for small `x`) is a numerical
+implementation change that has to be checked against published values across the whole
+domain — small `x`, the transition region, and the tail where `erfc` cancellation is
+the hazard. That check is the work; writing the formula is the easy part, and an
+unverified replacement would be worse than the honest 1.5e-7.
+
+**Action for whoever takes it:** decide whether to raise `erf`/`erfc` to machine
+precision or to document the accuracy, and if the former, keep `erf(0) == 0` and
+oddness as the first assertions — they are cheap and they fail loudly.
+
 ## The gap survey: what this workspace claims and does not have
 
 A survey rather than a bug hunt, now kept at `GAPS.md` in the repo root. It exists
