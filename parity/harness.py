@@ -242,7 +242,13 @@ def compare(case: Case) -> Result:
     else:
         interior = d
     flat = int(np.argmax(d))
-    y, x = divmod(flat, d.shape[1])
+    # 1-D results (a residual vector rather than an image) have no row/column to
+    # report. `argmax_case` is a tuple only when the data is 2-D; for a 1-D
+    # comparison report the flat index, which is what a reader needs.
+    if d.ndim >= 2:
+        y, x = divmod(flat, d.shape[1])
+    else:
+        y, x = flat, 0
     res = Result(
         case.name,
         int(d.size),
@@ -254,8 +260,8 @@ def compare(case: Case) -> Result:
         case.reason,
         case.atol,
         (int(y), int(x)),
-        float(rust[y, x]),
-        float(ref[y, x]),
+        float(rust.ravel()[flat]),
+        float(ref.ravel()[flat]),
     )
     return res
 
