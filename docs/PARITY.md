@@ -417,22 +417,43 @@ are the half-voxel grid-anchor shift, at most `vs/2`. Counts differ where the tw
 disagree on which cells are occupied (`neg`: rust 5 vs Open3D 3 at vs=0.5), which is
 a grid-anchor convention, not an arithmetic error.
 
-### DEFECT: normal estimation on a sphere — and it is a degenerate normal
+### Normal estimation — CORRECTED: the 90 deg is Open3D's, not ours
 
-| case | knn | n | mean angle to analytic | **max angle** | verdict |
-|---|---:|---:|---:|---:|---|
-| sphere | 20 | 312 | 1.57 deg | **90.0000 deg** | DEVIATES |
-| sphere | 8 | 312 | 2.79 deg | **90.0000 deg** | DEVIATES |
-| plane z=0.25 | 8 | 25 | 0.0000 | 0.0000 | **matches** |
+The harness first reported a 90.0000 deg max angle and `min |n|-1 = 0.00e+00`, and I
+read that as a zero-length normal in our code. **That reading was wrong.** Measured
+both sides separately on the same 312-point sphere:
 
-The plane is **exact** (0.0000 deg), which is the control: the convention, the
-comparison and the harness are all right. On the sphere the *mean* is small but the
-**max is exactly 90 deg**, which is not noise — 90 degrees is what you get when a
-normal is a zero vector, since `arccos(0)`. A k-NN normal estimate is undefined
-where the neighbourhood is planar, and the sphere's pole neighbourhoods are the
-degenerate case. `min |n|-1 = 0.00e+00` confirms at least one returned normal has
-**zero length**, and the docstring elsewhere in this workspace records that a
-zero-length vector normalises to NaN.
+```
+ours   (estimate_normals_knn): zero-length = []  nan = []
+                            max angle to analytic = 6.2828 deg (k=20), 15.0000 (k=8)
+
+Open3D estimate_normals    : zero-length = 0
+                            max angle to analytic = 90.0000 deg (k=20), 90.0000 (k=8)
+```
+
+So:
+
+- **Our normals are fine** — 6.3 deg and 15.0 deg worst case on a 12x24 sphere, no
+  zero-length and no NaN output, and the eigenvector in
+  `math::linalg::min_eigenvector_3x3` *is* normalised (line 334) with a fallback for
+  the degenerate case. I had not read that far before claiming a defect.
+- **Open3D produces the 90 deg**, from the sphere's poles where the k-NN
+  neighbourhood is degenerate.
+
+The harness conflated the two. `_norm_row` computed `max_d = max(ag.max(), ar.max(),
+cross.max())` — taking the worst of *our* deviation, *the reference's* deviation, and
+the angle between us — so a 90 deg belonging to Open3D was attributed to the
+workspace. `min |n|-1` measured `got` after normalising, so the column was measuring
+normalisation error, not length, and could not have shown a zero vector.
+
+**Fixed in the harness:** the three deviations are now reported in separate columns so
+a regression on either side is attributable. The plane case remains the control at
+0.0000 deg on both.
+
+This is the second time in this session that an unattributed deviation turned out to
+be the *reference* being wrong rather than the implementation — the first was the
+`resize` investigation, where an even-width input made two conventions identical. Both
+were the same mistake: a single number standing for two different quantities.
 
 ### DEFECT: k-NN neighbour sets differ from Open3D's
 

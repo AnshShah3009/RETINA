@@ -343,8 +343,8 @@ def case_normals(d):
     it here would compare two algorithms rather than two implementations.
     """
     print("## Normal estimation (direction, up to sign)\n")
-    print("| case | knn | n | mean angle to analytic (deg) | max angle (deg) | min |n|-1 | verdict |")
-    print("|---|---:|---:|---:|---:|---:|---|")
+    print("| case | knn | n | ours mean (deg) | ours max | open3d max | ours-vs-ref max | min \\|n\\|-1 | verdict |")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---|")
 
     rows = []
 
@@ -370,8 +370,11 @@ def case_normals(d):
     got = np.array(d["nv"]["normals_plane"][8][: len(pl)])
     rows.append(_norm_row("plane z=0.25", 8, got, ref, pl_nrm))
 
-    for name, k, n, mean_d, max_d, min_n, verdict in rows:
-        print(f"| {name} | {k} | {n} | {mean_d:.4f} | {max_d:.4f} | {min_n:.2e} | {verdict} |")
+    for name, k, n, ag_mean, ag_max, ar_mean, ar_max, cross_max, len_err, verdict in rows:
+        print(
+            f"| {name} | {k} | {n} | {ag_mean:.4f} | {ag_max:.4f} | {ar_max:.4f} | "
+            f"{cross_max:.4f} | {len_err:.2e} | {verdict} |"
+        )
 
     print()
     print("Angle is computed as arccos of |cos|, i.e. up to sign. The sphere's")
@@ -380,18 +383,28 @@ def case_normals(d):
     return rows
 
 
-def _norm_row(name, k, got, ref, analytic):
-    got = got / np.linalg.norm(got, axis=1, keepdims=True)
-    ref = ref / np.linalg.norm(ref, axis=1, keepdims=True)
+def _norm_row(name, k, got_raw, ref_raw, analytic):
+    got = got_raw / np.linalg.norm(got_raw, axis=1, keepdims=True)
+    ref = ref_raw / np.linalg.norm(ref_raw, axis=1, keepdims=True)
     an = analytic / np.linalg.norm(analytic, axis=1, keepdims=True)
+    # Three DISTINCT quantities, reported separately. Taking one max over all three
+    # attributed Open3D's own 90-degree deviation on the sphere poles to the
+    # workspace, and hid which side was actually wrong.
     ag = np.degrees(np.arccos(np.clip(np.abs(np.sum(got * an, axis=1)), 0, 1)))
     ar = np.degrees(np.arccos(np.clip(np.abs(np.sum(ref * an, axis=1)), 0, 1)))
-    # Compare the two against each other as well as against the analytic answer.
     cross = np.degrees(np.arccos(np.clip(np.abs(np.sum(got * ref, axis=1)), 0, 1)))
-    max_d = max(ag.max(), ar.max(), cross.max())
-    min_n = float(np.abs(np.linalg.norm(got, axis=1) - 1).min())
-    verdict = "matches" if max_d <= ATOL_DEG else "DEVIATES"
-    return (name, k, len(got), ag.mean(), max_d, min_n, verdict)
+    # `len_err` is measured BEFORE normalising, so it can actually see a zero-length
+    # normal. The previous version normalised first and then measured deviation from
+    # 1, which cannot report a zero vector at all.
+    len_err = float(np.abs(np.linalg.norm(got_raw, axis=1) - 1).min())
+    # Verdict is about OURS only. The reference is reported so a divergence can be
+    # attributed, but Open3D being worse is not a defect in this workspace.
+    if ag.max() <= ATOL_DEG:
+        verdict = "matches"
+    else:
+        verdict = ("DEVIATES (ours, and worse than reference)" if ag.max() > ar.max()
+                   else "DEVIATES (ours)")
+    return (name, k, len(got), ag.mean(), ag.max(), ar.mean(), ar.max(), cross.max(), len_err, verdict)
 
 
 def case_knn(d):
