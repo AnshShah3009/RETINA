@@ -10,7 +10,11 @@ pub struct LocalizationStats {
     pub queries: usize,
     /// Number of queries that produced a pose.
     pub succeeded: usize,
-    /// Fraction of queries that produced a pose (`0.0` when there are none).
+    /// Fraction of queries that produced a pose.
+    ///
+    /// `NaN` when there were no queries to evaluate, matching the error
+    /// statistics below. A batch that asked something and failed everything
+    /// reports `0.0`.
     pub success_rate: f64,
     /// Mean translation error over successful queries (`NaN` when none succeed).
     pub mean_translation_error: f64,
@@ -58,7 +62,9 @@ pub fn rotation_error_degrees(a: &Pose, b: &Pose) -> f64 {
 /// A query counts as successful when `results[i]` is `Some` and a matching
 /// ground-truth pose exists at `i`. Queries beyond the shorter of the two slices
 /// are ignored. Error statistics cover successful queries only; when none
-/// succeed they are `NaN` (`success_rate` is still reported as `0.0`).
+/// succeed they are `NaN`. `success_rate` is `succeeded / queries`, so it is
+/// `NaN` when there are no queries at all (0/0 must not read as "everything
+/// failed") and `0.0` when queries were attempted and none succeeded.
 ///
 /// `results` and `ground_truth` must use the same pose convention; see
 /// [`translation_error`] for what "translation error" means under each one.
@@ -72,7 +78,28 @@ pub fn evaluate_localization(
     let mut rotation_errors = Vec::new();
 
     for (result, &truth) in results.iter().zip(ground_truth.iter()).take(queries) {
-        if let Some(result) = result {
+        // `Some` is not success, and the difference is the whole point of a
+        // benchmark. A *stored* result can carry a pose with zero supporting
+        // inliers; `Localizer::localize` never produces one, because RANSAC needs an
+        // inlier and the acceptance floor is `min_matches`. Counting it anyway
+        // inflates the success rate and folds an unsupported pose into the error
+        // statistics.
+        //
+        // Measured before the fix, for a single zero-inlier result whose pose
+        // happens to equal the ground truth:
+        //
+        //     (queries, succeeded, success_rate) = (1, 1, 1.0)
+        //
+        // A perfect score for a result that localizes nothing - the same failure
+        // class as a registration reporting `fitness: 1.0` from a transform that
+        // never moved, and worse here than elsewhere because a benchmark's number
+        // is what every downstream comparison is made against. It errs *optimistic*,
+        // so a method that localizes nothing scores as well as one that localizes
+        // everything.
+        //
+        // `succeeded` is derived from these vectors' lengths below, so gating here
+        // fixes the count, the rate and the means together.
+        if let Some(result) = result.as_ref().filter(|r| r.success()) {
             translation_errors.push(translation_error(&result.pose, &truth));
             rotation_errors.push(rotation_error_degrees(&result.pose, &truth));
         }
@@ -83,11 +110,9 @@ pub fn evaluate_localization(
     LocalizationStats {
         queries,
         succeeded,
-        success_rate: if queries == 0 {
-            0.0
-        } else {
-            succeeded as f64 / queries as f64
-        },
+        // `succeeded / queries` is 0/0 = NaN for an empty batch: no query
+        // succeeded because none was asked, which is not a 0% success rate.
+        success_rate: succeeded as f64 / queries as f64,
         mean_translation_error: mean(&translation_errors),
         median_translation_error: median(&translation_errors),
         mean_rotation_error_deg: mean(&rotation_errors),

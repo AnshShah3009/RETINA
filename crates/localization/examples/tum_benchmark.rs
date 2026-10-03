@@ -54,7 +54,7 @@ OPTIONS:
     --tri-reproj <P>       triangulation reprojection tolerance, pixels [default: 3.0]
     --match-window <W>     temporal window for the track-based map: frame i is
                            matched against i+1..=i+W before tracks are formed
-                           [default: 2]
+                           [default: 5]
     --vocab <K>            train a BoW vocabulary of K words on the database
                            descriptors (default: no vocabulary)
     --seed <S>             deterministic vocabulary seed [default: 0]

@@ -115,6 +115,10 @@ impl SyntheticScene {
 
     /// Index (into [`SyntheticScene::views`]) of the database image that shares
     /// the most landmarks with the query — the "correct" retrieval answer.
+    ///
+    /// A scene with no views (`SyntheticConfig::num_views == 0`) has no correct
+    /// view; the index is 0 as a placeholder and [`SyntheticScene::views`] is
+    /// empty.
     pub fn correct_view_index(&self) -> usize {
         self.correct_view
     }
@@ -125,6 +129,14 @@ impl SyntheticScene {
     }
 
     /// Id of the [`SyntheticScene::correct_view_index`] image.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the scene has no views (`SyntheticConfig::num_views == 0`):
+    /// there is no image to take an id from, so the index would be out of
+    /// bounds. `generate` accepts such a configuration (its query pose is then
+    /// not finite either) because scenes are fixtures; callers that need
+    /// [`SyntheticScene::correct_view_id`] must ask for at least one view.
     pub fn correct_view_id(&self) -> usize {
         self.views[self.correct_view].id
     }

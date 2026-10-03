@@ -91,12 +91,30 @@ impl Database {
     pub fn add_image(&mut self, image: DatabaseImage) {
         self.id_to_index.insert(image.id, self.images.len());
         self.images.push(image);
-        self.built = false;
+        self.invalidate();
     }
 
     /// Add a landmark. Landmarks are addressed by their insertion index.
     pub fn add_landmark(&mut self, landmark: Landmark) {
         self.landmarks.push(landmark);
+        self.invalidate();
+    }
+
+    /// Drop every index built from the current contents.
+    ///
+    /// Every modification funnels through here so that "invalidated" means the
+    /// built state is *gone*, not merely flagged: [`Database::descriptor_index`]
+    /// documents itself as empty until a build, [`Database::lsh_index`] as
+    /// present only after a build, and [`Database::descriptors`] as the flat
+    /// concatenation of every image's descriptors. Keeping the stale vectors
+    /// alive after `add_image` made all three claims false and let a caller
+    /// read — or a localizer retrieve against — an index that no longer
+    /// describes the database.
+    fn invalidate(&mut self) {
+        self.bow = None;
+        self.lsh = None;
+        self.descriptors = Descriptors::new();
+        self.descriptor_index.clear();
         self.built = false;
     }
 

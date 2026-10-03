@@ -104,9 +104,11 @@ pub struct DatasetSummary {
     pub mean_features_per_frame: f64,
     /// Number of triangulated landmarks in the map.
     pub landmarks: usize,
-    /// Mean number of keypoint observations per landmark.
+    /// Mean number of keypoint observations per landmark (`NaN` when the map
+    /// has no landmarks).
     pub mean_observations_per_landmark: f64,
-    /// Median number of keypoint observations per landmark.
+    /// Median number of keypoint observations per landmark (`NaN` when the map
+    /// has no landmarks).
     pub median_observations_per_landmark: f64,
     /// Tracks with at least two observations that were handed to triangulation,
     /// *before* the reprojection/cheirality filter (this is the raw track count).
@@ -126,7 +128,9 @@ pub struct LocalizationReport {
     pub attempted: usize,
     /// Queries that returned a pose.
     pub succeeded: usize,
-    /// `succeeded / attempted` (`0.0` when nothing was attempted).
+    /// `succeeded / attempted`. `NaN` when no query was attempted (then
+    /// `attempted` is 0 and 0/0 must not read as "everything failed"); `0.0`
+    /// when queries were attempted and none succeeded.
     pub success_rate: f64,
     /// Mean camera-centre error over successful queries, in metres.
     pub mean_translation_m: f64,
@@ -147,10 +151,15 @@ pub struct LocalizationReport {
 pub struct RetrievalReport {
     /// Hit rate@1: fraction of queries whose top-1 candidate is within the hit
     /// radius. This is "recall@1" as place recognition papers use the term.
+    ///
+    /// The denominator is the set of queries that *have* a relevant database
+    /// frame, i.e. [`RetrievalReport::queries_with_hit`], because
+    /// `cv_eval::retrieval::hit_rate_at_k` skips queries with an empty relevant
+    /// set (their hit rate is undefined). `queries_with_hit == 0` reports `0.0`.
     pub hit_rate_at_1: f64,
-    /// Hit rate@5, same convention.
+    /// Hit rate@5, same convention as [`RetrievalReport::hit_rate_at_1`].
     pub hit_rate_at_5: f64,
-    /// Hit rate@10, same convention.
+    /// Hit rate@10, same convention as [`RetrievalReport::hit_rate_at_1`].
     pub hit_rate_at_10: f64,
     /// Mean recall@1 over all relevant frames (information-retrieval
     /// convention: what fraction of the frames within the radius were
@@ -332,8 +341,11 @@ pub fn run(config: &BenchmarkConfig) -> Result<BenchmarkReport, String> {
     );
     let landmarks = &map.landmarks;
     let per_image_landmarks = &map.per_image;
+    // An empty map has no landmarks to average over: NaN, not 0.0, so the mean
+    // agrees with the `median` below and with the crate's `mean()` helper
+    // rather than reporting a measured-looking zero.
     let mean_observations_per_landmark = if map.landmarks.is_empty() {
-        0.0
+        f64::NAN
     } else {
         map.total_observations as f64 / map.landmarks.len() as f64
     };

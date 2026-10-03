@@ -511,8 +511,8 @@ fn translation_error_is_a_pose_parameter_difference() {
 fn evaluation_statistics_are_exact_on_hand_checked_batches() {
     let truth = [Pose::identity(), Pose::identity(), Pose::identity()];
 
-    // Nothing succeeded: every statistic is NaN, and success_rate is 0.0 rather
-    // than NaN.
+    // Nothing succeeded: the error statistics are NaN, while success_rate is a
+    // real 0.0 - three queries were asked and all of them failed.
     let stats = evaluate_localization(&[None, None, None], &truth);
     assert_eq!(stats.queries, 3);
     assert_eq!(stats.succeeded, 0);
@@ -520,10 +520,11 @@ fn evaluation_statistics_are_exact_on_hand_checked_batches() {
     assert!(stats.mean_translation_error.is_nan());
     assert!(stats.median_rotation_error_deg.is_nan());
 
-    // Nothing was asked: no division by zero.
+    // Nothing was asked: 0/0 is NaN for the success rate too, not 0.0 - an
+    // empty batch did not "fail everything".
     let stats = evaluate_localization(&[], &[]);
     assert_eq!(stats.queries, 0);
-    assert_eq!(stats.success_rate, 0.0);
+    assert!(stats.success_rate.is_nan());
     assert!(stats.mean_translation_error.is_nan());
 
     // One exact hit: zero error, and the metric is symmetric in its arguments.
