@@ -259,6 +259,10 @@ fn control_a_unit_scale_mesh_is_unchanged() {
     .expect("brute runs")
     .remove(0)
     .expect("CONTROL: a unit triangle must still be hit");
-    assert!((hit.0 - 5.0).abs() < 1e-5, "hit distance should be 5.0, got {}", hit.0);
+    assert!(
+        (hit.0 - 5.0).abs() < 1e-5,
+        "hit distance should be 5.0, got {}",
+        hit.0
+    );
     assert!((hit.2 - Vector3::z()).norm() < 1e-6);
 }
