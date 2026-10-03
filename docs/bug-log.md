@@ -312,6 +312,62 @@ behaviour for every caller of both entry points — a decision about whether
 `sigma = 0` means "identity" or "invalid". The latter would want an error channel
 that `gaussian_blur(&GrayImage, f32) -> GrayImage` does not have.
 
+## The gap survey: what this workspace claims and does not have
+
+A survey rather than a bug hunt, now kept at `GAPS.md` in the repo root. It exists
+because the bug count and the gap count answer different questions: this workspace
+aims to replace OpenCV, Open3D, Matplotlib, SciPy and VSLoc-RS, and what disqualifies
+a replacement is a capability that **looks present and is not**.
+
+Measured coverage, worst first — public items per `#[test]`:
+
+| crate | items | tests | items/test |
+|---|---:|---:|---:|
+| `python` | 96 | 0 | ∞ |
+| `localization` | 54 | 13 | 4.2 |
+| `plot` | 90 | 26 | 3.5 |
+| `video` | 77 | 43 | 1.8 |
+| `runtime` | 244 | 139 | 1.8 |
+
+`localization` is the VSLoc-RS target and the thinnest *real* crate in the workspace;
+`plot` is the Matplotlib target. Both are behind the crates nobody is comparing
+against.
+
+### The HIGH findings are all silent
+
+- **`photo::Stitcher::stitch` returns the input image unmodified as the panorama**,
+  with `Ok(())` and no warning. A placeholder shipped as a working API — the caller
+  cannot tell a stitched panorama from a passthrough.
+- **`hal`'s `compute_normals_morton_gpu_or_cpu`** uses `normals_cpu_analytic` as its
+  CPU fallback, and that function's body is `Vec::new()`. So N points in, **0
+  normals out**, `Ok`-shaped, no log. The name promises a CPU fallback and the
+  fallback is empty.
+- **`hal`'s `batch_nearest_neighbors`** is documented "on GPU" and its body says
+  `// Simplified: just return k nearest using brute force on CPU` — including a
+  blocking device→host read. GPU in the signature, CPU in the body, no record
+  returned. (Its NaN panic is what the earlier sweep fixed; the downgrade remains.)
+- **`hal`'s `simplify_mesh(_gpu, …)`** takes a GPU handle and ignores it.
+- **`features::scorers::score_magsac` panics on every call** and its documentation
+  did not say so. `score_msac` is `unimplemented!()` for a generic `M: Clone`, which
+  carries no residual metric. Its own docs documented the panic; `score_magsac`'s
+  did not, which is the part that was a defect — **fixed** by adding the section,
+  naming `score_ransac` as the usable scorer and the missing model-distance trait as
+  the reason. Making it work is a design change, not a fix, so the panic stays and is
+  now honest rather than merely loud.
+
+The distinction worth keeping: this is a **documented, deliberate** panic replacing a
+former silent lie (the stub returned zero inliers for every model), so it is a gap
+rather than a defect. `score_ransac` is the scorer that works.
+
+### Also recorded there
+
+`plot::Figure::subplot()` accepts an index and discards it — no panel layout exists;
+`video`'s `MOG2::new` has two inert parameters; `hal`'s `compute_distance_field` is
+neither signed nor a surface distance; `hal`'s `build_kdtree` returns Morton codes
+rather than a tree; `optimize`'s `Isam2` config is accepted and ignored; `3d` has two
+"different" normal algorithms that ignore their distinguishing parameters; and
+`runtime::best_runner` drops the GPU/CPU distinction its `_gpu_wait` siblings return.
+
 ## FIXED: a failed tracking frame reported the identity pose
 
 `Tracker::process_frame` fell back to `last_frame` when tracking failed, but

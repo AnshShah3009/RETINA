@@ -339,6 +339,20 @@ pub mod scorers {
     }
 
     /// MAGSAC scoring: σ-consensus with adaptive margin
+    ///
+    /// # Panics
+    ///
+    /// **Always panics**, because every iteration calls [`scorers::score_msac`],
+    /// which is unimplemented for a generic `M`. This function previously carried no
+    /// `# Panics` section at all, so a caller reading its documentation had no
+    /// warning — while `score_msac`'s own docs did say so.
+    ///
+    /// `scorers::score_ransac` is the usable scorer; it shares the same generic
+    /// bound. Making these work needs a model-distance trait threaded through the
+    /// scorer API, which is a design change rather than a fix: a generic `M: Clone`
+    /// carries no way to compute a residual, which is why the original stub
+    /// silently returned zero inliers for every model and was replaced with a
+    /// panic. A panic is the honest of the two, but it is not a working scorer.
     pub fn score_magsac<M: Clone>(
         model: &M,
         points: &[Point2<f64>],
