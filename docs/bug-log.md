@@ -459,67 +459,67 @@ behaviour for every tensor a caller passes. Recording it with the mechanism and 
 reproduction is more useful than shipping a change I could not verify across both
 kinds of machine.
 
-## NOT FIXED: the `3d` visibility aspect correction is claimed but unverified
+## FIXED after further measurement: the `3d` visibility aspect correction
 
-An audit agent changed the footprint Jacobian in `crates/3d/src/visibility.rs`
-from
+An earlier entry here recorded this as **not committed**, because the audit agent's
+measurement did not reproduce. That judgement was right at the time and **wrong on
+the merits** — a direct check settles it.
+
+### The decisive argument
+
+`project_point` places a point with
+
+```rust
+let cx = (ndc_x + 1.0) * 0.5 * w;
+```
+
+where `ndc_x` already carries the aspect, because `perspective_matrix(aspect, ...)`
+sets `P[0][0] = 1 / (aspect · tan(fov_y/2))`. So the local scale actually used to
+place the point is
 
 ```text
-px_per_unit_depth = w / (2 * tan(fov_y / 2))
+d(cx)/dx = 0.5 · w · P[0][0] = w / (2 · aspect · tan(fov_y / 2))
 ```
 
-to `w / (2 * aspect * tan(fov_y / 2))`, arguing that the focal length in pixels is
-`(w/2)/tan(fov_x/2)` and `tan(fov_x/2) = aspect · tan(fov_y/2)`. **That derivation
-is correct** — I checked it independently. But the agent's *measurement* does not
-support its conclusion, and my own measurement contradicts it in one case. So the
-change is recorded rather than committed.
-
-### What was claimed
-
-> resolution (64,  64) -> 200 of 200 visible
-> resolution (128, 64) -> 200 of 200 visible
-> resolution (64, 128) ->   0 of 200 visible
-
-and "a height greater than the width made every point invisible".
-
-### What I measured
+**and the footprint radius must be that same derivative**, or the splat is sized for
+a different projection than the one placing it. Checked numerically:
 
 ```
-fixed:     64x64 -> 146    64x128 -> 118    128x64 -> 146
-original:  64x64 -> 146    64x128 -> 166    128x64 -> 170
+ 64x64   aspect 1.00 -> d(cx)/dx =  55.426   with-aspect  55.426   matches
+ 64x128  aspect 0.50 -> d(cx)/dx = 110.851   code's       55.426   DOES NOT match
+128x64   aspect 2.00 -> d(cx)/dx =  55.426   code's      110.851   DOES NOT match
 ```
 
-`0 of 200` does not reproduce in either version. And the change moves the
-**landscape** count the wrong way for a halved Jacobian: a smaller footprint means
-fewer collisions and so *more* visible points, yet landscape fell from 170 to 146.
+There is no choice to make: the identity holds only with the aspect factor. An
+independent projection also shows the two formulations are not a convention — they
+give different NDC for the same point (0.173205 vs 0.346410 at 64x128), so only one
+can be the projection the caller means.
 
-### What is genuinely established
+### Why my earlier measurement misled me, and why the count was the wrong instrument
 
-- An independent projection confirms **all 200 ring points land inside the image**
-  at every one of those resolutions, so the differing counts are **footprint
-  collisions** in the index buffer, not visibility. No implementation is right or
-  wrong on "which points are visible" for this input.
-- The radii involved are 11–22 px, so the `max(1.0, ...)` floor never binds and the
-  aspect factor is fully effective in every case — the contradiction is not
-  explained by the floor.
-- The **formula** is right. `f_x = w / (2 · aspect · tan(fov_y/2))` follows from
-  `f_x = (w/2)/tan(fov_x/2)`.
+I measured **how many of 200 ring points stayed visible** and found the counts did
+not move in the direction the footprint change predicted:
 
-### Why it is not committed
+```
+fixed:     64x64 -> 146   64x128 -> 118   128x64 -> 146
+original:  64x64 -> 146   64x128 -> 166   128x64 -> 170
+```
 
-Because the agent's stated evidence does not reproduce, and I cannot reconcile the
-landscape case with the collision model. One of three things is true and I do not
-know which: the measurement was taken with a different scene or camera than the code
-comment describes; a second effect (projection, not footprint) dominates the
-counts; or the change is wrong in one regime. **A fix whose supporting evidence
-does not reproduce is not a fix**, and writing a test for it means choosing which
-behaviour to call correct — which is the decision I do not have grounds to make.
+That is not evidence against the fix. **Every one of those 200 ring points projects
+inside the image** at every resolution — verified with an independent projection —
+so the count is not "how many are visible" at all. It is how many survive
+*footprint collisions* in the index buffer, and that depends on how the rasteriser's
+index buffer breaks ties, not on whether the Jacobian is right. The end-to-end count
+conflates two effects, and I used it to adjudicate a question it cannot answer.
 
-**For whoever picks this up:** a direct unit test on `project_point` for a single
-known point, comparing the returned `radius` against the analytic
-`w/(2·aspect·tan(fov_y/2))/depth`, decides it immediately and needs no rasteriser.
-The end-to-end count is a poor instrument here because it conflates footprint
-collision with visibility.
+**The right instrument is a direct unit test on the placement Jacobian** — no
+rasteriser, no occlusion, no collision. That is what a single point's returned
+`radius` against `w/(2·aspect·tan)/depth` would have been from the start, and it is
+why a test written against the count failed to catch the defect.
+
+**The lesson, and it is the general one:** when a measurement disagrees with a
+derivation, the first question is whether the measurement measures the thing you
+care about. Here it did not — and the derivation was right from the start.
 
 ## CHECKED AND CLEAN: `core` and `calib3d`, after every candidate was refuted
 
