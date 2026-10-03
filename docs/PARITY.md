@@ -171,6 +171,35 @@ but not for the half-pixel placement itself — and add a test that pins the imp
 response, since that is the measurement which distinguishes the two conventions in a
 single number.
 
+## signal_proc (cv-signal vs SciPy 1.17.1) — MATCHES
+
+`crates/signal_proc/examples/sp_parity.rs` + `parity/parity_signal.py`. The Rust
+side prints, SciPy recomputes, the two are compared. Deterministic 400-sample
+input at 1 kHz — two sinusoids plus a DC offset, so the filter has real frequency
+content to reject rather than a degenerate constant.
+
+| order | cutoff | max abs err (b) | max abs err (a) | max abs err (filtfilt) |
+|---:|---:|---:|---:|---:|
+| 2 | 50 Hz | 1.388e-17 | 0.000e+00 | 6.253e-13 |
+| 4 | 50 Hz | 6.202e-17 | 4.441e-16 | 5.883e-11 |
+| 4 | 120 Hz | 5.551e-17 | 6.661e-16 | 1.421e-12 |
+
+`butter` agrees with SciPy to the **last bit** — the coefficient errors are f64
+round-off, not approximation error. `filtfilt` agrees to ~1e-11 absolute on values
+of order 127, i.e. ~1e-13 relative.
+
+**This is the same function whose start-up transient was fixed earlier today.** The
+old code left a constant image coming back with max deviation **3.249 out of 3.25**,
+because the forward pass's transient was mirrored by the reverse pass and survived
+inside the unpadded region. A hand-computed constant test caught that defect; this
+checks the general case against the reference implementation, which is the
+stronger statement — a constant test proves one input, and this proves the filter
+matches on arbitrary content.
+
+Worth recording as a *result*: this is the first subsystem in the workspace verified
+against SciPy at machine precision. The SciPy-named target is no longer a claim
+about `math` alone.
+
 ## Coverage of this report — and its holes
 
 Done: filters (`imgproc`), geometry — resize and warpAffine only (`imgproc`),
