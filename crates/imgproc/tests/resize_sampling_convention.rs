@@ -38,11 +38,24 @@
 //! deliberate decision rather than an accident — and so a future reader
 //! discovers it from the code rather than from a rendering artefact.
 //!
-//! **Scope.** `cv_hal`'s CPU resize implements the mapping, and this test covers
-//! the value the caller observes. The GPU resize and the WGSL shader are a separate
-//! pair and are *not* covered here; if the convention is ever changed, all three
-//! must change together or `resize` will disagree with itself depending on the
-//! backend.
+//! **Scope, and what was actually checked.** `cv_hal`'s CPU resize implements the
+//! mapping and this test covers the value the caller observes. The GPU path is a
+//! separate implementation — `hal/shaders/resize_f32.wgsl`, reached through
+//! `gpu_kernels::resize` — and it is **not** covered by a test here, because that
+//! needs an adapter. It was checked by reading:
+//!
+//! ```wgsl
+//! src_width_f  = f32(params.src_w) - 1.0;
+//! dst_width_f  = max(f32(params.dst_w) - 1.0, 1.0);
+//! src_x_f      = max(f32(x_dst) * src_width_f / dst_width_f, 0.0);
+//! ```
+//!
+//! which is align-corners, matching the CPU path. So the two backends agree with
+//! each other and disagree with OpenCV together. **If the convention is ever
+//! changed, all three — `imgproc`, `hal`'s CPU resize, and the WGSL shader — must
+//! change together**, or `resize` will disagree with itself depending on which
+//! backend ran it. That requirement is recorded here because the GPU side has no
+//! test guarding it.
 
 #![forbid(unsafe_code)]
 
