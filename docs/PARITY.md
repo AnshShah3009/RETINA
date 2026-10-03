@@ -200,6 +200,37 @@ Worth recording as a *result*: this is the first subsystem in the workspace veri
 against SciPy at machine precision. The SciPy-named target is no longer a claim
 about `math` alone.
 
+## calib3d projection (cv-calib3d vs `cv2.projectPoints` 4.13.0) — MATCHES
+
+`crates/calib3d/examples/parity_project.rs` + `parity/parity_calib_project.py`.
+144 projections: 48 points at radii 0.2/0.6/1.0/1.5 through three distortion models,
+with a non-trivial rotated and translated pose.
+
+| distortion | max abs err u (px) | max abs err v (px) |
+|---|---:|---:|
+| none | 2.274e-13 | 1.137e-13 |
+| mild (`k1=-0.28`) | 2.274e-13 | 2.274e-13 |
+| strong (`k1=-0.82, k3=0.012`) | 1.137e-13 | 1.137e-13 |
+
+**2.274e-13 px** on image coordinates of order 640 — about `3.5e-16` relative, which
+is f64 round-off. The model, the pose convention and the radtan distortion all
+agree with OpenCV exactly, including the strong case where the cubic radial term
+dominates and a sign or coefficient-order error would be plainly visible.
+
+The cloud deliberately spans a range of radii: at small `r` the radial terms are
+near zero, so a bug in `k1`/`k2`/`p1`/`p2` would not show at all. The outer ring at
+`r = 1.5` is what makes this comparison able to fail.
+
+**This also settles the pose convention in this path.** `Pose` applies `R*p + t` and
+`cv2.projectPoints` applies `R*X + t`; the two agree to round-off, so there is no
+world-to-camera / camera-to-world ambiguity here. That ambiguity is the class of
+defect this workspace keeps finding — a pose and its inverse are *both* well-formed,
+so nothing downstream complains — and projection is where it would be most
+misleading, because the wrong convention still produces plausible pixels.
+
+Projection is the most-used operation in the workspace: every detection, every pose
+estimate and every reprojection error passes through it.
+
 ## Coverage of this report — and its holes
 
 Done: filters (`imgproc`), geometry — resize and warpAffine only (`imgproc`),
