@@ -5,7 +5,12 @@ edition = "2021"
 
 [lib]
 name = "cv_native"
-crate-type = ["cdylib"]
+# `rlib` alongside `cdylib`: a cdylib alone produces no linkable Rust
+# library, so `crates/python/tests/*.rs` could not name `cv_native` at all
+# (probe: "error[E0433]: cannot find module or crate `cv_native` in this scope"),
+# which is how a crate with 96 public Python items ended up with 0 tests.
+# `cargo build -p cv-python` still produces the same `libcv_native.so`.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = { workspace = true, features = ["abi3-py37"] }

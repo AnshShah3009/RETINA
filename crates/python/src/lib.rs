@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-mod core;
+pub mod core;
 mod dnn;
 mod features;
 mod helpers;

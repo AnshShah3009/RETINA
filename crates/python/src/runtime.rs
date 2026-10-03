@@ -82,6 +82,14 @@ pub struct PyAffinityGroup {
 #[pymethods]
 impl PyAffinityGroup {
     /// Leave this affinity group.
+    ///
+    /// A process holds exactly one group id, so leaving is a process-level
+    /// operation: the coordinator's `leave_group` is itself `join_group(0)`
+    /// ("set to 0 = ungrouped", crates/distributed/src/distributed/shared_memory.rs:551),
+    /// which is what `join_affinity_group(0)` does here. `self.group_id` is
+    /// therefore informational only - it records the group this handle was
+    /// issued for, and a stale handle cannot be used to leave some *other*
+    /// group, because there is no other group to act on.
     pub fn leave(&self) -> PyResult<()> {
         let s = scheduler()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
