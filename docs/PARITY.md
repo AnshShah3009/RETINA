@@ -231,6 +231,34 @@ misleading, because the wrong convention still produces plausible pixels.
 Projection is the most-used operation in the workspace: every detection, every pose
 estimate and every reprojection error passes through it.
 
+## What parity is *possible* here, and what is not
+
+Measured, because it bounds every claim in this report:
+
+| reference library | installed | so |
+|---|:--:|---|
+| `cv2` (OpenCV) | **yes**, 4.13.0 | OpenCV-side parity is available |
+| `scipy` | **yes**, 1.17.1 | SciPy-side parity is available |
+| `numpy` | **yes**, 2.4.6 | shared |
+| `open3d` | **no** | **no Open3D parity is possible on this machine** |
+| `matplotlib` | **no** | **no Matplotlib parity is possible** |
+| `sklearn` | **no** | no scikit-learn reference |
+
+**This is a hard limit on two of the five named targets.** Of OpenCV, Open3D,
+Matplotlib, SciPy and VSLoc-RS, this machine can verify **two** — OpenCV and SciPy.
+Claims about Open3D or Matplotlib parity cannot be substantiated here at all, and
+any such claim would be unsupported.
+
+It also shapes where effort pays off. Extending the `cv2` and `scipy` harness is
+cheap and immediately checkable; verifying the Open3D side would first require
+installing it, which is an environment decision rather than a code one.
+
+`sklearn` being absent also means the nearest available references for
+point-cloud geometry are `numpy` (exact arithmetic on hand-computed answers) and
+`scipy` (linear algebra, `spatial.transform`). That is what the `3d` and
+`registration` audits have been using, and it is why those results rest on
+hand-computed invariants rather than on a reference implementation.
+
 ## Coverage of this report — and its holes
 
 Done: filters (`imgproc`), geometry — resize and warpAffine only (`imgproc`),
