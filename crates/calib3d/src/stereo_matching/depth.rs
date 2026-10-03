@@ -161,7 +161,26 @@ pub fn filter_pointcloud_by_depth(
 
 /// Compute depth statistics
 pub fn compute_depth_stats(depths: &[Option<f64>]) -> Option<(f64, f64, f64)> {
-    let valid_depths: Vec<f64> = depths.iter().filter_map(|&d| d).collect();
+    // **Non-finite depths must be dropped, not merely unwrapped.**
+    //
+    // `filter_map(|&d| d)` keeps `Some(NaN)` and `Some(inf)` because `Option` is
+    // populated - they are not `None`. Measured on `[Some(1.0), Some(NaN),
+    // Some(inf)]`, this returned:
+    //
+    //     Some((1.0, inf, NaN))
+    //
+    // A plausible-looking triple carrying NaN in the mean, and the failure is
+    // **silent in a way that is easy to miss**: `f64::min` and `f64::max` return
+    // the *non-NaN* operand, so `min` survives as a clean `1.0` while only the
+    // mean is destroyed. Every component looked plausible individually.
+    //
+    // A depth of NaN or infinity is not a measurement, so it is excluded on the
+    // same grounds as `None`.
+    let valid_depths: Vec<f64> = depths
+        .iter()
+        .filter_map(|&d| d)
+        .filter(|d| d.is_finite())
+        .collect();
 
     if valid_depths.is_empty() {
         return None;
