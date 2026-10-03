@@ -240,18 +240,19 @@ Measured, because it bounds every claim in this report:
 | `cv2` (OpenCV) | **yes**, 4.13.0 | OpenCV-side parity is available |
 | `scipy` | **yes**, 1.17.1 | SciPy-side parity is available |
 | `numpy` | **yes**, 2.4.6 | shared |
-| `open3d` | **no** | **no Open3D parity is possible on this machine** |
-| `matplotlib` | **no** | **no Matplotlib parity is possible** |
+| `open3d` | **yes**, 0.20.0 | Open3D-side parity now possible |
+| `matplotlib` | **yes**, 3.11.2 | Matplotlib-side parity now possible |
 | `sklearn` | **no** | no scikit-learn reference |
 
-**This is a hard limit on two of the five named targets.** Of OpenCV, Open3D,
-Matplotlib, SciPy and VSLoc-RS, this machine can verify **two** — OpenCV and SciPy.
-Claims about Open3D or Matplotlib parity cannot be substantiated here at all, and
-any such claim would be unsupported.
+**All five reference stacks are now present**, so the earlier limit no longer
+applies. What is *not* installed is `sklearn`, and VSLoc-RS has no Python reference
+at all — for that target the comparison is against **source**, at
+`/home/Phoenix/refs/visloc-rs`, recorded in `docs/VS_REFERENCE_COMPARISON.md`.
 
-It also shapes where effort pays off. Extending the `cv2` and `scipy` harness is
-cheap and immediately checkable; verifying the Open3D side would first require
-installing it, which is an environment decision rather than a code one.
+`sklearn` being absent means the nearest references for point-cloud geometry remain
+`numpy` (exact arithmetic on hand-computed answers) and `scipy` (linear algebra,
+`scipy.spatial`). That is what the `3d` and `registration` audits have used, and it
+is why those results rest on hand-computed invariants rather than a reference.
 
 `sklearn` being absent also means the nearest available references for
 point-cloud geometry are `numpy` (exact arithmetic on hand-computed answers) and
@@ -385,3 +386,95 @@ gap as a defect.
 Five tests, all passing. The control (`orb_finds_the_planted_corners`) runs the
 image-size reasoning rather than assuming it.
 
+---
+
+## `crates/3d` vs Open3D 0.20.0 — TWO REAL DIVERGENCES FOUND
+
+`crates/3d/examples/parity_open3d.rs` + `parity/parity_open3d.py`. This is the
+**first Open3D comparison possible in this workspace**, and it immediately found a
+defect that no internal check could see.
+
+### Outlier removal — MATCHES on all 10 configurations
+
+| filter | parameters | rust n | open3d n | sets equal |
+|---|---|---:|---:|:--:|
+| statistical | nb=5, sr=2.0 | 27 | 27 | yes |
+| statistical | nb=4, sr=2.0 | 27 | 27 | yes |
+| statistical | nb=20, sr=2.0 | 27 | 27 | yes |
+| radius | r=0.5, min=2 | 27 | 27 | yes |
+| radius | r=0.12, min=4 | 19 | 19 | yes |
+
+(all 10 rows match) Index sets are integers, so set equality is the whole comparison
+and no tolerance is meaningful — none is applied.
+
+### Voxel downsampling — legitimate difference, and it is NOT the centroid rule
+
+Open3D returns the **arithmetic mean** of each voxel's points, and so does
+`cv_3d::filters::voxel_downsample` and `spatial::VoxelGrid::downsample` — verified
+by reading both implementations. A "first point in the voxel" implementation would
+have shown up as a centroid distance of order the voxel size; the measured distances
+are the half-voxel grid-anchor shift, at most `vs/2`. Counts differ where the two
+disagree on which cells are occupied (`neg`: rust 5 vs Open3D 3 at vs=0.5), which is
+a grid-anchor convention, not an arithmetic error.
+
+### DEFECT: normal estimation on a sphere — and it is a degenerate normal
+
+| case | knn | n | mean angle to analytic | **max angle** | verdict |
+|---|---:|---:|---:|---:|---|
+| sphere | 20 | 312 | 1.57 deg | **90.0000 deg** | DEVIATES |
+| sphere | 8 | 312 | 2.79 deg | **90.0000 deg** | DEVIATES |
+| plane z=0.25 | 8 | 25 | 0.0000 | 0.0000 | **matches** |
+
+The plane is **exact** (0.0000 deg), which is the control: the convention, the
+comparison and the harness are all right. On the sphere the *mean* is small but the
+**max is exactly 90 deg**, which is not noise — 90 degrees is what you get when a
+normal is a zero vector, since `arccos(0)`. A k-NN normal estimate is undefined
+where the neighbourhood is planar, and the sphere's pole neighbourhoods are the
+degenerate case. `min |n|-1 = 0.00e+00` confirms at least one returned normal has
+**zero length**, and the docstring elsewhere in this workspace records that a
+zero-length vector normalises to NaN.
+
+### DEFECT: k-NN neighbour sets differ from Open3D's
+
+| knn | queries | sets equal | Jaccard | ordering equal |
+|---:|---:|---:|---:|---:|
+| 6 | 27 | NO | 0.8202 | 1/27 |
+| 4 | 27 | NO | 0.7705 | 3/27 |
+
+A Jaccard of 0.82 means most neighbours agree, so this is a *tie-breaking or
+distance-metric* difference rather than a wrong neighbourhood — but it is a real
+divergence, and ordering matches in almost none of the queries.
+
+### Also noted by the harness, in `crates/3d/src/gpu/registration.rs`
+
+The incremental rotation is built from a raw twist by **first-order linearisation**
+(`inc[0][1] = -g; inc[0][2] = b; …`), which is the matrix exponential only to
+first order, so the composed result is not a rotation:
+
+```
+det(R) - 1                          = 2.878e-03
+|R[0][1] + R[1][0]|  (should be 0)  = 2.215e-05
+```
+
+Substituting a proper SE(3) exponential map, everything else identical, drops the
+error from `1.444e-03` to `1.545e-16` — f64 round-off. **NOT CHANGED here**: that
+harness owns only example and parity files, and the fix belongs in the library with
+its own test. Recorded for the next round.
+
+### Harness bugs found and fixed while getting this to run
+
+Four, all of which would have produced a *false* result rather than an error:
+
+1. `#CASE` was never handled, so `cur` stayed `None` and every per-case collection
+   was filed under the wrong key.
+2. `#NRM <k> <n>` assigned to the same variable as the case name, clobbering it with
+   an integer.
+3. `#VGP` has no count field, so slicing coordinates from the wrong index took two
+   values instead of three and every point set failed a `reshape(-1, 3)`.
+4. `compute_knn_graph` **does not exist in Open3D 0.20** (it raises
+   `AttributeError`); the supported path is `KDTreeFlann.search_knn_vector_3d`.
+
+Worth stating plainly: the agent that wrote this harness stopped at its turn limit
+with it **not running at all**, and the failure surfaced as a `ValueError` rather
+than a comparison. A parity script that raises is worse than no script, because it
+looks like progress.
