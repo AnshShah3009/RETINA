@@ -297,6 +297,106 @@ fn missing_input_file_exits_nonzero_with_clear_message() {
     assert!(stderr.contains("error"), "stderr: {stderr}");
 }
 
+/// A zero RPE gap is not a measurement, so it is refused rather than reported.
+///
+/// `cv_eval::Trajectory::rpe` documents `delta_frames == 0` as "no measurement"
+/// (every pose compared with itself), so the report contained
+/// `RPE translation rmse (delta=0): NaN m` and the process still exited 0 - a
+/// metric-shaped hole in an otherwise successful report, produced by one
+/// keystroke of difference from `--rpe-delta 1`.
+#[test]
+fn a_zero_rpe_delta_is_refused_and_a_one_is_still_accepted() {
+    let dir = TempDir::new("rpe_zero");
+    let estimate = dir.write(
+        "est.txt",
+        "0.0 5.0 6.0 -7.0 0 0 0 1\n0.1 6.0 6.0 -7.0 0 0 0 1\n0.2 7.0 6.0 -7.0 0 0 0 1\n",
+    );
+    let ground_truth = dir.write(
+        "gt.txt",
+        "0.0 0.0 0.0 0.0 0 0 0 1\n0.1 1.0 0.0 0.0 0 0 0 1\n0.2 2.0 0.0 0.0 0 0 0 1\n",
+    );
+    let base = |delta: &str| {
+        run(&[
+            "trajectory",
+            "--estimate",
+            path_str(&estimate),
+            "--ground-truth",
+            path_str(&ground_truth),
+            "--format",
+            "tum",
+            "--rpe-delta",
+            delta,
+        ])
+    };
+
+    let output = base("0");
+    assert!(
+        !output.status.success(),
+        "a zero frame gap measures nothing and must not exit 0:\n{}",
+        stdout_of(&output)
+    );
+    assert!(stdout_of(&output).is_empty(), "no report on failure");
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("--rpe-delta"), "stderr: {stderr}");
+
+    // Control: the well-formed neighbouring value still produces a report, and
+    // the report's RPE is the number for the gap that was asked for.
+    let output = base("1");
+    assert!(output.status.success(), "stderr: {}", stderr_of(&output));
+    let stdout = stdout_of(&output);
+    assert!(stdout.contains("delta=1"), "{stdout}");
+    assert!(
+        !stdout.contains("NaN"),
+        "RPE of a valid gap is not NaN:\n{stdout}"
+    );
+}
+
+/// A negative association tolerance is refused by name.
+///
+/// `tum::associate` rejects a negative `max_dt` outright and returns no match,
+/// so the run used to fail with "no TUM poses could be associated within
+/// --max-dt = -1 s (estimate has 3 poses, ground truth has 3)" - a message about
+/// the *data*, for a flag value that could never have matched anything.
+#[test]
+fn a_negative_max_dt_is_refused_by_name() {
+    let dir = TempDir::new("neg_max_dt");
+    let trajectory = "0.0 0.0 0.0 0.0 0 0 0 1\n0.1 1.0 0.0 0.0 0 0 0 1\n";
+    let estimate = dir.write("est.txt", trajectory);
+    let ground_truth = dir.write("gt.txt", trajectory);
+
+    let output = run(&[
+        "trajectory",
+        "--estimate",
+        path_str(&estimate),
+        "--ground-truth",
+        path_str(&ground_truth),
+        "--format",
+        "tum",
+        "--max-dt",
+        "-1",
+    ]);
+    assert!(!output.status.success(), "a negative tolerance must fail");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("--max-dt") && stderr.contains("negative"),
+        "the failure must name the flag and the reason, not the data: {stderr}"
+    );
+
+    // Control: the same file with a positive tolerance succeeds.
+    let output = run(&[
+        "trajectory",
+        "--estimate",
+        path_str(&estimate),
+        "--ground-truth",
+        path_str(&ground_truth),
+        "--format",
+        "tum",
+        "--max-dt",
+        "0.05",
+    ]);
+    assert!(output.status.success(), "stderr: {}", stderr_of(&output));
+}
+
 #[test]
 fn unknown_flag_exits_nonzero_with_clear_message() {
     let output = run(&[

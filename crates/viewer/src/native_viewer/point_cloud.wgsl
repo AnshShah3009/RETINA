@@ -75,13 +75,13 @@ fn vs_main(input: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     // size looked plausible before the projection existed and wrong after.
     let depth = max(eye.w, 0.01);
 
-    // Perspective-correct radius: a point twice as near covers twice the pixels.
-    // 0.02 is an arbitrary near-plane stand-in; it only sets the scale.
     // `point_radius` is a radius in **pixels**, and NDC is the screen: it spans
-    // -1..1 across the viewport regardless of how far away the point is. So the
-    // conversion is simply radius_px / (width_px / 2), with no depth term.
+    // -1..1 across each axis regardless of how far away the point is. So the
+    // conversion is simply radius_px / (pixels_along_that_axis / 2), with no
+    // depth term, and each axis divides by its *own* half extent so a sprite
+    // stays circular in pixels on a non-square viewport.
     //
-    // Three versions of this line, all measured, all wrong:
+    // Four versions of this line, all measured:
     //
     // - `point_radius * 0.02 / depth` gave 0.024 NDC at depth 2.5 - under half a
     //   pixel, so 16,826 points rendered 50 lit pixels.
@@ -91,12 +91,22 @@ fn vs_main(input: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     //   and read as one huge semicircle.
     // - `point_radius / (depth * half_width)` fixed the units but kept the depth
     //   divide, so a point asked to be 4 px across came out 1.6 px.
+    // - `point_radius / half_width`, then scaled by `* half_width` again in the
+    //   offset below, cancelled the two conversions: the offset that survived
+    //   the perspective divide was `point_radius` in NDC, i.e.
+    //   `point_radius * (width / 2)` pixels. Measured on a 640x480 viewport with
+    //   a single point at radius 4 px: the sprite covered the whole frame
+    //   (640 x 480 px, ~300k lit pixels) instead of 8 x 8 px. The y axis was
+    //   additionally off by `height / width` (480 px tall instead of 8) because
+    //   it used the x half-extent.
     //
     // Dividing by depth would be right for a constant *physical* size - the same
     // size in metres at any distance. A viewer slider labelled in pixels wants a
     // constant *screen* size, and NDC already is the screen.
     let half_width = max(uniforms.pixel_size.x * 0.5, 1.0);
-    let radius_ndc = uniforms.point_radius / half_width;
+    let half_height = max(uniforms.pixel_size.y * 0.5, 1.0);
+    let radius_ndc_x = uniforms.point_radius / half_width;
+    let radius_ndc_y = uniforms.point_radius / half_height;
 
     // WebGPU requires `z_ndc` in [0, 1], and the host sends only a view matrix -
     // no projection - so this stands in for the projection's depth term.
@@ -122,9 +132,8 @@ fn vs_main(input: VertexIn, @builtin(vertex_index) vi: u32) -> VertexOut {
     // to be added *after* the divide. It therefore goes in as an offset on the
     // clip vector scaled by `w`, which is what keeps a point the same number of
     // pixels across at every depth.
-    let half_height = max(uniforms.pixel_size.y * 0.5, 1.0);
-    let offset_x = corner.x * radius_ndc * eye.w * half_width;
-    let offset_y = corner.y * radius_ndc * eye.w * half_height;
+    let offset_x = corner.x * radius_ndc_x * eye.w;
+    let offset_y = corner.y * radius_ndc_y * eye.w;
 
     // A real perspective depth, so a depth test can resolve overdraw.
     //

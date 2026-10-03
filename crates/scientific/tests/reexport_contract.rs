@@ -165,11 +165,26 @@ fn reexported_delaunay_covers_the_hull() {
         area
     );
     for t in &triangles {
+        // Three *distinct* indices, each naming a real point. The check that
+        // used to be here was
+        // `(t[0] as f64 - 10.0 * 0.5).abs() < 100.0 && t[0] != t[1] && t[1] != t[2]`:
+        // the first clause is `|i - 5| < 100`, true for every index of this
+        // four-point set, and the second never compares `t[0]` with `t[2]`. So a
+        // degenerate triangle `[0, 1, 0]`, or an index past the end of `points`,
+        // passed an assertion whose message claims it rejects exactly those.
         assert!(
-            (t[0] as f64 - 10.0 * 0.5).abs() < 100.0 && t[0] != t[1] && t[1] != t[2],
+            t[0] != t[1] && t[1] != t[2] && t[0] != t[2],
             "triangle vertices must be three distinct point indices, got {:?}",
             t
         );
+        for &index in t {
+            assert!(
+                index < points.len(),
+                "triangle index {} is out of range for {} points",
+                index,
+                points.len()
+            );
+        }
     }
 }
 

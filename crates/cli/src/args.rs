@@ -121,7 +121,31 @@ pub fn parse_trajectory(argv: &[String]) -> Result<TrajectoryArgs, String> {
         None => Alignment::Se3,
     };
     let rpe_delta = flags.usize_or("rpe-delta", DEFAULT_RPE_DELTA)?;
+    if rpe_delta == 0 {
+        // `cv_eval::Trajectory::rpe` documents `delta_frames == 0` as "no
+        // measurement": every pose is compared with itself, `inv(T_i) * T_i` is
+        // the identity for *any* pair of trajectories, and the report comes out
+        // NaN. The subcommand then exited 0 with `RPE ... rmse: NaN` in it,
+        // which reads as a metric rather than as a refused configuration, so a
+        // typo (`--rpe-delta 0` for `--rpe-delta 1`) silently produced a report
+        // with no RPE in it. `--k` is already refused when it is zero.
+        return Err(
+            "option '--rpe-delta' must be at least 1 (a zero frame gap compares every \
+             pose with itself and measures nothing)"
+                .to_string(),
+        );
+    }
     let max_dt = flags.f64_or("max-dt", DEFAULT_MAX_DT)?;
+    if max_dt < 0.0 {
+        // A negative tolerance is not a tolerance: `tum::associate` rejects it
+        // outright and returns no match, so the run failed with "no TUM poses
+        // could be associated within --max-dt = -1 s", which blames the data for
+        // a flag that could never have worked.
+        return Err(format!(
+            "option '--max-dt' must not be negative, got {max_dt} (the association \
+             tolerance is a duration in seconds)"
+        ));
+    }
     Ok(TrajectoryArgs {
         estimate,
         ground_truth,

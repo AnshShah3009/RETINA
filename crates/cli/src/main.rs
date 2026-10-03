@@ -71,8 +71,8 @@ fn print_usage() {
     println!("  --ground-truth <FILE>        ground-truth trajectory (required)");
     println!("  --format <tum|kitti|euroc>   input format (required)");
     println!("  --align <none|se3|sim3>      alignment before ATE (default: se3)");
-    println!("  --rpe-delta <N>              RPE frame gap (default: 1)");
-    println!("  --max-dt <SECONDS>           TUM association tolerance (default: 0.02)\n");
+    println!("  --rpe-delta <N>              RPE frame gap, at least 1 (default: 1)");
+    println!("  --max-dt <SECONDS>           TUM association tolerance, >= 0 (default: 0.02)\n");
     println!("model options:");
     println!("  --images <FILE>              COLMAP images.txt (required)");
     println!("  --points3d <FILE>            COLMAP points3D.txt (optional)");

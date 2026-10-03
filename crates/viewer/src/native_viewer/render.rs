@@ -47,6 +47,45 @@ struct Uniforms {
 
 const SHADER: &str = include_str!("point_cloud.wgsl");
 
+/// The vertex layout the pipeline, the shader and the vertex buffers agree on.
+///
+/// One `Vertex` per **point**: the buffer is stepped once per instance, and the
+/// shader's `vertex_index` only selects a corner out of `CORNERS`. `draw_into`
+/// draws six vertices per instance for exactly that reason.
+///
+/// `pub(crate)` so the readback test in `native_viewer.rs` can draw the demo
+/// scene with this exact layout: a behavioural test that shares the source of
+/// truth, rather than a second copy that can drift from it.
+///
+/// See the test module below for the measurement that pinned the step mode: with
+/// `VertexStepMode::Vertex` every instance read the first six entries of the
+/// buffer, so each sprite was assembled from points 0..6 (six different points
+/// per quad), and a cloud of fewer than six points was not a drawable
+/// configuration at all.
+pub(crate) fn vertex_layout() -> eframe::wgpu::VertexBufferLayout<'static> {
+    eframe::wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<Vertex>() as u64,
+        step_mode: eframe::wgpu::VertexStepMode::Instance,
+        attributes: &[
+            eframe::wgpu::VertexAttribute {
+                format: eframe::wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            eframe::wgpu::VertexAttribute {
+                format: eframe::wgpu::VertexFormat::Float32x3,
+                offset: std::mem::size_of::<[f32; 3]>() as u64,
+                shader_location: 1,
+            },
+            eframe::wgpu::VertexAttribute {
+                format: eframe::wgpu::VertexFormat::Float32,
+                offset: std::mem::size_of::<[f32; 6]>() as u64,
+                shader_location: 2,
+            },
+        ],
+    }
+}
+
 struct CloudBuffer {
     buffer: eframe::wgpu::Buffer,
     len: usize,
@@ -110,27 +149,7 @@ impl PointCloudRenderer {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[eframe::wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: eframe::wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        eframe::wgpu::VertexAttribute {
-                            format: eframe::wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        eframe::wgpu::VertexAttribute {
-                            format: eframe::wgpu::VertexFormat::Float32x3,
-                            offset: std::mem::size_of::<[f32; 3]>() as u64,
-                            shader_location: 1,
-                        },
-                        eframe::wgpu::VertexAttribute {
-                            format: eframe::wgpu::VertexFormat::Float32,
-                            offset: std::mem::size_of::<[f32; 6]>() as u64,
-                            shader_location: 2,
-                        },
-                    ],
-                }],
+                buffers: &[vertex_layout()],
             },
             primitive: eframe::wgpu::PrimitiveState {
                 topology: eframe::wgpu::PrimitiveTopology::TriangleList,
@@ -303,8 +322,17 @@ fn build_vertices(pc: &PointCloud, min_z: f32, max_z: f32) -> Vec<Vertex> {
         // directly comparable.
         let (color, has_color) = match pc.colors.as_ref().and_then(|c| c.get(i)) {
             Some(c) => {
-                let m = c.x.abs().max(c.y.abs()).max(c.z.abs()).max(1e-6);
-                ([c.x / m, c.y / m, c.z / m], 1.0)
+                // `PointCloud::colors` is already normalised RGB in [0, 1] - that
+                // is what every producer in this workspace stores: the PLY reader
+                // divides byte channels by 255, the PLY writer multiplies by 255,
+                // and `NativeViewer::from_image` divides by 255. Scaling each
+                // colour by its own largest component "normalised" it a second
+                // time and destroyed it: measured, (0.25, 0.50, 0.75) was
+                // uploaded as (0.333, 0.667, 1.0) and mid-grey (0.5, 0.5, 0.5)
+                // as pure white, so every colour lost its brightness and was
+                // pushed to full saturation. A colour is passed through as it
+                // arrived; there is nothing to renormalise.
+                ([c.x, c.y, c.z], 1.0)
             }
             None => (height_ramp(p.z, min_z, max_z), 0.0),
         };
@@ -355,5 +383,98 @@ fn height_ramp(z: f32, min: f32, max: f32) -> [f32; 3] {
     } else {
         let k = (t - 0.5) * 2.0;
         [k, 1.0 - k, 0.0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::Point3;
+
+    /// The attribute fetch advances once per **instance**, because that is what
+    /// `CORNERS[vertex_index]` + a six-vertex draw needs.
+    ///
+    /// This was `VertexStepMode::Vertex`, which made every one of the six
+    /// vertices of a sprite fetch its own buffer entry: the sprite's six corners
+    /// came from six different points, so a quad spanned the cloud instead of
+    /// surrounding one point. A cloud of fewer than six points could not be
+    /// drawn at all - measured with a one-point cloud, wgpu 27 rejected the
+    /// draw: `Vertex 6 extends beyond limit 1 imposed by the buffer in slot 0`.
+    /// The pixel-level consequence is measured in `tests/sprite_geometry.rs`.
+    #[test]
+    fn the_vertex_buffer_steps_once_per_point() {
+        let layout = vertex_layout();
+        assert_eq!(
+            layout.step_mode,
+            eframe::wgpu::VertexStepMode::Instance,
+            "the buffer holds one vertex per point and is indexed by instance; \
+             stepping it per vertex makes each sprite read six different points"
+        );
+        assert_eq!(
+            layout.array_stride,
+            std::mem::size_of::<Vertex>() as u64,
+            "the stride must match the struct the shader describes"
+        );
+        assert_eq!(layout.array_stride, 28, "3 + 3 + 1 floats");
+        let offsets: Vec<u64> = layout.attributes.iter().map(|a| a.offset).collect();
+        assert_eq!(offsets, vec![0, 12, 24], "position, colour, has_color");
+        let locations: Vec<u32> = layout
+            .attributes
+            .iter()
+            .map(|a| a.shader_location)
+            .collect();
+        assert_eq!(locations, vec![0, 1, 2]);
+    }
+
+    /// A cloud's own colour reaches the GPU unchanged.
+    ///
+    /// The upload used to divide every channel by that colour's largest
+    /// component, which is not a normalisation of RGB in [0, 1] - the range
+    /// every producer in the workspace stores (the PLY reader and
+    /// `NativeViewer::from_image` divide byte channels by 255, the PLY writer
+    /// multiplies by 255). Measured before the fix: (0.25, 0.50, 0.75) was
+    /// uploaded as (0.333, 0.667, 1.0) and mid-grey (0.5, 0.5, 0.5) became pure
+    /// white, so every point lost its brightness and was driven to full
+    /// saturation.
+    #[test]
+    fn cloud_colours_are_uploaded_unchanged() {
+        let mut pc = PointCloud::default();
+        pc.points.push(Point3::new(0.0, 0.0, 0.0));
+        pc.points.push(Point3::new(0.0, 0.0, 1.0));
+        pc.points.push(Point3::new(0.0, 0.0, 2.0));
+        pc.colors = Some(vec![
+            Point3::new(0.25, 0.5, 0.75),
+            Point3::new(0.5, 0.5, 0.5),
+            Point3::new(0.1, 0.2, 0.4),
+        ]);
+
+        let (min_z, max_z) = z_range(&pc);
+        let verts = build_vertices(&pc, min_z, max_z);
+        assert_eq!(verts.len(), 3);
+
+        let cases = [
+            ([0.25, 0.5, 0.75], [0.25, 0.5, 0.75]),
+            ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
+            ([0.1, 0.2, 0.4], [0.1, 0.2, 0.4]),
+        ];
+        for (i, (got, want)) in cases.iter().enumerate() {
+            assert_eq!(verts[i].color, *want, "point {i} colour was altered");
+            assert_eq!(
+                verts[i].has_color, 1.0,
+                "a colour that came from the cloud must be marked as the cloud's own"
+            );
+            let _ = got;
+        }
+
+        // Control: with no colour array the height ramp is used, and the vertex
+        // is marked as *inferred* rather than measured.
+        let mut bare = PointCloud::default();
+        bare.points.push(Point3::new(0.0, 0.0, 0.0));
+        bare.points.push(Point3::new(0.0, 0.0, 1.0));
+        let (min_z, max_z) = z_range(&bare);
+        let verts = build_vertices(&bare, min_z, max_z);
+        assert_eq!(verts[0].has_color, 0.0);
+        assert_eq!(verts[0].color, [0.0, 0.0, 1.0], "t = 0 is the blue end");
+        assert_eq!(verts[1].color, [1.0, 0.0, 0.0], "t = 1 is the red end");
     }
 }

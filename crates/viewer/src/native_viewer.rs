@@ -101,6 +101,13 @@ pub struct NativeViewer {
     /// Point of interest. Fixed at the origin rather than fitted per cloud, so
     /// the camera does not jump every time a cloud is added.
     target: [f32; 3],
+    /// The part of the current drag that has already been applied to the camera.
+    ///
+    /// `pointer.total_drag_delta()` measures from the press, but the camera is
+    /// turned by a per-frame increment, so the increment is the difference
+    /// between this and the total. Reset to zero whenever no drag is in
+    /// progress.
+    drag_applied: egui::Vec2,
 }
 
 impl NativeViewer {
@@ -126,6 +133,7 @@ impl NativeViewer {
             camera_pitch: 25.0,
             camera_dist: 2.5,
             target: [0.45, 0.45, 0.45],
+            drag_applied: egui::Vec2::ZERO,
         }
     }
 
@@ -315,10 +323,26 @@ impl NativeViewer {
             // a `CentralPanel` never captures it - so `drag_delta()` was always
             // zero and the orbit was dead even though the pointer was genuinely
             // being dragged. `pointer.total_drag_delta()` is the position since
-            // the press, which is what the orbit wants.
-            let delta = ctx
-                .input(|i| i.pointer.total_drag_delta())
-                .unwrap_or(egui::Vec2::ZERO);
+            // the press, which is what the orbit wants - but *as the position*,
+            // not as an increment: feeding it to `camera_yaw` directly
+            // re-applied the whole gesture every frame, so a gesture orbited
+            // once per frame it was drawn over. Measured with a 30 px drag at
+            // distance 2.5: one 30 px frame gave yaw 9.375 degrees, the same
+            // 30 px arriving as three 10 px frames gave 18.75 (1 + 2 + 3 = 6
+            // increments of 10 px is 2x one of 30 px) - a slow drag spins the
+            // camera and a fast one does not.
+            let drag_now = ctx.input(|i| i.pointer.total_drag_delta());
+            let delta = match drag_now {
+                Some(total) => {
+                    let step = total - self.drag_applied;
+                    self.drag_applied = total;
+                    step
+                }
+                None => {
+                    self.drag_applied = egui::Vec2::ZERO;
+                    egui::Vec2::ZERO
+                }
+            };
             if delta.x != 0.0 {
                 // Scaled by distance so a drag moves the scene by about the same
                 // number of pixels whether the camera is near or far.
@@ -438,12 +462,26 @@ impl NativeViewer {
     /// cloud therefore lands off-centre or edge-on, which is what the first
     /// `--image` run showed. Fitting the camera to the data is the only version
     /// of this that works for an arbitrary cloud.
+    ///
+    /// Non-finite coordinates are skipped, as they are in `z_range`. An
+    /// infinite one used to make `hi` infinite, so the radius - and with it
+    /// `camera_dist` - was infinite and every entry of the view matrix became
+    /// NaN: a blank canvas with no message anywhere, which is the failure mode
+    /// this file is written around. `PointCloud::points` is a plain public
+    /// `Vec`, so a caller can hand one over.
     pub fn frame_bounds(&mut self) {
-        let mut lo = [f32::MAX; 3];
-        let mut hi = [f32::MIN; 3];
+        // Real infinities, not `f32::MAX`/`f32::MIN`: the constants are the
+        // largest finite values, so a running min/max seeded with them silently
+        // ignores a coordinate at `-inf` (or `+inf`), and `hi - lo` then has a
+        // wrong width rather than an obviously infinite one.
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
         let mut any = false;
         for (pc, _) in &self.clouds {
             for p in &pc.points {
+                if !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()) {
+                    continue;
+                }
                 any = true;
                 for (i, v) in [p.x, p.y, p.z].into_iter().enumerate() {
                     lo[i] = lo[i].min(v);
@@ -1114,27 +1152,14 @@ mod tests {
                 }),
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[eframe::wgpu::VertexBufferLayout {
-                    array_stride: 28,
-                    step_mode: eframe::wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        eframe::wgpu::VertexAttribute {
-                            format: eframe::wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        eframe::wgpu::VertexAttribute {
-                            format: eframe::wgpu::VertexFormat::Float32x3,
-                            offset: 12,
-                            shader_location: 1,
-                        },
-                        eframe::wgpu::VertexAttribute {
-                            format: eframe::wgpu::VertexFormat::Float32,
-                            offset: 24,
-                            shader_location: 2,
-                        },
-                    ],
-                }],
+                // The shipping layout, not a copy of it. `render::vertex_layout`
+                // is the single source of truth for the stride, the attribute
+                // offsets and the step mode, so a regression there shows up here
+                // as pixels: stepping the buffer per vertex instead of per
+                // instance leaves this demo scene with 62 lit pixels of 76,800
+                // (measured) against the 20,664 it draws with the correct mode,
+                // and the assertion below fails.
+                buffers: &[super::render::vertex_layout()],
             },
             primitive: eframe::wgpu::PrimitiveState::default(),
             depth_stencil: None,
@@ -1599,6 +1624,7 @@ mod tests {
             camera_pitch: 0.0,
             camera_dist: 2.5,
             target: [0.0, 0.0, 0.0],
+            drag_applied: egui::Vec2::ZERO,
         }
     }
 
@@ -1815,6 +1841,170 @@ mod tests {
             viewer.camera_dist
         );
         assert!(viewer.camera_dist >= 0.02);
+    }
+
+    /// Orbit with a press followed by `frames` moves of `dx_per_frame` pixels.
+    fn viewer_after_drag(dx_per_frame: f32, frames: usize) -> NativeViewer {
+        let ctx = egui::Context::default();
+        let canvas = canvas_rect(&ctx);
+        let screen = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(800.0, 800.0),
+        ));
+        let from = canvas.center();
+        let mut viewer = headless_viewer();
+
+        let press = egui::RawInput {
+            screen_rect: screen,
+            events: vec![
+                egui::Event::PointerMoved(from),
+                egui::Event::PointerButton {
+                    pos: from,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run(press, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let (_, response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 420.0),
+                    egui::Sense::click_and_drag(),
+                );
+                viewer.handle_camera(&response, ctx);
+            });
+        });
+
+        for frame in 1..=frames {
+            let pos = from + egui::vec2(dx_per_frame * frame as f32, 0.0);
+            let input = egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(pos)],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let (_, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 420.0),
+                        egui::Sense::click_and_drag(),
+                    );
+                    viewer.handle_camera(&response, ctx);
+                });
+            });
+        }
+        viewer
+    }
+
+    /// The orbit follows how far the pointer travelled, not the frame rate.
+    ///
+    /// The camera is turned by a *per-frame* increment, so the increment has to
+    /// be the pointer's movement since the previous frame. `total_drag_delta()`
+    /// is the movement since the mouse went **down**: applied as an increment it
+    /// re-applies the whole gesture every frame, so one drag of 30 px orbits by
+    /// 1 + 2 + 3 = 6 times as much when it arrives in three 10 px frames as when
+    /// it arrives in one 30 px frame, and a slow drag spins the camera.
+    #[test]
+    fn the_orbit_follows_pointer_travel_not_the_frame_count() {
+        let one_frame = viewer_after_drag(30.0, 1).camera_yaw;
+        let three_frames = viewer_after_drag(10.0, 3).camera_yaw;
+        eprintln!("30 px in one frame -> yaw {one_frame}; 10 px in three -> {three_frames}");
+        assert!(
+            (one_frame - three_frames).abs() < 1e-4,
+            "the same 30 px of pointer travel must orbit the same amount \
+             however many frames it arrives in: 30 px in one frame gave yaw \
+             {one_frame}, 10 px in three frames gave {three_frames}"
+        );
+        let mut viewer = viewer_after_drag(30.0, 1);
+        viewer.camera_dist = 2.5;
+        assert!(
+            (one_frame - 9.375).abs() < 1e-3,
+            "30 px of drag at distance 2.5 is 30 * 0.5 * 2.5 / 4 = 9.375 degrees, \
+             got {one_frame}"
+        );
+    }
+
+    /// Framing the camera must survive any cloud, including one whose
+    /// coordinates are not finite.
+    ///
+    /// `PointCloud::points` is a public `Vec`, so a caller can hand the viewer a
+    /// cloud containing an infinity or a NaN. Seeded running bounds of
+    /// `f32::MAX`/`f32::MIN` let an infinite coordinate through, which made the
+    /// fitted radius - and `camera_dist` - infinite, and every entry of the view
+    /// matrix NaN: a blank canvas with no error shown anywhere.
+    #[test]
+    fn frame_bounds_survives_non_finite_points() {
+        let mut viewer = headless_viewer();
+        let mut cloud = PointCloud::default();
+        for x in [0.0f32, 1.0] {
+            for y in [0.0f32, 1.0] {
+                for z in [0.0f32, 1.0] {
+                    cloud.points.push(nalgebra::Point3::new(x, y, z));
+                }
+            }
+        }
+        cloud
+            .points
+            .push(nalgebra::Point3::new(f32::INFINITY, 0.0, 0.0));
+        cloud
+            .points
+            .push(nalgebra::Point3::new(f32::NAN, f32::NAN, f32::NAN));
+        viewer.clouds.push((Arc::new(cloud), usize::MAX));
+
+        viewer.frame_bounds();
+
+        assert_eq!(
+            viewer.target,
+            [0.5, 0.5, 0.5],
+            "the target is the centre of the finite points"
+        );
+        assert!(
+            viewer.camera_dist.is_finite() && viewer.camera_dist > 0.0,
+            "camera_dist must stay finite and positive, got {}",
+            viewer.camera_dist
+        );
+        for row in viewer.view_matrix() {
+            for v in row {
+                assert!(
+                    v.is_finite(),
+                    "the view matrix went non-finite: {:?}",
+                    viewer.view_matrix()
+                );
+            }
+        }
+
+        // Control: a cloud with no finite point at all is not data, so the
+        // camera must not move (and must not become infinite either).
+        let mut viewer = headless_viewer();
+        let mut junk = PointCloud::default();
+        junk.points.push(nalgebra::Point3::new(f32::NAN, 0.0, 0.0));
+        viewer.clouds.push((Arc::new(junk), usize::MAX));
+        let before = (viewer.target, viewer.camera_dist);
+        viewer.frame_bounds();
+        assert_eq!(
+            (viewer.target, viewer.camera_dist),
+            before,
+            "an all-non-finite cloud must leave the camera alone"
+        );
+
+        // Control: a finite cloud is still framed - centre plus a margin.
+        let mut viewer = headless_viewer();
+        let mut cube = PointCloud::default();
+        for x in [0.0f32, 2.0] {
+            for y in [0.0f32, 3.0] {
+                cube.points.push(nalgebra::Point3::new(x, y, -1.0));
+            }
+        }
+        viewer.clouds.push((Arc::new(cube), usize::MAX));
+        viewer.frame_bounds();
+        assert_eq!(viewer.target, [1.0, 1.5, -1.0]);
+        // Half-extents 1.0, 1.5, 0.0 -> the largest is 1.5, framed at 1.35x.
+        assert!(
+            (viewer.camera_dist - 1.5 / 0.5 * 1.35).abs() < 1e-5,
+            "camera_dist should frame the 1.5 half-extent, got {}",
+            viewer.camera_dist
+        );
     }
 
     /// Where the canvas lands, for tests that need a point inside it.
