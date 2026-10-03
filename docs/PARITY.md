@@ -108,10 +108,54 @@ sides were told to use identically, with deviations concentrated away from the
 interior. Small and localised, but **not yet attributed** — could be a fixed-point
 rounding difference, a border-path detail, or a real disagreement.
 
-**The `linear`/`cubic`/`lanczos` resize cases deviate by 40-80 grey levels on
-98-99% of pixels.** That magnitude is far too large to be rounding. It is either a
-different kernel/phase convention or a genuine defect, and **I have not determined
-which**. Do not read this as either.
+### ATTRIBUTED: resize point-samples where OpenCV area-averages
+
+The 40-80 grey level resize deviations are **not** a phase convention, and not
+rounding. Established by measurement, for the 48x36 -> 24x18 case (an exact 2x
+downscale) on the `smooth` input, row 0:
+
+```
+src row0     : 127 153 177 198 214 224 227 224 214 198 177 153 127
+rust         : 127 178 215 227 211 172 120  71  37  28  47  88 141
+cv2 LINEAR   : 148 194 222 224 200 157 106  60  33  31  54  97 148
+cv2 INTER_AREA: 148 194 222 224 200 157 106  60  33  31  54  97 148
+```
+
+Three facts pin it:
+
+1. **`rust[0] == src[0,0]` exactly.** The Rust side takes the source value at the
+   pixel corner.
+2. **OpenCV's `INTER_AREA` and `INTER_LINEAR` agree to `0.0`** on this downscale. The
+   reference is self-consistent under two different algorithms.
+3. Amplitudes match (peak-to-peak 199 rust vs 193 cv2), so both **do** filter — this is
+   not nearest-neighbour. It is *where* the filter is centred.
+
+So on a 2x downscale the Rust side **discards 3 of every 4 source pixels**, while
+OpenCV averages the 2x2 neighbourhood. That is a genuine algorithmic difference and
+it explains both the magnitude and the frequency dependence: on the checkerboard it
+reads 40-80 apart, on the low-frequency `smooth` input only 11-21, because a
+point-sample of a fast signal and a box average of it differ far more than either
+differs from the other on a slow one.
+
+**Not fixed here, deliberately.** This is a **semantics decision, not a bug fix**:
+
+- `Interpolation::Linear` currently means "bilinear at the output pixel's mapped
+  source coordinate", which is a defensible and widely used definition - it is what
+  many libraries do, and it is correct for **upscaling**.
+- For **downscaling** it is the wrong choice: bilinear point-sampling aliases, which
+  is exactly why OpenCV offers `INTER_AREA` and why `INTER_AREA` and `INTER_LINEAR`
+  agree here (area averaging *is* the right downscale filter).
+- Changing `Linear` to area-average would fix the downscale case and alter every
+  existing caller that upscales with it.
+
+So the honest report is: the two libraries **disagree by design on downscaling**, and
+the correct outcome is a decision - either match OpenCV, or document the divergence
+and point users at a dedicated downscale path. What is now ruled out is the
+possibility that either implementation has a rounding bug: the numbers are
+self-consistent and reproducible on both sides.
+
+Everything downstream of a resize inherits this, so it is worth deciding before it is
+relied upon.
 
 ## Coverage of this report — and its holes
 
