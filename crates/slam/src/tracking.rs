@@ -4,6 +4,7 @@ use cv_calib3d::solve_pnp_ransac;
 use cv_core::{storage::Storage, CameraIntrinsics, KeyPoints, Pose, Tensor};
 use cv_features::{detect_and_compute_ctx, Descriptors, Orb};
 use cv_hal::compute::ComputeDevice;
+use cv_hal::cpu::CpuBackend;
 use cv_runtime::orchestrator::ResourceGroup;
 use nalgebra::{Point2, Point3};
 use std::sync::Arc;
@@ -42,10 +43,10 @@ impl Tracker {
         map: &mut WorldMap,
     ) -> Result<(Pose, Vec<usize>), String> {
         use cv_core::storage::CpuStorage;
-        let device = self
-            .group
-            .device()
-            .map_err(|e| format!("Failed to get compute device: {}", e))?;
+        // The device must be chosen to match where the *data* is, not just what
+        // the resource group happens to be bound to. See
+        // `device_for_u8_tensor` for why.
+        let device = device_for_u8_tensor::<S>(&image, &self.group)?;
 
         let (keypoints, descriptors) =
             detect_and_compute_ctx(&self.detector, &device, &self.group, image);
@@ -359,6 +360,121 @@ impl Tracker {
 
         Ok(())
     }
+}
+
+/// Pick the [`ComputeDevice`] the tracker should run on, given where the input
+/// tensor's storage actually lives.
+///
+/// # Why this exists
+///
+/// `ResourceGroup::device()` resolves whatever device the group is *bound* to.
+/// That has nothing to do with where the caller's tensor is stored, and the two
+/// can disagree in the most common configuration there is.
+///
+/// `ResourceGroup::device` -> `get_device_by_id` -> `GpuContext::global()`, and
+/// `GLOBAL_CONTEXT` is a process-wide `OnceLock`. Any other code in the same
+/// process that initialises it - `cv_runtime::registry()` does, and so does
+/// nearly every GPU test in the workspace - makes `global()` succeed *for
+/// everyone*. So on a machine with a GPU:
+///
+/// * a `CpuStorage` image (what `Tensor::from_vec` produces, what `Slam`
+///   hands to the tracker, what every image decoder produces) reached
+///   `ComputeDevice::Gpu`, and
+/// * `GpuContext::match_descriptors` rejects `CpuStorage` outright, so every
+///   frame failed with `Invalid input: GpuContext requires GpuStorage tensors`.
+///
+/// Because the context is global, that made the tracker **order-dependent**:
+/// whether it saw a GPU depended on which tests happened to run first in the
+/// process, which is why the same test passed under `cargo nextest` (one binary
+/// per process) and failed under `cargo test` on the first run but not later
+/// ones.
+///
+/// # Why the CPU storage selects the CPU device, rather than being uploaded
+///
+/// Uploading (`to_gpu`) is the other option and it is the tempting one, because
+/// the group's device is presumably what the caller asked to use. It is
+/// rejected here for three reasons:
+///
+/// 1. **The tracker needs the pixels back on the host regardless.** One line
+///    after detection, `convert_to_cpu` downloads the frame anyway, to hold in
+///    `TrackingFrame::image` for frame-to-frame matching. So an upload here is
+///    not avoided, only reordered - and is paid on *every* frame.
+/// 2. **The hot kernel is not the GPU's.** The tracker always builds both
+///    descriptor tensors with `Tensor::from_vec`, i.e. on the host: the query set
+///    from the detector's output, and the map set from `WorldMap`'s cached
+///    CPU buffer. Those are always `CpuStorage`, so the GPU matcher can never be
+///    used without uploading *both* per frame. Accelerating that is a real
+///    optimisation and a real API change; it is not a decision to make silently
+///    inside a storage-dispatch branch.
+/// 3. **It changes behaviour for every caller.** Choosing "upload" means a
+///    caller who passes CPU tensors silently gets GPU semantics (extra
+///    transfers, GPU-allocator pressure, different rounding in the detector),
+///    and on a machine where the GPU is contended or the upload fails partway the
+///    frame fails for a reason unrelated to tracking.
+///
+/// The alternative, if acceleration is ever wanted: keep the device selection
+/// here but add an explicit, opt-in upload of *both* descriptor tensors plus the
+/// image, fall back to the CPU matcher when either upload fails, and measure that
+/// GPU matching actually beats the CPU one for realistic map sizes first. That is
+/// a deliberate perf change with a fallback, not a default.
+///
+/// GPU-resident input still takes the GPU path: the choice follows the data.
+fn device_for_u8_tensor<S: Storage<u8> + 'static>(
+    image: &Tensor<u8, S>,
+    group: &ResourceGroup,
+) -> Result<ComputeDevice<'static>, String> {
+    use cv_core::storage::CpuStorage;
+    use cv_hal::storage::GpuStorage;
+
+    if image
+        .storage
+        .as_any()
+        .downcast_ref::<GpuStorage<u8>>()
+        .is_some()
+    {
+        return group
+            .device()
+            .map_err(|e| format!("Failed to get compute device: {}", e));
+    }
+
+    // CPU-resident data: the kernels below read host slices directly, so the CPU
+    // device is both the correct and the cheaper choice. This is also what makes
+    // the tracker independent of `GLOBAL_CONTEXT`, and therefore order
+    // independent.
+    if image
+        .storage
+        .as_any()
+        .downcast_ref::<CpuStorage<u8>>()
+        .is_some()
+    {
+        return cpu_device();
+    }
+
+    Err(format!(
+        "Unsupported storage type for tracking: {}",
+        image.storage.data_type_name()
+    ))
+}
+
+/// The process-wide CPU compute device.
+///
+/// `ComputeDevice::Cpu` borrows a `&'a CpuBackend` that has to outlive the
+/// returned device, so the backend is kept in a `static` for the same reason
+/// `cv_hal::compute` keeps its own in a `OnceLock`.
+fn cpu_device() -> Result<ComputeDevice<'static>, String> {
+    use std::sync::OnceLock;
+    static CPU_BACKEND: OnceLock<CpuBackend> = OnceLock::new();
+    if let Some(b) = CPU_BACKEND.get() {
+        return Ok(ComputeDevice::Cpu(b));
+    }
+    let created = CpuBackend::new().ok_or_else(|| "CPU backend unavailable".to_string())?;
+    let _ = CPU_BACKEND.set(created);
+    // `set` only fails if another thread won the race, in which case the
+    // winner's backend is equally valid - use whichever one is installed.
+    let backend = CPU_BACKEND
+        .get()
+        .expect("set above, or another thread set it first");
+    Ok(ComputeDevice::Cpu(backend))
 }
 
 fn convert_to_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
