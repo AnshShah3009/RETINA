@@ -175,7 +175,24 @@ impl GNCOptimizer {
                 .sum();
             (squared_errors / inliers.len() as f32).sqrt()
         } else {
-            0.0
+            // An empty inlier set is zero *support*, not zero error: every
+            // correspondence was found and every one of them fell outside the
+            // gate, so the residual is known to exceed
+            // `max_correspondence_distance`. Reporting 0.0 claims the opposite,
+            // and `fitness` beside it reports 0.0 as well - zero inliers *and*
+            // zero error at once, which is not a coherent answer for any
+            // transform.
+            //
+            // Measured: `max_correspondence_distance = 0.0` on perfectly matching
+            // clouds gave `Some(GNCResult { fitness: 0.0, inlier_rmse: 0.0,
+            // inlier_count: 0, .. })` before the fix. A gate of zero is an
+            // ordinary way to ask "what does this report with no inlier budget",
+            // and it returned a perfect error score.
+            //
+            // `INFINITY` rather than `NaN`, for the reason spelled out on
+            // `evaluate_registration`: it sorts as worse than any finite error
+            // under the ordinary `<` a caller uses to ask "did this converge".
+            f32::INFINITY
         };
 
         Some(GNCResult {

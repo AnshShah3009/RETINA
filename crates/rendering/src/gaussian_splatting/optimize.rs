@@ -2,7 +2,7 @@ use nalgebra::{Point3, Vector3};
 use rand::Rng;
 
 use super::rasterize::DifferentiableRasterizer;
-use super::types::{Gaussian, GaussianCloud};
+use super::types::{unit_quaternion, Gaussian, GaussianCloud};
 
 #[derive(Clone, Debug)]
 pub struct DensificationConfig {
@@ -140,7 +140,16 @@ impl GaussianOptimizer {
             gaussian.rotation.y -= self.config.learning_rate_rotation * grad.rotation_grad.y;
             gaussian.rotation.z -= self.config.learning_rate_rotation * grad.rotation_grad.z;
             gaussian.rotation.w -= self.config.learning_rate_rotation * grad.rotation_grad.w;
-            gaussian.rotation = gaussian.rotation.normalize();
+            // Not an unconditional `normalize()`: that is `0/0` for a zero-norm
+            // quaternion and writes NaN into a public field, from where it
+            // spreads through `rotation_matrix` into the covariance and every
+            // pixel the splat touches. `Gaussian::unit_quaternion` is the crate's
+            // existing decision on the same question - a quaternion and any
+            // positive multiple of it are the same rotation, and a zero-norm one
+            // denotes no rotation - so this reuses it rather than inventing a
+            // second answer. It is the only place a substitution happens, and the
+            // comment there says so.
+            gaussian.rotation = unit_quaternion(&gaussian.rotation);
 
             gaussian.opacity -= self.config.learning_rate_opacity * grad.opacity_grad;
             gaussian.opacity = gaussian.opacity.clamp(0.0, 1.0);

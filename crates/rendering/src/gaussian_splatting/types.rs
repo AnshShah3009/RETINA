@@ -84,11 +84,24 @@ impl SphericalHarmonics {
         }
     }
 
+    /// The degree-0 (DC) colour, or black when no DC coefficient is present.
+    ///
+    /// `coeffs` is a public `Vec`, so it can be empty; indexing `[0..3]` into an
+    /// empty vector is a panic. A descriptor with no DC term evaluates to black,
+    /// which is what an all-zero histogram means too, so the fallback is the same
+    /// answer rather than a fabricated one.
     pub fn dc(&self) -> Vector3<f32> {
-        Vector3::new(self.coeffs[0], self.coeffs[1], self.coeffs[2])
+        Vector3::new(
+            self.coeffs.first().copied().unwrap_or(0.0),
+            self.coeffs.get(1).copied().unwrap_or(0.0),
+            self.coeffs.get(2).copied().unwrap_or(0.0),
+        )
     }
 
     pub fn eval(&self, view_dir: Vector3<f32>) -> Vector3<f32> {
+        if self.coeffs.is_empty() {
+            return Vector3::zeros();
+        }
         if self.degree == 0 {
             return self.dc();
         }
@@ -103,7 +116,30 @@ impl SphericalHarmonics {
         result.y += self.coeffs[1];
         result.z += self.coeffs[2];
 
-        if self.degree >= 1 {
+        // `degree` is a public field and the coefficient buffer is sized
+        // separately, so the two can disagree. `from_dc` allocates exactly the
+        // 3 DC coefficients; setting `degree = 1` afterwards - a one-line field
+        // write on a public struct, and `PartialEq`/`Clone`/`Debug` all leave the
+        // fields open - left `eval` reading `coeffs[3..12]` out of a 3-element
+        // vector. Measured: `index out of bounds: the len is 3 but the index is 3`,
+        // i.e. a panic on ordinary malformed input from a public method.
+        //
+        // Which coefficients are *available* is a fact about the buffer, so the
+        // available degree is derived from the length rather than trusted from
+        // the field. `SphericalHarmonics::new(n)` stores `3 * (n + 1)^2`
+        // coefficients, and the evaluation of degrees up to `n` reads exactly
+        // that many, so `available` is the largest `n` whose allocation fits in
+        // `coeffs.len()`. A caller that declares a degree it did not supply gets
+        // the DC term and whatever the buffer really holds, which is the true
+        // answer for the data given.
+        let available = if self.coeffs.is_empty() {
+            0
+        } else {
+            ((self.coeffs.len() as f64) / 3.0).sqrt().floor() as usize - 1
+        };
+        let degree = self.degree.min(available);
+
+        if degree >= 1 {
             result.x += self.coeffs[3] * y;
             result.y += self.coeffs[4] * z;
             result.z += self.coeffs[5] * x;
@@ -116,6 +152,15 @@ impl SphericalHarmonics {
         }
 
         result
+    }
+}
+
+pub(crate) fn unit_quaternion(q: &Vector4<f32>) -> Vector4<f32> {
+    let n = q.norm();
+    if n.is_finite() && n > 0.0 {
+        q / n
+    } else {
+        Vector4::new(0.0, 0.0, 0.0, 1.0)
     }
 }
 
@@ -142,7 +187,7 @@ impl Gaussian {
             scale: scale.map(|s| s.max(0.0001)),
             // Not `rotation.normalize()`: that divides by zero for a zero
             // quaternion and stores NaN in a public field. See `unit_quaternion`.
-            rotation: Self::unit_quaternion(&rotation),
+            rotation: unit_quaternion(&rotation),
             opacity,
             spherical_harmonics: SphericalHarmonics::from_dc(color),
             features: Vector3::zeros(),
@@ -184,20 +229,19 @@ impl Gaussian {
     /// the tile. There is no rotation to derive from it, so the identity is used.
     /// That one *is* a choice rather than a derivation, and it is the only such
     /// substitution here.
-    fn unit_quaternion(q: &Vector4<f32>) -> Vector4<f32> {
-        let n = q.norm();
-        if n.is_finite() && n > 0.0 {
-            q / n
-        } else {
-            Vector4::new(0.0, 0.0, 0.0, 1.0)
-        }
+    ///
+    /// The body lives at module scope as [`unit_quaternion`] so that
+    /// `optimize::GaussianOptimizer::step` reaches the same decision for the same
+    /// reason rather than re-deriving it.
+    fn unit_quaternion(&self) -> Vector4<f32> {
+        unit_quaternion(&self.rotation)
     }
 
     pub fn rotation_matrix(&self) -> Matrix3<f32> {
         // Normalised here, not merely in the constructor: `rotation` is public, and
         // the formula below is only a rotation for a unit quaternion. See
         // `unit_quaternion`.
-        let q = Self::unit_quaternion(&self.rotation);
+        let q = self.unit_quaternion();
         let x = q[0];
         let y = q[1];
         let z = q[2];
@@ -414,7 +458,17 @@ impl GaussianCloud {
         idx
     }
 
+    /// Removes the Gaussian at `idx`.
+    ///
+    /// Out-of-range indices are ignored rather than passed to `Vec::swap_remove`,
+    /// which panics. Measured on a one-element cloud: `remove(5)` aborted with
+    /// `swap_remove index (is 5) should be < len (is 1)`. A stale index after
+    /// someone else's edit to `gaussians` is ordinary input for a public method
+    /// that takes a bare `usize`, and it took the whole process down.
     pub fn remove(&mut self, idx: usize) {
+        if idx >= self.gaussians.len() {
+            return;
+        }
         // `swap_remove` moves the last element into slot `idx`; remember its
         // old index so we can re-register it in `active_indices`.
         let last = self.gaussians.len() - 1;

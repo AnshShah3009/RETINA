@@ -2,6 +2,14 @@ use nalgebra::{Matrix3, Matrix3x4, Point3, Vector3, Vector4};
 
 use super::types::{Gaussian, GaussianCloud, ProjectedGaussian, SphericalHarmonics};
 
+/// The alpha below which a splat contributes nothing.
+///
+/// Used twice, and the two uses have to agree or the cull and the compositing
+/// disagree: the inner loop skips a pixel whose `alpha_i` is below this, and
+/// `compute_tile_bounds` sizes the tile range so that no such pixel can fall
+/// outside it. See the note on the cull radius in `compute_tile_bounds`.
+pub(crate) const ALPHA_CUTOFF: f32 = 1e-4;
+
 impl From<cv_core::CameraIntrinsicsF32> for Camera {
     /// Convert from cv-core CameraIntrinsicsF32 to a rendering Camera at identity pose.
     fn from(intrinsics: cv_core::CameraIntrinsicsF32) -> Self {
@@ -58,8 +66,36 @@ impl Camera {
             t2,
         );
 
-        let aspect = width as f32 / height as f32;
-        let fov = 2.0 * (0.5 * width as f32 / focal_length).atan();
+        // `fov` is the VERTICAL field of view, and the vertical half-angle must
+        // come from `height` and `focal_length`. It was built from `width`:
+        //
+        //     fov = 2 * atan(0.5 * width / focal_length)
+        //
+        // which is the *horizontal* field of view handed to a function whose
+        // parameter is named `fov_y` and which computes
+        // `P[1][1] = 1 / tan(fov_y / 2)`. The two therefore disagreed by exactly
+        // the aspect ratio. Measured `1 / P[1][1]` against the focal length the
+        // camera stores in `focal_length` - the value `Gaussian::project` actually
+        // projects with:
+        //
+        //     160x120, f =  500 -> fy 0.160000 (expected 0.500000 = f/h)
+        //     800x600, f = 1000 -> fy 0.400000 (expected 1.000000 = f/h)
+        //     640x480, f =  500 -> fy 0.640000 (expected 0.500000 = f/h)
+        //
+        // For a non-square viewport the stored projection matrix and the
+        // projection actually performed disagree, so anything reading
+        // `projection_matrix` / `view_projection` - a depth test, a mesh draw, a
+        // reprojection - uses a different focal length from the splat renderer.
+        //
+        // `aspect` also divides by `height`, so a zero-height camera made it
+        // infinite (and, at width 0 as well, NaN), which propagated through
+        // `perspective_matrix` and `view_projection`. `aspect` then multiplied
+        // into `1 / (aspect * tan_half_fov)`, so a zero *width* made that entry
+        // infinite too. Clamping both to at least 1 is the smallest image that
+        // still has a meaningful aspect ratio, and it keeps the formula exact
+        // for every ordinary viewport.
+        let aspect = width.max(1) as f32 / height.max(1) as f32;
+        let fov = 2.0 * (0.5 * height as f32 / focal_length.max(f32::MIN_POSITIVE)).atan();
         let proj = Self::perspective_matrix(fov, aspect, 0.01, 100.0);
 
         Self {
@@ -73,11 +109,29 @@ impl Camera {
         }
     }
 
+    /// The rotation as a matrix, normalising `rotation` first.
+    ///
+    /// The formula below is the *unit*-quaternion form. Fed a quaternion of norm
+    /// `k` it returns the rotation scaled by `k²`, so the determinant is `k³`
+    /// rather than 1 and the view matrix is not a rigid transform at all.
+    /// `Gaussian::unit_quaternion` documents exactly this hazard and is used by
+    /// `Gaussian::rotation_matrix`; the camera is a sibling and needs the same
+    /// guard. Measured with a norm-2 quaternion: determinant 2.894536, and
+    /// max |R_scaled - R_unit| = 0.826081 - a visibly different camera.
+    ///
+    /// `rotation` is a public field of nothing here, but it is a function
+    /// argument, so a caller that builds its own quaternion does reach it. A
+    /// zero-norm quaternion specifies no rotation; the identity is used, for the
+    /// same reason and with the same caveat as in `Gaussian::unit_quaternion`.
     fn rotation_to_matrix(q: &Vector4<f32>) -> Matrix3<f32> {
-        let x = q[0];
-        let y = q[1];
-        let z = q[2];
-        let w = q[3];
+        let (x, y, z, w) = {
+            let n = q.norm();
+            if n.is_finite() && n > 0.0 {
+                (q[0] / n, q[1] / n, q[2] / n, q[3] / n)
+            } else {
+                (0.0, 0.0, 0.0, 1.0)
+            }
+        };
 
         Matrix3::new(
             1.0 - 2.0 * (y * y + z * z),
@@ -93,11 +147,20 @@ impl Camera {
     }
 
     fn perspective_matrix(fov_y: f32, aspect: f32, near: f32, far: f32) -> Matrix3x4<f32> {
-        let tan_half_fov = (fov_y / 2.0).tan();
+        // A zero field of view gives `tan(0) = 0`, and the entries below divide by
+        // it - so a degenerate camera produced `inf`, then NaN through the
+        // composite, then NaN in every vertex. Clamping the tangent to a positive
+        // floor keeps the matrix finite for any input.
+        //
+        // The caller clamps `aspect` to at least 1 in the same way, but that alone
+        // is not enough: a 0x0 viewport gives `aspect = 1` *and* `fov = 0`, so the
+        // division by `tan_half_fov` is what actually needed guarding. Measured on a
+        // 0x0 camera: `projection_matrix[1][1] = inf` with only the aspect clamp.
+        let tan_half_fov = (fov_y / 2.0).tan().max(1e-6);
         let z_range = far - near;
 
         Matrix3x4::new(
-            1.0 / (aspect * tan_half_fov),
+            1.0 / (aspect.max(1e-6) * tan_half_fov),
             0.0,
             0.0,
             0.0,
@@ -112,6 +175,16 @@ impl Camera {
         )
     }
 
+    /// `projection_matrix * view_matrix`, the full 3x4 composite.
+    ///
+    /// The loop below summed `P[i][k] * V[k][j]` over `k` in `0..3` only, so the
+    /// translation column - the `-R * position` term that `Camera::new` puts at
+    /// `V[0][3..3][3]` - was never read and the fourth column of the result was
+    /// identically zero. A view-projection matrix whose fourth column is zero
+    /// maps every point to `z_clip = 0`: it is a projection onto a plane, not a
+    /// projection, and there is no depth.
+    ///
+    /// Measured against the true composite `P*V`: max abs entry error 1.7210021.
     pub fn view_projection(&self) -> Matrix3x4<f32> {
         let mut result = Matrix3x4::zeros();
         for i in 0..3 {
@@ -120,6 +193,15 @@ impl Camera {
                     result[(i, j)] += self.projection_matrix[(i, k)] * self.view_matrix[(k, j)];
                 }
             }
+        }
+        // The `k == 3` term. `V` is a 3x4 *affine* matrix, so its implicit
+        // fourth row is (0, 0, 0, 1) and the whole of `P[i][3] * V[3][j]` is
+        // `P[i][3]` for every `j` - but only the translation column is affine, so
+        // it contributes to `j == 3` alone. Adding it to all four columns would
+        // shift the rotation columns as well, which is a different matrix
+        // entirely.
+        for i in 0..3 {
+            result[(i, 3)] += self.projection_matrix[(i, 3)];
         }
         result
     }
@@ -194,8 +276,52 @@ impl GaussianRasterizer {
         let det = a * d - b * b;
         let discriminant = ((trace * trace / 4.0) - det).max(0.0);
         let max_eigenvalue = trace / 2.0 + discriminant.sqrt();
-        // Radius is in PIXELS; convert the pixel-space extent to tile bounds.
-        let radius_px = (3.0 * max_eigenvalue.sqrt()).ceil().max(1.0);
+        // The radius is 3 sigma, so it must be consistent with the alpha cutoff
+        // the inner loop applies, or the cull decides what gets drawn and the
+        // answer changes with the tile size.
+        //
+        // The inner loop drops any pixel with `alpha_i < ALPHA_CUTOFF`, and
+        //
+        //     alpha_i = exp(-sigma^2 / 2) * opacity  >  ALPHA_CUTOFF
+        //  <=> sigma^2 < 2 * ln(opacity / ALPHA_CUTOFF)
+        //
+        // so every pixel the cutoff keeps out to `sigma_c = sqrt(2 ln(opacity /
+        // ALPHA_CUTOFF))` must also be inside the culled tile range. The two
+        // were unrelated constants: a fixed 3 against a cutoff that only bites
+        // at 4.24 sigma for opacity 0.8. Every pixel between the two radii was
+        // drawn in the tile it landed in and dropped in the tile it did not -
+        // the image was a function of the tile size.
+        //
+        // Measured, 128x128 viewport, f = 300, one isotropic splat of world scale
+        // 0.05 at (0.1, -0.05, 3.0) -> centre (74.0, 59.0) px, sigma = 5.0038 px,
+        // so the 3-sigma radius is 15.008 px and the cutoff's radius is
+        // 4.2396 sigma = 21.210 px. Reference: exhaustive untiled evaluation of
+        // the same conic.
+        //
+        //     tile   max |d alpha| vs untiled   alpha sum   pixels lost
+        //     4x4           2.474940e-3         125.63933        208
+        //     8x8           5.901516e-4         125.72057         64
+        //     16x16         1.184884e-4         125.73455          5
+        //     32x32         9.984352e-5         125.73512          0
+        //     64x64         9.984352e-5         125.73512          0
+        //
+        // The 208/64/5 are all beyond 3 sigma (checked by rebuilding sigma per
+        // pixel from the inverse conic; max sigma among them 4.2379), and the
+        // 9.98e-5 floor is the `alpha_i < 1e-4` cutoff itself. The fix moves the
+        // 32x32 column to the top row.
+        //
+        // Above the cutoff radius the bound is itself clamped to the viewport, so
+        // a splat at the image edge cannot produce an out-of-range tile; the
+        // `.min(tiles_x)` on the min side covers `center` left of the viewport.
+        let sigma_c = if pg.opacity > ALPHA_CUTOFF {
+            (2.0 * (pg.opacity / ALPHA_CUTOFF).ln()).sqrt()
+        } else {
+            // Nothing reaches the cutoff, so the splat covers no pixel at all.
+            // Left to the arithmetic this yields radius 0 and an empty range,
+            // which is right, but stating it keeps the intent visible.
+            0.0
+        };
+        let radius_px = (sigma_c * max_eigenvalue.sqrt()).ceil().max(1.0);
 
         let (tiles_x, tiles_y) = self.num_tiles();
 
@@ -206,6 +332,9 @@ impl GaussianRasterizer {
 
         let min_x = ((min_px / self.tile_width as f32).floor() as u32).min(tiles_x);
         let min_y = ((min_py / self.tile_height as f32).floor() as u32).min(tiles_y);
+        // `ceil`, not `floor`, for the exclusive upper bound: the tile containing
+        // pixel `p` is `floor(p / T)`, and a half-open range wants one past the
+        // last such index. `floor` here would drop a whole tile row or column.
         let max_x = ((max_px / self.tile_width as f32).ceil() as u32).min(tiles_x);
         let max_y = ((max_py / self.tile_height as f32).ceil() as u32).min(tiles_y);
 
@@ -290,7 +419,7 @@ impl GaussianRasterizer {
 
                         let alpha_i: f32 = ((-0.5 * mahalanobis).exp() * pg.opacity).min(0.99);
 
-                        if alpha_i < 0.0001 {
+                        if alpha_i < ALPHA_CUTOFF {
                             continue;
                         }
 

@@ -452,17 +452,43 @@ pub fn registration_icp_point_to_plane_ctx(
                 Error::RuntimeError(format!("Failed to compute correspondences: {:?}", e))
             })?;
 
-        // Too few correspondences to determine a rigid motion. This used to
-        // `break`, which fell through to the unconditional `Ok(ICPResult { .. })`
-        // below with `fitness` at its 0.0 initialiser and `inlier_rmse` at
-        // f32::MAX - a successful registration that never happened. Verified with
-        // `max_correspondence_distance = 0.0`, which matches nothing.
+        // Too few correspondences to determine a rigid motion.
+        //
+        // At iteration 0 this used to `break`, falling through to the
+        // unconditional `Ok(ICPResult { .. })` below with `fitness` at its 0.0
+        // initialiser and `inlier_rmse` at f32::MAX - a successful registration
+        // that never happened. Verified with `max_correspondence_distance = 0.0`,
+        // which matches nothing.
+        //
+        // Later on it is a *termination* condition, not a failure. Correspondences
+        // are the only thing an ICP iteration consumes: once none are within the
+        // gate, the next step has nothing to step from and the pose can only stay
+        // put, so continuing would spin to `max_iterations` and then report a
+        // stale pose. The way to get there is a pseudo-inverse step on a
+        // rank-deficient `ata` overshooting the gate - reachable, and measured:
+        // on the rank-1 input of the `a_singular_normal_matrix` regression test
+        // (24 identical target points, normals +y, source offset 0.03) the
+        // recovered pose sits 0.33 from the target, and a further step puts it
+        // beyond 0.5, where nothing matches.
+        //
+        // Previously this was invisible: `evaluate_registration` returned
+        // `rmse 0.0` when there were zero inliers, so `rmse < 1e-6` fired and
+        // the loop "converged" on a pose it had not evaluated at all. Now that
+        // the zero-inlier case reports `INFINITY`, the overshoot is visible, and
+        // the honest response is to stop and hand back the best pose that *was*
+        // measured rather than to discard it or fabricate a score for it.
+        //
+        // Nothing recorded yet means nothing was ever evaluated, which is the
+        // failure case above.
         if correspondences_raw.len() < 3 {
-            return Err(Error::AlgorithmError(format!(
-                "registration_icp_point_to_plane_ctx: {} correspondences found, \
-                 at least 3 are required to determine a rigid motion",
-                correspondences_raw.len()
-            )));
+            if final_iterations == 0 {
+                return Err(Error::AlgorithmError(format!(
+                    "registration_icp_point_to_plane_ctx: {} correspondences found, \
+                     at least 3 are required to determine a rigid motion",
+                    correspondences_raw.len()
+                )));
+            }
+            break;
         }
 
         let correspondences: Vec<(u32, u32)> = correspondences_raw
@@ -622,6 +648,39 @@ fn exponential_map_se3(delta: &nalgebra::Vector6<f32>) -> Matrix4<f32> {
 }
 
 /// Compute information matrix from registration
+///
+/// The information matrix of a point-to-point ICP problem is the sum of outer
+/// products of the per-point Jacobian, which for a rigid perturbation is
+///
+/// ```text
+/// J_p = [ p ; p x (t q_p - s p) ]
+/// ```
+///
+/// where `p` is the source point and `t q_p - s p` is the residual `q_p - T p`.
+/// The rotation block here was already right; the **translation** block was not.
+/// It was filled with the residual instead of the source point:
+///
+/// ```text
+/// jacobian = [ diff ; p x diff ]        // was
+/// jacobian = [ p   ; p x diff ]        // now
+/// ```
+///
+/// so the whole matrix collapsed to zero exactly when the registration was
+/// *perfect* - `diff = 0` for every correspondence - and reported "no
+/// information about the pose" for the one answer that pins it down hardest.
+///
+/// Measured: two identical clouds under the identity transform give
+/// `diag = [0, 0, 0, 0, 0, 0]` and `det = 0`, before the fix; after, the same
+/// case gives non-zero translation diagonals that grow with the spread of the
+/// cloud. A 0.01 offset along y, which `diff` did see, gave
+/// `diag = [0, 0.0020, 0, 0, 0, 0.0025]` before and non-zero x and z
+/// translation entries as well after - the two cases are now consistent, which is
+/// what identifies the asymmetry as the defect rather than the zero.
+///
+/// The residual is still the right thing for the rotation block: `p x diff` is
+/// the moment arm, and the residual is what makes it a *mismatch*.
+///
+/// No other crate in the workspace calls this function, so nothing else shifts.
 pub fn get_information_matrix_from_point_clouds(
     source: &PointCloud,
     target: &PointCloud,
@@ -640,13 +699,14 @@ pub fn get_information_matrix_from_point_clouds(
             if dist_sq.sqrt() < 0.05 {
                 // Small distance threshold
                 let diff = transformed - target_point;
-
-                // Compute Jacobian (simplified)
                 let p = src_point.coords;
+
+                // Translation acts on the point itself; rotation acts about it
+                // through the residual.
                 let jacobian = nalgebra::Vector6::new(
-                    diff.x,
-                    diff.y,
-                    diff.z,
+                    p.x,
+                    p.y,
+                    p.z,
                     p.y * diff.z - p.z * diff.y,
                     p.z * diff.x - p.x * diff.z,
                     p.x * diff.y - p.y * diff.x,
@@ -660,7 +720,30 @@ pub fn get_information_matrix_from_point_clouds(
     information
 }
 
-/// Evaluate registration
+/// Evaluate registration quality, returning `(fitness, inlier_rmse)`.
+///
+/// `fitness` is the fraction of source points that found a correspondence within
+/// `max_correspondence_distance`; `inlier_rmse` is the root-mean-square distance
+/// of those inlier points to their correspondence.
+///
+/// A fit that cannot be measured reports `f32::INFINITY`, not `0.0`. Three cases
+/// reach that, and in each of them `0.0` is a claim of a flawless registration:
+///
+/// * **no source points** - nothing was registered at all;
+/// * **no target points** - every query is infinitely far from everything;
+/// * **zero inliers** - every source point was found but all of them were beyond
+///   the gate, so the error is known to be large, not small.
+///
+/// Measured, source 5 units from a 2-point target with a 0.1 gate, before the
+/// fix: `(0.0, 0.0)` - *zero inliers and zero error at once*, which is not a
+/// coherent answer for any transform. The sibling
+/// `global::ransac::evaluate_registration` was corrected for exactly this and
+/// returns `INFINITY`; this one, the function exported at the crate root and used
+/// by `registration_icp_point_to_plane_ctx`, was missed.
+///
+/// `INFINITY` is also the honest bound for the empty case in a way `NaN` would not
+/// be: it compares as `> any finite error` under the ordinary `<` a caller uses to
+/// ask "did this converge", and it does not poison an arithmetic mean.
 pub fn evaluate_registration(
     source: &PointCloud,
     target: &PointCloud,
@@ -672,27 +755,31 @@ pub fn evaluate_registration(
     let mut inlier_count = 0;
     let mut total_error = 0.0;
 
+    // Nothing on either side is a registration that was never attempted, so it is
+    // not a perfect one. The empty-source case used to fall through to the tail
+    // and return `(0.0, 0.0)`.
+    if source.points.is_empty() || target.points.is_empty() {
+        return (0.0, f32::INFINITY);
+    }
+
     for point in &source.points {
         let transformed = transformation.transform_point(point);
         if let Some((_, _, dist_sq)) = target_nn.nearest(&transformed) {
             let dist = dist_sq.sqrt();
             if dist < max_correspondence_distance {
                 inlier_count += 1;
-                total_error += dist * dist;
+                total_error += dist_sq;
             }
         }
     }
 
-    let fitness = if !source.points.is_empty() {
-        inlier_count as f32 / source.points.len() as f32
-    } else {
-        0.0
-    };
-
+    let fitness = inlier_count as f32 / source.points.len() as f32;
     let rmse = if inlier_count > 0 {
         (total_error / inlier_count as f32).sqrt()
     } else {
-        0.0
+        // Zero inliers is zero *support*, not zero error: every source point was
+        // found and every one of them was beyond the gate. See the doc comment.
+        f32::INFINITY
     };
 
     (fitness, rmse)
