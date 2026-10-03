@@ -4,6 +4,9 @@ use crate::style::Style;
 use crate::PlotError;
 
 /// Type of plot to create
+///
+/// `Histogram` and `Heatmap` are declared but not drawn by any renderer: see
+/// the crate documentation.
 #[derive(Debug, Clone, Default)]
 pub enum PlotType {
     #[default]
@@ -15,6 +18,11 @@ pub enum PlotType {
 }
 
 /// A data series for plotting
+///
+/// `x` and `y` are the pair of coordinate vectors. Every renderer walks them
+/// with `zip`, so they must be the same length: `to_svg` draws the shorter of
+/// the two, and `save_svg`/`save_html` reject a series whose lengths differ
+/// rather than write a file that quietly holds less data than the series does.
 #[derive(Debug, Clone)]
 pub struct Series {
     pub x: Vec<f64>,
@@ -79,6 +87,15 @@ impl Default for SubPlot {
     }
 }
 
+/// Largest grid `subplot()` will allocate.
+///
+/// The panel count comes from two caller-supplied `usize`s, so `subplot()`
+/// would otherwise try to allocate `rows * cols` panels for any pair of large
+/// arguments - an out-of-memory abort for `subplot(usize::MAX, 2, 0)`. A cap
+/// keeps a degenerate call from taking the process down; the grid shape itself
+/// is still recorded verbatim.
+const MAX_SUBPLOTS: usize = 4096;
+
 /// Main plot/figure container
 #[derive(Debug, Clone)]
 pub struct Figure {
@@ -88,6 +105,20 @@ pub struct Figure {
     pub subplots: Vec<SubPlot>,
     pub legend: bool,
     pub grid: bool,
+    /// Grid shape requested by [`Figure::subplot`], as `(rows, cols)`.
+    ///
+    /// `None` until `subplot()` is called, in which case the exporter lays the
+    /// panels out in a single row. A grid that is too small for
+    /// `subplots.len()` (only possible if the panels were pushed by hand) falls
+    /// back to the same single row.
+    pub subplot_grid: Option<(usize, usize)>,
+    /// Panel that the `&mut self` builder methods write into, i.e. the `index`
+    /// last passed to [`Figure::subplot`].
+    ///
+    /// Clamped against `subplots.len()` on every use, so it can never address a
+    /// panel that does not exist - including after a caller mutates the public
+    /// `subplots` vector directly.
+    pub current: usize,
 }
 
 impl Figure {
@@ -100,6 +131,20 @@ impl Figure {
             subplots: vec![SubPlot::default()],
             legend: true,
             grid: true,
+            subplot_grid: None,
+            current: 0,
+        }
+    }
+
+    /// Index of the subplot the builder methods below write into.
+    ///
+    /// `subplots` and `current` are public and can drift apart, so the value is
+    /// clamped at the point of use rather than when it is written.
+    fn active_panel(&self) -> Option<usize> {
+        if self.subplots.is_empty() {
+            None
+        } else {
+            Some(self.current.min(self.subplots.len() - 1))
         }
     }
 
@@ -124,8 +169,8 @@ impl Figure {
 
     /// Add a series to the current subplot
     pub fn add_series(&mut self, x: &[f64], y: &[f64], label: &str) -> &mut Self {
-        if let Some(subplot) = self.subplots.last_mut() {
-            subplot
+        if let Some(panel) = self.active_panel() {
+            self.subplots[panel]
                 .series
                 .push(Series::new(x.to_vec(), y.to_vec(), label));
         }
@@ -134,8 +179,8 @@ impl Figure {
 
     /// Add a scatter series
     pub fn scatter(&mut self, x: &[f64], y: &[f64], label: &str) -> &mut Self {
-        if let Some(subplot) = self.subplots.last_mut() {
-            subplot
+        if let Some(panel) = self.active_panel() {
+            self.subplots[panel]
                 .series
                 .push(Series::scatter(x.to_vec(), y.to_vec(), label));
         }
@@ -144,36 +189,76 @@ impl Figure {
 
     /// Add a bar series
     pub fn bar(&mut self, x: &[f64], y: &[f64], label: &str) -> &mut Self {
-        if let Some(subplot) = self.subplots.last_mut() {
-            subplot
+        if let Some(panel) = self.active_panel() {
+            self.subplots[panel]
                 .series
                 .push(Series::bar(x.to_vec(), y.to_vec(), label));
         }
         self
     }
 
-    /// Set subplot title
+    /// Set the title of the current subplot.
+    ///
+    /// This is the *panel* title, not the figure title (which is set through
+    /// `Figure::new` or `Plot::title`). A figure with one panel draws the
+    /// figure title, falling back to this one when the figure has no title of
+    /// its own; a figure with several panels draws this one above the panel it
+    /// belongs to.
     pub fn title(&mut self, title: &str) -> &mut Self {
-        if let Some(subplot) = self.subplots.last_mut() {
-            subplot.title = title.to_string();
+        if let Some(panel) = self.active_panel() {
+            self.subplots[panel].title = title.to_string();
         }
         self
     }
 
-    /// Set axis labels
+    /// Set axis labels on the current subplot
     pub fn labels(&mut self, x_label: &str, y_label: &str) -> &mut Self {
-        if let Some(subplot) = self.subplots.last_mut() {
-            subplot.x_label = x_label.to_string();
-            subplot.y_label = y_label.to_string();
+        if let Some(panel) = self.active_panel() {
+            self.subplots[panel].x_label = x_label.to_string();
+            self.subplots[panel].y_label = y_label.to_string();
         }
         self
     }
 
-    /// Add a new subplot
-    pub fn subplot(&mut self, rows: usize, cols: usize, _index: usize) -> &mut Self {
-        while self.subplots.len() < rows * cols {
+    /// Add a new subplot, or select an existing one, and make it current.
+    ///
+    /// `rows` x `cols` is the grid the figure is laid out in and `index` is the
+    /// panel inside it, counted from 0 in row-major order - the same order the
+    /// panels are drawn in. Everything added afterwards (`add_series`,
+    /// `scatter`, `bar`, `title`, `labels`) goes into that panel until the next
+    /// `subplot()` call.
+    ///
+    /// The panel list grows to `rows * cols` entries if it is smaller, so
+    /// `subplot(2, 2, 3)` is a legal way to reach the last panel of a fresh 2x2
+    /// grid. `rows` or `cols` of 0 is treated as 1, an `index` past the last
+    /// panel selects the last panel, and the whole call is capped at
+    /// [`MAX_SUBPLOTS`] panels so that a degenerate argument cannot ask for an
+    /// unbounded allocation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use cv_plot::Figure;
+    ///
+    /// let mut fig = Figure::new("two panels");
+    /// fig.subplot(2, 1, 0).add_series(&[0.0, 1.0], &[0.0, 1.0], "top");
+    /// fig.subplot(2, 1, 1).add_series(&[0.0, 1.0], &[1.0, 0.0], "bottom");
+    ///
+    /// assert!(fig.subplots[0].series[0].label == "top");
+    /// assert!(fig.subplots[1].series[0].label == "bottom");
+    /// ```
+    pub fn subplot(&mut self, rows: usize, cols: usize, index: usize) -> &mut Self {
+        let rows = rows.max(1);
+        let cols = cols.max(1);
+        // Saturating, because the product is caller-supplied and would overflow
+        // in debug builds for large arguments (and wrap to a small number in
+        // release, silently allocating the wrong grid).
+        let panels = rows.saturating_mul(cols).min(MAX_SUBPLOTS);
+        while self.subplots.len() < panels {
             self.subplots.push(SubPlot::default());
         }
+        self.subplot_grid = Some((rows, cols));
+        self.current = index.min(self.subplots.len() - 1);
         self
     }
 }
@@ -203,7 +288,11 @@ impl Plot {
         self
     }
 
-    /// Set plot title
+    /// Set the figure title
+    ///
+    /// Note the deliberate difference from [`Figure::title`], which sets the
+    /// title of the *current subplot*: a `Plot` owns one figure and has no
+    /// panels to name.
     pub fn title(&mut self, title: &str) -> &mut Self {
         self.figure.title = title.to_string();
         self

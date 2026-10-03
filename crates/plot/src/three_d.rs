@@ -352,6 +352,12 @@ impl Plot3D {
     }
 
     /// Set default point size
+    ///
+    /// This is the size the interactive HTML viewer draws every point at.
+    /// [`Plot3D::to_svg`] cannot honour it: an SVG point is drawn at its own
+    /// [`Point3D::size`], because a point that was never sized explicitly is
+    /// indistinguishable from one sized to exactly the constructor default.
+    /// Use `Point3D::with_size` for a specific radius in the SVG.
     pub fn point_size(mut self, size: f64) -> Self {
         self.point_size = size;
         self

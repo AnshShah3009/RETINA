@@ -389,14 +389,15 @@ fn save_writes_exactly_the_rendered_bytes_and_reports_io_errors() {
     );
 }
 
-/// The figure size must reach the SVG header, and the axis labels are taken
-/// from the *first* subplot only while the legend covers every subplot.
+/// The figure size must reach the SVG header, every panel must draw its own
+/// axis labels, and the legend must cover every panel.
 ///
-/// Wrong answer: the header still saying 800x600 after `size(321, 123)`
-/// (the title builder shadowing the size), the x label coming from the last
-/// subplot, or `add_series` after `subplot` landing in the first subplot.
+/// Wrong answer: the header still saying 800x600 after `size(321, 123)` (the
+/// title builder shadowing the size), only the first subplot's labels
+/// appearing (every later panel's labels silently dropped), or a legend that
+/// misses a panel.
 #[test]
-fn size_reaches_the_header_and_labels_come_from_the_first_subplot() {
+fn size_reaches_the_header_and_every_panel_gets_its_own_labels() {
     let mut fig = Figure::new("layout")
         .size(321.0, 123.0)
         .legend(true)
@@ -423,8 +424,13 @@ fn size_reaches_the_header_and_labels_come_from_the_first_subplot() {
     );
     assert_eq!(
         texts_of_class(&svg, "label"),
-        vec!["alpha".to_string(), "gamma".to_string()],
-        "axis labels must come from the first subplot only: {svg}"
+        vec![
+            "alpha".to_string(),
+            "gamma".to_string(),
+            "beta".to_string(),
+            "delta".to_string()
+        ],
+        "each panel must label its own axes: {svg}"
     );
     assert_eq!(
         texts_of_class(&svg, "legend"),
@@ -432,7 +438,8 @@ fn size_reaches_the_header_and_labels_come_from_the_first_subplot() {
         "the legend must cover every subplot: {svg}"
     );
 
-    // `subplot(rows, cols, _)` grows the list and later series go to the last.
+    // `subplot(rows, cols, index)` selects the panel: `index` is 0-based and
+    // row-major, so `subplot(2, 2, 0)` makes the FIRST panel current.
     let mut grown = Figure::new("grow");
     grown.subplot(2, 2, 0);
     assert_eq!(
@@ -442,15 +449,32 @@ fn size_reaches_the_header_and_labels_come_from_the_first_subplot() {
     );
     grown.add_series(&[0.0], &[0.0], "added-later");
     assert!(
-        grown.subplots[3]
+        grown.subplots[0]
             .series
             .iter()
             .any(|s| s.label == "added-later"),
-        "add_series must append to the most recently added subplot"
+        "add_series must write into the panel subplot() selected"
     );
     assert!(
-        grown.subplots[0].series.is_empty(),
-        "add_series must not write into the first subplot"
+        grown.subplots[3].series.is_empty(),
+        "add_series must not fall through to the last panel"
+    );
+
+    // Control: selecting a later panel still routes there.
+    grown
+        .subplot(2, 2, 3)
+        .add_series(&[1.0], &[1.0], "last-panel");
+    assert!(
+        grown.subplots[3]
+            .series
+            .iter()
+            .any(|s| s.label == "last-panel"),
+        "subplot(2, 2, 3) must make the last panel current"
+    );
+    assert_eq!(
+        grown.subplots[0].series.len(),
+        1,
+        "the panel selected earlier must not receive later series"
     );
 }
 
