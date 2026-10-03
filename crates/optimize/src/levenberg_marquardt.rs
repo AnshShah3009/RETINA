@@ -39,6 +39,50 @@ pub fn curve_fit(
     if m < np {
         return Err("Need at least as many data points as parameters".into());
     }
+    // A model with *no* parameters has nothing to fit, and used to walk into
+    // the covariance solve on a zero-by-zero `J^T J` and panic there.
+    //
+    // Measured against baseline `4029e46`, sweeping the empty shapes:
+    //
+    // ```text
+    //   m=0 np=0  PANIC     attempt to subtract with overflow
+    //   m=0 np=1  Err       "Need at least as many data points as parameters"
+    //   m=0 np=2  Err       "Need at least as many data points as parameters"
+    //   m=1 np=0  PANIC     attempt to subtract with overflow
+    //   m=2 np=0  PANIC     attempt to subtract with overflow
+    // ```
+    //
+    // (nalgebra-0.33.2 `linalg/solve.rs:125`, `for i in 0..dim - 1` with
+    // `dim == 0`). So the panic is on `np == 0`, not on empty data: empty data
+    // with a real model is already handled by the `m < np` guard above, and a
+    // guard written for `m == 0` would have been dead code. The invariant is
+    // `np == 0` — and it holds for every `m`, which is why `m=1` and `m=2` with
+    // no parameters panicked just as hard as the fully empty case.
+    //
+    // There is a well-defined answer here: with no parameters the residuals are
+    // whatever the model produces on the caller's empty parameter vector, and
+    // the fit cannot change them. Report exactly that instead of unwinding, so
+    // a caller can still read `r_squared` and the residuals off the result.
+    if np == 0 {
+        let residuals: Vec<f64> = (0..m).map(|i| y_data[i] - model(x_data[i], p0)).collect();
+        let cost: f64 = residuals.iter().map(|v| v * v).sum();
+        let y_mean: f64 = if m == 0 {
+            0.0
+        } else {
+            y_data.iter().sum::<f64>() / m as f64
+        };
+        let ss_tot: f64 = y_data.iter().map(|&y| (y - y_mean).powi(2)).sum();
+        return Ok(CurveFitResult {
+            params: p0.to_vec(),
+            covariance: Vec::new(),
+            r_squared: if ss_tot > 1e-30 {
+                1.0 - cost / ss_tot
+            } else {
+                1.0
+            },
+            residuals,
+        });
+    }
 
     let mut params = p0.to_vec();
     let mut lambda = 1e-3;

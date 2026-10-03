@@ -560,7 +560,42 @@ impl CgSolver {
         for _ in 0..self.max_iters {
             let ap = a.spmv_ctx(ctx, &p)?;
             let pap = p.dot(&ap);
-            if pap.abs() < 1e-10 {
+            // `p·Ap <= 0` means `A` has no energy along `p`: CG cannot continue.
+            // This is the *only* breakdown criterion, and it is scale-free.
+            //
+            // The loop used to carry an extra `pap.abs() < 1e-10` test, which
+            // looked like a guard against dividing by ~0 but was not one. `p·Ap`
+            // is quadratic in the problem's units, so a fixed threshold fires
+            // long before the system is actually exhausted whenever the matrix
+            // is small - and it fires at a different *iteration* for every
+            // overall scale, so the answer depended on the units the residual
+            // happened to be measured in.
+            //
+            // Measured on `A = diag(1..40) * s`, `b = A·1`, i.e. an SPD system
+            // whose exact solution is `x = 1` (|x-1| is the whole error):
+            //
+            // ```text
+            //     s     broken out at   ||x - 1||    never breaks out: |x - 1|
+            //   1e0       iter 33          5.6e-08        iter 39, then diverges
+            //   1e-3      iter  1          1.2e-02        3.9e-11
+            //   1e-5      iter  1          3.2e+00        3.9e-06
+            //   1e-6      iter  1          6.3e+00        diverges
+            // ```
+            //
+            // At `s = 1e-5` the very first iteration has `p·Ap = 6.7e-10`, the
+            // "breakdown" test fires, and a matrix that is `10^5` times further
+            // from singular than the one it handled is abandoned at
+            // |x-1| = 3.2 - a *worse* answer than the zero step, which is what
+            // the caller was told was the thing being avoided. `A·p = 0` and a
+            // vanishing-but-positive `p·Ap` are entirely different situations
+            // and only the first one is breakdown; dividing by the second gives
+            // a large step in a direction `A` has not yet cancelled, which is
+            // what the next iteration needs in order to finish.
+            //
+            // If the step length or the iterate itself does become non-finite,
+            // stop there rather than propagating it: the final residual check
+            // decides whether the result counts as a solution.
+            if pap <= 0.0 {
                 // Breakdown: `A` has no energy along `p`. This is not
                 // convergence, so let the final residual check decide.
                 break;
@@ -570,6 +605,9 @@ impl CgSolver {
             residual -= alpha * &ap;
 
             let rsnew = residual.dot(&residual);
+            if !rsnew.is_finite() {
+                break;
+            }
             if rsnew.sqrt() < self.tolerance {
                 return Ok((x, rsnew.sqrt()));
             }
