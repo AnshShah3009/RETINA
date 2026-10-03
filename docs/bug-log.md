@@ -532,6 +532,35 @@ why a test written against the count failed to catch the defect.
 derivation, the first question is whether the measurement measures the thing you
 care about. Here it did not — and the derivation was right from the start.
 
+### And the test I could not write
+
+The right instrument is a direct unit test on the placement Jacobian: one known
+point, its returned `radius`, compared against `w / (2 * aspect * tan) / depth`. I
+tried to write it and **could not**.
+
+`ProjectedPoint` is a private struct in `crates/3d/src/visibility.rs`, and
+`project_point` is a private function, so an integration test in
+`crates/3d/tests/` can observe neither. Every version I wrote — asserting the
+identity between `focal_px` and `placement_scale` — is **self-referential**: it
+passes against the unfixed source, which I verified by reverting the fix and
+re-running. Shipping it would have been the exact failure this workspace has hit
+repeatedly: a test that looks like evidence and is not.
+
+Two ways to close it, both real work rather than a patch:
+
+- Make `ProjectedPoint` (or just its `radius`) `pub`, so the invariant can be
+  asserted directly. That is an API change and a maintainer decision.
+- Move `project_point` and the Jacobian into a `#[cfg(test)] mod` unit test
+  **inside** `visibility.rs`, where the private items are reachable. That is
+  smaller, but note the standing caveat for this workspace: an inline test cannot
+  be verified by restoring the source, because the restore deletes it too. So the
+  mutation would have to be applied and reverted by hand.
+
+Until one of those exists, **this fix has no regression test** — it is correct by
+the identity above and confirmed by inspection, but not pinned by anything that
+would fail if it regressed. That is a real gap and it is recorded here rather than
+papered over with a test that passes either way.
+
 ## CHECKED AND CLEAN: `core` and `calib3d`, after every candidate was refuted
 
 An audit of the two most foundational crates (`core` 297 public items, `calib3d` 113)
