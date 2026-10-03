@@ -227,7 +227,9 @@ currently apply. They need the same treatment the Sampson fix just received.
 ### Not finished
 
 An `f32` mask branch and the last sections were still in progress when the agent hit
-its turn limit. **No calib3d result is claimed beyond the RANSAC residuals above**,
+its turn limit. (Note this section predates the later independent audits of
+`calib3d`; see the bug log for the hand-eye and P3P work, where a `+`/`-` sign flip
+in the translation accumulation was caught by mutation at a 0.92 m error.) **No calib3d result is claimed beyond the RANSAC residuals above**,
 and the deviations listed as "not attributable" must not be read as defects until
 their normalisation is fixed.
 
