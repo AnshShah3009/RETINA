@@ -260,6 +260,63 @@ point-cloud geometry are `numpy` (exact arithmetic on hand-computed answers) and
 `registration` audits have been using, and it is why those results rest on
 hand-computed invariants rather than on a reference implementation.
 
+## `cv-math` special functions vs SciPy 1.17.1 — `erf`/`erfc` now at machine precision
+
+`crates/math/examples/parity_special.rs` + `parity/parity_special.py`. This closes
+the one gap recorded as OPEN for the SciPy target.
+
+### `erf`: `1.3851e-07` → `6.6613e-16`
+
+```
+=== erf ===                            samples : 606
+  worst |rust - scipy| : 6.6613e-16  at x = -1.6
+  worst ulps           : 6.0
+=== erf(0) and exactness properties ===
+  erf(0.0) == 0.0 exactly
+=== erf oddness: erf(-x) == -erf(x) ===
+  pairs checked : 204    exact violations : 0
+  worst |erf(-x)+erf(x)| : 0.0000e+00
+=== erfc ===                            samples : 735
+  worst relative : 1.0458e-13 at x = 25.5   (the tail, where cancellation lives)
+  worst absolute (|x| <= 2) : 6.6613e-16
+```
+
+**A 2x10^8 improvement**, and the two properties that were silently false before
+now hold: `erf(0)` is exactly `0` (it was `9.999999717180685e-10`, so `erf` was not
+odd about zero) and oddness is **exact** across 204 pairs, worst violation
+`0.0000e+00`.
+
+### What changed
+
+The Abramowitz & Stegun 7.1.26 rational approximation is gone — its five
+coefficients sum to `0.999999999`, and that residue was the entire error. It is
+replaced by a Maclaurin series for small `|x|` and a continued fraction for
+`erfc` in the tail, where `1 - erf(x)` cancels catastrophically. The A&S form is
+retained as a private helper with a comment recording why it is not the entry point,
+rather than deleted — so the reason it was rejected is visible to the next reader.
+
+### What is still open, honestly
+
+The same harness reports **7 functions outside their derived bounds**, and the agent
+was interrupted before setting per-function tolerances. On inspection these look
+like each function's **algorithmic floor** rather than defects, but that is a claim
+not yet checked per function:
+
+| function | first exceedance | looks like |
+|---|---|---|
+| `gamma` | rel `1.009e-11` | near f64 accumulation over a wide range |
+| `factorial` | rel `1.160e-11` at n=20 | Stirling series truncation |
+| `bessel_y0` | rel `1.124e-06` | the NR approximation's own limit |
+| `bessel_jn` / `bessel_yn` | rel `3.7e-09` / `1.0e-08` | series truncation |
+| `bessel_k0` | rel `2.901e-06` | ditto |
+| `expi` | abs `1.868e-01`, rel `7.29e-09` at x=20 | first omitted term at x=20 is ~2.3e-8, so this is the optimal truncation point |
+
+**So the harness currently exits non-zero on 7 checks.** That is the honest state: the
+tolerances are not yet derived from each function's documented floor, and until they
+are, this is a *diagnostic* script rather than a gate. Widening them without deriving
+the floor would be exactly the "tune the tolerance until it passes" move that is
+worthless — the derivation is the work.
+
 ## Coverage of this report — and its holes
 
 Done: filters (`imgproc`), geometry — resize and warpAffine only (`imgproc`),
