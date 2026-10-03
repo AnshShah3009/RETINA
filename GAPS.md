@@ -23,6 +23,15 @@ Targets claimed by the workspace README/root crate: OpenCV, Open3D, Matplotlib, 
 > - `imgproc`'s normalised Gaussian not preserving a constant (kernel summing to
 >   `0.99999964`, so `128` blurred to `127`) — **fixed**. It was not in this survey;
 >   found later by the numerical parity harness.
+> - `video`'s `MOG2::new` inert parameters, `photo`'s inpaint and HDR simplifications,
+>   `slam`'s GPU-for-CPU device selection — **fixed**.
+> - `optimize`'s CG using an **absolute** residual threshold, so accuracy depended on
+>   the units of the problem: at a scale where the absolute rule burned 50 iterations
+>   and landed 0.7 from the truth, a relative rule converged in four. Same class as
+>   `qr_solve` and `cond`. **fixed**.
+> - `3d`'s splat footprint omitting a factor of `aspect`, sizing each splat on a
+>   different projection than the one placing it — **fixed**, and now pinned by
+>   `footprint_is_the_placement_jacobian`.
 >
 > Still open and worth reading before planning: the facade re-exports 11 of 30
 > crates, `erf` is accurate to ~1.5e-7 against SciPy's ~1e-16, `Interpolation::Linear`
