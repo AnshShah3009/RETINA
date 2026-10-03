@@ -805,6 +805,28 @@ against a strict `1e-10` tolerance. The step was almost certainly usable — LM
 validates steps by whether the cost decreases, not by whether the linear solve was
 exact.
 
+**Wrong #3 — a claim I repeated twice without tracing it.** I also wrote that
+`bundle_adjust_ctx`'s documented CPU fallback "never fires", because an inner solve
+failure never becomes `Err`. **That is wrong.** `solver.minimize(...)` calls
+`self.solve_lm_step(&j, &r, lambda)?` — with `?` — and `solve_lm_step` propagates
+its own failures with `?` as well (`j.transpose_spmv_ctx(self.ctx, r)?`,
+`j.spmv_ctx(self.ctx, &p)?`). So a sparse-matvec `Err` **does** reach
+`bundle_adjust_ctx`, which maps it to `false`, which is exactly what makes the
+caller fall through to the sequential CPU path. **The fallback is reachable and
+correct.**
+
+What misled me: `solve_lm_step` contains its *own* CG loop, which ends in `Ok(x)` on
+breakdown, rather than calling the `Err`-returning `LinearSolver::solve`. So there
+are two distinct behaviours — an *iteration breakdown* yields `Ok(partial iterate)`,
+while a *sparse-matvec failure* yields `Err`. I conflated them, and read the comment
+"an iteration cap is not convergence" (about the first) as a statement about the
+second.
+
+The distinguishing question is not "is there an `unwrap_or` here" but "which of the
+two failure modes does *this call site* turn into what" — and that needs the call
+chain, not the local code. **Third time this session I asserted something about an
+error path from reading rather than tracing it.**
+
 **The real shape is an interface problem, not a local patch.**
 `CgSolver::solve` returns `Result<DVector<f64>, String>`, so an unconverged solve
 *cannot* hand back its approximate iterate. That leaves the caller two options:
