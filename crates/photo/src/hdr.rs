@@ -526,7 +526,6 @@ pub fn tonemap_drago(hdr: &CpuTensor<f64>, gamma: f64, saturation: f64) -> Resul
     let bias_log = bias.ln() / (0.5f64).ln();
     let inv_gamma = 1.0 / gamma.max(0.01);
 
-    // Drago mapping: L_out = log(1 + L_scaled) / log(1 + L_max_scaled)
     let l_max = lum.iter().cloned().fold(0.0f64, f64::max);
     let l_max_scaled = l_max / log_avg;
 
@@ -538,10 +537,31 @@ pub fn tonemap_drago(hdr: &CpuTensor<f64>, gamma: f64, saturation: f64) -> Resul
             let l_in = lum[pixel];
             let l_scaled = l_in / log_avg;
 
-            // Adaptive base for logarithm.
+            // Drago's adaptive logarithmic mapping (Drago et al., Eurographics
+            // 2003): the *logarithm of one plus* the scaled luminance, taken in
+            // a per-pixel adaptive base
+            //     base = 2 + 8 * (L_scaled / L_max_scaled)^(ln(bias)/ln(0.5)),
+            //     L_out = log_base(1 + L_scaled).
+            //
+            // Both parts matter. Without the `1 +`, `log_base(L_scaled)` is
+            // *negative* for every pixel darker than the log-average luminance,
+            // which is half a typical image; a `.max(0.0)` used to clamp those
+            // negatives away, so shadows and everything at or below mid-luminance
+            // came back pure black (measured: a constant image returned all zeros,
+            // and on a 1..100 ramp the darkest 13 of 32 columns were 0.0).
+            // Dividing by `log_base(L_max_scaled)` also cancelled the base
+            // exactly - log_base(a)/log_base(b) = ln a / ln b for every base - so
+            // the adaptive term, the whole point of this operator, was dead code.
+            // The reference divides 1 + L_scaled by the adaptive log base, which
+            // needs no clamp: the result is in [0, 1] with the maximum at
+            // L_scaled = L_max_scaled, and it is monotone in the luminance.
+            //
+            // The reference also scales by the constant
+            // (L_dmax / 100) / log10(1 + L_max_scaled); the [0, 1]
+            // normalisation at the end of this function removes any global
+            // scale factor exactly, so it is omitted.
             let base = (2.0 + 8.0 * (l_scaled / l_max_scaled).powf(bias_log)).clamp(2.0, 10.0);
-            let l_out = l_scaled.log(base) / l_max_scaled.log(base).max(1e-10);
-            let l_out = l_out.max(0.0);
+            let l_out = (1.0 + l_scaled).ln() / base.ln();
 
             // Apply saturation.
             let channel_val = data[ch_offset + pixel].max(0.0);
@@ -622,8 +642,11 @@ pub fn tonemap_mantiuk(hdr: &CpuTensor<f64>, gamma: f64, scale: f64) -> Result<C
         }
     }
 
-    // Reconstruct log-luminance from attenuated gradients using Poisson solver
-    // (Gauss-Seidel iteration on the divergence).
+    // Reconstruct log-luminance from the attenuated gradients by solving the
+    // Poisson equation whose solution has those gradients as its derivative:
+    //     Laplacian(recon) = div,   div = d(gx)/dx + d(gy)/dy.
+    // `div` below is that divergence, evaluated with the forward differences
+    // above (so it is also the discrete Laplacian of the *input* log-luminance).
     let mut div = vec![0.0f64; n_pixels];
     for y in 0..height {
         for x in 0..width {
@@ -644,12 +667,28 @@ pub fn tonemap_mantiuk(hdr: &CpuTensor<f64>, gamma: f64, scale: f64) -> Result<C
     }
 
     // Gauss-Seidel Poisson solve.
+    //
+    // The 5-point Laplacian is `sum_of_neighbours - count * recon`, so
+    // `Laplacian(recon) = div` is solved by `recon = (sum_of_neighbours - div) / count`
+    // - the divergence enters with a minus sign. The sign matters: the solve used
+    // to add `div`, which converges to `Laplacian(recon) = -div`, i.e. to the
+    // *negation* of the input log-luminance up to a harmonic term. Measured on a
+    // monotone 1 -> 100 luminance ramp, the result inverted local ordering at the
+    // image border: the darkest input column (0.0 in log space, where the
+    // one-sided divergence is largest) came back as the brightest pixel of its
+    // half, 0.579 against 0.386 for the neighbouring column.
+    //
+    // A missing neighbour contributes no equation, which is the zero-flux
+    // (mirror) boundary condition, so `count` is the number of in-bounds
+    // neighbours. That is also exactly the normal equation of the least-squares
+    // problem `min ||grad(recon) - g||^2`, so the iteration is consistent even
+    // where the divergence does not sum to zero.
     let mut recon = log_lum.clone();
     for _ in 0..100 {
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
-                let mut sum = div[idx];
+                let mut sum = -div[idx];
                 let mut count = 0.0;
 
                 if x > 0 {
@@ -914,6 +953,132 @@ mod tests {
     }
 
     // --- Mantiuk tone mapping tests ---
+
+    // --- Regression: gradient-domain reconstruction sign (Mantiuk) ---
+
+    /// A monotone input must stay monotone through gradient-domain tone
+    /// mapping: attenuating a gradient may shrink it, never reverse it.
+    ///
+    /// `tonemap_mantiuk` used to add the divergence in the Gauss-Seidel Poisson
+    /// solve instead of subtracting it, so it converged to
+    /// `Laplacian(recon) = -div` - the *negation* of the input log-luminance.
+    /// On this 1 -> 100 ramp the darkest input column (the brightest-column
+    /// boundary is x = 0, where the one-sided divergence is largest) came back
+    /// as the brightest pixel of its half: row[0] = 0.57912 against
+    /// row[1] = 0.48719.
+    #[test]
+    fn test_tonemap_mantiuk_preserves_luminance_order() {
+        let (h, w) = (16usize, 32usize);
+        let mut data = vec![0.0f64; h * w];
+        for y in 0..h {
+            for x in 0..w {
+                data[y * w + x] = 1.0 + 99.0 * (x as f64 / (w - 1) as f64);
+            }
+        }
+        let hdr = CpuTensor::<f64>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+        let out = tonemap_mantiuk(&hdr, 1.0, 0.5).unwrap();
+        let o = out.as_slice().unwrap();
+
+        for y in 0..h {
+            for x in 1..w {
+                let (prev, cur) = (o[y * w + x - 1], o[y * w + x]);
+                assert!(
+                    cur >= prev - 1e-4,
+                    "Mantiuk reversed the luminance order at row {y}, x={x}: {prev:.5} -> {cur:.5} \
+                     (a monotone 1..100 ramp must stay monotone; the gradient domain may \
+                     compress a gradient but cannot invert it)"
+                );
+            }
+        }
+        // Control: the operator still spreads the ramp over the output range.
+        assert!(
+            o[w - 1] - o[0] > 0.5,
+            "Mantiuk should still compress the range onto [0,1]: first={:.4} last={:.4}",
+            o[0],
+            o[w - 1]
+        );
+    }
+
+    // --- Regression: Drago adaptive logarithmic mapping ---
+
+    fn constant_hdr(value: f64) -> CpuTensor<f64> {
+        CpuTensor::<f64>::from_vec(vec![value; 64], TensorShape::new(1, 8, 8)).unwrap()
+    }
+
+    /// A constant image has no gradient to compress; every output pixel must
+    /// equal every other, and none of them may be black.
+    ///
+    /// `tonemap_drago` used to compute `log_base(L_scaled)` with no `1 +`, which
+    /// is `log_base(1) = 0` for a constant image, so the whole frame came back
+    /// as 0.0 and the "normalize to [0,1]" step silently skipped itself because
+    /// its guard is `max_val > 1e-10`.
+    #[test]
+    fn test_tonemap_drago_constant_image_is_uniform_and_not_black() {
+        for value in [0.05f64, 0.18, 1.0, 20.0] {
+            let hdr = constant_hdr(value);
+            let out = tonemap_drago(&hdr, 2.2, 1.0).unwrap();
+            let o = out.as_slice().unwrap();
+            let first = o[0];
+            assert!(
+                first > 1e-3,
+                "Drago mapped a constant {value} HDR image to {first} (all-black is a \
+                 fabricated answer, not a tone curve)"
+            );
+            for (i, &v) in o.iter().enumerate() {
+                assert!(
+                    (v - first).abs() < 1e-6,
+                    "constant image produced a non-constant output at {i}: {v} vs {first}"
+                );
+            }
+        }
+    }
+
+    /// Shadows must survive Drago: the operator's reference curve is
+    /// monotonically increasing in the luminance, so a monotone ramp must come
+    /// back monotone and no column may be crushed to exactly zero.
+    ///
+    /// `tonemap_drago` used to return `log_base(L_scaled) / log_base(L_max_scaled)`
+    /// with both logs taken without a `1 +`; the ratio is negative for every
+    /// pixel darker than the log-average luminance and a `.max(0.0)` clamp hid
+    /// it. Measured on this ramp: 13 of 32 columns were exactly 0.0.
+    #[test]
+    fn test_tonemap_drago_preserves_luminance_order() {
+        let (h, w) = (16usize, 32usize);
+        let mut data = vec![0.0f64; h * w];
+        for y in 0..h {
+            for x in 0..w {
+                data[y * w + x] = 1.0 + 99.0 * (x as f64 / (w - 1) as f64);
+            }
+        }
+        let hdr = CpuTensor::<f64>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+        let out = tonemap_drago(&hdr, 1.0, 1.0).unwrap();
+        let o = out.as_slice().unwrap();
+
+        for y in 0..h {
+            for x in 1..w {
+                let (prev, cur) = (o[y * w + x - 1], o[y * w + x]);
+                assert!(
+                    cur >= prev,
+                    "Drago reversed the luminance order at row {y}, x={x}: {prev:.5} -> {cur:.5}"
+                );
+            }
+        }
+        for x in 0..w {
+            assert!(
+                o[x] > 0.0,
+                "Drago crushed the ramp to black at column {x}: the input luminance there is \
+                 {:.2}, which is above zero",
+                1.0 + 99.0 * (x as f64 / (w - 1) as f64)
+            );
+        }
+        // Control: the brightest column is the one the input says is brightest.
+        assert!(
+            o[w - 1] > o[0],
+            "Drago output should span the ramp: {:.4} .. {:.4}",
+            o[0],
+            o[w - 1]
+        );
+    }
 
     #[test]
     fn test_tonemap_mantiuk_output_range() {

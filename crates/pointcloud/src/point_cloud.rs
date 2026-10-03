@@ -13,10 +13,30 @@ fn fast_eigen3x3_min(m: &Matrix3<f32>) -> Vector3<f32> {
     cv_math::linalg::min_eigenvector_3x3(m)
 }
 
+/// The normal given to a point whose neighbourhood cannot determine one.
+fn default_normal() -> Vector3<f32> {
+    Vector3::new(0.0, 0.0, 1.0)
+}
+
+/// Whether a point has a position at all.
+///
+/// A non-finite coordinate is not a position: it cannot be a neighbour of
+/// anything and (measured) `rstar`'s `nearest_neighbor_iter` panics with
+/// `Option::unwrap()` on `None` when it is queried with one, so every k-NN loop
+/// in this module keeps such points out of the tree.
+fn has_position(p: &Point3<f32>) -> bool {
+    p.x.is_finite() && p.y.is_finite() && p.z.is_finite()
+}
+
 /// Downsample a point cloud with a voxel grid.
 /// Returns a new point cloud with one point per voxel (the centroid).
 pub fn voxel_down_sample(pc: &PointCloud, voxel_size: f32) -> PointCloud {
-    if voxel_size <= 0.0 || pc.is_empty() {
+    // Written as `!(voxel_size > 0.0)` rather than `voxel_size <= 0.0`: NaN is
+    // neither greater than zero nor less than or equal to it, so a NaN voxel
+    // size used to slip past the guard and `(p.x / NaN).floor() as i32` then
+    // saturated to 0 for every coordinate - a 16-point cloud came back as a
+    // single point, the centroid of the whole input.
+    if !(voxel_size > 0.0) || pc.is_empty() {
         return pc.clone();
     }
 
@@ -151,6 +171,10 @@ impl rstar::PointDistance for PointWrapper {
 /// Estimate normals for the point cloud using K-nearest neighbors.
 /// Uses PCA/SVD on the covariance matrix of the neighborhood.
 /// Modifies the point cloud in place to add normals.
+///
+/// Points with a non-finite coordinate have no neighbourhood: they are left out
+/// of the search tree and get the default `(0, 0, 1)` normal, the same as a
+/// point with fewer than three neighbours.
 pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
     if pc.is_empty() {
         return;
@@ -160,6 +184,7 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
         .points
         .iter()
         .enumerate()
+        .filter(|(_, p)| has_position(p))
         .map(|(i, p)| PointWrapper(i, *p))
         .collect();
 
@@ -169,6 +194,9 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
         .points
         .par_iter()
         .map(|p| {
+            if !has_position(p) {
+                return default_normal();
+            }
             let query_point = [p.x, p.y, p.z];
             let neighbors: Vec<&PointWrapper> = tree
                 .nearest_neighbor_iter(&query_point)
@@ -177,7 +205,7 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
                 .collect();
 
             if neighbors.len() < 3 {
-                return Vector3::new(0.0, 0.0, 1.0); // Default up
+                return default_normal(); // Default up
             }
 
             // Compute centroid
@@ -206,6 +234,10 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
 
 /// Orient normals consistently using simple neighbor voting.
 /// Fast O(n*k) algorithm - much faster than Open3D's MST approach.
+///
+/// Points with a non-finite coordinate cannot be reached: they are left out of
+/// the search tree (querying it with one panics inside `rstar`) and keep the
+/// normal they came in with.
 pub fn orient_normals(pc: &mut PointCloud, k: usize) {
     let n = pc.len();
     if n < 3 {
@@ -222,14 +254,19 @@ pub fn orient_normals(pc: &mut PointCloud, k: usize) {
         .points
         .iter()
         .enumerate()
+        .filter(|(_, p)| has_position(p))
         .map(|(i, p)| PointWrapper(i, *p))
         .collect();
     let tree = RTree::bulk_load(wrappers);
 
-    // Simple propagation: start from point 0, orient all neighbors
+    // Simple propagation: start from the first point that has a position, orient
+    // all neighbors.
     let mut visited = vec![false; n];
-    let mut queue = vec![0];
-    visited[0] = true;
+    let mut queue = Vec::new();
+    if let Some(seed) = pc.points.iter().position(has_position) {
+        visited[seed] = true;
+        queue.push(seed);
+    }
 
     while let Some(i) = queue.pop() {
         let q = [pc.points[i].x, pc.points[i].y, pc.points[i].z];
@@ -253,23 +290,25 @@ pub fn orient_normals(pc: &mut PointCloud, k: usize) {
     // Handle unvisited (disconnected components) — run a new BFS from each
     // unvisited seed so the entire component gets consistently oriented.
     for i in 0..n {
-        if !visited[i] {
+        if visited[i] || !has_position(&pc.points[i]) {
             visited[i] = true;
-            let mut comp_queue = vec![i];
-            while let Some(ci) = comp_queue.pop() {
-                let q = [pc.points[ci].x, pc.points[ci].y, pc.points[ci].z];
-                let neighbors: Vec<_> = tree.nearest_neighbor_iter(&q).skip(1).take(k).collect();
-                for nb in neighbors {
-                    let j = nb.0;
-                    if visited[j] {
-                        continue;
-                    }
-                    if normals[j].dot(&normals[ci]) < 0.0 {
-                        normals[j] = -normals[j];
-                    }
-                    visited[j] = true;
-                    comp_queue.push(j);
+            continue;
+        }
+        visited[i] = true;
+        let mut comp_queue = vec![i];
+        while let Some(ci) = comp_queue.pop() {
+            let q = [pc.points[ci].x, pc.points[ci].y, pc.points[ci].z];
+            let neighbors: Vec<_> = tree.nearest_neighbor_iter(&q).skip(1).take(k).collect();
+            for nb in neighbors {
+                let j = nb.0;
+                if visited[j] {
+                    continue;
                 }
+                if normals[j].dot(&normals[ci]) < 0.0 {
+                    normals[j] = -normals[j];
+                }
+                visited[j] = true;
+                comp_queue.push(j);
             }
         }
     }
@@ -364,6 +403,9 @@ pub fn compute_normals_from_depth(
 /// Remove statistical outliers.
 /// Compute mean distance to `k` neighbors for each point.
 /// Points with mean distance > global_mean + std_ratio * std_dev are removed.
+///
+/// A point with a non-finite coordinate has no distance to measure, so it is
+/// never an inlier and is left out of the mean and standard deviation.
 pub fn remove_statistical_outliers(
     pc: &PointCloud,
     k: usize,
@@ -377,6 +419,7 @@ pub fn remove_statistical_outliers(
         .points
         .iter()
         .enumerate()
+        .filter(|(_, p)| has_position(p))
         .map(|(i, p)| PointWrapper(i, *p))
         .collect();
     let tree = RTree::bulk_load(wrappers);
@@ -385,6 +428,12 @@ pub fn remove_statistical_outliers(
         .points
         .par_iter()
         .map(|p| {
+            if !has_position(p) {
+                // No position, so no neighbour distance exists. NaN is never
+                // `<=` the threshold below, so such a point is dropped rather
+                // than panicking the tree query.
+                return f32::NAN;
+            }
             let query_point = [p.x, p.y, p.z];
             // nearest_neighbor_iter returns k+1 including itself (dist 0).
             // take(k+1) gives nearest neighbors.
@@ -412,17 +461,23 @@ pub fn remove_statistical_outliers(
         })
         .collect();
 
-    let mean_dist = cv_math::mean(&distances.iter().map(|&d| d as f64).collect::<Vec<_>>())
-        .unwrap_or(0.0) as f32;
-    // std dev
-    let variance = distances
+    // Only the points that have a distance take part in the statistics: a single
+    // NaN in the mean would put NaN in the threshold and reject the whole cloud.
+    let measured: Vec<f64> = distances
         .iter()
-        .map(|d| {
-            let diff = d - mean_dist;
+        .filter(|d| d.is_finite())
+        .map(|&d| d as f64)
+        .collect();
+    let mean_dist = cv_math::mean(&measured).unwrap_or(0.0) as f32;
+    // std dev
+    let variance = measured
+        .iter()
+        .map(|&d| {
+            let diff = d as f32 - mean_dist;
             diff * diff
         })
         .sum::<f32>()
-        / distances.len() as f32;
+        / measured.len().max(1) as f32;
     let std_dev = variance.sqrt();
 
     let threshold = mean_dist + std_ratio as f32 * std_dev;
@@ -469,6 +524,10 @@ pub fn remove_statistical_outliers(
 
 /// Remove radius outliers.
 /// Points with fewer than `min_points` neighbors within `radius` are removed.
+///
+/// A negative radius contains no point at all, so every point is an outlier;
+/// `locate_within_distance` takes a *squared* radius, which used to turn
+/// `radius = -1.0` into `radius = 1.0` and keep the whole cloud.
 pub fn remove_radius_outliers(
     pc: &PointCloud,
     radius: f32,
@@ -486,7 +545,9 @@ pub fn remove_radius_outliers(
         .collect();
     let tree = RTree::bulk_load(wrappers);
 
-    let r2 = radius * radius;
+    // A negative squared radius matches nothing (measured: `rstar` returns an
+    // empty set for it rather than panicking).
+    let r2 = if radius < 0.0 { -1.0 } else { radius * radius };
 
     let inlier_mask: Vec<bool> = pc
         .points
@@ -581,6 +642,13 @@ impl RobustModel<Point3<f32>> for PlaneEstimator {
 /// Segment a plane using RANSAC.
 /// Returns (a, b, c, d) plane model and list of inlier indices.
 /// Plane equation: ax + by + cz + d = 0.
+///
+/// `ransac_n` is validated against the cloud size but, contrary to the Open3D
+/// convention it is named after, it does not change the fit: the plane is always
+/// estimated from the first three sampled points (`PlaneEstimator`'s
+/// `min_sample_size`), so any value `>= 3` returns the same model as `3`
+/// (measured: `ransac_n` of 3, 4 and 100 on the same cloud all recovered the
+/// same plane with the same 400 inliers).
 pub fn segment_plane(
     pc: &PointCloud,
     distance_threshold: f32,
@@ -614,10 +682,18 @@ pub fn segment_plane(
 /// DBSCAN clustering.
 /// Returns a list of labels for each point. -1 indicates noise.
 /// 0..N indicates cluster index.
+///
+/// A negative `eps` contains no neighbour, so every point is noise: the squared
+/// radius used for the search turned `eps = -1.0` into `eps = 1.0` and produced
+/// the same clusters as the positive radius.
 pub fn cluster_dbscan(pc: &PointCloud, eps: f32, min_points: usize) -> Vec<i32> {
     let n = pc.len();
     let mut labels = vec![-1; n]; // -1 = noise/unvisited
     let mut cluster_idx = 0;
+
+    if eps < 0.0 {
+        return labels;
+    }
 
     // Build tree
     let wrappers: Vec<PointWrapper> = pc
@@ -827,8 +903,14 @@ fn compute_pair_features(
         return (0.0, 0.0, 0.0);
     }
 
+    // Darboux frame from Rusu et al. (ICRA 2009): `u = n1`, `v = u × d`, with
+    // `d = p2 - p1`. The sign matters: `delta.cross(u)` is `-v`, which flips the
+    // sign of `alpha` and `theta` and mirrors their bins about the centre, so
+    // the same cloud produced a different descriptor here than in
+    // `cv-registration`'s implementation of the same paper (measured on
+    // `p1=(0,0,0), n1=z, p2=(1,0,0), n2=y`: alpha bin 0 instead of bin 10).
     let u = n1;
-    let v = delta.cross(u);
+    let v = u.cross(&delta);
     let v_norm = v.norm();
 
     if v_norm < 1e-6 {

@@ -93,6 +93,9 @@ pub fn triangulate_point_dlt(
 }
 
 /// Triangulate multiple points from two views.
+///
+/// Returns an empty vector when either point list is empty (there is nothing to
+/// triangulate); it never panics on an empty batch.
 pub fn triangulate_points(
     points1: &[Point2<f64>],
     points2: &[Point2<f64>],
@@ -119,6 +122,15 @@ pub fn triangulate_points_ctx(
         return Err(SfmError::TriangulationFailed(
             "Point counts must match".to_string(),
         ));
+    }
+    // Nothing to triangulate. This used to index `points1[0]` unconditionally to
+    // validate the projection matrices, so an empty batch panicked with "index
+    // out of bounds: the len is 0 but the index is 0" - a caller that filtered a
+    // frame's correspondences down to none crashed instead of getting an empty
+    // result. An empty input has exactly one correct answer and it is not an
+    // error, so return it before touching any element.
+    if points1.is_empty() {
+        return Ok(Vec::new());
     }
     // Checked once for the whole batch rather than per point, so the cost stays
     // linear in the input instead of one check per parallel task.

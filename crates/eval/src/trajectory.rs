@@ -70,7 +70,7 @@ impl Default for SimilarityTransform {
     }
 }
 
-/// Summary statistics of an error series (never panics, empty input yields zeros).
+/// Summary statistics of an error series (never panics).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ErrorStats {
     /// Root mean square error.
@@ -88,10 +88,20 @@ pub struct ErrorStats {
 impl ErrorStats {
     /// Compute the summary statistics of `errors`.
     ///
-    /// Returns all-zero statistics for an empty slice.
+    /// Every field is `NaN` for an empty slice. There is no error to summarise,
+    /// and a zero would be read as a perfect score by every comparison built on
+    /// it (`if stats.rmse < best_so_far` selects the trajectory that was never
+    /// measured). Callers that have to distinguish "no samples" from "a large
+    /// error" can test `errors.is_empty()` on the error list they passed in.
     pub fn from_errors(errors: &[f64]) -> Self {
         if errors.is_empty() {
-            return Self::default();
+            return Self {
+                rmse: f64::NAN,
+                mean: f64::NAN,
+                median: f64::NAN,
+                max: f64::NAN,
+                std: f64::NAN,
+            };
         }
         let n = errors.len() as f64;
         let mean = errors.iter().sum::<f64>() / n;
@@ -163,18 +173,19 @@ impl Trajectory {
     }
 
     /// Build a trajectory from positions, quaternions and explicit timestamps.
+    ///
+    /// `timestamps` is trimmed to the number of poses, and the poses are trimmed
+    /// to the number of timestamps when the caller supplies fewer: the two
+    /// fields are documented to be parallel, and leaving a short `timestamps`
+    /// slice in place produced a trajectory whose `poses` and `timestamps` had
+    /// different lengths, which every `zip` over them silently truncates.
     pub fn from_positions_and_quaternions_with_timestamps(
         positions: &[Vector3<f64>],
         quaternions: &[UnitQuaternion<f64>],
         timestamps: &[f64],
     ) -> Self {
-        let mut trajectory = Self::from_positions_and_quaternions(positions, quaternions);
-        trajectory.timestamps = timestamps
-            .iter()
-            .take(trajectory.poses.len())
-            .copied()
-            .collect();
-        trajectory
+        let trajectory = Self::from_positions_and_quaternions(positions, quaternions);
+        Self::new(trajectory.poses, timestamps.to_vec())
     }
 
     /// Number of poses.
@@ -202,12 +213,13 @@ impl Trajectory {
 
     /// RMSE between the camera centers of `self` and `gt` (no alignment).
     ///
-    /// Returns `0.0` for an empty overlap and ignores extra poses in the
-    /// longer trajectory.
+    /// The comparison stops at the shorter trajectory. Returns `NaN` when the
+    /// two share no pose: nothing was compared, and `0.0` would be read as a
+    /// perfect match by any caller that thresholds or ranks the result.
     pub fn camera_center_rmse(&self, gt: &Trajectory) -> f64 {
         let n = self.poses.len().min(gt.poses.len());
         if n == 0 {
-            return 0.0;
+            return f64::NAN;
         }
         let sum_sq: f64 = self.poses[..n]
             .iter()
@@ -220,21 +232,27 @@ impl Trajectory {
     /// Absolute trajectory error against a ground-truth trajectory.
     ///
     /// Camera centers are optionally aligned (`align`) to the ground truth
-    /// before the per-pose errors are measured. Returns zeroed statistics
-    /// (and `transform: None`) when there is no overlapping pose.
+    /// before the per-pose errors are measured. The comparison stops at the
+    /// shorter trajectory.
+    ///
+    /// When the two trajectories share no pose there is nothing to measure: the
+    /// result carries `NaN` statistics, an empty `errors` list and no
+    /// `transform`, with `is_valid` still `true` because the inputs themselves
+    /// are well formed (see [`AteResult::is_valid`]). Reporting `rmse = 0.0`
+    /// here made "compared nothing" rank as a perfect reconstruction.
     pub fn ate(&self, gt: &Trajectory, align: Alignment) -> AteResult {
         let n = self.poses.len().min(gt.poses.len());
         if n == 0 {
             return AteResult {
-                rmse: 0.0,
-                mean: 0.0,
-                median: 0.0,
-                max: 0.0,
-                std: 0.0,
+                rmse: f64::NAN,
+                mean: f64::NAN,
+                median: f64::NAN,
+                max: f64::NAN,
+                std: f64::NAN,
                 errors: Vec::new(),
                 is_valid: true,
                 alignment: align,
-                scale: 1.0,
+                scale: f64::NAN,
                 transform: None,
             };
         }
@@ -309,21 +327,32 @@ impl Trajectory {
     /// `inv(T_i) * T_{i+delta}` is compared between `self` and `gt`. A global
     /// rigid transform between the two trajectories cancels out, so RPE is
     /// invariant to the (unobservable) world frame.
+    ///
+    /// Returns empty error lists and `NaN` statistics when there is no pair to
+    /// compare: `delta_frames == 0` (every pose against itself, which is the
+    /// identity for *any* pair of trajectories) or `delta_frames >= n`.
     pub fn rpe(&self, gt: &Trajectory, delta_frames: usize) -> RpeResult {
         let n = self.poses.len().min(gt.poses.len());
         let mut translation_errors = Vec::new();
         let mut rotation_errors = Vec::new();
 
-        let mut i = 0;
-        while i + delta_frames < n {
-            let est_rel = self.poses[i]
-                .inverse()
-                .compose(&self.poses[i + delta_frames]);
-            let gt_rel = gt.poses[i].inverse().compose(&gt.poses[i + delta_frames]);
-            let error = gt_rel.inverse().compose(&est_rel);
-            translation_errors.push(error.translation.norm());
-            rotation_errors.push(error.rotation.angle());
-            i += 1;
+        // `delta_frames == 0` would compare each pose with itself: `inv(T_i) *
+        // T_i` is the identity regardless of what the two trajectories contain,
+        // so the loop below used to emit `n` exact zeros and report a perfect
+        // RPE (translation and rotation rmse of 0.0) for trajectories that share
+        // nothing. Only a positive gap compares distinct poses.
+        if delta_frames > 0 {
+            let mut i = 0;
+            while i + delta_frames < n {
+                let est_rel = self.poses[i]
+                    .inverse()
+                    .compose(&self.poses[i + delta_frames]);
+                let gt_rel = gt.poses[i].inverse().compose(&gt.poses[i + delta_frames]);
+                let error = gt_rel.inverse().compose(&est_rel);
+                translation_errors.push(error.translation.norm());
+                rotation_errors.push(error.rotation.angle());
+                i += 1;
+            }
         }
 
         RpeResult {
@@ -351,7 +380,8 @@ pub struct AteResult {
     pub std: f64,
     /// Per-pose errors, in trajectory order.
     ///
-    /// Empty when the result is not valid - see [`AteResult::is_valid`].
+    /// Empty when there is no overlapping pose (then every statistic above is
+    /// `NaN`), or when the result is not valid - see [`AteResult::is_valid`].
     pub errors: Vec<f64>,
     /// `false` when the input contained a non-finite coordinate, so every
     /// statistic above is NaN.
@@ -359,10 +389,16 @@ pub struct AteResult {
     /// `ate` has no error channel and returns a struct of plain `f64`, so
     /// without this a malformed trajectory is indistinguishable from one that
     /// simply registered poorly: both report `rmse = NaN`.
+    ///
+    /// This flag reports the *input*: a pair of well-formed trajectories that
+    /// share no pose is still valid, but carries `NaN` statistics because
+    /// nothing was measured, so a caller must not read those numbers as an
+    /// error of zero. Check `errors.is_empty()` or `rmse.is_nan()` for that.
     pub is_valid: bool,
     /// Alignment that was requested.
     pub alignment: Alignment,
-    /// Scale recovered by the alignment (`1.0` for `None`/`Se3`).
+    /// Scale recovered by the alignment (`1.0` for `None`/`Se3`), or `NaN` when
+    /// nothing was aligned because there is no overlapping pose.
     pub scale: f64,
     /// Transform applied before measuring the error (`None` for `Alignment::None`).
     pub transform: Option<SimilarityTransform>,
@@ -583,11 +619,126 @@ mod tests {
         assert!((traj.path_length() - 2.0).abs() < 1e-12);
 
         let empty = Trajectory::default();
+        // A sum over no segments genuinely is zero.
         assert_eq!(empty.path_length(), 0.0);
-        assert_eq!(empty.camera_center_rmse(&traj), 0.0);
+
+        // The rest are measurements, and a measurement over zero poses has no
+        // value to report. A zero reads as a perfect match to any caller that
+        // thresholds or ranks it; NaN is the honest "no data".
+        assert!(
+            empty.camera_center_rmse(&traj).is_nan(),
+            "camera-centre RMSE over no overlap = {}",
+            empty.camera_center_rmse(&traj)
+        );
         let ate = empty.ate(&traj, Alignment::Sim3);
-        assert_eq!(ate.rmse, 0.0);
+        assert!(ate.rmse.is_nan(), "ATE over no overlap = {}", ate.rmse);
+        assert!(ate.is_valid, "an empty trajectory is a well-formed input");
+        assert!(ate.errors.is_empty());
         assert!(ate.transform.is_none());
-        assert_eq!(empty.rpe(&traj, 1).translation.rmse, 0.0);
+        let rpe = empty.rpe(&traj, 1);
+        assert!(rpe.translation.rmse.is_nan());
+        assert!(rpe.rotation.rmse.is_nan());
+    }
+
+    #[test]
+    fn error_stats_of_no_samples_are_nan() {
+        let stats = ErrorStats::from_errors(&[]);
+        assert!(stats.rmse.is_nan(), "rmse = {}", stats.rmse);
+        assert!(stats.mean.is_nan());
+        assert!(stats.median.is_nan());
+        assert!(stats.max.is_nan());
+        assert!(stats.std.is_nan());
+
+        // Control: one sample is summarised exactly (a zero standard deviation
+        // here is computed from the data, not fabricated).
+        let one = ErrorStats::from_errors(&[3.0]);
+        assert_eq!(one.rmse, 3.0);
+        assert_eq!(one.mean, 3.0);
+        assert_eq!(one.median, 3.0);
+        assert_eq!(one.max, 3.0);
+        assert_eq!(one.std, 0.0);
+    }
+
+    #[test]
+    fn rpe_with_zero_frame_gap_reports_no_measurement() {
+        // Ground truth moves one metre per frame; the estimate also drifts in y,
+        // so the frame-to-frame motion genuinely differs.
+        let gt = Trajectory::from_positions_and_quaternions(
+            &(0..6)
+                .map(|i| Vector3::new(i as f64, 0.0, 0.0))
+                .collect::<Vec<_>>(),
+            &[UnitQuaternion::identity(); 6],
+        );
+        let est = Trajectory::from_positions_and_quaternions(
+            &(0..6)
+                .map(|i| Vector3::new(i as f64, 0.5 * i as f64, 0.0))
+                .collect::<Vec<_>>(),
+            &[UnitQuaternion::identity(); 6],
+        );
+
+        // A zero gap compares every pose with itself, which is the identity for
+        // *any* pair of trajectories: it must not report a perfect 0.0.
+        let zero = est.rpe(&gt, 0);
+        assert!(
+            zero.translation_errors.is_empty(),
+            "delta 0 fabricated {} samples: {:?}",
+            zero.translation_errors.len(),
+            zero.translation_errors
+        );
+        assert!(zero.rotation_errors.is_empty());
+        assert!(zero.translation.rmse.is_nan(), "{}", zero.translation.rmse);
+        assert!(zero.rotation.rmse.is_nan());
+
+        // Control: a positive gap measures the real discrepancy, and a gap at
+        // the last possible index still has one sample.
+        let one = est.rpe(&gt, 1);
+        assert_eq!(one.translation_errors.len(), 5);
+        assert!(
+            one.translation.rmse > 0.4 && one.translation.rmse.is_finite(),
+            "delta 1 translation rmse = {}",
+            one.translation.rmse
+        );
+        let last = est.rpe(&gt, 5);
+        assert_eq!(last.translation_errors.len(), 1);
+        assert!(last.translation.rmse.is_finite());
+
+        // A gap beyond the trajectory has no pair to compare either.
+        let beyond = est.rpe(&gt, 6);
+        assert!(beyond.translation_errors.is_empty());
+        assert!(beyond.translation.rmse.is_nan());
+    }
+
+    #[test]
+    fn timestamps_stay_parallel_to_poses() {
+        let positions: Vec<Vector3<f64>> =
+            (0..4).map(|i| Vector3::new(i as f64, 0.0, 0.0)).collect();
+        let quaternions = [UnitQuaternion::identity(); 4];
+
+        let full = Trajectory::from_positions_and_quaternions_with_timestamps(
+            &positions,
+            &quaternions,
+            &[1.0, 2.0, 3.0, 4.0],
+        );
+        assert_eq!(full.poses.len(), 4);
+        assert_eq!(full.timestamps, vec![1.0, 2.0, 3.0, 4.0]);
+
+        // Too few timestamps: the shorter input wins, as `Trajectory::new`
+        // documents, rather than leaving the two fields out of step.
+        let short = Trajectory::from_positions_and_quaternions_with_timestamps(
+            &positions,
+            &quaternions,
+            &[1.0, 2.0],
+        );
+        assert_eq!(short.poses.len(), short.timestamps.len());
+        assert_eq!(short.timestamps, vec![1.0, 2.0]);
+
+        // Too many: trimmed to the poses.
+        let long = Trajectory::from_positions_and_quaternions_with_timestamps(
+            &positions,
+            &quaternions,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        );
+        assert_eq!(long.poses.len(), long.timestamps.len());
+        assert_eq!(long.timestamps.len(), 4);
     }
 }

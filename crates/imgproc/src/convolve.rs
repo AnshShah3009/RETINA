@@ -447,6 +447,19 @@ pub fn separable_convolve_into_ctx(
     let ry = ky.len() / 2;
     let src = image.as_raw();
 
+    // Value the *whole* row takes when it lies outside the image under a
+    // `Constant` border. The vertical pass convolves rows of the horizontal
+    // result, so an out-of-range row must be the horizontal convolution of a
+    // row filled with `v`, i.e. `v * Σkx` - not `v`. Substituting the raw
+    // constant made the separable path disagree with the 2-D
+    // `convolve_with_border` by a factor of `Σkx`: zero for a derivative
+    // kernel (`[-1, 0, 1]`), larger for an unnormalised smoothing kernel
+    // (`[1, 2, 1]` -> `4v`). It agreed only for kernels that sum to exactly 1.
+    let constant_row_value = match border {
+        BorderMode::Constant(v) => v as f32 * kx.iter().sum::<f32>(),
+        _ => 0.0,
+    };
+
     let mut tmp: Vec<f32> = vec![0.0f32; width * height];
 
     // Horizontal Pass (using kx)
@@ -488,8 +501,8 @@ pub fn separable_convolve_into_ctx(
                             if let Some(iy) = target_y {
                                 let idx = iy * width + x;
                                 vals.copy_from_slice(&tmp[idx..idx + 8]);
-                            } else if let BorderMode::Constant(v) = border {
-                                vals = [v as f32; 8];
+                            } else {
+                                vals = [constant_row_value; 8];
                             }
                             sum_v += f32x8::from(vals) * w_v;
                         }
@@ -504,10 +517,7 @@ pub fn separable_convolve_into_ctx(
                                 let sy = (y as isize) + (k as isize) - (ry as isize);
                                 let val = match map_coord(sy, height, border) {
                                     Some(iy) => tmp[iy * width + cx],
-                                    None => match border {
-                                        BorderMode::Constant(v) => v as f32,
-                                        _ => 0.0,
-                                    },
+                                    None => constant_row_value,
                                 };
                                 sum += val * ky[k];
                             }

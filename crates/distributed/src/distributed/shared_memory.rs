@@ -23,7 +23,10 @@ const DEVICE_REGION_OFFSET: usize = HEADER_SIZE; // 64
 const SLOT_REGION_OFFSET: usize = DEVICE_REGION_OFFSET + MAX_DEVICES * DEVICE_STATE_SIZE; // 2112
 
 const SHM_MAGIC: u32 = 0x52455449; // "RETI"
-const SHM_VERSION: u32 = 3;
+/// Bumped to 4 when `ProcessSlot` gained its per-device `load_count` array:
+/// the slot layout changed, so a region written by an older process must be
+/// re-initialized instead of being reinterpreted.
+const SHM_VERSION: u32 = 4;
 
 // --- Slot states ---
 
@@ -96,7 +99,12 @@ struct ProcessSlot {
     memory_budget_mb: [AtomicU32; MAX_DEVICES],
     compute_budget_pct: [AtomicU32; MAX_DEVICES],
     affinity_group: AtomicU32,
-    _pad: [u8; 68],
+    /// Per-device load published by this process via
+    /// [`LoadCoordinator::update_load`]. Kept separate from
+    /// `compute_budget_pct` (which `reserve_device` owns) so that publishing a
+    /// load cannot overwrite a compute budget and vice versa.
+    load_count: [AtomicU32; MAX_DEVICES],
+    _pad: [u8; 4],
 }
 
 // Compile-time size checks
@@ -396,6 +404,7 @@ impl ShmCoordinator {
                 for j in 0..MAX_DEVICES {
                     slot.memory_budget_mb[j].store(0, Ordering::Relaxed);
                     slot.compute_budget_pct[j].store(0, Ordering::Relaxed);
+                    slot.load_count[j].store(0, Ordering::Relaxed);
                 }
                 slot.affinity_group.store(0, Ordering::Relaxed);
 
@@ -441,7 +450,22 @@ impl ShmCoordinator {
         // CAS loop for memory reservation
         loop {
             let current = dev.used_memory_mb.load(Ordering::Acquire);
-            if current + memory_mb > total {
+            // `current + memory_mb` must not be computed in `u32`: a caller
+            // passing a size near `u32::MAX` used to overflow (panicking in
+            // debug, wrapping in release and letting the reservation through).
+            let requested = match current.checked_add(memory_mb) {
+                Some(sum) => sum,
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::OutOfMemory,
+                        format!(
+                            "Device {} over budget: used={}MB + requested={}MB overflows",
+                            device_idx, current, memory_mb
+                        ),
+                    ))
+                }
+            };
+            if requested > total {
                 return Err(io::Error::new(
                     io::ErrorKind::OutOfMemory,
                     format!(
@@ -452,12 +476,7 @@ impl ShmCoordinator {
             }
             if dev
                 .used_memory_mb
-                .compare_exchange(
-                    current,
-                    current + memory_mb,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange(current, requested, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 break;
@@ -494,18 +513,17 @@ impl ShmCoordinator {
         // if another thread in the same process calls reserve_device() between
         // the load and store(0), the newly-added budget would be silently lost.
         let budget = slot.memory_budget_mb[idx].swap(0, Ordering::AcqRel);
-        if budget == 0 {
-            return Ok(()); // nothing to release
-        }
 
         // Subtract our budget from the device's used total
         // (saturating to guard against wrapping arithmetic if budget accounting
         // has already drifted due to a prior race)
-        dev.used_memory_mb
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                Some(used.saturating_sub(budget))
-            })
-            .ok();
+        if budget > 0 {
+            dev.used_memory_mb
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                    Some(used.saturating_sub(budget))
+                })
+                .ok();
+        }
 
         // Clear owner bit
         let bit = Self::slot_bit(self.slot_index);
@@ -816,8 +834,9 @@ impl ShmCoordinator {
                         let bit = Self::slot_bit(i);
                         dev.owner_mask.fetch_and(!bit, Ordering::AcqRel);
                     }
-                    slot.compute_budget_pct[d].store(0, Ordering::Release);
                 }
+                slot.compute_budget_pct[d].store(0, Ordering::Release);
+                slot.load_count[d].store(0, Ordering::Release);
             }
 
             // Zero the slot
@@ -929,8 +948,9 @@ impl ShmCoordinator {
                                         .fetch_and(!Self::slot_bit(i), Ordering::AcqRel);
                                 }
                                 slot.memory_budget_mb[d].store(0, Ordering::Release);
-                                slot.compute_budget_pct[d].store(0, Ordering::Release);
                             }
+                            slot.compute_budget_pct[d].store(0, Ordering::Release);
+                            slot.load_count[d].store(0, Ordering::Release);
                         }
                         slot.pid.store(0, Ordering::Relaxed);
                         slot.device_mask.store(0, Ordering::Relaxed);
@@ -1055,24 +1075,27 @@ impl ShmCoordinator {
 
 impl LoadCoordinator for ShmCoordinator {
     fn update_load(&self, device_load: &HashMap<DeviceId, usize>) -> io::Result<()> {
-        if device_load.is_empty() {
-            return Ok(());
-        }
-
-        // Store primary device load in the slot for backward-compatible global load queries
         let slot = self.my_slot();
-        let total_load: usize = device_load.values().sum();
-        let primary_device = device_load
-            .iter()
-            .max_by_key(|(_, &load)| load)
-            .map(|(id, _)| id.0)
-            .unwrap_or(0);
 
-        // We reuse compute_budget_pct[0] for legacy load tracking (atomic, no lock needed)
-        slot.compute_budget_pct[0].store(total_load as u32, Ordering::Release);
-        // Store primary device in device_mask's lowest bits conceptually
-        // but we track it separately for queries
-        let _ = primary_device; // tracked via device_mask already
+        // Publish the caller's map verbatim, device by device. The previous
+        // implementation collapsed it to a single total, stored that total in
+        // `compute_budget_pct[0]` (a field `reserve_device` also owns) and
+        // reported the whole sum against `DeviceId(0)` - so a load published
+        // for devices 3 and 5 came back as `{0: 9}`, inventing a device 0
+        // entry and losing the real per-device breakdown that
+        // `FileCoordinator` (the other `LoadCoordinator`) preserves.
+        //
+        // Devices absent from the map are cleared, so a process that becomes
+        // idle stops contributing the load it reported earlier. An empty map
+        // is a valid publish ("no load anywhere") and must not be ignored.
+        for d in 0..MAX_DEVICES {
+            let count = device_load
+                .get(&DeviceId(d as u32))
+                .copied()
+                .unwrap_or(0)
+                .min(u32::MAX as usize) as u32;
+            slot.load_count[d].store(count, Ordering::Release);
+        }
 
         self.send_heartbeat()?;
         Ok(())
@@ -1105,22 +1128,14 @@ impl LoadCoordinator for ShmCoordinator {
                 }
             }
 
-            // Aggregate load from device reservations
-            let mask = slot.device_mask.load(Ordering::Acquire);
+            // Sum every process's published per-device load. This is the same
+            // reduction `FileCoordinator::get_global_load` performs over its
+            // per-process files.
             for d in 0..MAX_DEVICES {
-                if mask & (1u64 << d) != 0 {
-                    let budget = slot.memory_budget_mb[d].load(Ordering::Acquire);
-                    if budget > 0 {
-                        *aggregate.entry(DeviceId(d as u32)).or_insert(0) += 1;
-                    }
+                let count = slot.load_count[d].load(Ordering::Acquire) as usize;
+                if count > 0 {
+                    *aggregate.entry(DeviceId(d as u32)).or_insert(0) += count;
                 }
-            }
-
-            // Also count legacy load
-            let legacy_load = slot.compute_budget_pct[0].load(Ordering::Acquire);
-            if legacy_load > 0 && mask == 0 {
-                // No device reservations but has legacy load data
-                *aggregate.entry(DeviceId(0)).or_insert(0) += legacy_load as usize;
             }
         }
 
@@ -1149,6 +1164,9 @@ impl LoadCoordinator for ShmCoordinator {
             slot.device_mask.store(0, Ordering::Relaxed);
             slot.heartbeat_ns.store(0, Ordering::Relaxed);
             slot.affinity_group.store(0, Ordering::Relaxed);
+            for d in 0..MAX_DEVICES {
+                slot.load_count[d].store(0, Ordering::Release);
+            }
             slot.state.store(SLOT_EMPTY, Ordering::Release);
         }
     }
@@ -1641,5 +1659,165 @@ mod tests {
 
         drop(coord2);
         drop(coord1);
+    }
+
+    #[test]
+    fn test_update_load_keeps_the_per_device_breakdown() {
+        // The coordinator must publish the per-device load map it was given.
+        // Previously everything was collapsed into one total and reported
+        // against DeviceId(0), so devices 3 and 5 disappeared from the
+        // aggregate and the entire load was attributed to device 0.
+        let name = unique_name("per_device_load");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+
+        let mut load = HashMap::new();
+        load.insert(DeviceId(3), 7usize);
+        load.insert(DeviceId(5), 2usize);
+        coord.update_load(&load).unwrap();
+
+        let global = coord.get_global_load().unwrap();
+        assert_eq!(
+            global.get(&DeviceId(3)),
+            Some(&7),
+            "load of device 3 lost: {global:?}"
+        );
+        assert_eq!(
+            global.get(&DeviceId(5)),
+            Some(&2),
+            "load of device 5 lost: {global:?}"
+        );
+        assert_eq!(
+            global.get(&DeviceId(0)),
+            None,
+            "no load was published for device 0: {global:?}"
+        );
+        assert_eq!(global.values().sum::<usize>(), 9);
+
+        // Control: the well-formed single-device case still works, and a
+        // later publish replaces (not accumulates) the previous map.
+        let mut single = HashMap::new();
+        single.insert(DeviceId(3), 1usize);
+        coord.update_load(&single).unwrap();
+        let global = coord.get_global_load().unwrap();
+        assert_eq!(
+            global.len(),
+            1,
+            "stale per-device load was not cleared: {global:?}"
+        );
+        assert_eq!(global.get(&DeviceId(3)), Some(&1));
+
+        // Control: an idle process publishes an empty map and must not keep
+        // reporting its previous load.
+        coord.update_load(&HashMap::new()).unwrap();
+        assert!(
+            coord.get_global_load().unwrap().is_empty(),
+            "empty load map must clear the published load"
+        );
+    }
+
+    #[test]
+    fn test_update_load_does_not_clobber_the_compute_budget() {
+        // `update_load` and `reserve_device` must not share storage: they did
+        // (both wrote `compute_budget_pct[0]`), so publishing a load of 9
+        // replaced a compute budget of 40 with 9, and `get_global_load`
+        // reported compute percentages as load.
+        let name = unique_name("no_clobber");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        coord.init_device(0, 2048).unwrap();
+        coord.reserve_device(0, 256, 40).unwrap();
+        assert_eq!(
+            coord.my_slot().compute_budget_pct[0].load(Ordering::Acquire),
+            40
+        );
+
+        let mut load = HashMap::new();
+        load.insert(DeviceId(7), 9usize);
+        coord.update_load(&load).unwrap();
+
+        assert_eq!(
+            coord.my_slot().compute_budget_pct[0].load(Ordering::Acquire),
+            40,
+            "update_load overwrote the compute budget of device 0"
+        );
+        // Control: the reservation itself is untouched.
+        assert_eq!(coord.device_memory_usage()[0].1, 256);
+        assert_eq!(coord.get_global_load().unwrap().get(&DeviceId(7)), Some(&9));
+
+        coord.release_device(0).unwrap();
+        assert_eq!(
+            coord.my_slot().compute_budget_pct[0].load(Ordering::Acquire),
+            0
+        );
+    }
+
+    #[test]
+    fn test_release_device_clears_a_zero_memory_reservation() {
+        // A reservation with `memory_mb == 0` (e.g. a caller claiming only a
+        // compute share) used to make `release_device` return early, leaving
+        // the slot's compute budget and its device bit set forever - every
+        // other process then saw this slot as a peer on that device.
+        let name = unique_name("zero_mb_release");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        coord.init_device(0, 2048).unwrap();
+
+        coord.reserve_device(0, 0, 30).unwrap();
+        let slot = coord.my_slot();
+        assert_eq!(slot.compute_budget_pct[0].load(Ordering::Acquire), 30);
+        assert_ne!(slot.device_mask.load(Ordering::Acquire) & 1, 0);
+
+        coord.release_device(0).unwrap();
+
+        assert_eq!(
+            slot.compute_budget_pct[0].load(Ordering::Acquire),
+            0,
+            "compute budget survived release_device"
+        );
+        assert_eq!(
+            slot.device_mask.load(Ordering::Acquire) & 1,
+            0,
+            "slot still advertises device 0 after releasing it"
+        );
+        let dev = ShmCoordinator::device_ptr(&coord.mmap, 0).unwrap();
+        assert_eq!(
+            dev.owner_mask.load(Ordering::Acquire) & ShmCoordinator::slot_bit(coord.slot_index),
+            0,
+            "owner bit survived release_device"
+        );
+
+        // Control: a normal reservation still releases its memory.
+        coord.reserve_device(0, 512, 10).unwrap();
+        assert_eq!(coord.device_memory_usage()[0].1, 512);
+        coord.release_device(0).unwrap();
+        assert_eq!(coord.device_memory_usage()[0].1, 0);
+        assert_eq!(slot.compute_budget_pct[0].load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_reserve_device_rejects_an_overflowing_request() {
+        // `current + memory_mb > total` overflowed on a caller-supplied size:
+        // debug builds panicked (this test would abort), release builds wrapped
+        // around and let the request through, over-committing the device.
+        let name = unique_name("reserve_overflow");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        coord.init_device(0, 2048).unwrap();
+        coord.reserve_device(0, 1024, 0).unwrap();
+
+        let res = coord.reserve_device(0, u32::MAX, 0);
+        assert!(
+            res.is_err(),
+            "u32::MAX on a 2048MB device must be rejected, not overflow"
+        );
+        assert_eq!(res.unwrap_err().kind(), io::ErrorKind::OutOfMemory);
+        assert_eq!(
+            coord.device_memory_usage()[0].1,
+            1024,
+            "a rejected request must not change the accounting"
+        );
+
+        // Control: a request that exactly fits is still accepted.
+        coord.reserve_device(0, 1024, 0).unwrap();
+        assert_eq!(coord.device_memory_usage()[0].1, 2048);
+        coord.release_device(0).unwrap();
+        assert_eq!(coord.device_memory_usage()[0].1, 0);
     }
 }

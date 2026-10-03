@@ -74,7 +74,7 @@ fn a_non_finite_coordinate_in_the_ground_truth_is_reported() {
 }
 
 #[test]
-fn an_empty_trajectory_is_valid_and_reports_zero_error() {
+fn an_empty_trajectory_is_valid_but_measures_nothing() {
     let est = Trajectory::from_poses(&[]);
     let gt = Trajectory::from_poses(&[]);
     let r = est.ate(&gt, Alignment::Se3);
@@ -82,5 +82,13 @@ fn an_empty_trajectory_is_valid_and_reports_zero_error() {
         r.is_valid,
         "an empty trajectory is a valid degenerate input"
     );
-    assert_eq!(r.rmse, 0.0);
+    // "Compared nothing" is not "an error of zero": a 0.0 here is the best
+    // possible ATE and wins any comparison against a real measurement.
+    assert!(
+        r.rmse.is_nan(),
+        "ATE over zero poses must report no measurement, got {}",
+        r.rmse
+    );
+    assert!(r.errors.is_empty());
+    assert!(r.transform.is_none());
 }
