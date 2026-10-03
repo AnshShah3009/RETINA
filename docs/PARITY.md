@@ -108,54 +108,68 @@ sides were told to use identically, with deviations concentrated away from the
 interior. Small and localised, but **not yet attributed** — could be a fixed-point
 rounding difference, a border-path detail, or a real disagreement.
 
-### ATTRIBUTED: resize point-samples where OpenCV area-averages
+### ATTRIBUTED: the resize divergence is align-corners vs half-pixel, not a kernel difference
 
-The 40-80 grey level resize deviations are **not** a phase convention, and not
-rounding. Established by measurement, for the 48x36 -> 24x18 case (an exact 2x
-downscale) on the `smooth` input, row 0:
+An impulse probe settles it — a single lit pixel tells you exactly which source
+pixels each side reads, with no hypothesis about phase. A 16x16 image with one
+`255` at the centre, downscaled to 8x8 (an exact 2x reduction):
 
 ```
-src row0     : 127 153 177 198 214 224 227 224 214 198 177 153 127
-rust         : 127 178 215 227 211 172 120  71  37  28  47  88 141
-cv2 LINEAR   : 148 194 222 224 200 157 106  60  33  31  54  97 148
-cv2 INTER_AREA: 148 194 222 224 200 157 106  60  33  31  54  97 148
+OpenCV NEAREST : 255          (picks the source pixel)
+OpenCV LINEAR  :  64  = 255/4 (exactly the 2x2 box average)
+OpenCV AREA    :  64  = 255/4 (identical, which is the key datum)
+
+Rust NEAREST   : 255          (agrees)
+Rust LINEAR    :  47
 ```
 
-Three facts pin it:
+`cv2 LINEAR` and `cv2 AREA` agreeing exactly says OpenCV is area-averaging on a
+downscale. The Rust value is not a box average — and it is **exactly** what a
+correct bilinear produces under a *different coordinate convention*:
 
-1. **`rust[0] == src[0,0]` exactly.** The Rust side takes the source value at the
-   pixel corner.
-2. **OpenCV's `INTER_AREA` and `INTER_LINEAR` agree to `0.0`** on this downscale. The
-   reference is self-consistent under two different algorithms.
-3. Amplitudes match (peak-to-peak 199 rust vs 193 cv2), so both **do** filter — this is
-   not nearest-neighbour. It is *where* the filter is centred.
+```
+output x=4, source width 16 -> 8
 
-So on a 2x downscale the Rust side **discards 3 of every 4 source pixels**, while
-OpenCV averages the 2x2 neighbourhood. That is a genuine algorithmic difference and
-it explains both the magnitude and the frequency dependence: on the checkerboard it
-reads 40-80 apart, on the low-frequency `smooth` input only 11-21, because a
-point-sample of a fast signal and a box average of it differ far more than either
-differs from the other on a slow one.
+  align-corners  fx = x·(w−1)/(nw−1)   = 8.5714   dx = 0.5714
+                  2-D weight on the impulse = (1−0.5714)² = 0.1837
+                  255 × 0.1837 = 46.84  -> 47     <- MEASURED
 
-**Not fixed here, deliberately.** This is a **semantics decision, not a bug fix**:
+  half-pixel     fx = (x+0.5)·w/nw − 0.5 = 8.5000  dx = 0.5000
+                  2-D weight = (1−0.5)² = 0.2500
+                  255 × 0.25 = 63.75 -> 64           <- OpenCV
+```
 
-- `Interpolation::Linear` currently means "bilinear at the output pixel's mapped
-  source coordinate", which is a defensible and widely used definition - it is what
-  many libraries do, and it is correct for **upscaling**.
-- For **downscaling** it is the wrong choice: bilinear point-sampling aliases, which
-  is exactly why OpenCV offers `INTER_AREA` and why `INTER_AREA` and `INTER_LINEAR`
-  agree here (area averaging *is* the right downscale filter).
-- Changing `Linear` to area-average would fix the downscale case and alter every
-  existing caller that upscales with it.
+So both implementations are doing a bilinear interpolation; they disagree because
+**`cv_hal`'s CPU resize maps with `align-corners` and OpenCV maps with
+`half-pixel`.** The Rust arithmetic is internally consistent — this is a convention
+difference, not a bug.
 
-So the honest report is: the two libraries **disagree by design on downscaling**, and
-the correct outcome is a decision - either match OpenCV, or document the divergence
-and point users at a dedicated downscale path. What is now ruled out is the
-possibility that either implementation has a rounding bug: the numbers are
-self-consistent and reproducible on both sides.
+**Which is "right" depends on the contract, and that is the open question.** They
+are not interchangeable:
 
-Everything downstream of a resize inherits this, so it is worth deciding before it is
-relied upon.
+- **align-corners** (`x·(w−1)/(nw−1)`) pins the *corner* samples, so a 2x downscale
+  and a 2x upscale are exact inverses at the endpoints. It is what many scientific
+  libraries use.
+- **half-pixel** (`(x+0.5)·w/nw − 0.5`) treats samples as pixel *centres*, which is
+  what OpenCV, and graphics APIs generally, use. It avoids the half-pixel shift that
+  align-corners introduces at non-integer scales.
+
+Neither is more correct in the abstract. What *is* a defect is that a library
+positioned as an OpenCV replacement makes the opposite choice **silently** — a user
+compositing `resize` with `warp_affine` or a camera matrix gets a half-pixel
+displacement they cannot see.
+
+**Not changed here.** Switching to half-pixel would alter every existing caller and
+would make `resize` a round-trip of `warp_affine` rather than of its own inverse.
+The decision is a documented contract question, and the same choice has to be made
+consistently across `imgproc`, `hal`'s CPU and GPU resize, and the WGSL shader — three
+implementations that currently agree with each other and not with OpenCV.
+
+**Action for whoever decides:** state the convention in the `Interpolation` doc
+comment — it is already documented there for the *downscaling aliasing* consequence,
+but not for the half-pixel placement itself — and add a test that pins the impulse
+response, since that is the measurement which distinguishes the two conventions in a
+single number.
 
 ## Coverage of this report — and its holes
 
