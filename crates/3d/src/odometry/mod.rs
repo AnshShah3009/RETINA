@@ -174,6 +174,26 @@ pub fn compute_rgbd_odometry_ctx(
         group,
     );
 
+    // The pyramid loop above is best-effort: each scale returns `None` on
+    // failure and the previous transform is kept. If *every* scale failed, the
+    // transformation handed on is the identity - not because the camera did not
+    // move, but because nothing was ever estimated. That is exactly the shape
+    // of failure this crate has been removing: `compute_hybrid` used to return
+    // `Some` with the identity and a fabricated `fitness: 0.0`, and `fitness`
+    // is also `0.0` here when the whole pyramid failed, so a caller reading the
+    // score alone could not tell the two apart. Returning the identity *as a
+    // success* is the wrong half of the answer either way.
+    //
+    // Measured: a source frame with valid depth against a target frame with none
+    // returned `Some(OdometryResult { transformation: identity,
+    // fitness: 0.0, inlier_rmse: 0.0 })` - a "result" in which the camera did
+    // not move, nothing was matched, and the RMSE of an empty match set is
+    // reported as a perfect 0.0. The honest signal is the one the signature
+    // already has: `None`, matching `compute_intensity` and `compute_hybrid`.
+    if fitness <= 0.0 {
+        return None;
+    }
+
     Some(OdometryResult {
         transformation,
         fitness,
@@ -511,6 +531,20 @@ fn compute_vertex_normal_map_ctx(
 ) -> (Vec<Point3<f32>>, Vec<Vector3<f32>>) {
     let mut vertices = vec![Point3::origin(); width * height];
     let mut normals = vec![Vector3::zeros(); width * height];
+
+    // A zero-dimension frame has no vertices to differentiate, and
+    // `par_chunks_mut(0)` panics outright with "chunk_size must not be zero".
+    //
+    // This is reachable from the public entry point for any frame narrower than
+    // 8 pixels: `compute_rgbd_odometry_ctx` runs a four-level pyramid whose
+    // coarsest level is `scale = 0.125`, so a 7x7 frame downsamples to
+    // `(7*0.125) as usize = 0` columns and every call panicked in a rayon
+    // worker. A 1x1 frame and a declared 0x0 frame panic identically. The
+    // `length_checks` regression test covers a *short slice*, not a *zero
+    // dimension* — the two are different guards.
+    if width == 0 || height == 0 {
+        return (vertices, normals);
+    }
 
     group.run(|| {
         // Compute vertices in parallel

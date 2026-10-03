@@ -85,7 +85,7 @@ pub fn depth_buffer_visibility(
     let n = points.len();
     let splats: Vec<Option<ProjectedPoint>> = points
         .par_iter()
-        .map(|p| project_point(*p, viewpoint, &vp, w, h, fov_rad))
+        .map(|p| project_point(*p, viewpoint, &vp, w, h, fov_rad, aspect))
         .collect();
 
     // Rasterize: every pixel under a point's footprint keeps the nearest point
@@ -160,6 +160,7 @@ fn project_point(
     w: usize,
     h: usize,
     fov_rad: f64,
+    aspect: f64,
 ) -> Option<ProjectedPoint> {
     let clip = vp * Vector4::new(p.x, p.y, p.z, 1.0);
     if clip.w.abs() < 1e-15 {
@@ -178,9 +179,35 @@ fn project_point(
 
     let depth = (p - viewpoint).norm();
 
-    // Pixels per world unit at unit depth. The perspective divide scales that
-    // by 1/depth, so dividing by the eye distance gives the local Jacobian.
-    let px_per_unit_depth = w as f64 / (2.0 * (fov_rad / 2.0).tan());
+    // Pixels per world unit at unit depth, then divided by the eye distance to
+    // get the local Jacobian of the perspective divide.
+    //
+    // The focal length in *pixels* is `(w / 2) / tan(fov_x / 2)`, and for a
+    // perspective projection `tan(fov_x / 2) = aspect * tan(fov_y / 2)`. So
+    // `f_x = w / (2 * aspect * tan(fov_y / 2))`. The code used
+    // `w / (2 * tan(fov_y / 2))`, i.e. it divided by `tan` but not by `aspect`.
+    //
+    // That is a missing factor of `aspect` (= `w / h`), and it made the whole
+    // function wrong for every non-square viewport - and not only slightly.
+    // Measured on a ring of 200 points at unit distance, viewed edge-on down
+    // +z with fov 60 deg:
+    //
+    // ```text
+    // resolution (64,  64) -> 200 of 200 visible   (aspect 1, factor 1)
+    // resolution (128, 64) -> 200 of 200 visible   (aspect 2, factor 2 too large)
+    // resolution (64, 128) ->   0 of 200 visible   (aspect 0.5, factor 2 too small)
+    // ```
+    //
+    // Zero visible is the tell: with `aspect = 0.5` the computed Jacobian was
+    // half the true one, so `radius` fell to its 1-pixel floor for points that
+    // genuinely cover several columns, and every point's footprint landed on a
+    // single pixel that a *later* point in the ring then took ownership of. A
+    // height greater than the width made every point invisible - the opposite of
+    // the answer the same geometry gives at a square resolution.
+    //
+    // The footprint radius is still `max(1, world_radius * |J|)` with the
+    // 1-pixel floor; only the Jacobian is corrected.
+    let px_per_unit_depth = w as f64 / (2.0 * aspect * (fov_rad / 2.0).tan());
     let jacobian = px_per_unit_depth / depth.max(1e-12);
     let radius = jacobian.max(1.0);
 

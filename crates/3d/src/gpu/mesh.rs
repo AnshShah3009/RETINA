@@ -61,8 +61,17 @@ pub fn compute_vertex_normals(
         }
     }
     for n in &mut normals {
+        // The accumulated vector is a sum of *area-weighted* face normals, so
+        // its length is an area, scaling as L^2 - not a direction quality.
+        // `len > 1e-9` was a size test wearing a normalisation guard's clothes:
+        // measured on an equilateral triangle of edge 1 the sum normalises to
+        // [[0,0,1]], of edge 1e-4 it still normalises, and of edge 1e-5 it does
+        // not, leaving the caller a "normal" of length 1.73e-10. `> 0.0` is the
+        // right test - a non-zero sum is already a direction, however short - and
+        // still refuses a genuinely zero sum (a vertex on no faces, or only
+        // zero-area ones).
         let len = n.norm();
-        if len > 1e-9 {
+        if len > 0.0 {
             *n /= len;
         }
     }

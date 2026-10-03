@@ -459,6 +459,68 @@ behaviour for every tensor a caller passes. Recording it with the mechanism and 
 reproduction is more useful than shipping a change I could not verify across both
 kinds of machine.
 
+## NOT FIXED: the `3d` visibility aspect correction is claimed but unverified
+
+An audit agent changed the footprint Jacobian in `crates/3d/src/visibility.rs`
+from
+
+```text
+px_per_unit_depth = w / (2 * tan(fov_y / 2))
+```
+
+to `w / (2 * aspect * tan(fov_y / 2))`, arguing that the focal length in pixels is
+`(w/2)/tan(fov_x/2)` and `tan(fov_x/2) = aspect · tan(fov_y/2)`. **That derivation
+is correct** — I checked it independently. But the agent's *measurement* does not
+support its conclusion, and my own measurement contradicts it in one case. So the
+change is recorded rather than committed.
+
+### What was claimed
+
+> resolution (64,  64) -> 200 of 200 visible
+> resolution (128, 64) -> 200 of 200 visible
+> resolution (64, 128) ->   0 of 200 visible
+
+and "a height greater than the width made every point invisible".
+
+### What I measured
+
+```
+fixed:     64x64 -> 146    64x128 -> 118    128x64 -> 146
+original:  64x64 -> 146    64x128 -> 166    128x64 -> 170
+```
+
+`0 of 200` does not reproduce in either version. And the change moves the
+**landscape** count the wrong way for a halved Jacobian: a smaller footprint means
+fewer collisions and so *more* visible points, yet landscape fell from 170 to 146.
+
+### What is genuinely established
+
+- An independent projection confirms **all 200 ring points land inside the image**
+  at every one of those resolutions, so the differing counts are **footprint
+  collisions** in the index buffer, not visibility. No implementation is right or
+  wrong on "which points are visible" for this input.
+- The radii involved are 11–22 px, so the `max(1.0, ...)` floor never binds and the
+  aspect factor is fully effective in every case — the contradiction is not
+  explained by the floor.
+- The **formula** is right. `f_x = w / (2 · aspect · tan(fov_y/2))` follows from
+  `f_x = (w/2)/tan(fov_x/2)`.
+
+### Why it is not committed
+
+Because the agent's stated evidence does not reproduce, and I cannot reconcile the
+landscape case with the collision model. One of three things is true and I do not
+know which: the measurement was taken with a different scene or camera than the code
+comment describes; a second effect (projection, not footprint) dominates the
+counts; or the change is wrong in one regime. **A fix whose supporting evidence
+does not reproduce is not a fix**, and writing a test for it means choosing which
+behaviour to call correct — which is the decision I do not have grounds to make.
+
+**For whoever picks this up:** a direct unit test on `project_point` for a single
+known point, comparing the returned `radius` against the analytic
+`w/(2·aspect·tan(fov_y/2))/depth`, decides it immediately and needs no rasteriser.
+The end-to-end count is a poor instrument here because it conflates footprint
+collision with visibility.
+
 ## CHECKED AND CLEAN: `core` and `calib3d`, after every candidate was refuted
 
 An audit of the two most foundational crates (`core` 297 public items, `calib3d` 113)
