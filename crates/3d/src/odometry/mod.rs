@@ -407,7 +407,7 @@ fn compute_fitness_rmse(
 ///
 /// Maps a 6-vector [tx, ty, tz, rx, ry, rz] to a 4x4 homogeneous transformation
 /// matrix using Rodrigues' formula for rotation and the left Jacobian for translation.
-fn exponential_map_se3(delta: &Vector6<f32>) -> Matrix4<f32> {
+pub(crate) fn exponential_map_se3(delta: &Vector6<f32>) -> Matrix4<f32> {
     let omega = Vector3::new(delta[3], delta[4], delta[5]);
     let v = Vector3::new(delta[0], delta[1], delta[2]);
 
