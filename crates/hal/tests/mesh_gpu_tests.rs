@@ -283,17 +283,20 @@ fn test_bounds_single_point() -> Result<(), Box<dyn Error>> {
     };
 
     let vertices = vec![Point3::new(3.0, 5.0, 7.0)];
-    let expected = (Point3::new(3.0, 5.0, 7.0), Point3::new(3.0, 5.0, 7.0));
+
+    // CONTROL: the trivial case, checked against a hand-written literal rather
+    // than the reference, so a bug in the reference below cannot hide here.
+    assert_eq!(compute_bounds_cpu(&vertices), (vertices[0], vertices[0]));
 
     let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(&ctx, &vertices)?;
 
     assert!(
-        points_close(&result.0, &expected.0, 1e-5),
+        points_close(&result.0, &vertices[0], 1e-5),
         "Min bounds should match: {:?}",
         result.0
     );
     assert!(
-        points_close(&result.1, &expected.1, 1e-5),
+        points_close(&result.1, &vertices[0], 1e-5),
         "Max bounds should match: {:?}",
         result.1
     );
@@ -318,19 +321,32 @@ fn test_bounds_cube() -> Result<(), Box<dyn Error>> {
         Point3::new(0.0, 1.0, 1.0),
     ];
 
-    let expected = (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0));
+    // CONTROL: the reference's own answer on this input is a literal, so the
+    // comparison below is against a known value and not just self-consistency.
+    assert_eq!(
+        compute_bounds_cpu(&vertices),
+        (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0))
+    );
+
+    // PARITY: the GPU reduction must agree with the CPU reduction elementwise.
+    // A literal expectation can only be wrong about one configuration; the
+    // reference covers whatever the vertex set actually is, so a shader that
+    // drops or mis-indexes a vertex is caught on any input.
+    let expected = compute_bounds_cpu(&vertices);
 
     let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(&ctx, &vertices)?;
 
     assert!(
         points_close(&result.0, &expected.0, 1e-5),
-        "Min bounds should be (0,0,0), got {:?}",
-        result.0
+        "GPU min {:?} disagrees with CPU reference {:?}",
+        result.0,
+        expected.0
     );
     assert!(
         points_close(&result.1, &expected.1, 1e-5),
-        "Max bounds should be (1,1,1), got {:?}",
-        result.1
+        "GPU max {:?} disagrees with CPU reference {:?}",
+        result.1,
+        expected.1
     );
 
     Ok(())
@@ -344,19 +360,30 @@ fn test_bounds_negative_coordinates() -> Result<(), Box<dyn Error>> {
 
     let vertices = vec![Point3::new(-5.0, -3.0, -1.0), Point3::new(2.0, 4.0, 6.0)];
 
-    let expected = (Point3::new(-5.0, -3.0, -1.0), Point3::new(2.0, 4.0, 6.0));
+    // The negative-coordinate case is where a shader that initialises its
+    // accumulator to +INF rather than the first vertex, or that uses an
+    // unsigned comparison, diverges from the reference.
+    let expected = compute_bounds_cpu(&vertices);
+    assert_eq!(
+        expected,
+        (Point3::new(-5.0, -3.0, -1.0), Point3::new(2.0, 4.0, 6.0)),
+        "the CPU reference itself must be right here, or the parity check below \
+         is vacuous"
+    );
 
     let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(&ctx, &vertices)?;
 
     assert!(
         points_close(&result.0, &expected.0, 1e-5),
-        "Min bounds incorrect: {:?}",
-        result.0
+        "Min bounds incorrect: {:?} (reference {:?})",
+        result.0,
+        expected.0
     );
     assert!(
         points_close(&result.1, &expected.1, 1e-5),
-        "Max bounds incorrect: {:?}",
-        result.1
+        "Max bounds incorrect: {:?} (reference {:?})",
+        result.1,
+        expected.1
     );
 
     Ok(())

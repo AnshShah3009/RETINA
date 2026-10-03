@@ -117,38 +117,6 @@ pub fn calibrate_hand_eye(
     solve_ax_xb(&a_rot, &a_tr, &b_rot, &b_tr)
 }
 
-fn rotation_vector_from_matrix(r: &Matrix3<f64>) -> Vector3<f64> {
-    let trace = r[(0, 0)] + r[(1, 1)] + r[(2, 2)];
-    let angle = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos();
-    let denom = 2.0 * angle.sin();
-    if denom.abs() < 1e-10 {
-        return Vector3::zeros();
-    }
-    Vector3::new(
-        (r[(2, 1)] - r[(1, 2)]) / denom * angle,
-        (r[(0, 2)] - r[(2, 0)]) / denom * angle,
-        (r[(1, 0)] - r[(0, 1)]) / denom * angle,
-    )
-}
-
-fn skew(v: &Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
-}
-
-/// Convert γ = 2·sin(θ/2)·axis into a rotation matrix.
-fn gamma_to_rotation(gamma: &Vector3<f64>) -> Option<Matrix3<f64>> {
-    let half_sine = gamma.norm() / 2.0;
-    if half_sine <= 1e-12 || half_sine > 1.0 + 1e-9 {
-        return None;
-    }
-    let theta = 2.0 * half_sine.asin();
-    let axis = gamma.normalize();
-    Some(
-        nalgebra::Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(axis), theta)
-            .into_inner(),
-    )
-}
-
 /// Dense normal-equations solve for min ‖Ax − b‖².
 /// `rows` are the stacked 3-wide rows of A; `rhs` holds one scalar per row.
 ///
@@ -353,6 +321,28 @@ fn average_translations(ts: &[Vector3<f64>]) -> Vector3<f64> {
 mod tests {
     use super::*;
     use nalgebra::Rotation3;
+
+    /// Axis-angle length of a rotation, used to state a metric rotation error.
+    ///
+    /// Test-only helper. It lived at module scope but was referenced *only* from
+    /// this `#[cfg(test)]` module, so a non-test build reported it as dead code
+    /// (`warning: function rotation_vector_from_matrix is never used` on the
+    /// lib target) even though the lib itself is what the tests exercise. Gating
+    /// it on the same condition that has a use makes that warning describe the
+    /// truth instead of the test harness.
+    fn rotation_vector_from_matrix(r: &Matrix3<f64>) -> Vector3<f64> {
+        let trace = r[(0, 0)] + r[(1, 1)] + r[(2, 2)];
+        let angle = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos();
+        let denom = 2.0 * angle.sin();
+        if denom.abs() < 1e-10 {
+            return Vector3::zeros();
+        }
+        Vector3::new(
+            (r[(2, 1)] - r[(1, 2)]) / denom * angle,
+            (r[(0, 2)] - r[(2, 0)]) / denom * angle,
+            (r[(1, 0)] - r[(0, 1)]) / denom * angle,
+        )
+    }
 
     /// Deterministic pseudo-random generator for reproducible tests.
     struct Lcg(u64);

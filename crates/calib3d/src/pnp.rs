@@ -699,6 +699,21 @@ fn project_point_dist(
 /// Perspective-n-Point (PnP) solver for absolute pose estimation.
 pub struct PnpSolver;
 
+/// Convolution of two dense polynomials, low-degree coefficient first.
+///
+/// Public only so the Grunert quartic assembly can be checked directly by
+/// `tests/p3p_quartic_scaling_regression.rs`; it is not part of the PnP API
+/// and no solver outside this module calls it.
+pub fn pmul(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; a.len() + b.len() - 1];
+    for (i, &x) in a.iter().enumerate() {
+        for (j, &y) in b.iter().enumerate() {
+            out[i + j] += x * y;
+        }
+    }
+    out
+}
+
 impl PnpSolver {
     /// Estimate absolute camera pose from 3 3D-2D correspondences using the
     /// P3P algorithm (Grunert's distance parametrization).
@@ -755,25 +770,6 @@ impl PnpSolver {
         let dpoly = [1.0, -2.0 * ca, 1.0];
         let npoly = [m * dpoly[0] - sa * sa, m * dpoly[1], m * dpoly[2] + sa * sa];
         let dpoly_d = [-2.0 * sa * sa * cb, 2.0 * sa * sa * cg];
-
-        fn pmul(a: &[f64], b: &[f64]) -> Vec<f64> {
-            let mut out = vec![0.0; a.len() + b.len() - 1];
-            for (i, &x) in a.iter().enumerate() {
-                for (j, &y) in b.iter().enumerate() {
-                    out[i + j] += x * y;
-                }
-            }
-            out
-        }
-        fn padd(mut a: Vec<f64>, b: &[f64]) -> Vec<f64> {
-            if a.len() < b.len() {
-                a.resize(b.len(), 0.0);
-            }
-            for (i, &v) in b.iter().enumerate() {
-                a[i] += v;
-            }
-            a
-        }
 
         let t1 = pmul(&npoly, &npoly); // scaled by a² below
         let t2 = pmul(&npoly, &dpoly_d); // scaled by −2a²cb below

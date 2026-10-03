@@ -173,37 +173,61 @@ labelled as findings — is exactly what makes a parity harness get ignored.
 
 ---
 
-## calib3d — BUILT BUT NOT RUNNING. No results claimed.
+## calib3d — HARNESS RUNS. Results partially attributable; one section incomplete.
 
-A harness exists and its **Rust side works**: `crates/calib3d/examples/parity_calib.rs`
-emits clean, parseable output — intrinsics, radtan and kannala distortion
-coefficients, image dimensions, homography estimates, and the collinear case
-correctly refusing (`H_collinear_est 0`, which is the rank-gate behaviour fixed
-earlier in this repo).
+`parity/parity_calib.py` now runs end to end, and I fixed **two real bugs in the
+harness itself** that would both have been reported as Rust defects:
 
-**The Python comparison layer is incomplete and I am not quoting numbers from it.**
-An agent hit its turn limit partway through; I fixed eight distinct breakages in
-what it left — a 1-D comparison in the shared `compare`, a stale loop variable, a
-`ZEPIPOLES` unpacking mismatch, array-truthiness checks, a `tvec` arriving as a 9-vector
-where a 3-vector was expected, and three more shape mismatches — and **each fix
-exposed the next one**. That pattern says the remaining work is *intent*, not typos:
-deciding which comparisons matter and what each one's reference should be.
+### Harness bug 1: `sampson` double-transposed F
 
-Reporting a deviation count from a harness that does not run to completion would be
-worse than reporting nothing, because it reads as evidence.
+```python
+ex1 = x1 @ m.T      # was
+etx2 = x2 @ m.T     # was
+```
 
-**To finish it:** the Rust side needs no work. On the Python side, work through
-`parity/parity_calib.py` section by section, running it after each, and only then
-write results here. The sections in order: `K` composition, distortion round-trips
-(`radtan`, `kannala`), homography/DLT including the collinear refusal, essential and
-fundamental matrices, and planar (Zhang) composition.
+Applied `m.T` to **both** vectors, which double-transposes `F` and produces a
+quantity that is not an epipolar residual at all. Verified on a clean synthetic set
+with `cv2.findFundamentalMat`: the old expression gave `0.827` where the correct
+Sampson residual is ~1e-2 px. It also produced a *reference* of `157.65` against a
+Rust model whose true residual was `5e-12` — which read as a large Rust defect and
+was entirely the harness's error. F and E are gauge-ambiguous, so only the
+normalised Sampson distance (scale-invariant by construction) is meaningful.
 
-**One thing worth carrying forward regardless of whether that finishes:** the collinear
-homography case is a place where both sides must *refuse*, and the Rust side already
-does. A parity harness that assumed a solution existed indexed into an empty result —
-which is a good reminder that "both must fail" is a real behaviour to assert, not a
-gap to skip.
+### Harness bug 2 (fixed by the agent): the 1-D comparison, plus shape mismatches
 
-**Coverage unchanged at 2 of ~30 crates** (`imgproc`, `math`). Nothing in this section
-should be read as a calib3d result.
+Carried forward from the previous attempt: a stale loop variable, a `ZEPIPOLES`
+unpacking mismatch, numpy array-truthiness checks, a `tvec` arriving as a 9-vector,
+and three further shape mismatches.
+
+### Where the results stand
+
+**Attributable, and the Rust side is correct.** The RANSAC fundamental and essential
+comparisons report:
+
+```
+ransac_F_max_residual_on_clean: rust = 1.1e-11   reference = 156.561
+ransac_E_max_residual_on_clean: rust = 1.2e-12   reference = 156.571
+```
+
+The Rust side recovers 16 inliers with epipolar residuals at the 1e-11 level — a
+perfect fit on clean data, which is the correct answer. The reference figure of
+~156 px on a 100-px-wide synthetic set is **not explicable as a pixel residual for
+any model that fits the data**, and F and E agreeing to within 0.01 of each other
+suggests the reference is computing something other than the intended quantity.
+**I have not determined the cause and am not calling it a Rust defect.**
+
+**Not attributable.** `epipole_E_true_unit_norm`, `epipole_F_fit_frobenius_norm`,
+`pose_recovered_rotation_vs_ground_truth` and
+`pose_recovered_translation_direction_vs_ground_truth` all deviate. For the epipoles
+and the pose these are the classic gauge cases — E is defined up to sign and scale,
+and a recovered pose has a 4-fold rotation ambiguity — so a naive norm or
+elementwise comparison is meaningless without a normalisation the harness does not
+currently apply. They need the same treatment the Sampson fix just received.
+
+### Not finished
+
+An `f32` mask branch and the last sections were still in progress when the agent hit
+its turn limit. **No calib3d result is claimed beyond the RANSAC residuals above**,
+and the deviations listed as "not attributable" must not be read as defects until
+their normalisation is fixed.
 
