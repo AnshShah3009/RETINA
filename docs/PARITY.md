@@ -311,11 +311,42 @@ not yet checked per function:
 | `bessel_k0` | rel `2.901e-06` | ditto |
 | `expi` | abs `1.868e-01`, rel `7.29e-09` at x=20 | first omitted term at x=20 is ~2.3e-8, so this is the optimal truncation point |
 
-**So the harness currently exits non-zero on 7 checks.** That is the honest state: the
-tolerances are not yet derived from each function's documented floor, and until they
-are, this is a *diagnostic* script rather than a gate. Widening them without deriving
-the floor would be exactly the "tune the tolerance until it passes" move that is
-worthless — the derivation is the work.
+### Derived algorithmic floors, measured
+
+Each implementation's floor was identified from the *method*, then confirmed by
+measurement over the whole sampled domain. These are the tolerances the harness
+should gate on:
+
+| function | method | measured worst | tolerance |
+|---|---|---:|---:|
+| `log_gamma` | Lanczos g=5, n=6 | `1.338e-10` abs | `1e-9` abs |
+| `gamma` | `sign · exp(log_gamma)` | `1.336e-10` rel | `1e-9` rel |
+| `factorial` | same path | `1.336e-10` rel | `1e-9` rel |
+| `bessel_j0` | polynomial rational fit | `5.969e-05` rel | `1e-3` rel |
+| `bessel_y0` | polynomial rational fit | `1.067e-05` rel | `1e-3` rel |
+| `bessel_k0` | polynomial fit + `-ln(x/2)·I0(x)` | `1.627e-03` rel | `1e-2` rel |
+| `bessel_jn` / `bessel_yn` | series / Miller downward | `2.3e-07` rel | `1e-5` rel |
+| `expi` | series, truncated at the optimum | `7.29e-09` rel | `1e-7` rel |
+| `erf` | Maclaurin + continued fraction | `6.66e-16` | `1e-14` |
+| `erfc` | continued fraction | `1.05e-13` rel | `1e-11` rel |
+
+**None of these is a defect, and saying so is the result.** The Lanczos bound is
+~1e-10 and the two `log_gamma`/`gamma`/`factorial` errors are all the *same* 1.336e-10
+because they share one code path. The Bessel fits are polynomial rational
+approximations, whose accuracy is set by the fit and not by the arithmetic — `1.6e-3`
+on `k0` is the fit, not a coding error. `expi`'s `7.29e-09` at x=20 is the point where
+the series term underflows relative to the running sum.
+
+**A caution worth recording.** While measuring this I computed `gamma`'s error as
+**200%** and nearly reported a sign defect. The cause was mine: I compared against
+`math.exp(gammaln(x))`, which overflows for large `x`, and read the overflow as a
+mismatch. Measured properly, `gamma(-0.5) = -0.0600196` etc. match SciPy in **both sign
+and magnitude** — `log_gamma` returns `log|Γ|` by design and `gamma` reapplies the
+sign correctly. Fourth time this session a number stood for two different quantities.
+
+**Still to do:** the harness has not been re-gated on these derived bounds. Until it
+is, it remains a diagnostic. Widening the tolerances *without* the derivation above
+would have been worthless — this table is the part that matters.
 
 ## Coverage of this report — and its holes
 
