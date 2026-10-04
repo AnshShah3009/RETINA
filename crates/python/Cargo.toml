@@ -32,3 +32,7 @@ image = { workspace = true }
 
 [features]
 default = []
+# Enables `tests/binding_contract.rs`, which links PyO3 against CPython and so
+# needs `CV_PYTHON_LINK_LIB=1` at build time. Off by default because the shipped
+# cdylib must not depend on a particular libpython.
+python-link-tests = []

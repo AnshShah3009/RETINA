@@ -14,13 +14,25 @@ fn main() {
     // at load time - but an integration test is an ordinary executable, so it has to
     // link libpython itself.
     //
-    // Without this, `binding_contract.rs` fails with
-    //     ld.lld: error: undefined symbol: PyExc_ValueError
-    // which is a property of the test harness, not of the binding code.
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+    // **Guarded on an explicit opt-in**, because linking libpython into the
+    // *cdylib* is wrong whenever it is available: the shipped artefact would then
+    // hard-depend on a particular libpython at a fixed path. It already did:
+    //
+    //     error: linking with `cc` failed: exit status: 1
+    //     ... "-lpython3.13" ... "-Wl,-rpath,/usr/lib/x86_64-linux-gnu"
+    //     /usr/bin/ld: cannot find -lpython3.13
+    //
+    // on any machine without a matching `libpython3.13` - which is every CI
+    // runner. The flags now apply only when CV_PYTHON_LINK_LIB is set, and the
+    // local test command that needs them is documented here rather than discovered
+    // by a red build.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux")
+        && std::env::var("CV_PYTHON_LINK_LIB").is_ok()
+    {
         if let Ok(dir) = std::env::var("PYTHON_LIB_DIR") {
             println!("cargo:rustc-link-search=native={dir}");
-            println!("cargo:rustc-link-lib=python3.13");
+            println!("cargo:rustc-link-lib=dylib=python3.13");
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
         } else if let Ok(out) = std::process::Command::new("python3")
             .args([
                 "-c",

@@ -24,7 +24,8 @@ Cargo.lock
 *.rrd
 
 # Python build artifacts
-python/cv_native/__pycache__/
+__pycache__/
+*.pyc
 python/cv_native/*.so
 python/cv_native/*.egg-info/
 
