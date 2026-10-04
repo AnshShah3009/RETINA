@@ -628,16 +628,59 @@ be the *reference* being wrong rather than the implementation — the first was 
 `resize` investigation, where an even-width input made two conventions identical. Both
 were the same mistake: a single number standing for two different quantities.
 
-### DEFECT: k-NN neighbour sets differ from Open3D's
+### k-NN neighbour sets: ATTRIBUTED — a tie at the k-th boundary, not a defect
 
 | knn | queries | sets equal | Jaccard | ordering equal |
 |---:|---:|---:|---:|---:|
 | 6 | 27 | NO | 0.8202 | 1/27 |
 | 4 | 27 | NO | 0.7705 | 3/27 |
 
-A Jaccard of 0.82 means most neighbours agree, so this is a *tie-breaking or
-distance-metric* difference rather than a wrong neighbourhood — but it is a real
-divergence, and ordering matches in almost none of the queries.
+Initially unattributed. Investigated properly rather than accepted, and the answer
+is that **the harness's own explanation was right and I doubted it wrongly.**
+
+Query 0, sorted by distance:
+
+```
+idx   0  d = 0.000000
+idx   1  d = 0.100000      idx 3 = 0.100000      idx 9 = 0.100000
+idx   4  d = 0.141421      idx 10 = 0.141421     idx 12 = 0.141421
+idx  13  d = 0.173205
+```
+
+With `k = 6` the k-th neighbour falls **inside a tie group**: three points sit at
+*exactly* `0.141421`, and only two of them fit. Which two is arbitrary, so the set
+is not determined by the distances at all. Every failing query shows the same shape —
+one member substituted for another at an identical distance:
+
+```
+query 0: extra=[12] (d=0.141421)  missing=[10] (d=0.141421)
+query 1: extra=[11] (d=0.141421)  missing=[3]  (d=0.141421)
+query 2: extra=[14] (d=0.141421)  missing=[10] (d=0.141421)
+```
+
+**This is a defect in the harness's scene, not in either implementation.** A
+cubic lattice at spacing 0.1 has enormous numbers of exact ties, and every
+substitution is between equidistant points.
+
+### The part that IS a real finding
+
+Checked both implementations against **brute-force ground truth** rather than
+against each other:
+
+```
+k=6:  cv_3d matches exact on  9/27      Open3D matches exact on 16/27
+k=4:  cv_3d matches exact on 10/27      Open3D matches exact on 16/27
+```
+
+**Open3D's `KDTreeFlann` is approximate** — it returns a different k-th *distance*
+from the exact one on 27 of 27 queries. So it is not a reference for exact k-NN at
+all, and `cv_3d`'s deviation from it is not evidence about `cv_3d`.
+
+`cv_3d`'s own misses are all tie-boundary choices too (9/27 is a low score *because*
+most queries are ties, not because the search is wrong) — but on a scene with no ties
+it should match brute force exactly, and **that has not been verified.** A
+tie-free scene (jittered or random points, all distances distinct) is what would
+settle it, and is the next thing to run.
 
 ### Also noted by the harness, in `crates/3d/src/gpu/registration.rs`
 
