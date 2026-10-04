@@ -365,6 +365,74 @@ whatever happened to pass.
 `factorial` also gained a note: its reference is `float(math.factorial(n))`, itself
 only f64-accurate, so it cannot be held to 1e-13 however good our side is.
 
+## `crates/plot` vs Matplotlib 3.11.2 — TWO structural divergences, measured
+
+The last of the five targets to get a comparison. **Rendered-image diffing was
+deliberately not used**: Agg antialiases, so a pixel comparison against a
+hand-written SVG disagrees for reasons that say nothing about either implementation.
+Both properties below have an analytic answer, and both are checkable.
+
+### 1. Autoscaling margins: 10% against Matplotlib's 5%
+
+`crates/plot/src/export.rs:96-97` pads each axis by
+
+```rust
+let x_pad = (max_x - min_x).max(1.0) * 0.1;
+let y_pad = (max_y - min_y).max(1.0) * 0.1;
+```
+
+— **10% per side, 20% total**, of `max(span, 1)`.
+
+Matplotlib's default is `margins.x = margins.y = 0.05`. Measured:
+
+```
+data [0, 1]        span 1      matplotlib xlim [-0.05, 1.05]   5% per side
+data [0, 100]      span 100    matplotlib xlim [-5, 105]      5% per side
+data [-5, 5]       span 10     matplotlib xlim [-5.5, 5.5]    5% per side
+```
+
+**A factor of two, on every non-degenerate span.** Not a rounding disagreement — the
+plots are framed differently, and the two libraries will never put the same data at the
+same place on the same figure size.
+
+Note the `max(span, 1.0)` clamp is doing real work the other way: for data with
+`span < 1` the padding becomes `0.1` *absolute*, so a tiny range gets a large
+relative margin. Matplotlib's margin is always relative to the span, so it shrinks with
+the data. For a range of `1e-5` the two differ by five orders of magnitude.
+
+### 2. There are no tick values at all
+
+Emitted SVG from `Figure::scatter(...)` with 21 points spanning x in `[0, 100]`:
+
+```xml
+<text x="400" y="33" class="title"  text-anchor="middle">ticks</text>
+<text x="400" y="590" class="label"  text-anchor="middle">X</text>
+<text x="15"  y="300" class="label"  text-anchor="middle" transform="rotate(-90, 15, 300)">Y</text>
+<text x="688" y="70"  class="legend">s</text>
+```
+
+A title, axis labels and a legend — and **no numeric ticks on either axis, and no
+tick marks**. `grep -rn "tick" crates/plot/src/` returns nothing: there is no tick
+generation in the crate. Matplotlib emits them by default:
+
+```
+data [0, 1]      -> ticks [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+data [0, 100]    -> ticks [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]
+data [3.14159, 3.14160] -> ticks [3.14159, 3.141592, ..., 3.1416]
+```
+
+This is a **capability gap, not a convention difference**, and it is the one that
+matters most for the Matplotlib target: an axis with no numbers on it is not a
+plotting axis. Tick *placement* is well-defined — Matplotlib's `MaxNLocator` picks
+from a scale, and that is a reference to compare against. It is also the natural next
+task, and unlike the margin it is additive rather than a behaviour change.
+
+### Not compared, and why
+
+Rendering, marker shapes, line joins and font metrics — all of which depend on Agg's
+antialiasing and font stack, and would produce differences that say nothing about the
+implementation.
+
 ## Coverage of this report — and its holes
 
 Done: filters (`imgproc`), geometry — resize and warpAffine only (`imgproc`),
