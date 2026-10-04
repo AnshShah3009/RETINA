@@ -675,9 +675,25 @@ fn marker_style_selects_the_marker_shape() {
     assert_eq!(tags_with(&triangles, "<polygon").len(), 2, "marker \"^\"");
     let crosses = draw(Style::default().marker("x"));
     // Two crossing lines per point, plus the two axis lines of the panel.
+    // Filter by the **tick class**, not by "has a black stroke". The old filter
+    // was `!t.contains("stroke=\"black\"")`, which happened to exclude the panel's
+    // two axis lines - and, when tick marks were added, did not exclude those,
+    // because a tick `<line>` carries no `stroke` attribute at all. Adding ticks
+    // therefore broke this test.
+    //
+    // Being explicit about what is being excluded is the fix: a marker line has a
+    // stroke and no tick class; a tick has the class and no stroke; a panel axis line
+    // has neither in the form matched here.
     let cross_lines = tags_with(&crosses, "<line")
         .into_iter()
-        .filter(|t| !t.contains("stroke=\"black\""))
+        .filter(|t| !t.contains("class=\"tick"))
+        .count();
+    // Exclude both the panel's axis box (black stroke, no tick class) and the tick
+    // marks (tick class, no stroke). The original filter excluded only the first,
+    // which worked by accident until ticks existed.
+    let cross_lines = tags_with(&crosses, "<line")
+        .into_iter()
+        .filter(|t| !t.contains("class=\"tick") && !t.contains("stroke=\"black\""))
         .count();
     assert_eq!(
         cross_lines, 4,

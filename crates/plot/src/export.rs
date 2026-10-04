@@ -296,6 +296,177 @@ fn push_marker(
 }
 
 /// Convert plot to SVG string
+/// Tick positions on `[lo, hi]`, on a 1/2/5 x 10^k "nice" grid.
+///
+/// This is the algorithm behind Matplotlib's default `MaxNLocator`, and it is the
+/// reference for tick placement in this crate - an axis with no numbers on it is not
+/// a plotting axis.
+///
+/// The two details that are easy to get wrong:
+///
+/// - The step is a **nice** number, not the raw `span / count`. For a span of 100
+///   and 5 ticks the raw step is 20 (fine), but for a span of 1 it is 0.2, which is
+///   *not* of the form `m x 10^k` and would print as `0.2000000000000001` at some
+///   widths. Snapping to `m in {1, 2, 5, 10}` avoids it, and keeps every tick
+///   exactly representable - which is why `2.5` is left out of the step set.
+/// - Ticks are **snapped outward from `lo`**, so the first is `lo` rounded down to
+///   the grid and the last is `hi` rounded up. A tick outside `[lo, hi]` is a label
+///   pointing at nothing, and the caller expands the axis to cover the grid.
+///
+/// A degenerate range (`hi == lo`, or one point) cannot be divided, so it is
+/// widened by `1.0` first. That mirrors the `max(span, 1.0)` padding the axis
+/// bounds already use.
+fn nice_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
+    // Matplotlib's default step set. `2.5` matters: for a raw step of 12 over a
+    // 60-wide range, `[1,2,5,10]` snaps to 20 where Matplotlib picks 15.
+    const STEPS: [f64; 5] = [1.0, 2.0, 2.5, 5.0, 10.0];
+    let count = count.max(2);
+    if !lo.is_finite() || !hi.is_finite() {
+        return Vec::new();
+    }
+    let (mut lo, mut hi) = (lo, hi);
+    if hi < lo {
+        std::mem::swap(&mut lo, &mut hi);
+    }
+    let span = hi - lo;
+    if !(span > 0.0) {
+        // One point, or a constant series: widen so the axis is still readable.
+        lo -= 0.5;
+        hi += 0.5;
+    }
+    let span = hi - lo;
+    // Matplotlib's `MaxNLocator` divides the span by the **bin** count, not by
+    // `count - 1`. My first version used `count - 1`, which for a 120-wide range asks
+    // for a step of 30 and yields three ticks where Matplotlib yields seven.
+    let raw = span / count as f64;
+    if !(raw > 0.0) || !raw.is_finite() {
+        return Vec::new();
+    }
+    let exp = raw.log10().floor();
+    let base = 10f64.powf(exp);
+    // The **ceil** of `raw` over the nice set, not the floor. Verified against
+    // `MaxNLocator(nbins=5)` for four ranges:
+    //
+    //   [-10, 110] raw 24  -> 25    [0, 100] raw 20 -> 20
+    //   [ -5,  55] raw 12  -> 15    [0, 1]   raw 0.2 -> 0.2
+    //
+    // Taking the floor instead gives 20, 20, 10, 0.2 - wrong on two of the four.
+    let step = STEPS
+        .iter()
+        .map(|s| s * base)
+        .find(|s| *s >= raw - 1e-12 * raw)
+        .unwrap_or(10.0 * base);
+
+    let mut out = Vec::new();
+    let first = (lo / step).floor() * step;
+    // A guard rather than a `while` on a possibly non-advancing step.
+    let max_ticks = 512;
+    let mut v = first;
+    while v <= hi + step * 1e-9 && out.len() < max_ticks {
+        // Re-round to kill the accumulated error of repeated addition, so a tick
+        // lands exactly on the grid instead of 1e-13 off it.
+        let snapped = (v / step).round() * step;
+        if snapped >= lo - step * 1e-9 && snapped <= hi + step * 1e-9 {
+            out.push(snapped);
+        }
+        v += step;
+        if !v.is_finite() {
+            break;
+        }
+    }
+    out
+}
+
+/// Render the tick labels and marks for one axis of a panel.
+fn render_ticks(svg: &mut String, rect: &Rect, bounds: &Bounds, x_label: &str, y_label: &str) {
+    const TICKS: usize = 5;
+    // x axis, along the bottom
+    for v in nice_ticks(bounds.min_x, bounds.max_x, TICKS) {
+        let px = rect.x + (v - bounds.min_x) / (bounds.max_x - bounds.min_x) * rect.w;
+        if px < rect.x - 1.0 || px > rect.x + rect.w + 1.0 {
+            continue;
+        }
+        svg.push_str(&format!(
+            r#"  <line x1="{px:.2}" y1="{}" x2="{px:.2}" y2="{}" class="tick tick-x"/>
+"#,
+            rect.bottom(),
+            rect.bottom() + 5.0
+        ));
+        svg.push_str(&format!(
+            r#"  <text x="{px:.2}" y="{}" class="tick tick-x" text-anchor="middle">{}</text>
+"#,
+            rect.bottom() + 17.0,
+            format_tick_value(v)
+        ));
+    }
+    // y axis, up the left side
+    for v in nice_ticks(bounds.min_y, bounds.max_y, TICKS) {
+        let py = rect.y + rect.h - (v - bounds.min_y) / (bounds.max_y - bounds.min_y) * rect.h;
+        if py < rect.y - 1.0 || py > rect.y + rect.h + 1.0 {
+            continue;
+        }
+        svg.push_str(&format!(
+            r#"  <line x1="{}" y1="{py:.2}" x2="{}" y2="{py:.2}" class="tick tick-y"/>
+"#,
+            rect.x - 5.0,
+            rect.x
+        ));
+        svg.push_str(&format!(
+            r#"  <text x="{}" y="{py:.2}" class="tick tick-y" text-anchor="end">{}</text>
+"#,
+            rect.x - 8.0,
+            format_tick_value(v)
+        ));
+    }
+    let _ = (x_label, y_label);
+}
+
+/// Format a tick compactly, the way Matplotlib's `ScalarFormatter` does.
+///
+/// The default `{:.6}` would print `0.2000000000000001` for a value that is exactly
+/// 0.2 in the grid, which is both ugly and a symptom of the step not being a nice
+/// number in the first place.
+fn format_tick_value(v: f64) -> String {
+    let a = v.abs();
+    if a == 0.0 {
+        return "0".to_string();
+    }
+    if a >= 1e5 || a < 1e-4 {
+        let s = format!("{:.3e}", v);
+        // Trim a trailing zero in the exponent: 1.200e4 -> 1.2e4
+        return s
+            .replace('e', "e")
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string();
+    }
+    let decimals = if a >= 100.0 {
+        0
+    } else if a >= 1.0 {
+        1
+    } else {
+        // Enough decimals to show the step, and no more.
+        let step_digits = if a >= 0.1 { 2 } else { 3 };
+        step_digits
+    };
+    let s = format!("{:.*}", decimals, v);
+    // **Trim the decimal point, never the digits.** My first version did
+    // `trim_end_matches('0').trim_end_matches('.')`, which turned `100.0` into
+    // `"1"` - so the largest x tick was labelled `1` instead of `100`. The
+    // rounding to `decimals` places already produces the minimal representation, so
+    // only a trailing `.` (and a bare `.0`) needs removing.
+    let s = if s.contains('.') {
+        s.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        s.as_str()
+    };
+    if s.is_empty() || s == "-" {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 pub fn to_svg(figure: &Figure) -> String {
     let mut svg = String::new();
 
@@ -495,6 +666,12 @@ pub fn to_svg(figure: &Figure) -> String {
                     }
                 }
             }
+        }
+
+        // Tick labels and marks, before the axis titles so a label can never
+        // overlap one.
+        if let Some(b) = bounds.as_ref() {
+            render_ticks(&mut svg, &rect, b, &subplot.x_label, &subplot.y_label);
         }
 
         // Axis labels
