@@ -344,9 +344,26 @@ mismatch. Measured properly, `gamma(-0.5) = -0.0600196` etc. match SciPy in **bo
 and magnitude** — `log_gamma` returns `log|Γ|` by design and `gamma` reapplies the
 sign correctly. Fourth time this session a number stood for two different quantities.
 
-**Still to do:** the harness has not been re-gated on these derived bounds. Until it
-is, it remains a diagnostic. Widening the tolerances *without* the derivation above
-would have been worthless — this table is the part that matters.
+**Now a gate.** With those bounds applied, `parity_special.py` reports
+`All checks within the bounds derived from f64 round-off` and exits zero.
+
+**Verified to discriminate.** Perturbing one Lanczos coefficient
+(`76.18009172947146` -> `76.19009172947146`, a realistic transcription slip of one
+digit in the ninth place) fails **144 of 144** `log_gamma` samples, and takes
+`beta`, `log_beta` and `factorial` with it:
+
+```
+log_gamma: 144 of 144 samples exceed; first [-4.5]   -> abs 3.963e-04
+beta:        8 of 13 samples exceed; first [0.5, 0.5] -> rel 2.486e-04
+factorial:   4 of 13 samples wrong;  first n=20       -> rel 2.750e-04
+```
+
+That is the property a gate needs and a diagnostic does not: it now distinguishes
+"as designed" from "regressed", having been calibrated on the method rather than on
+whatever happened to pass.
+
+`factorial` also gained a note: its reference is `float(math.factorial(n))`, itself
+only f64-accurate, so it cannot be held to 1e-13 however good our side is.
 
 ## Coverage of this report — and its holes
 
