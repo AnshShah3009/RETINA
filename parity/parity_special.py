@@ -458,6 +458,13 @@ def check_parity(name, pos_rows, neg_rows, ref, expect_odd=True) -> None:
 
 def main() -> int:
     path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/parity_special.txt"
+    if not os.path.exists(path):
+        print(
+            f"record file {path} does not exist. Generate it first:\n"
+            f"  cargo run -q -p cv-math --example parity_special > {path}",
+            file=sys.stderr,
+        )
+        return 2
     rows = parse(path)
     print(f"scipy {scipy.__version__}, numpy {np.__version__}, "
           f"reference file {path}")
