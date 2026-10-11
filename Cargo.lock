@@ -1440,6 +1440,7 @@ name = "cv-photo"
 version = "0.1.0"
 dependencies = [
  "cv-core",
+ "cv-imgproc",
  "image",
 ]
 
@@ -1583,6 +1584,7 @@ dependencies = [
  "cv-optimize",
  "cv-runtime",
  "cv-video",
+ "futures",
  "image",
  "nalgebra",
 ]
@@ -1619,7 +1621,9 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "epaint",
+ "image",
  "nalgebra",
+ "pollster",
  "wgpu 28.0.0",
 ]
 
