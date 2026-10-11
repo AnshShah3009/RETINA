@@ -3596,31 +3596,33 @@ impl ComputeContext for CpuBackend {
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-        let src_width_f = T::from_f32(w as f32 - 1.0);
-        let src_height_f = T::from_f32(h as f32 - 1.0);
-        let dst_width_f = T::from_f32((nw.max(1) - 1) as f32);
-        let dst_height_f = T::from_f32((nh.max(1) - 1) as f32);
+        let src_width_f = T::from_f32(w as f32);
+        let src_height_f = T::from_f32(h as f32);
+        let dst_width_f = T::from_f32(nw.max(1) as f32);
+        let dst_height_f = T::from_f32(nh.max(1) as f32);
 
         dst.par_chunks_mut(nw * c)
             .enumerate()
             .for_each(|(y, row_out)| {
                 for x in 0..nw {
-                    // Align-corners mapping. Lower-bound in float; upper-bound index
-                    // clamp in integer space so f32(w-1) rounding cannot OOB.
-                    let fx = if nw <= 1 {
-                        T::ZERO
-                    } else {
-                        let v = T::from_f32(x as f32) * src_width_f / dst_width_f;
+                    // Half-pixel mapping (OpenCV `resize` semantics): output
+                    // pixel x samples `(x + 0.5) * w / nw - 0.5`. Positions
+                    // below 0 clamp to the edge; the upper-bound index clamp is
+                    // in integer space so f32 rounding cannot OOB.
+                    let fx = {
+                        let v = (T::from_f32(x as f32) + T::from_f32(0.5)) * src_width_f
+                            / dst_width_f
+                            - T::from_f32(0.5);
                         if v < T::ZERO {
                             T::ZERO
                         } else {
                             v
                         }
                     };
-                    let fy = if nh <= 1 {
-                        T::ZERO
-                    } else {
-                        let v = T::from_f32(y as f32) * src_height_f / dst_height_f;
+                    let fy = {
+                        let v = (T::from_f32(y as f32) + T::from_f32(0.5)) * src_height_f
+                            / dst_height_f
+                            - T::from_f32(0.5);
                         if v < T::ZERO {
                             T::ZERO
                         } else {

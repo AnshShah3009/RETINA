@@ -27,13 +27,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let src_width_f = f16(params.src_w) - 1.0h;
-    let src_height_f = f16(params.src_h) - 1.0h;
-    let dst_width_f = f16(params.dst_w) - 1.0h;
-    let dst_height_f = f16(params.dst_h) - 1.0h;
+    let src_width_f = f16(params.src_w);
+    let src_height_f = f16(params.src_h);
+    let dst_width_f = f16(params.dst_w);
+    let dst_height_f = f16(params.dst_h);
 
-    var src_x_f = max(f16(x_dst) * src_width_f / dst_width_f, 0.0h);
-    var src_y_f = max(f16(y_dst) * src_height_f / dst_height_f, 0.0h);
+    var src_x_f = max((f16(x_dst) + 0.5h) * src_width_f / dst_width_f - 0.5h, 0.0h);
+    var src_y_f = max((f16(y_dst) + 0.5h) * src_height_f / dst_height_f - 0.5h, 0.0h);
 
     let x0 = min(params.src_w - 1u, u32(floor(src_x_f)));
     let y0 = min(params.src_h - 1u, u32(floor(src_y_f)));

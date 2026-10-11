@@ -204,9 +204,16 @@ fn resize_nearest(src: &GrayImage, width: u32, height: u32) -> GrayImage {
         .for_each(|(y, row)| {
             let y = y as u32;
             for x in 0..width {
-                let sx = ((x as f32 * src_width / dst_width).floor() as u32).min(src.width() - 1);
+                // OpenCV's INTER_NEAREST floors `x / (nw / w)` - the scale as a
+                // reciprocal, in f32. Measured against cv2 over 293 samples of
+                // 12 (w, nw) pairs, this is the only form that matches every
+                // one: the multiply forms `(x*w)/nw`, `x*(w/nw)` (f32 and f64)
+                // all give 27.0 at the 36->40 y=30 tie where cv2 picks 26, and
+                // the half-pixel form is wrong in 101 of 293. Nearest is NOT
+                // half-pixel; only the interpolating modes are.
+                let sx = ((x as f32 / (dst_width / src_width)).floor() as u32).min(src.width() - 1);
                 let sy =
-                    ((y as f32 * src_height / dst_height).floor() as u32).min(src.height() - 1);
+                    ((y as f32 / (dst_height / src_height)).floor() as u32).min(src.height() - 1);
                 let val = src.get_pixel(sx, sy)[0];
                 row[x as usize] = val;
             }
@@ -249,9 +256,16 @@ fn resize_rgb_nearest(src: &RgbImage, width: u32, height: u32) -> RgbImage {
         .for_each(|(y, row)| {
             let y = y as u32;
             for x in 0..width {
-                let sx = ((x as f32 * src_width / dst_width).floor() as u32).min(src.width() - 1);
+                // OpenCV's INTER_NEAREST floors `x / (nw / w)` - the scale as a
+                // reciprocal, in f32. Measured against cv2 over 293 samples of
+                // 12 (w, nw) pairs, this is the only form that matches every
+                // one: the multiply forms `(x*w)/nw`, `x*(w/nw)` (f32 and f64)
+                // all give 27.0 at the 36->40 y=30 tie where cv2 picks 26, and
+                // the half-pixel form is wrong in 101 of 293. Nearest is NOT
+                // half-pixel; only the interpolating modes are.
+                let sx = ((x as f32 / (dst_width / src_width)).floor() as u32).min(src.width() - 1);
                 let sy =
-                    ((y as f32 * src_height / dst_height).floor() as u32).min(src.height() - 1);
+                    ((y as f32 / (dst_height / src_height)).floor() as u32).min(src.height() - 1);
                 let pixel = src.get_pixel(sx, sy);
                 row[x as usize * 3] = pixel[0];
                 row[x as usize * 3 + 1] = pixel[1];
@@ -264,11 +278,10 @@ fn resize_rgb_nearest(src: &RgbImage, width: u32, height: u32) -> RgbImage {
 
 fn resize_rgb_linear(src: &RgbImage, width: u32, height: u32) -> RgbImage {
     let mut dst = RgbImage::new(width, height);
-    let src_width = src.width() as f32 - 1.0;
-    let src_height = src.height() as f32 - 1.0;
-    // Guard against 1-pixel destinations (see `resize_cpu_hal`).
-    let dst_width = (width.max(2) - 1) as f32;
-    let dst_height = (height.max(2) - 1) as f32;
+    let src_width = src.width() as f32;
+    let src_height = src.height() as f32;
+    let dst_width = width.max(1) as f32;
+    let dst_height = height.max(1) as f32;
 
     // Only an empty source has nothing to sample; single-row/column sources
     // are replicated by the mapping below (see `resize_cpu_hal`).
@@ -282,8 +295,8 @@ fn resize_rgb_linear(src: &RgbImage, width: u32, height: u32) -> RgbImage {
         .for_each(|(y, row)| {
             let y = y as u32;
             for x in 0..width {
-                let fx = (x as f32 / dst_width) * src_width;
-                let fy = (y as f32 / dst_height) * src_height;
+                let fx = ((x as f32 + 0.5) * src_width / dst_width - 0.5).max(0.0);
+                let fy = ((y as f32 + 0.5) * src_height / dst_height - 0.5).max(0.0);
 
                 let x0 = fx as u32;
                 let y0 = fy as u32;
@@ -338,9 +351,9 @@ fn lanczos_weights(f: f32) -> Vec<f32> {
 
 /// Separable resampling of a `channels`-channel interleaved u8 buffer.
 ///
-/// The coordinate mapping matches the HAL bilinear resampler (`resize_cpu_hal`): the source spans
-/// `0 ..= len - 1` across the destination's `0 ..= len - 1`, so `Cubic` and
-/// `Lanczos` degrade gracefully to the same geometry as the bilinear path.
+/// The coordinate mapping matches the HAL bilinear resampler (`resize_cpu_hal`):
+/// half-pixel, `(x + 0.5) * w / nw - 0.5` (OpenCV `resize` semantics), so
+/// `Cubic` and `Lanczos` sample the same geometry as the bilinear path.
 /// Taps outside the source replicate the nearest edge sample.
 fn resample_kernel(
     src: &[u8],
@@ -358,21 +371,21 @@ fn resample_kernel(
         return dst;
     }
 
-    let src_width = src_w as f32 - 1.0;
-    let src_height = src_h as f32 - 1.0;
-    let dst_width = (dst_w.max(2) - 1) as f32;
-    let dst_height = (dst_h.max(2) - 1) as f32;
+    let src_width = src_w as f32;
+    let src_height = src_h as f32;
+    let dst_width = dst_w.max(1) as f32;
+    let dst_height = dst_h.max(1) as f32;
     let row_len = dst_w as usize * channels;
 
     dst.par_chunks_mut(row_len)
         .enumerate()
         .for_each(|(y, row)| {
-            let fy = (y as f32 / dst_height) * src_height;
+            let fy = (y as f32 + 0.5) * src_height / dst_height - 0.5;
             let y0 = fy.floor() as i32;
             let wy = weights(fy);
 
             for x in 0..dst_w as usize {
-                let fx = (x as f32 / dst_width) * src_width;
+                let fx = (x as f32 + 0.5) * src_width / dst_width - 0.5;
                 let x0 = fx.floor() as i32;
                 let wx = weights(fx);
 
@@ -577,21 +590,21 @@ mod tests {
         }
     }
 
-    /// Reference copy of the resampler that `resize_cpu_hal` replaced, used to
-    /// show the HAL-routed bilinear path did not change results.
+    /// Independent reference resampler for the HAL-routed bilinear path, in the
+    /// same half-pixel convention `resize_cpu_hal` documents.
     fn reference_resize_linear(src: &GrayImage, width: u32, height: u32) -> GrayImage {
         let mut dst = GrayImage::new(width, height);
-        let src_width = src.width() as f32 - 1.0;
-        let src_height = src.height() as f32 - 1.0;
-        let dst_width = (width.max(2) - 1) as f32;
-        let dst_height = (height.max(2) - 1) as f32;
+        let src_width = src.width() as f32;
+        let src_height = src.height() as f32;
+        let dst_width = width.max(1) as f32;
+        let dst_height = height.max(1) as f32;
         if src.width() == 0 || src.height() == 0 {
             return dst;
         }
         for y in 0..height {
             for x in 0..width {
-                let fx = (x as f32 / dst_width) * src_width;
-                let fy = (y as f32 / dst_height) * src_height;
+                let fx = ((x as f32 + 0.5) * src_width / dst_width - 0.5).max(0.0);
+                let fy = ((y as f32 + 0.5) * src_height / dst_height - 0.5).max(0.0);
                 let x0 = fx as u32;
                 let y0 = fy as u32;
                 let x1 = (x0 + 1).min(src.width() - 1);
