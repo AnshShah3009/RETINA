@@ -42,7 +42,7 @@ fn kernel_from_1d(kx: &[f32], ky: &[f32]) -> Kernel {
 fn apply_linear_transform(mut img: GrayImage, scale: f32, delta: f32) -> GrayImage {
     img.as_mut().par_iter_mut().for_each(|px| {
         let v = (*px as f32) * scale + delta;
-        *px = v.clamp(0.0, 255.0) as u8;
+        *px = v.round_ties_even().clamp(0.0, 255.0) as u8;
     });
     img
 }
@@ -192,14 +192,14 @@ fn sobel_gpu(
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
     let gy_data: Vec<u8> = gy_cpu
         .storage
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
 
     let gx = GrayImage::from_raw(src.width(), src.height(), gx_data)
@@ -322,7 +322,7 @@ pub fn sobel_magnitude_ctx(gx: &GrayImage, gy: &GrayImage, group: &RuntimeRunner
                 let gx_f = gx_val as f32;
                 let gy_f = gy_val as f32;
                 let mag = (gx_f * gx_f + gy_f * gy_f).sqrt();
-                *out = mag.min(255.0) as u8;
+                *out = mag.round_ties_even().min(255.0) as u8;
             });
 
         GrayImage::from_raw(width, height, output).unwrap_or_else(|| GrayImage::new(width, height))
@@ -635,7 +635,7 @@ fn canny_gpu(
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
 
     GrayImage::from_raw(src.width(), src.height(), res_data)

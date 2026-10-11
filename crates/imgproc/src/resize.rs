@@ -185,7 +185,7 @@ fn resize_gpu(
         .as_slice()
         .ok_or_else(|| cv_hal::Error::MemoryError("Download failed".into()))?
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
     GrayImage::from_raw(width, height, data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
@@ -303,7 +303,7 @@ fn resize_rgb_linear(src: &RgbImage, width: u32, height: u32) -> RgbImage {
                     let v1 = v01 * (1.0 - dx) + v11 * dx;
                     let v = v0 * (1.0 - dy) + v1 * dy;
 
-                    row[x as usize * 3 + c] = v.clamp(0.0, 255.0) as u8;
+                    row[x as usize * 3 + c] = v.round_ties_even().clamp(0.0, 255.0) as u8;
                 }
             }
         });

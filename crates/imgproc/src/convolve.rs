@@ -330,7 +330,7 @@ fn gaussian_blur_gpu(
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
     GrayImage::from_raw(image.width(), image.height(), data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
@@ -376,7 +376,7 @@ fn convolve_gpu(
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
     GrayImage::from_raw(image.width(), image.height(), data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
@@ -428,7 +428,7 @@ pub fn convolve_with_border_into_ctx(
                         }
                     }
 
-                    row[x] = sum.clamp(0.0, 255.0) as u8;
+                    row[x] = sum.round_ties_even().clamp(0.0, 255.0) as u8;
                 }
             });
     });
@@ -547,7 +547,7 @@ pub fn separable_convolve_into_ctx(
                         }
                         let res: [f32; 8] = sum_v.into();
                         for i in 0..8 {
-                            row_out[x + i] = res[i].clamp(0.0, 255.0) as u8;
+                            row_out[x + i] = res[i].round_ties_even().clamp(0.0, 255.0) as u8;
                         }
                     } else {
                         for cx in x..width {
@@ -560,7 +560,7 @@ pub fn separable_convolve_into_ctx(
                                 };
                                 sum += val * ky[k];
                             }
-                            row_out[cx] = sum.clamp(0.0, 255.0) as u8;
+                            row_out[cx] = sum.round_ties_even().clamp(0.0, 255.0) as u8;
                         }
                     }
                 }

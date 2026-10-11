@@ -243,7 +243,7 @@ pub fn warp_perspective_ex_ctx(
                 let pt = Point2::new(x as f32, y as f32);
                 let src_pt = transform_point(&inv, &pt);
                 let val = interpolate_sample(src, src_pt.x, src_pt.y, interpolation, border);
-                row[x as usize] = val.clamp(0.0, 255.0) as u8;
+                row[x as usize] = val.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });
 
@@ -290,7 +290,7 @@ fn warp_gpu(
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
 
     GrayImage::from_raw(width, height, res_data)
@@ -488,7 +488,7 @@ pub fn remap_ex_ctx(
                 let sx = map_x[idx];
                 let sy = map_y[idx];
                 let val = interpolate_sample(src, sx, sy, interpolation, border);
-                row[x as usize] = val.clamp(0.0, 255.0) as u8;
+                row[x as usize] = val.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });
 
@@ -558,7 +558,7 @@ fn remap_gpu(
         .as_slice()
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to get CPU slice".into()))?
         .iter()
-        .map(|v: &f32| v.clamp(0.0, 255.0) as u8)
+        .map(|v: &f32| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
 
     GrayImage::from_raw(width, height, res_data)
@@ -597,7 +597,7 @@ pub fn remap(
                 let sx = map_x[idx];
                 let sy = map_y[idx];
                 let val = interpolate_sample(src, sx, sy, interpolation, border);
-                row[x as usize] = val.clamp(0.0, 255.0) as u8;
+                row[x as usize] = val.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });
 
@@ -797,7 +797,9 @@ mod tests {
         let cubic = sample(Interpolation::Cubic);
         let lanczos = sample(Interpolation::Lanczos);
 
-        assert_eq!(linear.get_pixel(1, 0)[0], 127);
+        // The linear sample at x = 1.5 lands on 127.5; quantisation rounds to
+        // nearest (ties-even, `cvRound` semantics) rather than truncating.
+        assert_eq!(linear.get_pixel(1, 0)[0], 128);
         assert_ne!(cubic.get_pixel(1, 0)[0], linear.get_pixel(1, 0)[0]);
         assert_ne!(lanczos.get_pixel(1, 0)[0], linear.get_pixel(1, 0)[0]);
         // Cubic and Lanczos are interpolating kernels with different support.
