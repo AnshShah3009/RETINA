@@ -324,21 +324,34 @@ replaced by a Maclaurin series for small `|x|` and a continued fraction for
 retained as a private helper with a comment recording why it is not the entry point,
 rather than deleted — so the reason it was rejected is visible to the next reader.
 
-### What is still open, honestly
+### Verified — and three exactness defects found in the process
 
-The same harness reports **7 functions outside their derived bounds**, and the agent
-was interrupted before setting per-function tolerances. On inspection these look
-like each function's **algorithmic floor** rather than defects, but that is a claim
-not yet checked per function:
+The 7 functions that exceeded their bounds were each checked against their
+*method* rather than waved through: the results are the table below ("Derived
+algorithmic floors, measured"), and none of the seven is a defect - the errors
+are the fits' and the series' own floors.
 
-| function | first exceedance | looks like |
-|---|---|---|
-| `gamma` | rel `1.009e-11` | near f64 accumulation over a wide range |
-| `factorial` | rel `1.160e-11` at n=20 | Stirling series truncation |
-| `bessel_y0` | rel `1.124e-06` | the NR approximation's own limit |
-| `bessel_jn` / `bessel_yn` | rel `3.7e-09` / `1.0e-08` | series truncation |
-| `bessel_k0` | rel `2.901e-06` | ditto |
-| `expi` | abs `1.868e-01`, rel `7.29e-09` at x=20 | first omitted term at x=20 is ~2.3e-8, so this is the optimal truncation point |
+But the accuracy claim was the wrong question to stop at. The `erf` defect was
+not an accuracy problem - it was **exact at a point where mathematics pins the
+value** (`erf(0) = 0`) and wrong there, which silently falsified oddness. So
+each function was probed for exactly those points, and three of them failed -
+all now fixed, all confirmed against scipy, which is exact at each:
+
+| property | was | now | fix |
+|---|---|---|---|
+| `factorial(20)` | `2.432902008204852e18` | `2.43290200817664e18` (exact) | the exact-product path covered n < 20; 20!..22! are representable in f64, so the bound moved to n <= 22 |
+| `gamma(2)` | `0.9999999999999996` | `1.0` (exact) | `exp(log_gamma(x))` approximates values that are exact integers; gamma now returns the exact factorial at positive integers <= 23 |
+| `j0(0)` | `1.00000000283141` | `1.0` (exact) | the Hart/NR rational fit did not interpolate its boundary value; its constant term is corrected to den's (a 2.8e-9 shift, four orders below the fit's own 5.97e-5 error) |
+
+`j1(0) = 0` and the exact evenness/oddness of `j0`/`j1` hold by construction
+(the `|x|` and `x.signum()` structure), now pinned by tests so they stay true.
+`crates/math/tests/special_exactness.rs` gates all of these as identities -
+exact `assert_eq`, no tolerances - the standard the `erf` incident set.
+
+What is genuinely method-limited and stays approximate: `gamma(0.5)` against
+`sqrt(pi)` (the `exp(log_gamma)` route cannot round-trip to the last ulp the way
+SciPy's direct Lanczos does), and every Bessel value away from special points,
+where the polynomial fits *are* the contract (the floor table).
 
 ### Derived algorithmic floors, measured
 
