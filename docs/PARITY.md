@@ -99,20 +99,38 @@ verified on a 16x16 zero image with float32 and float64 maps and both
 The remap block therefore **skips and says so** rather than raising, because a parity
 report that silently omits a comparison is worse than one that fails.
 
-### Deviations present, none of them attributed yet
+### Where it stands after the half-pixel switch
 
-```
-resize_checker_nearest_13x40      max=160  2.5% over tol   rust=200 ref=40
-resize_checker_linear_24x18       max=80  99.1% over tol   rust=40  ref=120
-warpaffine_smooth_linear_c0       max=4   29.9% over tol   rust=100 ref=104
-warpaffine_checker_linear_c0      max=4   43.5% over tol   rust=182 ref=186
-```
+The coordinate-contract question below was **decided: half-pixel**, and the
+resize divergence closed with it. Before the switch the checker/linear cases were
+off by up to 160 grey (a convention difference is a whole phase, not a few
+levels); after it every resize case matches or differs only by the reference's
+own arithmetic. The `nearest` rule turned out to be a third thing entirely -
+measured against cv2 over 293 samples of 12 (w, nw) pairs, `INTER_NEAREST` is
+`floor(x / (nw/w))`, the scale as a **f32 reciprocal**. Every multiply form
+(`(x*w)/nw`, `x*(w/nw)` in f32 and f64) fails exactly one tie case (36 -> 40,
+y = 30: all give 27.0 where cv2 picks 26), and half-pixel fails 101 of 293 -
+nearest is NOT half-pixel, only the interpolating modes are. Rust now matches
+cv2's nearest exactly.
 
-**The `nearest` case is a coordinate-phase convention, not a defect.** Verified
-directly: for a checkerboard downscaled with `INTER_NEAREST`, OpenCV's
-`out[0,0]` picks the source pixel `img[0,0]` (value `0`) where the Rust side picks
-the other phase (`200`). Both are self-consistent; they round a half-pixel boundary
-in opposite directions. Which is "right" is a documented-choice question, not a bug.
+What remains in the report, all attributed and none a Rust defect:
+
+- **Linear, ±1 LSB** (e.g. `resize_smooth_linear_96x72`, 11.7% over): Rust's
+  bilinear is the exact float mapping (verified bit-for-bit in the warpaffine
+  probe); `cv2.resize` computes its interpolation weights in fixed point
+  (1/32 tables), worth up to 1 LSB - measured directly: exact float bilinear vs
+  `INTER_LINEAR` differs on 607/6912 pixels by max 1, exactly the case's shape.
+- **Cubic/Lanczos interior, ≤3 LSB on high-contrast inputs**: the Rust side is
+  bit-exact a numpy mirror of its own kernel (Catmull-Rom / Lanczos-3, per-tap
+  edge replicate, half-pixel positions - 0 pixels differ on all 4 warp cases and
+  the 96x72 resize); cv2's kernels are fixed-point tables with integer
+  accumulation. On smooth input the same class is ≤1 LSB.
+- **Cubic/Lanczos borders, up to 13 LSB at corners**: cv2's edge extension is
+  not reproducible from behaviour alone - it matches neither tap-replicate
+  (13 off), nor position-clamp (37 off), nor zero-extend (90 off) exactly.
+  OpenCV's `resize.cpp` border handling would have to be read to close this.
+  The Rust side is exactly its documented kernel, so the residue is attributed
+  to the reference's border handling, flagged open rather than called a defect.
 
 **The `warpaffine` cases deviate by 1-4 grey levels — attributed, and not a Rust
 defect.** Probed to the standard of the resize attribution below: an exact float
@@ -163,32 +181,24 @@ So both implementations are doing a bilinear interpolation; they disagree becaus
 `half-pixel`.** The Rust arithmetic is internally consistent — this is a convention
 difference, not a bug.
 
-**Which is "right" depends on the contract, and that is the open question.** They
-are not interchangeable:
+**RESOLVED — the contract is half-pixel.** Neither convention is more correct in
+the abstract; what decided it is that a library positioned as an OpenCV
+replacement must not make the opposite choice **silently** — a user compositing
+`resize` with `warp_affine` or a camera matrix would get a half-pixel
+displacement they cannot see. Half-pixel is what `cv2.resize` and graphics APIs
+use, and interchangeability with OpenCV is worth more here than align-corners'
+endpoint-inverse property.
 
-- **align-corners** (`x·(w−1)/(nw−1)`) pins the *corner* samples, so a 2x downscale
-  and a 2x upscale are exact inverses at the endpoints. It is what many scientific
-  libraries use.
-- **half-pixel** (`(x+0.5)·w/nw − 0.5`) treats samples as pixel *centres*, which is
-  what OpenCV, and graphics APIs generally, use. It avoids the half-pixel shift that
-  align-corners introduces at non-integer scales.
+Landed consistently across **all** implementations: `imgproc`'s cubic/lanczos
+resampler and RGB linear, `hal`'s CPU resize, and the five WGSL resize shaders
+(u8, f16, bf16, f32, f32-multichannel). `crates/imgproc/tests/resize_sampling_convention.rs`
+pins the impulse response at **64 = 255/4** — OpenCV's value — and would have
+caught either convention being changed alone. The GPU path remains guarded only
+by code reading (no adapter test), so the "all backends move together"
+requirement lives in that test's doc comment.
 
-Neither is more correct in the abstract. What *is* a defect is that a library
-positioned as an OpenCV replacement makes the opposite choice **silently** — a user
-compositing `resize` with `warp_affine` or a camera matrix gets a half-pixel
-displacement they cannot see.
-
-**Not changed here.** Switching to half-pixel would alter every existing caller and
-would make `resize` a round-trip of `warp_affine` rather than of its own inverse.
-The decision is a documented contract question, and the same choice has to be made
-consistently across `imgproc`, `hal`'s CPU and GPU resize, and the WGSL shader — three
-implementations that currently agree with each other and not with OpenCV.
-
-**Action for whoever decides:** state the convention in the `Interpolation` doc
-comment — it is already documented there for the *downscaling aliasing* consequence,
-but not for the half-pixel placement itself — and add a test that pins the impulse
-response, since that is the measurement which distinguishes the two conventions in a
-single number.
+Measured after the switch: `resize_checker_linear_24x18` and `_96x72` — the
+largest divergences in this section, up to 160 grey — now match exactly.
 
 ## signal_proc (cv-signal vs SciPy 1.17.1) — MATCHES
 
