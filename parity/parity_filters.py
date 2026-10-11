@@ -32,14 +32,13 @@ from harness import (  # noqa: E402
 
 # ── tolerances, each justified ───────────────────────────────────────────────
 #
-# Both sides emit u8. A normalised smoother on the same kernel with the same
-# border mode has the same exact arithmetic (products of u8 x f32 weights) in
-# the same order for gaussian (separable, f32 accumulation), so the only
-# divergence is float rounding plus any round-to-u8 tie. That is bounded by
-# half an ulp of f32 relative to the accumulated magnitude: < 1e-3 counts for
-# these ranges. A 0.5-count tolerance is therefore comfortably above the
-# legitimate noise floor and far below one quantisation step - it can only be
-# tripped by a real difference, never by rounding.
+# Both sides emit u8 and both round to nearest (`as u8` truncation in the Rust
+# path was a defect and is fixed). On the same kernel and border mode the exact
+# arithmetic is shared, so the only divergence left is OpenCV's 8u fixed-point
+# kernel and intermediate rounding: the probe below measures that at <= 1 count
+# even for exact f64 arithmetic with the same kernel. A 0.5-count tolerance
+# therefore flags exactly the cases where the reference's own fixed-point path
+# crosses a rounding boundary - visible and attributed, never silent.
 ATOL_IMAGE = 0.5
 
 # Morphology is min/max over integers: exact, no floating point anywhere. The

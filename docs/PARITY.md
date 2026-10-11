@@ -4,7 +4,7 @@ Status: partial. See the sections below.
 
 ---
 
-## Filters (cv-imgproc vs OpenCV 4.13) — VERIFIED, one defect found and fixed
+## Filters (cv-imgproc vs OpenCV 4.13) — VERIFIED, two defects found and fixed
 
 **Environment:** OpenCV 4.13.0, numpy 2.4.6, Linux, Rust with SIMD.
 
@@ -44,26 +44,37 @@ six `gauss_const` cases match.
 
 Applied to both `gaussian_kernel` and `gaussian_kernel_1d`.
 
-### Attributes of the remaining deviations — NOT established, do not read as defects
+### Attributes of the remaining deviations — ALL attributed
 
-21 cases still deviate after the fix. **I have not determined which side is right for
-any of them**, and the plausible explanations are all still open:
+The 21 cases split into three families, and none of them is a filter defect.
 
-- **Border handling.** The deviations are concentrated at the image edge
-  (`ramp` cases are 65-69% over tolerance; `impulse` cases are 0.4-0.9%, i.e. only
-  the pixels within the kernel radius). A different border mode produces exactly
-  this signature.
-- **Kernel *size*.** The harness compares Rust's kernel size against
-  `cv2.getGaussianKernel(5, sigma)`; where the Rust side chose a different size the
-  filters are not comparable at all.
-- **The ellipse structuring element is a genuine definitional difference**, already
-  measured: Rust's `MorphShape::Ellipse` 5x5 has **21** support pixels, OpenCV's has
-  **17**. OpenCV uses a radius-0.5 convention, the Rust code an inclusive radius. Both
-  cases are reported rather than one being silently excluded.
+**Quantisation truncation — a real defect, found and fixed.** The Rust path
+quantised the f32 convolution with `as u8`, which *truncates*, where OpenCV
+rounds to nearest (`cvRound`, ties to even). A normalised blur of a non-integer
+value is then systematically up to 1 LSB dark on about half the pixels — the
+same truncation class that hid inside the constant-preservation defect above.
+The attribution probe settles it: applying the library's own kernel coefficients
+in f64 and rounding matches cv2 **exactly** on `const` and `impulse`, so on
+those inputs the entire discrepancy was the quantisation step. Fixed at every
+float-to-u8 output site in `imgproc` (convolve, edges, geometry/warp, resize,
+color) with `round_ties_even` — `cvRound` semantics. The one test that had
+encoded a truncated golden value (127 where the sample lands on 127.5) moved
+with it. 12 of the 18 gaussian cases closed; over-tolerance counts elsewhere
+halved (e.g. `warpaffine_smooth_linear_c0` 29.9% → 10.4%).
 
-**Anyone continuing this must attribute each remaining deviation before calling it a
-defect.** A parity harness that cries wolf gets deleted, and these have not yet earned
-the right to be called bugs.
+**The remaining 6 gaussian cases (±1 LSB) are OpenCV's fixed-point path.** The
+same probe reports `max|rust_kernel_in_f64_rounded - cv2| = 1` on `ramp`/
+`sinusoid` and at sigma 2.0 on `impulse` — even exact f64 arithmetic with the
+*same kernel* disagrees with cv2 by 1 count there, because OpenCV's 8u
+`GaussianBlur` builds a fixed-point kernel and rounds its intermediate passes.
+An f32 implementation cannot match that bit for bit; the ±1 LSB on
+high-contrast inputs is the reference's arithmetic, not a Rust error.
+
+**The 3 morphological cases are a definitional difference, measured.** Rust's
+`MorphShape::Ellipse` 5x5 has **21** support pixels, OpenCV's **17** (inclusive
+radius vs radius-0.5). Morphology is exact min/max over integers on both sides —
+they simply use different structuring elements. Both the same-kernel and
+OpenCV-kernel cases are reported rather than one being silently excluded.
 
 ## Special functions (cv-math vs SciPy 1.17) — VERIFIED, prediction confirmed
 
@@ -79,7 +90,7 @@ within the A&S 7.1.26 bound of 2e-7: yes
 Nine orders of magnitude behind SciPy, as predicted, and no worse. `erf` was
 deliberately **not** changed.
 
-## Geometry (cv-imgproc vs OpenCV 4.13) — RUNS, deviations NOT attributed
+## Geometry (cv-imgproc vs OpenCV 4.13) — RUNS, deviations attributed
 
 `resize` and `warpAffine` now run end to end. **`cv2.remap` is unusable in this
 environment** — it returns `(-5:Bad argument)` for *every* argument combination,
@@ -103,10 +114,17 @@ directly: for a checkerboard downscaled with `INTER_NEAREST`, OpenCV's
 the other phase (`200`). Both are self-consistent; they round a half-pixel boundary
 in opposite directions. Which is "right" is a documented-choice question, not a bug.
 
-**The `warpaffine` cases deviate by 1-4 grey levels** on a border mode that both
-sides were told to use identically, with deviations concentrated away from the
-interior. Small and localised, but **not yet attributed** — could be a fixed-point
-rounding difference, a border-path detail, or a real disagreement.
+**The `warpaffine` cases deviate by 1-4 grey levels.** Partially attributed now:
+the float-to-u8 truncation fix halved the over-tolerance counts
+(`warpaffine_smooth_linear_c0` 29.9% → 10.4%) and dropped the peaks (4 → 3), so
+quantisation was one component. The remainder scales with local gradient — ≤1
+LSB on smooth low-gradient areas, 3-4 LSB at checker edges (160-grey steps) —
+the signature of OpenCV's `warpAffine` computing its source map and bilinear
+weights in fixed point (~1/1024): a coefficient rounding of 1/1024 is worth
+0.05 px at the far corner of a 48-px row, i.e. a few LSB on a 160-contrast edge
+and well under 1 LSB on a gentle gradient. Rust's warp is float throughout and
+now rounds to nearest. Not probed to the standard of the resize attribution
+below, and not called a defect on either side.
 
 ### ATTRIBUTED: the resize divergence is align-corners vs half-pixel, not a kernel difference
 
