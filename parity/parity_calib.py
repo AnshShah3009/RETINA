@@ -1295,11 +1295,22 @@ def main() -> int:
     )
     p1 = project_pinhole(world, (0, 0, 0), (0, 0, 0))
     relpose = V("ep_relpose")
-    # `emit_pose` writes [t | R]: translation first. Reading these the other way
-    # round silently compares the wrong matrices and still "passes" because both
-    # are 3-vectors, which is why both halves are asserted separately below.
-    rv_rel, t_rel = relpose[:3], relpose[3:6]
-    p2 = project_pinhole(world, rv_rel, t_rel)
+    # `emit_pose` writes [t | R]: translation first, then the rotation *matrix*
+    # row-major. This block first read the record as an (rvec, tvec) pair -
+    # feeding the translation to `rodrigues` and the rotation matrix's first
+    # row to the translation slot. The wrong reading is self-consistent (its own
+    # E fits its own points, so the residual cases cannot see it), but
+    # `ep_pts2` was 243.337 px out and E was built from a nonsense pose.
+    t_rel = relpose[:3]
+    r_rel = relpose[3:12].reshape(3, 3)
+    # Exactly `project_points`' transform (project.rs:54): X_cam = R X + t.
+    pc = (r_rel @ world.T).T + t_rel
+    p2 = np.column_stack(
+        [
+            CAM[0] * pc[:, 0] / pc[:, 2] + CAM[2],
+            CAM[1] * pc[:, 1] / pc[:, 2] + CAM[3],
+        ]
+    )
     results.append(
         compare(
             Case(
@@ -1330,27 +1341,25 @@ def main() -> int:
     held1, held2 = p1[20:], p2[20:]
 
     # `essential_from_extrinsics` is `skew(t) * R` (essential_fundamental.rs:9-12).
-    # E is only determined up to sign and scale, so the entrywise comparison is
-    # done against the *signed unit-norm* normalisation and both signs are
-    # reported; the geometric claim is then checked by residual.
-    r_rel = rodrigues(rv_rel)
+    # E *estimated from correspondences* is gauge-ambiguous up to sign and scale,
+    # but this E is a formula applied to known extrinsics - deterministic on both
+    # sides - so the entrywise comparison is the honest one. The previous
+    # unit-norm + sign-matched comparison would have hidden a scale defect in
+    # `skew_symmetric`, and it also forgot to normalise the Rust record, whose
+    # norm is ‖t‖·√2 by construction.
     tx = skew(t_rel)
     e_true = tx @ r_rel
-    e_unit = (e_true / np.linalg.norm(e_true)).reshape(-1)
-    e_unit_neg = -e_unit
     rust_e_true = V("E_true")
-    d_pos = float(np.abs(rust_e_true - e_unit).max())
-    d_neg = float(np.abs(rust_e_true - e_unit_neg).max())
     results.append(
         compare(
             Case(
-                "epipole_E_true_unit_norm",
+                "epipole_E_true_from_extrinsics",
                 rust_e_true,
-                e_unit if d_pos <= d_neg else e_unit_neg,
+                e_true.reshape(-1),
                 0,
                 atol=1e-15,
-                reason="E = [t]_x R normalised to unit Frobenius norm, sign chosen "
-                "to match (E and -E are the same geometry)",
+                reason="E = [t]_x R from the same extrinsics, entrywise: a formula "
+                "on both sides, so there is no gauge to quotient out",
             )
         )
     )
