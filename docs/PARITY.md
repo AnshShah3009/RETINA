@@ -725,21 +725,35 @@ The k-NN search itself is exact. Every disagreement with the lattice harness was
 a tie at the k-th boundary, and every disagreement with Open3D is down to
 Open3D's approximation, not ours.
 
-### Also noted by the harness, in `crates/3d/src/gpu/registration.rs`
+### Also noted by the harness, in `crates/3d/src/gpu/registration.rs` — fixed, twice
 
-The incremental rotation is built from a raw twist by **first-order linearisation**
-(`inc[0][1] = -g; inc[0][2] = b; …`), which is the matrix exponential only to
-first order, so the composed result is not a rotation:
+The incremental rotation was built from a raw twist by **first-order
+linearisation** (`inc[0][1] = -g; inc[0][2] = b; …`), which is the matrix
+exponential only to first order, so the composed result was not a rotation:
 
 ```
 det(R) - 1                          = 2.878e-03
 |R[0][1] + R[1][0]|  (should be 0)  = 2.215e-05
 ```
 
-Substituting a proper SE(3) exponential map, everything else identical, drops the
-error from `1.444e-03` to `1.545e-16` — f64 round-off. **NOT CHANGED here**: that
-harness owns only example and parity files, and the fix belongs in the library with
-its own test. Recorded for the next round.
+Substituting a proper SE(3) exponential map (`exponential_map_se3`), everything
+else identical, dropped that error to f64 round-off. **Fixed.**
+
+**And the fix itself shipped a second defect, caught here on re-run.** The twist
+was packed into the exponential map with its x and z rotation components swapped
+(`Vector6::new(tx, ty, tz, g, b, a)` where the Jacobian solves
+`x = [omega; t] = [a, b, g, tx, ty, tz]`). Any exp-map output is a valid
+rotation, so det and orthogonality were perfect — but the rotation was in the
+wrong plane, and `icp_point_to_plane` landed **5.234e-02** from the ground truth
+where Open3D's `registration_icp` reached 9.378e-06 on the same clouds. The
+packing is `(a, b, g)` now and the harness measures **8.396e-08** — tighter than
+Open3D.
+
+The lesson the repo keeps relearning: a shape assertion is not a correctness
+assertion. `icp_returns_rigid_transform.rs` asserts rotation-ness and passed
+under both defects; it now also asserts the **pose** against a known offset with
+unequal x/z rotation components, and a mutation check confirms that test fails
+under the swapped packing while the rotation-ness tests pass.
 
 ### Harness bugs found and fixed while getting this to run
 
