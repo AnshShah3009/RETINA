@@ -200,3 +200,68 @@ fn an_aligned_pair_returns_the_identity() {
         "the identity path produced a non-finite entry"
     );
 }
+
+/// THE SECOND DEFECT, and the reason a *pose* assertion exists here. After the
+/// linearisation fix, the twist was packed into `exponential_map_se3` with its
+/// x and z rotation components swapped. Every shape property still held - any
+/// exp-map output is a valid rotation - but the rotation was in the wrong
+/// plane, and `icp_point_to_plane` landed 5.234e-02 from the ground truth where
+/// Open3D reached 9.378e-06 on the same clouds. This scene generates the target
+/// from the source with a known rigid offset whose rotation has unequal x and z
+/// components - the exact pair the packing swapped - and asserts the recovered
+/// pose equals it.
+#[test]
+fn the_recovered_pose_matches_the_known_offset() {
+    const A: f32 = 0.6;
+    const FX: f32 = 0.45;
+    const FY: f32 = 0.38;
+    let height = |x: f32, y: f32| A * (FX * x).sin() * (FY * y).cos();
+    let grad = |x: f32, y: f32| {
+        (
+            A * FX * (FX * x).cos() * (FY * y).cos(),
+            -A * FY * (FX * x).sin() * (FY * y).sin(),
+        )
+    };
+
+    // 0.10 rad about x, 0.30 rad about z: omega_x != omega_z, so the two
+    // packings give visibly different rotations.
+    let (cx, sx) = (0.10f32.cos(), 0.10f32.sin());
+    let (cz, sz) = (0.30f32.cos(), 0.30f32.sin());
+    let rx = Matrix3::new(1.0, 0.0, 0.0, 0.0, cx, -sx, 0.0, sx, cx);
+    let rz = Matrix3::new(cz, -sz, 0.0, sz, cz, 0.0, 0.0, 0.0, 1.0);
+    let r = rz * rx;
+    let t = Vector3::new(0.3, -0.2, 0.1);
+
+    let (mut src, mut tgt, mut nrm) = (Vec::new(), Vec::new(), Vec::new());
+    let n = 24usize;
+    for i in 0..n {
+        for j in 0..n {
+            let x = (i as f32 / (n - 1) as f32 - 0.5) * 9.0;
+            let y = (j as f32 / (n - 1) as f32 - 0.5) * 9.0;
+            let sp = Point3::new(x, y, height(x, y));
+            let (gx, gy) = grad(x, y);
+            let sn = Vector3::new(-gx, -gy, 1.0).normalize();
+            tgt.push(Point3::from(r * sp.coords + t));
+            nrm.push(r * sn);
+            src.push(sp);
+        }
+    }
+
+    let m = icp_point_to_plane(&src, &tgt, &nrm, 1.0, 50).expect("ICP converges");
+    let r_rec = rotation(&m);
+    let t_rec = Vector3::new(m[(0, 3)], m[(1, 3)], m[(2, 3)]);
+
+    let mut rot_err = 0.0f32;
+    for i in 0..3 {
+        for j in 0..3 {
+            rot_err = rot_err.max((r_rec[(i, j)] - r[(i, j)]).abs());
+        }
+    }
+    let t_err = (t_rec - t).norm();
+    assert!(
+        rot_err < 1e-2 && t_err < 1e-2,
+        "recovered pose is not the generating one: max |R_rec - R| = {rot_err:.3e}, \
+         |t_rec - t| = {t_err:.3e}. A twist packed with the wrong axis order still \
+         yields a valid rotation, so only a pose assertion sees it"
+    );
+}

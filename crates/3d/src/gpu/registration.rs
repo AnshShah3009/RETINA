@@ -114,9 +114,18 @@ pub fn icp_point_to_plane(
         // promoted to `pub(crate)` rather than duplicated — two SE(3) exponentials
         // in one crate is how they drift apart.
         //
-        // Note the ordering: the twist is `[translation, rotation]` there, and the
-        // solved `x` is `[a, b, g, tx, ty, tz]`, so it is packed to match.
-        let inc = exponential_map_se3(&Vector6::new(tx, ty, tz, g, b, a));
+        // Note the ordering: `exponential_map_se3` takes `[translation, rotation]`
+        // and the solved `x` is `[a, b, g, tx, ty, tz]` = `[omega; t]`, so it is
+        // packed to match: `omega = (a, b, g)` in the same xyz order the
+        // Jacobian's `p x n` rows were built in.
+        //
+        // The first version of this fix packed `(g, b, a)` here - x and z
+        // swapped. The result was still a *valid* rotation (det 1, orthogonal),
+        // so every rotation-ness property held, but the rotation was in the
+        // wrong plane: `icp_point_to_plane` landed 5.234e-02 from the ground
+        // truth where Open3D's `registration_icp` reached 9.378e-06 on the same
+        // clouds. Only a pose assertion catches this, not a shape one.
+        let inc = exponential_map_se3(&Vector6::new(tx, ty, tz, a, b, g));
 
         transform = inc * transform;
 
