@@ -677,10 +677,21 @@ from the exact one on 27 of 27 queries. So it is not a reference for exact k-NN 
 all, and `cv_3d`'s deviation from it is not evidence about `cv_3d`.
 
 `cv_3d`'s own misses are all tie-boundary choices too (9/27 is a low score *because*
-most queries are ties, not because the search is wrong) — but on a scene with no ties
-it should match brute force exactly, and **that has not been verified.** A
-tie-free scene (jittered or random points, all distances distinct) is what would
-settle it, and is the next thing to run.
+most queries are ties, not because the search is wrong) — and on a scene with no
+ties it does match brute force exactly. **Now verified**, in
+`crates/3d/examples/knn_exact.rs`: 200 fixed-seed jittered points (all distances
+distinct), brute-force ground truth computed in f64, neighbour *sets* compared
+for k = 4, 6, 10:
+
+```
+k=4:  exact set on 200/200 tie-free queries
+k=6:  exact set on 200/200 tie-free queries
+k=10: exact set on 200/200 tie-free queries
+```
+
+The k-NN search itself is exact. Every disagreement with the lattice harness was
+a tie at the k-th boundary, and every disagreement with Open3D is down to
+Open3D's approximation, not ours.
 
 ### Also noted by the harness, in `crates/3d/src/gpu/registration.rs`
 
