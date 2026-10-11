@@ -490,15 +490,28 @@ perfect fit on clean data, which is the correct answer. The reference figure of
 ~156 px on a 100-px-wide synthetic set is **not explicable as a pixel residual for
 any model that fits the data**, and F and E agreeing to within 0.01 of each other
 suggests the reference is computing something other than the intended quantity.
-**I have not determined the cause and am not calling it a Rust defect.**
+**Resolved - two harness defects at once.** The "clean" fit set is the whole
+20-point contaminated set, so the comparison scored two *random samplers* against
+each other; and cv2's model on this input is degenerate (singular values
+[1.0009, 8.777e-4, 1.229e-18], epipole at infinity), whose Sampson residual on its
+own fit points is exactly the ~156 px. Both rows were removed in favour of the
+comparable quantities - inlier count and per-point inlier mask, which agree
+exactly - with the measurements kept as a `ransac_quality_not_comparable` note.
 
-**Not attributable.** `epipole_E_true_unit_norm`, `epipole_F_fit_frobenius_norm`,
-`pose_recovered_rotation_vs_ground_truth` and
-`pose_recovered_translation_direction_vs_ground_truth` all deviate. For the epipoles
-and the pose these are the classic gauge cases — E is defined up to sign and scale,
-and a recovered pose has a 4-fold rotation ambiguity — so a naive norm or
-elementwise comparison is meaningless without a normalisation the harness does not
-currently apply. They need the same treatment the Sampson fix just received.
+**Resolved - all four were harness bugs, not defects.** The gauge reading was
+wrong: the epipolar block read the `emit_pose` record `[t | R]` back to front,
+feeding the translation to `rodrigues` and the rotation matrix's first row to the
+translation slot. The wrong pose is self-consistent - its own E fits its own
+points, so the residual cases stayed green - but `ep_pts2` was 243.337 px out and
+every downstream "ground truth" was the nonsense pose. The gauge story was also
+wrong in its own right: E from *known extrinsics* is a formula, not a fit, so
+`epipole_E_true_unit_norm` (now `epipole_E_true_from_extrinsics`) compares it
+entrywise, and `epipole_F_fit_frobenius_norm` asserted the *raw* estimator record
+where the scaled one is the contract (raw ‖F‖ is 0.515; no contract fixes it).
+With the record read correctly: `ep_pts2` to 1.1e-13 px, E bit-exact, recovered
+pose vs ground truth 3.7e-15. `ep_resid_Ffit8`'s residual *equality* was the same
+class - two independent solvers' fit quality - and became a Rust-own closure gate
+with cv2's numbers kept in the note.
 
 ### Not finished
 
@@ -506,8 +519,9 @@ An `f32` mask branch and the last sections were still in progress when the agent
 its turn limit. (Note this section predates the later independent audits of
 `calib3d`; see the bug log for the hand-eye and P3P work, where a `+`/`-` sign flip
 in the translation accumulation was caught by mutation at a 0.92 m error.) **No calib3d result is claimed beyond the RANSAC residuals above**,
-and the deviations listed as "not attributable" must not be read as defects until
-their normalisation is fixed.
+and the deviations formerly listed as "not attributable" were harness bugs and are
+closed above; the two divergences that remain in the report are the documented
+legitimate differences (`undistort_radtan_inverse_answer`, `zhang_K`).
 
 ---
 
