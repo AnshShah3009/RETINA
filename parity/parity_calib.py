@@ -245,7 +245,16 @@ def sampson(m: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
 def sampson_max(m: np.ndarray, a: np.ndarray, b: np.ndarray) -> float:
     """The largest Sampson residual over a correspondence set, in px."""
     if m is None:
-        return float("inf")
+        # `cv2.findFundamentalMat` returns None when RANSAC rejects everything,
+        # and this previously collapsed to `inf` - an *absent* model rendered as
+        # if it were a measured residual. (The ~157 px that prompted this audit
+        # was a different bug: cv2's model existed but was degenerate - see the
+        # `ransac_quality_not_comparable` note below.) A missing model is now
+        # NaN, which `compare` reports as "reference produced no model" rather
+        # than as a measured discrepancy. The distinction matters: an absent
+        # model and a badly-fitting one are opposite findings, and conflating
+        # them is how a harness cries wolf.
+        return float("nan")
     r = sampson(m, a, b)
     return float(r.max()) if len(r) else float("nan")
 

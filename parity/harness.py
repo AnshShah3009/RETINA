@@ -234,6 +234,32 @@ def compare(case: Case) -> Result:
             case.name, 0, float("inf"), float("inf"), 0, 1.0,
             case.note, f"shape mismatch {rust.shape} vs {ref.shape}", case.atol,
         )
+    # A NaN on the reference side means the reference algorithm produced no
+    # model at all (`cv2.findFundamentalMat` returns `None`, and `sampson_max`
+    # passes that through as NaN). That is an absent measurement, not a
+    # measured discrepancy, so it gets its own verdict and never reaches
+    # `diverging` - `NaN > tol` is False, so it cannot land in `bad`.
+    # A non-finite value on the Rust side is the opposite finding: there is no
+    # reference to blame, so it must diverge loudly at the first bad entry.
+    if not np.isfinite(rust).all():
+        flat = int(np.argmax(~np.isfinite(rust)))
+        if rust.ndim >= 2:
+            y, x = divmod(flat, rust.shape[1])
+        else:
+            y, x = flat, 0
+        return Result(
+            case.name, int(rust.size), float("inf"), float("inf"),
+            int(rust.size), 1.0,
+            case.note, "rust side produced non-finite output", case.atol,
+            (int(y), int(x)),
+            float(rust.ravel()[flat]),
+            float(ref.ravel()[flat]),
+        )
+    if not np.isfinite(ref).all():
+        return Result(
+            case.name, int(ref.size), float("nan"), float("nan"), 0, 0.0,
+            case.note, "reference produced no model", case.atol,
+        )
     d = np.abs(rust - ref)
     over = d > case.atol
     r = case.radius
@@ -356,6 +382,8 @@ def render_table(results: list[Result], title: str) -> str:
         tol = r.tol
         if r.n == 0:
             verdict = "SHAPE MISMATCH"
+        elif np.isnan(r.max_abs):
+            verdict = "reference produced no model"
         elif r.max_abs <= tol:
             verdict = "match"
         elif r.max_abs_interior <= tol:
