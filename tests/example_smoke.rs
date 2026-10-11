@@ -97,6 +97,7 @@ macro_rules! smoke {
 smoke!(
     plot_demo,
     registration_icp,
+    knn_exact,
     gaussian_splatting_basic,
     kalman_filter,
     bundle_adjustment,
