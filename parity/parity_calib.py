@@ -1418,6 +1418,12 @@ def main() -> int:
                            "independent solvers' fit quality is not a parity quantity, "
                            "and cv2's minimal-sample accuracy (3e-3 px here, against "
                            "Rust's 5e-10) is a property of cv2"),
+        # Emitted by the same emitter block but never asserted anywhere: a
+        # recorded number that no comparison reads is the "silently skipped"
+        # class of gap this harness exists to close. Same treatment as Ffit8.
+        "ep_resid_Efit8": (np.zeros(len(fit1)), TOL_SAMP_FIT,
+                           "Rust's own 8-point essential fit on noise-free geometry "
+                           "must close to the f64 noise floor; measured 2.7e-10"),
     }
     for name, (ref, tol, why) in refs.items():
         got = np.array(V(name)).reshape(-1)
