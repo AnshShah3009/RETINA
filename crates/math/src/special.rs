@@ -283,6 +283,13 @@ pub fn gamma(x: f64) -> f64 {
     if x <= 0.0 && x.fract() == 0.0 {
         return f64::INFINITY;
     }
+    // Gamma(n) = (n-1)! exactly at positive integers, and f64 holds those up to
+    // 22!. `exp(log_gamma(x))` is an approximation there - gamma(2) returned
+    // 0.9999999999999996 - and scipy returns the exact integers. Same class as
+    // `erf(0) != 0`: a value that mathematics pins down was left approximate.
+    if x > 0.0 && x.fract() == 0.0 && x <= 23.0 {
+        return factorial(x as u64 - 1);
+    }
     // `log_gamma` returns log|Gamma|, so the sign has to be reapplied here.
     // Reflection gives Gamma(x) = sign(pi/sin(pi x)) * |Gamma(x)|, and
     // Gamma(1-x) > 0 for x < 0, so the sign is that of sin(pi*x): Gamma is
@@ -311,7 +318,12 @@ pub fn log_beta(x: f64, y: f64) -> f64 {
 }
 
 pub fn factorial(n: u64) -> f64 {
-    if n < 20 {
+    // n! is exactly representable in f64 up to 22! (its odd part fits in 53
+    // bits), and the running product is exact whenever the result is. Routing
+    // 20..=22 through `gamma` handed back an approximation of a value f64 can
+    // hold exactly - factorial(20) was 2.432902008204852e18 against the exact
+    // 2.43290200817664e18. scipy returns the exact integers here.
+    if n <= 22 {
         (1..=n).fold(1.0, |acc, i| acc * i as f64)
     } else {
         gamma(n as f64 + 1.0)
@@ -332,8 +344,16 @@ pub fn bessel_j0(x: f64) -> f64 {
     let ax = x.abs();
     if ax < 8.0 {
         // Direct rational fit (Hart/NR): J0 is even in x.
+        //
+        // The constant term is corrected from NR's 57568490574.0 to den's
+        // 57568490411.0 so the fit interpolates **J0(0) = 1 exactly**: the
+        // uncorrected ratio is 1.00000000283141 at the origin, where the
+        // mathematical value is pinned (window functions need unity peak), and
+        // scipy returns exactly 1.0. The correction shifts every sampled value
+        // by 2.8e-9 - four orders below the fit's own 5.97e-5 error - the same
+        // trade the gaussian kernel-sum fix made.
         let y = ax * ax;
-        let num = 57568490574.0
+        let num = 57568490411.0
             + y * (-13362590354.0
                 + y * (651619640.7 + y * (-11214424.18 + y * (77392.33017 + y * (-184.9052456)))));
         let den = 57568490411.0
