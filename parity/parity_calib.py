@@ -1411,8 +1411,13 @@ def main() -> int:
                           "Rust E->F vs cv2.findEssentialMat, same 20 correspondences"),
         "ep_resid_Ffit": (fit_and_held(f_cv_ransac), TOL_SAMP_HELD,
                           "Rust find_fundamental_mat vs cv2.findFundamentalMat (RANSAC)"),
-        "ep_resid_Ffit8": (sampson(f_cv_8pt_min, fit1, fit2), TOL_SAMP_8PT,
-                           "Rust 8-point sample vs cv2.findFundamentalMat (FM_8POINT) on 8 points"),
+        "ep_resid_Ffit8": (np.zeros(len(fit1)), TOL_SAMP_FIT,
+                           "Rust's own 8-point fit on noise-free geometry must close "
+                           "to the f64 noise floor. cv2's FM_8POINT residuals are "
+                           "measured in the note below, not compared for equality: two "
+                           "independent solvers' fit quality is not a parity quantity, "
+                           "and cv2's minimal-sample accuracy (3e-3 px here, against "
+                           "Rust's 5e-10) is a property of cv2"),
     }
     for name, (ref, tol, why) in refs.items():
         got = np.array(V(name)).reshape(-1)
@@ -1461,20 +1466,24 @@ def main() -> int:
         f"tolerance.**",
     )
 
-    # `F_fit` and `E_fit` are each emitted twice: once normalised and once raw.
-    # The raw forms are checked for unit Frobenius norm so the normalisation is
-    # not silently a no-op on the records compared elsewhere.
+    # `F_fit` and `E_fit` are each emitted twice: the raw estimator output
+    # (`*_rowmajor`) and the same matrix divided by its own Frobenius norm.
+    # The norm claim belongs to the *scaled* record - no contract fixes the raw
+    # one's scale (this block first asserted ‖raw F‖ = 1, which
+    # `find_fundamental_mat` never promises: its raw norm is 0.515, while
+    # `find_essential_mat`'s happens to be 1 - an artefact of each estimator's
+    # internal normalisation, not a property either side advertises).
     f_fit_raw = V("F_fit_rowmajor")
     results.append(
         compare(
             Case(
                 "epipole_F_fit_frobenius_norm",
-                np.array([[np.linalg.norm(f_fit_raw.reshape(3, 3))]]),
+                np.array([[np.linalg.norm(V("F_fit").reshape(3, 3))]]),
                 np.array([[1.0]]),
                 0,
                 atol=1e-12,
-                reason="F_fit_rowmajor is the unnormalised matrix; its Frobenius norm "
-                "being 1 is what makes the F/h22 record comparable",
+                reason="F_fit is the record normalised by ‖F‖_F: the scaling applied "
+                "to the records compared elsewhere must not be a no-op",
             )
         )
     )
@@ -1483,11 +1492,11 @@ def main() -> int:
         compare(
             Case(
                 "epipole_E_fit_frobenius_norm",
-                np.array([[np.linalg.norm(e_fit_raw.reshape(3, 3))]]),
+                np.array([[np.linalg.norm(V("E_fit").reshape(3, 3))]]),
                 np.array([[1.0]]),
                 0,
                 atol=1e-12,
-                reason="same for E_fit_rowmajor",
+                reason="same for E_fit",
             )
         )
     )
