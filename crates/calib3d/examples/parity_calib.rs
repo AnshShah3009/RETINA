@@ -525,13 +525,17 @@ fn main() {
         emit_f64s("kb_fwd", &kb_fwd);
         emit_f64s("kb_inv", &kb_inv);
 
-        // Round-trip residual of the *distorted* grid through remove(): this is
-        // the quantity that is model-independent and can be checked against
-        // scipy.optimize.brentq on the same forward map.
+        // Round-trip residual of the *distorted* grid: `remove`, then `apply`
+        // again, and measure against the input. Measuring `remove`'s output
+        // against its *input* instead - which this block first did - reports
+        // the distortion displacement `‖d − u‖` (~1.5e-2 here): nonzero exactly
+        // when the inverse succeeds and zero when `remove` falls back to its
+        // input, i.e. success reported as error and failure as closure.
         let mut rt = Vec::new();
         for c in fwd.chunks(2) {
             let (ux, uy) = radtan.remove(c[0], c[1]);
-            rt.push((c[0] - ux).hypot(c[1] - uy));
+            let (ax, ay) = radtan.apply(ux, uy);
+            rt.push((c[0] - ax).hypot(c[1] - ay));
         }
         emit_f64s("radtan_roundtrip_resid", &rt);
     }

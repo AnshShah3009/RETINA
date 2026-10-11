@@ -903,36 +903,40 @@ def main() -> int:
         f"* max(r,1) gate. None returned `None`.",
     )
 
-    # The round-trip residual the emitter reports is `remove`'s *fallback*, and
-    # `remove` returns its input unchanged on non-convergence
-    # (distortion.rs:169-171). Since `remove_checked` succeeds everywhere on this
-    # grid, this residual is identically 0 and carries no information. Reported
-    # so the number is on the record with its explanation attached.
+    # The emitter's "round-trip residual" measured `remove`'s output against
+    # its *input* (`‖d − remove(d)‖`) - the distortion displacement
+    # `‖apply(u) − u‖`, verified bit-exact against `fwd − radtan_inv` (max
+    # difference 0.0). That is nonzero precisely when `remove` *succeeds* and
+    # zero when it falls back to its input (geometry/distortion.rs:169-171):
+    # success and failure inverted. This also resolves the earlier "undetermined"
+    # reading - there was no stale state, the metric simply could not close.
+    # The emitter now closes the loop (`apply(remove(d)) − d`), and the case
+    # compares that against the reference's forward residual of the *same*
+    # `remove` output: the two differ only in whose `apply` closes the loop.
     rt = np.array(V("radtan_roundtrip_resid")).reshape(-1)
     results.append(
         compare(
             Case(
                 "undistort_radtan_roundtrip_resid",
                 rt,
-                np.zeros_like(rt),
+                resid,
                 0,
-                atol=0.0,
-                reason="the emitter's own round-trip metric, at tolerance 0 so its "
-                "non-zero values are exposed rather than absorbed",
+                atol=1e-12,
+                reason="Rust `apply(remove(d)) − d` vs the numpy formula's forward "
+                "residual of the same `remove` output - pure `apply` parity. A "
+                "`remove` fallback would put rt at ~1.5e-2 here and cannot hide.",
             )
         )
     )
     note_detail(
         "undistort_radtan_roundtrip_resid",
-        f"worst {float(rt.max()):.3e}, median {float(np.median(rt)):.3e}. This is NOT "
-        f"a round-trip error. The emitter calls `remove`, not `remove_checked`, and "
-        f"`remove` returns *its input* when the checked variant fails "
-        f"(distortion.rs:169-171), so the metric degenerates to "
-        f"`|apply(x) - x|`. Here `remove_checked` succeeds at all "
-        f"{int(solved.sum())}/{len(grid)} points, so the residual should be 0 - and "
-        f"it is not, which means this emitter block is reading stale state or a "
-        f"different code path than `radtan.remove_checked`. **Reported as "
-        f"undetermined**, not attributed to either side.",
+        f"worst {float(rt.max()):.3e}, max |rt - ref| "
+        f"{float(np.abs(rt - resid).max()):.3e}. The emitter's metric used to be "
+        f"the distortion displacement, not a round trip - bit-exact against "
+        f"`fwd − radtan_inv` (max diff 0.0) - which is why it read ~1.5e-2 "
+        f"while `remove_checked` succeeded at all {int(solved.sum())}/{len(grid)} "
+        f"points. Now it closes the loop and agrees with the reference's forward "
+        f"residual of the same `remove` output.",
     )
 
     rust_inv32 = np.array(V("radtan_inv32")).reshape(-1, 2)
