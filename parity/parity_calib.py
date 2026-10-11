@@ -431,14 +431,21 @@ def main() -> int:
             )
         )
     )
-    # K^T K^-1 is a translation, not a rotation: row 3 is K^-T's third column,
-    # (1/fx, 1/fy, -(cx/fx + cy/fy)). Asserting the *wrong* 3x3 here is exactly
-    # the kind of false failure this report exists to avoid.
+    # K^T K^-1, closed form. Rows 1-2 are [1,0,-cx] and [0,1,-cy]; row 3 is
+    # K^T's third row [cx, cy, 1] pushed through K^-1, i.e.
+    # [cx/fx, cy/fy, 1 - cx^2/fx - cy^2/fy]. This reference first asserted
+    # [1/fx, 1/fy, -(cx/fx + cy/fy)] there - three wrong entries that the very
+    # comparison below exposed as a 315.63 divergence "in" the Rust product,
+    # which is bit-exact (max |rust - this| = 0.0).
     kt_kinv_ref = np.array(
         [
             [1.0, 0.0, -CAM[2]],
             [0.0, 1.0, -CAM[3]],
-            [1.0 / CAM[0], 1.0 / CAM[1], -(CAM[2] / CAM[0] + CAM[3] / CAM[1])],
+            [
+                CAM[2] / CAM[0],
+                CAM[3] / CAM[1],
+                1.0 - CAM[2] ** 2 / CAM[0] - CAM[3] ** 2 / CAM[1],
+            ],
         ]
     )
     results.append(
@@ -449,7 +456,8 @@ def main() -> int:
                 kt_kinv_ref,
                 0,
                 atol=TOL_COMPOSE_F64,
-                reason="K^T K^-1 is [[1,0,-cx],[0,1,-cy],[1/fx,1/fy,-(cx/fx+cy/fy)]]",
+                reason="K^T K^-1 = [[1,0,-cx],[0,1,-cy],"
+                "[cx/fx, cy/fy, 1-cx^2/fx-cy^2/fy]]",
             )
         )
     )
