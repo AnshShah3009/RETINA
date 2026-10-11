@@ -114,17 +114,18 @@ directly: for a checkerboard downscaled with `INTER_NEAREST`, OpenCV's
 the other phase (`200`). Both are self-consistent; they round a half-pixel boundary
 in opposite directions. Which is "right" is a documented-choice question, not a bug.
 
-**The `warpaffine` cases deviate by 1-4 grey levels.** Partially attributed now:
-the float-to-u8 truncation fix halved the over-tolerance counts
-(`warpaffine_smooth_linear_c0` 29.9% → 10.4%) and dropped the peaks (4 → 3), so
-quantisation was one component. The remainder scales with local gradient — ≤1
-LSB on smooth low-gradient areas, 3-4 LSB at checker edges (160-grey steps) —
-the signature of OpenCV's `warpAffine` computing its source map and bilinear
-weights in fixed point (~1/1024): a coefficient rounding of 1/1024 is worth
-0.05 px at the far corner of a 48-px row, i.e. a few LSB on a 160-contrast edge
-and well under 1 LSB on a gentle gradient. Rust's warp is float throughout and
-now rounds to nearest. Not probed to the standard of the resize attribution
-below, and not called a defect on either side.
+**The `warpaffine` cases deviate by 1-4 grey levels — attributed, and not a Rust
+defect.** Probed to the standard of the resize attribution below: an exact float
+bilinear warp of the same inputs through the same f32-echoed matrix and border
+mode, mirroring `get_pixel_bilinear_with_border`'s weight order and rounding to
+nearest, matches the Rust output **bit-for-bit on all 1728 pixels of all four
+cases** (smooth/checker × c0/replicate). The Rust side *is* the mathematical
+bilinear warp; the entire 1-4 LSB remainder is OpenCV's `warpAffine` computing
+its source map and bilinear weights in fixed point (~1/1024) — worth a few LSB
+at checker edges (160-grey steps) and under 1 LSB on gentle gradients, exactly
+the observed scaling. Before the truncation fix the over-counts were double
+(`warpaffine_smooth_linear_c0` 29.9% → 10.4%), because Rust was then wrong by up
+to 1 LSB as well.
 
 ### ATTRIBUTED: the resize divergence is align-corners vs half-pixel, not a kernel difference
 
