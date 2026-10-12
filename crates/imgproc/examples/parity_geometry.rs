@@ -7,8 +7,8 @@
 //! #W <name> <width> <height> <v0> ...   # warped/resampled image (row-major)
 //! ```
 
-use cv_imgproc::{remap_ex, resize, warp_affine_ex, BorderMode, Interpolation};
-use image::{GrayImage, Luma};
+use cv_imgproc::{remap_ex, resize, resize_rgb, warp_affine_ex, BorderMode, Interpolation};
+use image::{GrayImage, Luma, Rgb, RgbImage};
 
 const W: u32 = 48;
 const H: u32 = 36;
@@ -20,6 +20,18 @@ fn emit_image(name: &str, img: &GrayImage) {
         line.push_str(&format!(" {:.1}", *p as f64));
     }
     println!("{line}");
+}
+
+/// The three channels of an RGB image, emitted as separate planes so each is
+/// compared and any channel cross-talk is visible per channel.
+fn emit_image_rgb(name: &str, img: &RgbImage) {
+    for c in 0..3 {
+        let mut line = format!("#IM {name}_c{c} {} {}", img.width(), img.height());
+        for p in img.pixels() {
+            line.push_str(&format!(" {:.1}", p[0 + c] as f64));
+        }
+        println!("{line}");
+    }
 }
 
 fn emit_warp(name: &str, img: &GrayImage) {
@@ -87,6 +99,29 @@ fn affine_rotate_translate(angle_deg: f64, tx: f64, ty: f64) -> [[f32; 3]; 2] {
     ]
 }
 
+/// Three-channel input with a *different* pattern per channel, so any channel
+/// cross-talk in the RGB resamplers shows up in exactly one plane. Mirrored in
+/// the reference side as `geometry_rgb_input`.
+fn input_rgb() -> RgbImage {
+    let smooth = input_smooth();
+    let checker = input_checker();
+    let mut img = RgbImage::new(W, H);
+    for y in 0..H {
+        for x in 0..W {
+            img.put_pixel(
+                x,
+                y,
+                Rgb([
+                    smooth.get_pixel(x, y)[0],
+                    checker.get_pixel(x, y)[0],
+                    ((x * 5 + y * 7) % 256) as u8,
+                ]),
+            );
+        }
+    }
+    img
+}
+
 fn main() {
     let src = input_smooth();
     let checker = input_checker();
@@ -107,17 +142,39 @@ fn main() {
             for (mname, mode) in modes {
                 let case = format!("resize_{iname}_{mname}_{tw}x{th}");
                 // Radius = half the widest kernel support in the mode
-                // (Lanczos-3 -> 3), so the reported interior is guaranteed
+                // (Lanczos-4 -> 4), so the reported interior is guaranteed
                 // kernel-free even though the Rust resamplers edge-clamp.
                 let radius = match mode {
                     Interpolation::Nearest | Interpolation::Linear => 1,
                     Interpolation::Cubic => 2,
-                    Interpolation::Lanczos => 3,
+                    Interpolation::Lanczos => 4,
                 };
                 emit_meta(&case, radius);
                 let out = resize(img, tw, th, mode);
                 emit_image(&case, &out);
             }
+        }
+    }
+
+    // ── resize, RGB ────────────────────────────────────────────────────────
+    // The RGB resamplers are separate code paths (`resize_rgb_linear` is not
+    // the HAL bilinear), so they are covered per channel: three planes per
+    // case, and a channel mix-up lands in exactly one of them.
+    let rgb = input_rgb();
+    emit_image_rgb("input_rgb", &rgb);
+    for (tw, th) in [(24u32, 18u32), (13, 40)] {
+        for (mname, mode) in modes {
+            let case = format!("resize_rgb_{mname}_{tw}x{th}");
+            let radius = match mode {
+                Interpolation::Nearest | Interpolation::Linear => 1,
+                Interpolation::Cubic => 2,
+                Interpolation::Lanczos => 4,
+            };
+            for c in 0..3 {
+                emit_meta(&format!("{case}_c{c}"), radius);
+            }
+            let out = resize_rgb(&rgb, tw, th, mode);
+            emit_image_rgb(&case, &out);
         }
     }
 

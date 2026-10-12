@@ -110,6 +110,42 @@ def main() -> int:
                     )
                 )
 
+    # ── resize, RGB ─────────────────────────────────────────────────────────
+    # The RGB resamplers are separate code paths (`resize_rgb_linear` is not
+    # the HAL bilinear), so they are covered per channel: a channel mix-up
+    # lands in exactly one plane. The input stacks the two gray patterns plus
+    # a ramp, mirrored from the example's `input_rgb`.
+    gh, gw = inputs["smooth"].shape
+    yy, xx = np.mgrid[0:gh, 0:gw]
+    rgb_in = np.dstack([inputs["smooth"], inputs["checker"],
+                        ((xx * 5 + yy * 7) % 256).astype(np.float64)])
+    for c in range(3):
+        got = rec.images[f"input_rgb_c{c}"]
+        if got.shape != (gh, gw) or not np.array_equal(got, rgb_in[:, :, c]):
+            print(f"INPUT MISMATCH input_rgb_c{c}", file=sys.stderr)
+            return 2
+    for tw, th in [(24, 18), (13, 40)]:
+        for mname, mcode in INTERP.items():
+            case = f"resize_rgb_{mname}_{tw}x{th}"
+            tol = ATOL_NEAREST if mname == "nearest" else ATOL_INTERP
+            ref = cv2.resize(
+                u8(rgb_in), (tw, th), interpolation=mcode
+            ).astype(np.float64)
+            for c in range(3):
+                results.append(
+                    compare(
+                        Case(
+                            f"{case}_c{c}",
+                            rec.images[f"{case}_c{c}"],
+                            ref[:, :, c],
+                            rec.meta[f"{case}_c{c}"],
+                            atol=tol,
+                            reason="RGB path, channel isolated: u8 in / u8 out, "
+                            "same mapping and kernels as the gray cases",
+                        )
+                    )
+                )
+
     # ── warpAffine ──────────────────────────────────────────────────────────
     # The matrix is read back out of the record file: the Rust side receives it
     # as f32, so the reference must use exactly those f32-rounded coefficients,
