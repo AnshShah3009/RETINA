@@ -121,9 +121,9 @@ What remains in the report, all attributed and none a Rust defect:
   (`INTER_RESIZE_COEF_BITS = 11`). Measured directly for linear: exact float
   bilinear vs `INTER_LINEAR` differs on 607/6912 pixels by max 1, exactly the
   case's shape, and the Lanczos-4 recipe lands at the same ±1.
-- **`resize` cubic now matches cv2 bit-for-bit.** The entire former cubic
-  divergence (interior up to 3 LSB, borders up to 13) was **one definitional
-  choice: the kernel**. OpenCV's `INTER_CUBIC` is Keys a = -0.75
+- **`resize` cubic now matches cv2 bit-for-bit** (gray). The entire former
+  cubic divergence (interior up to 3 LSB, borders up to 13) was **one
+  definitional choice: the kernel**. OpenCV's `INTER_CUBIC` is Keys a = -0.75
   (`interpolateCubic`); the crate used Catmull-Rom (a = -0.5). Decoding this
   needed resize.cpp itself - earlier behavioural probing had wrongly blamed
   cv2's fixed-point tables and even its border handling (its `sxj += cn`
@@ -134,6 +134,13 @@ What remains in the report, all attributed and none a Rust defect:
   crate's kernels - see `kernels.rs`. This is the same contract class as the
   coordinate mapping: an OpenCV replacement must not silently use a different
   kernel under the same method name.
+- **RGB is covered now, per channel** (24 cases: `resize_rgb_*_c0/c1/c2`). The
+  RGB resamplers are separate code paths - `resize_rgb_linear` is not the HAL
+  bilinear - and had no parity coverage at all despite carrying the same
+  convention changes. The input stacks a different pattern per channel (smooth,
+  checker, ramp), so a channel mix-up would land in exactly one plane. None
+  does: every RGB divergence is max 1, the same fixed-point class as gray (the
+  RGB cubic's ±1 is its own f32 accumulation order against cv2's tables).
 
 **The `warpaffine` cases deviate by 1-4 grey levels — attributed, and not a Rust
 defect.** Probed to the standard of the resize attribution below: an exact float
@@ -480,17 +487,20 @@ implementation.
 
 ## Coverage of this report — and its holes
 
-Done: filters (`imgproc`), geometry — resize and warpAffine only (`imgproc`),
-special functions (`math`).
-**Not reached:** `remap` (unusable here), `photo` tone mapping, and everything in
-`calib3d`, `features`, `3d`, `registration`, `pointcloud`, `rendering`. So this is a
-**partial** parity report covering 2 of ~30 crates, and nothing here should be read as
-a statement about the rest.
+Covered end to end: `imgproc` (filters, geometry - resize incl. RGB, warpAffine),
+`math` (special functions), `signal`, `calib3d` (projection, distortion, DLT,
+epipolar, pose recovery), `3d` (vs Open3D: outliers, voxel, normals, k-NN, ICP),
+`plot` (vs Matplotlib).
+**Not reached:** `remap` (the cv2 binding is unusable in this environment), `photo`
+tone mapping, `features` descriptors (invariants only, by design), and
+`registration`, `pointcloud`, `rendering`. This is still a **partial** report, and
+nothing here should be read as a statement about the rest.
 
-The geometry section is the least mature part of this report: it runs, it produces
-numbers, and **most of those numbers are not yet explained**. That is stated rather
-than smoothed over, because the alternative — a table of unexplained deviations
-labelled as findings — is exactly what makes a parity harness get ignored.
+Every section is attributed to the standard the `erf` incident set: each
+deviation is a proven defect (fixed), a proven convention decision (recorded),
+or the reference's own arithmetic (measured). Where an attribution was wrong -
+and at least twice in this report it was, loudly - the correction is part of
+the record.
 
 ---
 
