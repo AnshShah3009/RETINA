@@ -76,6 +76,36 @@ pub struct WorkloadStats {
     pub total_groups: usize,
 }
 
+/// Whether a group's backend satisfies a request under the given hint.
+///
+/// - [`WorkloadHint::Require`]: exact match only.
+/// - [`WorkloadHint::Prefer`]: a GPU preference accepts any GPU group (loose
+///   fallback across backends); a CPU preference is exact.
+/// - Default / Latency / Throughput / PowerSave: **exact** match. A WebGPU
+///   request is not satisfied by Vulkan (or any other GPU), and vice versa —
+///   callers that want "any accelerator" use `Prefer` or the
+///   `best_gpu_or_cpu*` helpers that try each backend in turn.
+fn backend_satisfies(
+    requested: BackendType,
+    group_backend: BackendType,
+    hint: WorkloadHint,
+) -> bool {
+    match hint {
+        WorkloadHint::Require(req) => group_backend == req,
+        WorkloadHint::Prefer(pref) => {
+            if pref != BackendType::Cpu && group_backend != BackendType::Cpu {
+                true
+            } else {
+                group_backend == pref
+            }
+        }
+        WorkloadHint::Default
+        | WorkloadHint::Latency
+        | WorkloadHint::Throughput
+        | WorkloadHint::PowerSave => group_backend == requested,
+    }
+}
+
 /// The mode of the orchestrator: either standalone or coordinated via a daemon.
 #[derive(Debug, Clone)]
 pub enum OrchestratorMode {
@@ -750,6 +780,10 @@ impl TaskScheduler {
     /// Finds the best available resource group for a given device type.
     /// Prefers groups with higher priority, then those with the least active tasks.
     ///
+    /// Backend matching follows [`backend_satisfies`]: Default / Latency /
+    /// Throughput / PowerSave and `Require` are exact; `Prefer` stays loose
+    /// across GPU backends.
+    ///
     /// If an affinity group is active, it prefers devices where peers are already
     /// scheduled, provided the device load is within a reasonable threshold.
     pub fn get_best_group(
@@ -788,23 +822,7 @@ impl TaskScheduler {
             // Use cached backend — no registry mutex hit.
             let group_backend = group.backend();
 
-            let matches = match hint {
-                WorkloadHint::Require(req) => group_backend == req,
-                WorkloadHint::Prefer(pref) => {
-                    // Match any GPU if pref is a GPU type, otherwise exact match
-                    if pref != BackendType::Cpu && group_backend != BackendType::Cpu {
-                        true
-                    } else {
-                        group_backend == pref
-                    }
-                }
-                _ => match (backend_type, group_backend) {
-                    (BackendType::Cpu, BackendType::Cpu) => true,
-                    // Any GPU backend matches a GPU request for now
-                    (t, b) if t != BackendType::Cpu && b != BackendType::Cpu => true,
-                    _ => false,
-                },
-            };
+            let matches = backend_satisfies(backend_type, group_backend, hint);
 
             if matches {
                 let priority = group.policy.priority;
@@ -1389,5 +1407,129 @@ mod tests {
         let runner = RuntimeRunner::Sync(DeviceId(0));
         let result: std::result::Result<i32, crate::Error> = runner.run_safe(true, || Ok(42));
         assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn default_path_exact_matches_gpu_backend() {
+        // The closed gap: Default (and siblings) used to treat any GPU as a
+        // match for any GPU request. WebGPU ≠ Vulkan.
+        assert!(backend_satisfies(
+            BackendType::WebGPU,
+            BackendType::WebGPU,
+            WorkloadHint::Default
+        ));
+        assert!(!backend_satisfies(
+            BackendType::WebGPU,
+            BackendType::Vulkan,
+            WorkloadHint::Default
+        ));
+        assert!(!backend_satisfies(
+            BackendType::Vulkan,
+            BackendType::WebGPU,
+            WorkloadHint::Default
+        ));
+        assert!(!backend_satisfies(
+            BackendType::WebGPU,
+            BackendType::Cpu,
+            WorkloadHint::Default
+        ));
+
+        // Latency / Throughput / PowerSave share the exact contract.
+        for hint in [
+            WorkloadHint::Latency,
+            WorkloadHint::Throughput,
+            WorkloadHint::PowerSave,
+        ] {
+            assert!(backend_satisfies(
+                BackendType::Vulkan,
+                BackendType::Vulkan,
+                hint
+            ));
+            assert!(!backend_satisfies(
+                BackendType::Vulkan,
+                BackendType::WebGPU,
+                hint
+            ));
+        }
+
+        // Require stays exact (was already).
+        assert!(backend_satisfies(
+            BackendType::WebGPU,
+            BackendType::Vulkan,
+            WorkloadHint::Require(BackendType::Vulkan)
+        ));
+        assert!(!backend_satisfies(
+            BackendType::WebGPU,
+            BackendType::WebGPU,
+            WorkloadHint::Require(BackendType::Vulkan)
+        ));
+
+        // Prefer stays loose across GPUs — that is intentional.
+        assert!(backend_satisfies(
+            BackendType::WebGPU,
+            BackendType::Vulkan,
+            WorkloadHint::Prefer(BackendType::WebGPU)
+        ));
+        assert!(backend_satisfies(
+            BackendType::Vulkan,
+            BackendType::WebGPU,
+            WorkloadHint::Prefer(BackendType::Vulkan)
+        ));
+        // Prefer(CPU) is exact; a GPU group does not satisfy it.
+        assert!(!backend_satisfies(
+            BackendType::Cpu,
+            BackendType::WebGPU,
+            WorkloadHint::Prefer(BackendType::Cpu)
+        ));
+        assert!(backend_satisfies(
+            BackendType::Cpu,
+            BackendType::Cpu,
+            WorkloadHint::Prefer(BackendType::Cpu)
+        ));
+    }
+
+    #[test]
+    fn default_request_does_not_silently_pick_a_different_gpu() {
+        // End-to-end against a real GPU group when one exists. GpuContext
+        // reports WebGPU; requesting Vulkan under Default must not hand it
+        // back. Prefer(Vulkan) may still accept it (loose).
+        let Some(gpu) = registry().ok().and_then(|r| r.default_gpu()) else {
+            return;
+        };
+        assert_eq!(
+            gpu.backend(),
+            BackendType::WebGPU,
+            "regression assumes the registered GPU is WebGPU"
+        );
+
+        let s = TaskScheduler::new();
+        s.create_group_with_device("gpu-exact", 1, None, GroupPolicy::default(), gpu.id())
+            .unwrap();
+
+        let picked = s
+            .get_best_group(BackendType::Vulkan, WorkloadHint::Default)
+            .unwrap();
+        assert!(
+            picked.is_none(),
+            "Default Vulkan must not be satisfied by a WebGPU group; got {:?}",
+            picked.map(|g| g.backend())
+        );
+
+        let prefer = s
+            .get_best_group(
+                BackendType::Vulkan,
+                WorkloadHint::Prefer(BackendType::Vulkan),
+            )
+            .unwrap();
+        assert!(
+            prefer.is_some(),
+            "Prefer(Vulkan) is allowed to fall back to any GPU"
+        );
+        assert_eq!(prefer.unwrap().backend(), BackendType::WebGPU);
+
+        let exact = s
+            .get_best_group(BackendType::WebGPU, WorkloadHint::Default)
+            .unwrap();
+        assert_eq!(exact.unwrap().name, "gpu-exact");
     }
 }
