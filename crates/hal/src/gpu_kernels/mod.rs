@@ -1134,7 +1134,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 /// GPU-accelerated spatial queries
 pub mod spatial_gpu {
-    use crate::gpu_kernels::buffer_utils::{create_buffer, read_buffer};
+    use crate::gpu_kernels::buffer_utils::{create_buffer, create_buffer_uninit, read_buffer};
     use nalgebra::Vector3;
     use std::sync::Arc;
     use wgpu::BufferUsages;
@@ -1228,26 +1228,136 @@ pub mod spatial_gpu {
         );
 
         Ok(GpuKDTree {
-            nodes_buffer: points_buf,
-            points_buffer: morton_buf,
+            points_buffer: points_buf,
+            morton_buffer: morton_buf,
             num_points: points.len() as u32,
             device: device.clone(),
         })
     }
 
-    /// Batch nearest neighbor search - simplified brute force on GPU
+    /// Batch nearest neighbor search, brute force **on the GPU**.
+    ///
+    /// One invocation per query point scans the cloud and keeps a sorted top-k
+    /// (`knn_bruteforce.wgsl`). `k` is capped at 128 - the kernel's private
+    /// list size - and larger `k` is refused with a pointer to
+    /// [`batch_nearest_neighbors_cpu`] rather than silently computed
+    /// elsewhere. This function used to read the whole cloud back to the host
+    /// and loop there while the docs said GPU; that loop is now
+    /// `batch_nearest_neighbors_cpu`, named for what it is.
     pub fn batch_nearest_neighbors(
         gpu: &crate::gpu::GpuContext,
         kdtree: &GpuKDTree,
         queries: &[Vector3<f32>],
         k: u32,
     ) -> crate::Result<Vec<Vec<(u32, f32)>>> {
-        // Simplified: just return k nearest using brute force on CPU
-        // A proper GPU implementation would use the Morton codes
+        const K_MAX: u32 = 128;
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        if k == 0 {
+            return Ok(vec![Vec::new(); queries.len()]);
+        }
+        if k > K_MAX {
+            return Err(crate::Error::InvalidInput(format!(
+                "GPU k-NN supports k <= {K_MAX}; use batch_nearest_neighbors_cpu for larger k"
+            )));
+        }
+
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        #[repr(C)]
+        struct KnnParams {
+            num_points: u32,
+            k: u32,
+            num_queries: u32,
+            _pad: u32,
+        }
+
+        let q_data: Vec<[f32; 4]> = queries.iter().map(|q| [q.x, q.y, q.z, 0.0]).collect();
+        let q_buf = create_buffer(&gpu.device, &q_data, BufferUsages::STORAGE);
+        let out_len = queries.len() * k as usize * 2;
+        let out_buf = create_buffer_uninit(
+            &gpu.device,
+            out_len * std::mem::size_of::<f32>(),
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
+        let params = KnnParams {
+            num_points: kdtree.num_points,
+            k,
+            num_queries: queries.len() as u32,
+            _pad: 0,
+        };
+        let params_buf = create_buffer(&gpu.device, &[params], BufferUsages::UNIFORM);
+
+        let pipeline = gpu.create_compute_pipeline(include_str!("knn_bruteforce.wgsl"), "main");
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("knn_bind_group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: kdtree.points_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: q_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: out_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups((queries.len() as u32).div_ceil(64), 1, 1);
+        }
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+
+        let out: Vec<f32> = pollster::block_on(read_buffer(
+            kdtree.device.clone(),
+            &gpu.queue,
+            &out_buf,
+            0,
+            out_len * std::mem::size_of::<f32>(),
+        ))?;
+
+        let per_query = k.min(kdtree.num_points) as usize;
+        Ok((0..queries.len())
+            .map(|qi| {
+                let base = qi * k as usize * 2;
+                (0..per_query)
+                    .map(|i| (out[base + 2 * i + 1] as u32, out[base + 2 * i]))
+                    .collect()
+            })
+            .collect())
+    }
+
+    /// Batch nearest neighbors on the **CPU**: reads the cloud back from the
+    /// GPU buffer and brute-forces there. O(queries * points), no `k` cap.
+    ///
+    /// This is the loop `batch_nearest_neighbors` used to run while claiming
+    /// to be a GPU kernel. It stays because `batch_radius_search` wants
+    /// `k = num_points` and the GPU path caps `k` at 128.
+    pub fn batch_nearest_neighbors_cpu(
+        gpu: &crate::gpu::GpuContext,
+        kdtree: &GpuKDTree,
+        queries: &[Vector3<f32>],
+        k: u32,
+    ) -> crate::Result<Vec<Vec<(u32, f32)>>> {
         let points_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
             kdtree.device.clone(),
             &gpu.queue,
-            &kdtree.nodes_buffer,
+            &kdtree.points_buffer,
             0,
             kdtree.num_points as usize * 16,
         ))?;
@@ -1293,9 +1403,11 @@ pub mod spatial_gpu {
     ) -> crate::Result<Vec<Vec<(u32, f32)>>> {
         let radius_sq = radius * radius;
 
-        // Use batch_nearest_neighbors and filter
+        // Use the CPU brute-force path and filter: radius search wants
+        // k = num_points (up to 1024 here), beyond the GPU kernel's k <= 128
+        // cap, and the CPU variant is named for exactly this.
         let k = kdtree.num_points.min(1024); // Limit search
-        let all_neighbors = batch_nearest_neighbors(gpu, kdtree, queries, k)?;
+        let all_neighbors = batch_nearest_neighbors_cpu(gpu, kdtree, queries, k)?;
 
         let results: Vec<Vec<(u32, f32)>> = all_neighbors
             .into_iter()
@@ -1434,8 +1546,12 @@ pub mod spatial_gpu {
 
     /// GPU KDTree handle
     pub struct GpuKDTree {
-        pub nodes_buffer: wgpu::Buffer,
+        /// The point cloud, as `vec4<f32>` (w unused).
         pub points_buffer: wgpu::Buffer,
+        /// Morton codes, one per point - computed but not yet traversed: the
+        /// query kernels are brute force. Named for what it holds (it used to
+        /// be `points_buffer`, swapped with the one above).
+        pub morton_buffer: wgpu::Buffer,
         pub num_points: u32,
         pub device: Arc<wgpu::Device>,
     }
