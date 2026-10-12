@@ -156,35 +156,10 @@ fn pcd_binary_hostile_points_is_rejected_promptly() {
     assert!(err.contains("refusing"), "got: {err}");
 }
 
-/// The plain-binary path's cap holds, but the *ASCII* path clamps the
-/// reservation to 200M points - 2.4 GB - and commits it before looking at the
-/// body, so a 90-byte file with `POINTS 40000000000` costs 2.4 GB of memory to
-/// discover that it is empty. Not a crash, but a cheap amplification.
-#[test]
-fn pcd_ascii_hostile_points_reserves_2_4gb_for_an_empty_body() {
-    let file = pcd_ascii("40000000000", "POINTS 40000000000\n", "");
-    // `run_with_budget` runs the parser on a dedicated 4 MiB stack, and the
-    // *first* such thread in a process also gets glibc's per-thread malloc
-    // arena. Both land in the process's `VmSize`, so measuring before/after
-    // across the call attributes ~68 MiB of the harness's own cost to the
-    // parser - which is more than this test's 64 MiB budget, and made the
-    // result depend on whether some earlier test happened to have spawned a
-    // thread first. Warm the cost up so what is left is the parser's own.
-    let _ = run_with_budget(DEFAULT_BUDGET, || Ok(0u8));
-    let before = address_space_bytes();
-    let cloud = parse_hostile(run_pcd, &file).expect_ok("empty ascii body");
-    assert_eq!(cloud.len(), 0, "no data lines means no points");
-    let grew = address_space_bytes()
-        .zip(before)
-        .map(|(after, before)| after.saturating_sub(before))
-        .unwrap_or(0);
-    assert!(
-        grew < 64 * 1024 * 1024,
-        "KNOWN BUG: `POINTS 40000000000` on an empty ASCII body grew the address space by \
-         {grew} bytes (the reservation is clamped to 200M points, still 2.4 GB); a 90-byte file \
-         should not cost gigabytes"
-    );
-}
+// The ASCII path's 200M-point clamp - a 2.4 GB reservation for a 90-byte
+// file claiming `POINTS 40000000000` - is measured in `tests/memory_probe.rs`.
+// The measurement reads the process-wide `VmSize` and was flaky here under
+// `cargo test`'s threaded runner.
 
 /// `POINTS` = `usize::MAX` overflows `stride * count`; the `checked_mul` guard
 /// must turn that into an error rather than a wrapped, too-small buffer.
@@ -213,21 +188,7 @@ fn pcd_binary_small_stride_huge_count_does_not_hang() {
     }
 }
 
-/// The address-space probe: whatever the outcome, a hostile header must not
-/// commit a 48 GB virtual allocation. (Belt and braces for the byte cap.)
-#[test]
-fn pcd_hostile_points_does_not_commit_gigabytes() {
-    let before = address_space_bytes();
-    let _ = parse_hostile(run_pcd, &pcd_binary("4000000000", "", &[]));
-    if let (Some(before), Some(after)) = (before, address_space_bytes()) {
-        let grew = after.saturating_sub(before);
-        assert!(
-            grew < 1024 * 1024 * 1024,
-            "address space grew by {} bytes for a hostile POINTS header",
-            grew
-        );
-    }
-}
+// The address-space probe lives with its sibling in `tests/memory_probe.rs`.
 
 // ===========================================================================
 // 4. Arithmetic overflow in the size / offset computation
