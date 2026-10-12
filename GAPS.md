@@ -163,13 +163,13 @@ Its sibling on the same struct is **still open**:
 ### (c4) `cv-hal` — `build_kdtree` returns Morton codes, not a tree
 - `crates/hal/src/gpu_kernels/mod.rs:1172-1175` — doc: "Build KDTree on GPU (parallel construction) - simplified
   version / Returns sorted Morton codes as a basic spatial index".
-- `GpuKDTree` (`:1436-1441`) has only `nodes_buffer`, `points_buffer`, `num_points`, `device` — no node
-  structure, no split planes, no tree. Nearest-neighbour queries against it are answered by the CPU brute-force
-  loop in `batch_nearest_neighbors` (see (d1)), so the "index" is not used as an index.
-- **Bug found while verifying this** (`:1231-1235`): the two public buffers are populated **swapped against their
-  names** — `nodes_buffer: points_buf, points_buffer: morton_buf`. `batch_nearest_neighbors` (`:1248`) reads
-  `kdtree.nodes_buffer` into `points_data`, which works only because of the swap. Any other consumer of the
-  `pub` fields gets points where it expects Morton codes and vice versa.
+- `GpuKDTree` (`:1436-1441`) has only `points_buffer`, `morton_buffer`, `num_points`, `device` — no node
+  structure, no split planes, no tree. Nearest-neighbour queries against it are brute force (now on the GPU,
+  see (d1)), so the "index" is not used as an index. The fields are named for what they hold and say so.
+- **The buffer-name swap is fixed.** Was (`:1231-1235`): the two public buffers were populated **swapped
+  against their names** — `nodes_buffer: points_buf, points_buffer: morton_buf` — and
+  `batch_nearest_neighbors` read `nodes_buffer` as points, working only because of the double error. The
+  fields are now `points_buffer` (the cloud) and `morton_buffer` (the codes), each documented.
 
 ### Concurrent modification notice (affects this section's line numbers)
 
@@ -257,12 +257,12 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 | # | location | downgrade | detectable by caller? |
 |---|---|---|---|
-| d1 | `crates/hal/src/gpu_kernels/mod.rs:1238-1248` | `batch_nearest_neighbors` — "on GPU" documented, body is `// Simplified: just return k nearest using brute force on CPU`, including a blocking `read_buffer(...)` + `pollster::block_on` device→host copy. Accepts `gpu: &GpuContext`, ignores it. | **No** |
+| d1 | `crates/hal/src/gpu_kernels/mod.rs:1238-1248` | **CLOSED** — was: "on GPU" documented, body `// Simplified: just return k nearest using brute force on CPU`, with a blocking device→host copy of the whole cloud. Now a real WGSL kernel (`knn_bruteforce.wgsl`, one invocation per query, sorted top-k) with only the results read back; `test_knn_vs_cpu` passes through it. `k` is capped at 128 (the kernel's list size) and larger k is **refused loudly** with a pointer to `batch_nearest_neighbors_cpu`, which is the old loop under its honest name; `batch_radius_search` (k up to 1024) calls it explicitly. | n/a — fixed |
 | d2 | `crates/hal/src/gpu_kernels/mod.rs:1619-1624` | `simplify_mesh(_gpu: &GpuContext, …)` — GPU handle accepted and unused; CPU voxel-grid decimation. | **No** |
-| d3 | `crates/hal/src/gpu_kernels/pointcloud.rs:11-20,29-39` | `compute_normals_morton_gpu_or_cpu` — if `GpuContext::global()` fails *or* the GPU kernel errors, it silently returns `normals_cpu_analytic(...)` = `Vec::new()`. N points in, 0 normals out, `Ok`-shaped result, no log. The name promises a CPU fallback; the fallback is empty. | **No** |
+| d3 | `crates/hal/src/gpu_kernels/pointcloud.rs:11-20,29-39` | **CLOSED** — was: the CPU fallback `normals_cpu_analytic` = `Vec::new()`, N points in, 0 normals out. Now a real implementation (brute-force kNN + PCA); see (b1) #2. | n/a — fixed |
 | d4 | `crates/runtime/src/orchestrator.rs:395-414` | `best_runner()` / `try_best_runner()` fall back to `RuntimeRunner::Sync(reg.default_cpu()…)` with no indication. The `_gpu_wait` siblings (`:421-444`) *do* return `(runner, is_gpu)` — so the information exists but the primary entry point drops it. `3d/src/gpu/mod.rs:749` (GPU stereo matching) calls `best_runner()` and cannot tell whether it got a GPU. | **No** (the API to know exists elsewhere) |
 | d5 | `crates/runtime/src/orchestrator.rs:798` | `// Any GPU backend matches a GPU request for now` — device selection matches *any* GPU to a GPU-typed request, so e.g. a backend-specific request is satisfied by a different GPU backend. | **No** |
-| d6 | `crates/features/src/usac.rs:342-366` | `score_magsac(model, points, threshold, sigma_max)` — `threshold` is **unused** (compiler: `warning: unused variable: 'threshold'`, `usac.rs:345`). The loop sets its own `t = s as f64` from `sigma_max`; a caller's calibration is discarded. It also panics via (b1) #7. | **No** |
+| d6 | `crates/features/src/usac.rs:342-366` | **CLOSED** — was: `score_magsac`'s `threshold` unused (caller's calibration discarded) and the whole path panicking via (b1) #7. The signature now takes the residual metric and drops `threshold` entirely (the sigma sweep *is* the threshold range); see (b1) #7. | n/a — fixed |
 | d7 | `crates/hal/src/gpu/compute_context_impl.rs:607` | Morphology GPU path proceeds on an assumption in a comment ("Let's assume for now morphology on GPU is f32-compatible or we use casts") and has no dtype check before the `GpuStorage<u8>` downcast; failure surfaces only as a late `"Failed to downcast GPU result"`. | Partially (late error) |
 | d8 | `crates/hal/src/gpu_kernels/undistort.rs:140` | `_ => 1, // Default to bilinear for now` — an unrecognised interpolation mode silently becomes bilinear instead of erroring. | **No** |
 | d9 | `crates/photo/src/stitcher.rs` | **CLOSED** — was returning `images[0]`; see (b1) #1. | n/a |
