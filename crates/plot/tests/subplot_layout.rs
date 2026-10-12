@@ -153,32 +153,32 @@ fn subplot_index_selects_the_panel_and_every_panel_scales_to_its_own_data() {
     //   cell       = 355 x 250
     //   panel 0    = x 105, y 78, w 290, h 184   (cell + 45/28, minus 20/38)
     //   panel 1    = x 460, y 78, w 290, h 184
-    // Data 0..1 is padded to -0.1..1.1 (span 1.2); 100..200 to 90..210 (120);
-    // 1000..2000 to 900..2100 (1200).
+    // Data 0..1 is padded to -0.05..1.05 (span 1.1); 100..200 to 95..205 (110);
+    // 1000..2000 to 950..2050 (1100) - Matplotlib's default 5% margins.
     let p_small = points(polylines[0]);
     let p_large = points(polylines[1]);
-    assert_close(p_small[0].0, 105.0 + (0.1 / 1.2) * 290.0, "panel 0 x of 0");
-    assert_close(p_small[1].0, 105.0 + (1.1 / 1.2) * 290.0, "panel 0 x of 1");
-    assert_close(p_small[0].1, 262.0 - (0.1 / 1.2) * 184.0, "panel 0 y of 0");
-    assert_close(p_small[1].1, 262.0 - (1.1 / 1.2) * 184.0, "panel 0 y of 1");
+    assert_close(p_small[0].0, 105.0 + (0.05 / 1.1) * 290.0, "panel 0 x of 0");
+    assert_close(p_small[1].0, 105.0 + (1.05 / 1.1) * 290.0, "panel 0 x of 1");
+    assert_close(p_small[0].1, 262.0 - (0.05 / 1.1) * 184.0, "panel 0 y of 0");
+    assert_close(p_small[1].1, 262.0 - (1.05 / 1.1) * 184.0, "panel 0 y of 1");
     assert_close(
         p_large[0].0,
-        460.0 + (10.0 / 120.0) * 290.0,
+        460.0 + (5.0 / 110.0) * 290.0,
         "panel 1 x of 100",
     );
     assert_close(
         p_large[1].0,
-        460.0 + (110.0 / 120.0) * 290.0,
+        460.0 + (105.0 / 110.0) * 290.0,
         "panel 1 x of 200",
     );
     assert_close(
         p_large[0].1,
-        262.0 - (100.0 / 1200.0) * 184.0,
+        262.0 - (50.0 / 1100.0) * 184.0,
         "panel 1 y of 1000",
     );
     assert_close(
         p_large[1].1,
-        262.0 - (1100.0 / 1200.0) * 184.0,
+        262.0 - (1050.0 / 1100.0) * 184.0,
         "panel 1 y of 2000",
     );
 
@@ -819,15 +819,16 @@ fn a_single_panel_keeps_the_full_figure_axes() {
     let circles = tags_with(&svg, "<circle");
     assert_eq!(circles.len(), 2, "one circle per point: {svg}");
     // Same numbers as `svg_geometry.rs` computes for a single-plot figure:
-    // the plot area is still 60..770 x 50..550.
+    // the plot area is still 60..770 x 50..550. Data x 0..10 pads to
+    // -0.5..10.5 (span 11), y 0..100 to -5..105 (span 110).
     assert_close(
         attr_f64(circles[0], "cx"),
-        60.0 + (1.0 / 12.0) * 710.0,
+        60.0 + (0.5 / 11.0) * 710.0,
         "cx",
     );
     assert_close(
         attr_f64(circles[0], "cy"),
-        550.0 - (10.0 / 120.0) * 500.0,
+        550.0 - (5.0 / 110.0) * 500.0,
         "cy",
     );
     let axis = tags_with(&svg, "<line")

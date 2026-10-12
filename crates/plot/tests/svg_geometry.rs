@@ -8,11 +8,12 @@
 //! py = height - margin_bottom - (y - min_y) / (max_y - min_y) * plot_height
 //! ```
 //!
-//! with the data bounds padded by `10%` of `max(range, 1)`. Every expected
-//! number below is computed by hand from those rules, so a wrong answer means
-//! the projection itself is wrong (flipped axis, wrong margin, padding applied
-//! to the wrong range, off-by-one in the padding), not just a cosmetic
-//! difference in the emitted markup.
+//! with the data bounds padded by Matplotlib's default margins: `5%` of the
+//! span per side, relative (and the singular-axis rule the `Bounds` doc
+//! states). Every expected number below is computed by hand from those rules,
+//! so a wrong answer means the projection itself is wrong (flipped axis, wrong
+//! margin, padding applied to the wrong range, off-by-one in the padding),
+//! not just a cosmetic difference in the emitted markup.
 
 use cv_plot::{Figure, PlotError};
 
@@ -99,26 +100,26 @@ fn scatter_maps_data_extrema_onto_the_padded_axes() {
     let plot_w = 800.0 - ML - MR;
     let plot_h = 600.0 - MT - MB;
 
-    // x: data span 0..10 -> padded span -1..11 (width 12).
+    // x: data span 0..10 -> padded span -0.5..10.5 (width 11).
     assert_close(
         attr_f64(circles[0], "cx"),
-        ML + 1.0 / 12.0 * plot_w,
+        ML + 0.5 / 11.0 * plot_w,
         "cx of x=0",
     );
     assert_close(
         attr_f64(circles[1], "cx"),
-        ML + 11.0 / 12.0 * plot_w,
+        ML + 10.5 / 11.0 * plot_w,
         "cx of x=10",
     );
-    // y: data span 0..100 -> padded span -10..110 (height 120), inverted.
+    // y: data span 0..100 -> padded span -5..105 (height 110), inverted.
     assert_close(
         attr_f64(circles[0], "cy"),
-        600.0 - MB - 10.0 / 120.0 * plot_h,
+        600.0 - MB - 5.0 / 110.0 * plot_h,
         "cy of y=0 (must be at the bottom)",
     );
     assert_close(
         attr_f64(circles[1], "cy"),
-        600.0 - MB - 110.0 / 120.0 * plot_h,
+        600.0 - MB - 105.0 / 110.0 * plot_h,
         "cy of y=100 (must be at the top)",
     );
 
@@ -127,8 +128,8 @@ fn scatter_maps_data_extrema_onto_the_padded_axes() {
 }
 
 /// A single data point is the degenerate case of the padding rule: the span is
-/// 0, so `max(range, 1) * 0.1` makes it 0.1 and the point lands exactly at the
-/// centre of the plot area.
+/// 0, so the singular-axis rule applies and the point lands exactly at the
+/// centre of the plot area (the pad is symmetric whatever its size).
 ///
 /// Wrong answer: `NaN`/`inf` coordinates (if the degenerate bounds were not
 /// padded, `0/0` reaches the format string), or a marker anywhere but the
@@ -290,15 +291,15 @@ fn bar_series_draws_one_hand_sized_rect_per_bar() {
         assert_close(attr_f64(r, "width"), plot_w / 4.0 * 0.8, "bar width");
     }
 
-    // y data span 1..4 -> padded 0.7..4.3 (3.6).
+    // y data span 1..4 -> padded 0.85..4.15 (span 3.3), Matplotlib's 5% margins.
     assert_close(
         attr_f64(rects[0], "height"),
-        (1.0 - 0.7) / 3.6 * plot_h,
+        (1.0 - 0.85) / 3.3 * plot_h,
         "height of the shortest bar",
     );
     assert_close(
         attr_f64(rects[3], "height"),
-        (4.0 - 0.7) / 3.6 * plot_h,
+        (4.0 - 0.85) / 3.3 * plot_h,
         "height of the tallest bar",
     );
 

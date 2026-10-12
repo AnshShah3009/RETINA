@@ -61,7 +61,14 @@ struct Bounds {
 }
 
 impl Bounds {
-    /// Data range of `subplot`, padded by 10% of `max(span, 1)`.
+    /// Data range of `subplot`, padded the way Matplotlib's default
+    /// `margins.x = margins.y = 0.05` pads it: **5% of the span per side**,
+    /// relative, with no absolute floor (the previous 10% of `max(span, 1)`
+    /// framed every plot differently and gave a 1e-5 span a 0.1 absolute pad -
+    /// five orders of magnitude off). For a *singular* axis Matplotlib first
+    /// replaces the interval with `v ± 5%` of the value's scale (`1.0` at
+    /// `v = 0`) and then applies the margin to that, which measures as
+    /// `±0.055·|v|` (`±0.055` at v = 0): pinned against matplotlib 3.11.2.
     ///
     /// `None` when the panel holds no finite `(x, y)` pair at all, which is the
     /// only case where there is no honest answer to "what range is this axis".
@@ -91,10 +98,19 @@ impl Bounds {
             return None;
         }
 
-        // The padded range can never be zero: a single point or a constant
-        // series gets a span of 0.2 instead of a division by zero.
-        let x_pad = (max_x - min_x).max(1.0) * 0.1;
-        let y_pad = (max_y - min_y).max(1.0) * 0.1;
+        // Matplotlib-compatible margins (see the doc above): 5% of the span
+        // per side, and for a singular axis the measured ±0.055·scale rule.
+        let pad = |lo: f64, hi: f64| {
+            let span = hi - lo;
+            if span > 0.0 {
+                span * 0.05
+            } else {
+                let scale = if lo != 0.0 { lo.abs() } else { 1.0 };
+                scale * 0.055
+            }
+        };
+        let x_pad = pad(min_x, max_x);
+        let y_pad = pad(min_y, max_y);
         Some(Self {
             min_x: min_x - x_pad,
             max_x: max_x + x_pad,
@@ -864,4 +880,50 @@ pub fn save_png(_figure: &Figure, _path: &str) -> Result<(), crate::PlotError> {
     Err(crate::PlotError::Export(
         "PNG export is not supported. Use save_svg() or save_html() instead.".to_string(),
     ))
+}
+
+#[cfg(test)]
+mod margin_tests {
+    use super::*;
+
+    fn bounds_of(x: &[f64], y: &[f64]) -> Bounds {
+        let mut fig = Figure::new("t");
+        fig.scatter(x, y, "s");
+        Bounds::of(&fig.subplots[0]).expect("finite data")
+    }
+
+    /// Matplotlib's default `margins.x = margins.y = 0.05`, measured against
+    /// matplotlib 3.11.2. A different pad frames every figure differently, so
+    /// this is a contract, not a preference.
+    #[test]
+    fn margins_match_matplotlib_default() {
+        let b = bounds_of(&[0.0, 1.0], &[0.0, 1.0]);
+        assert!((b.min_x + 0.05).abs() < 1e-12 && (b.max_x - 1.05).abs() < 1e-12);
+        // Purely relative: a 1e-5 span gets a 5e-7 pad, with no absolute floor
+        // (the old `max(span, 1) * 0.1` gave 0.1 here - five orders off).
+        let b = bounds_of(&[0.0, 1e-5], &[0.0, 1.0]);
+        assert!((b.min_x + 5e-7).abs() < 1e-15 && (b.max_x - 1.05e-5).abs() < 1e-15);
+    }
+
+    /// A singular axis follows matplotlib's measured rule: it substitutes
+    /// `v ± 5%` of the value's scale and pads that, which comes out as
+    /// `±0.055 * |v|` (`±0.055` at v = 0).
+    #[test]
+    fn singular_axes_follow_the_measured_matplotlib_rule() {
+        for (v, pad) in [
+            (5.0, 0.275),
+            (1.0, 0.055),
+            (0.5, 0.0275),
+            (0.0, 0.055),
+            (-3.0, 0.165),
+        ] {
+            let b = bounds_of(&[0.0, 1.0], &[v, v]);
+            assert!(
+                (b.min_y - (v - pad)).abs() < 1e-12 && (b.max_y - (v + pad)).abs() < 1e-12,
+                "singular y at {v}: got [{}, {}]",
+                b.min_y,
+                b.max_y
+            );
+        }
+    }
 }
