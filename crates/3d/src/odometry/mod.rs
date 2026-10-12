@@ -37,7 +37,7 @@ pub fn compute_rgbd_odometry(
     height: usize,
     method: OdometryMethod,
 ) -> Option<OdometryResult> {
-    let runner = cv_runtime::best_runner().ok()?;
+    let runner = cv_runtime::best_runner().ok().map(|(r, _)| r)?;
     compute_rgbd_odometry_ctx(
         source_depth,
         target_depth,

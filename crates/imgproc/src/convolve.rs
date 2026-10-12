@@ -219,13 +219,15 @@ pub fn convolve(image: &GrayImage, kernel: &Kernel) -> GrayImage {
 }
 
 pub fn convolve_with_border(image: &GrayImage, kernel: &Kernel, border: BorderMode) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback: use CPU registry if available
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     convolve_ctx(image, kernel, border, &runner)
 }
 
@@ -274,7 +276,7 @@ pub fn convolve_with_border_into(
 }
 
 pub fn gaussian_blur_with_border(image: &GrayImage, sigma: f32, border: BorderMode) -> GrayImage {
-    match cv_runtime::best_runner() {
+    match cv_runtime::best_runner().map(|(r, _)| r) {
         Ok(runner) => gaussian_blur_ctx(image, sigma, border, &runner),
         Err(_) => {
             // Fallback: compute on CPU

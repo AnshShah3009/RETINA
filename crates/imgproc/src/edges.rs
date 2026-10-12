@@ -86,7 +86,7 @@ pub fn sobel_ex(
     border: BorderMode,
 ) -> crate::Result<GrayImage> {
     validate_sobel_ksize(ksize)?;
-    match cv_runtime::best_runner() {
+    match cv_runtime::best_runner().map(|(r, _)| r) {
         Ok(runner) => sobel_ex_ctx(src, dx, dy, ksize, scale, delta, border, &runner),
         Err(_) => {
             warn!("GPU not available for sobel, falling back to CPU");
@@ -218,7 +218,7 @@ pub fn scharr_ex(
     delta: f32,
     border: BorderMode,
 ) -> GrayImage {
-    match cv_runtime::best_runner() {
+    match cv_runtime::best_runner().map(|(r, _)| r) {
         Ok(runner) => scharr_ex_ctx(src, dx, dy, scale, delta, border, &runner),
         Err(_) => {
             // Fallback: compute on CPU

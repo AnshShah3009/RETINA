@@ -202,12 +202,14 @@ pub fn undistort_image_ex(
     interpolation: cv_imgproc::Interpolation,
     border: cv_imgproc::BorderMode,
 ) -> Result<GrayImage> {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     undistort_image_ex_ctx(
         src,
         intrinsics,

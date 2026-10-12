@@ -18,10 +18,12 @@ pub mod point_cloud {
 
     /// Transform point cloud using the best available runner
     pub fn transform(points: &[Point3<f32>], transform: &Matrix4<f32>) -> Vec<Point3<f32>> {
-        let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-            // Fallback to CPU registry on error
-            cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
-        });
+        let runner = cv_runtime::best_runner()
+            .map(|(r, _)| r)
+            .unwrap_or_else(|_| {
+                // Fallback to CPU registry on error
+                cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
+            });
         transform_ctx(points, transform, &runner)
     }
 
@@ -42,10 +44,12 @@ pub mod point_cloud {
 
     /// Compute normals using the runtime scheduler
     pub fn compute_normals(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32>> {
-        let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-            warn!("GPU not available for compute_normals, using CPU");
-            cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
-        });
+        let runner = cv_runtime::best_runner()
+            .map(|(r, _)| r)
+            .unwrap_or_else(|_| {
+                warn!("GPU not available for compute_normals, using CPU");
+                cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
+            });
         compute_normals_ctx(points, k, &runner)
     }
 
@@ -113,7 +117,7 @@ pub mod point_cloud {
         }
         let k = k.min(points.len().saturating_sub(1)).max(3);
 
-        let runner = cv_runtime::best_runner().ok();
+        let runner = cv_runtime::best_runner().ok().map(|(r, _)| r);
         if let Some(ref r) = runner {
             if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = r.device() {
                 let pts: Vec<nalgebra::Vector3<f32>> = points.iter().map(|p| p.coords).collect();
@@ -578,7 +582,7 @@ pub mod point_cloud {
         let covs = compute_covariances_parallel(points, k);
 
         // Phase 2: GPU batch eigenvectors, or CPU analytic fallback.
-        let runner = cv_runtime::best_runner().ok();
+        let runner = cv_runtime::best_runner().ok().map(|(r, _)| r);
         if let Some(ref r) = runner {
             if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = r.device() {
                 match cv_hal::gpu_kernels::pointcloud::compute_normals_from_covariances_gpu(
@@ -803,7 +807,7 @@ pub mod stereo {
         right: &::image::GrayImage,
         params: &StereoMatchParams,
     ) -> cv_hal::Result<::image::ImageBuffer<::image::Luma<f32>, Vec<f32>>> {
-        let runner =
+        let (runner, _) =
             cv_runtime::best_runner().map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
         match_stereo_ctx(left, right, params, &runner)
     }

@@ -392,20 +392,25 @@ impl RuntimeRunner {
 }
 
 /// Get the best available runtime runner (GPU if available, else CPU).
-pub fn best_runner() -> Result<RuntimeRunner> {
+///
+/// Returns `(runner, is_gpu)` - the signal [`best_runner_gpu_wait`] always
+/// returned and this entry point used to drop, leaving callers to work it out
+/// afterwards from `runner.device()` (or not). Ignoring the flag is now
+/// visible at the call site as a discarded `.1`.
+pub fn best_runner() -> Result<(RuntimeRunner, bool)> {
     try_best_runner()
 }
 
 /// Try to get the best runner; falls back to synchronous CPU if no scheduler is available.
-pub fn try_best_runner() -> Result<RuntimeRunner> {
+pub fn try_best_runner() -> Result<(RuntimeRunner, bool)> {
     if let Ok(s) = scheduler() {
-        if let Ok(g) = s.best_gpu_or_cpu() {
-            return Ok(RuntimeRunner::Group(g));
+        if let Ok((g, is_gpu)) = s.best_gpu_with_wait(WorkloadHint::Default, 0, None) {
+            return Ok((RuntimeRunner::Group(g), is_gpu));
         }
     }
 
     if let Ok(reg) = registry() {
-        return Ok(RuntimeRunner::Sync(reg.default_cpu().id()));
+        return Ok((RuntimeRunner::Sync(reg.default_cpu().id()), false));
     }
 
     Err(crate::Error::RuntimeError(

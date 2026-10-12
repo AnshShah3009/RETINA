@@ -192,13 +192,15 @@ pub fn warp_perspective_ex(
     interpolation: Interpolation,
     border: BorderMode,
 ) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback: use CPU registry if available
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     warp_perspective_ex_ctx(src, matrix, width, height, interpolation, border, &runner)
 }
 
@@ -320,13 +322,15 @@ pub fn warp_affine(
     width: u32,
     height: u32,
 ) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback: use CPU registry if available
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     warp_affine_ctx(src, matrix_2x3, width, height, &runner)
 }
 
@@ -356,13 +360,15 @@ pub fn warp_affine_ex(
     interpolation: Interpolation,
     border: BorderMode,
 ) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback: use CPU registry if available
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     warp_affine_ex_ctx(
         src,
         matrix_2x3,
@@ -428,12 +434,14 @@ pub fn remap_ex(
     interpolation: Interpolation,
     border: BorderMode,
 ) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     remap_ex_ctx(
         src,
         map_x,

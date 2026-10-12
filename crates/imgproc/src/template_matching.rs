@@ -24,13 +24,15 @@ pub fn match_template(
     templ: &GrayImage,
     method: TemplateMatchMethod,
 ) -> MatchResult {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback: use CPU registry if available
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     match_template_ctx(image, templ, method, &runner)
 }
 

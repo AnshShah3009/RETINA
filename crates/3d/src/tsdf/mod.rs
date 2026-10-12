@@ -100,7 +100,7 @@ impl TSDFVolume {
         // no-op: `integrate` returned as though the frame had been merged, and
         // the volume simply never changed. Dropping a frame without saying so is
         // indistinguishable from a frame that contributed nothing.
-        let runner = cv_runtime::best_runner().map_err(|e| {
+        let (runner, _) = cv_runtime::best_runner().map_err(|e| {
             cv_core::Error::AlgorithmError(format!(
                 "no compute runner is available, so the frame was not integrated: {e}"
             ))
@@ -985,6 +985,7 @@ mod tests {
 
         // Build a RuntimeRunner for CPU fallback
         let runner = cv_runtime::best_runner()
+            .map(|(r, _)| r)
             .unwrap_or_else(|_| cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0)));
 
         volume.integrate_ctx(

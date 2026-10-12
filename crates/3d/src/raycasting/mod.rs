@@ -117,10 +117,12 @@ pub fn cast_ray_mesh_bvh(ray: &Ray, mesh: &TriangleMesh, bvh: &Bvh) -> Option<Ra
 
 /// Cast multiple rays against a mesh using best available runner
 pub fn cast_rays_mesh(rays: &[Ray], mesh: &TriangleMesh) -> Vec<Option<RayHit>> {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback to CPU registry on error
-        cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback to CPU registry on error
+            cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
+        });
     cast_rays_mesh_ctx(rays, mesh, &runner)
 }
 
@@ -383,10 +385,12 @@ pub fn closest_points_on_mesh(
     queries: &[Point3<f32>],
     mesh: &TriangleMesh,
 ) -> Vec<(Point3<f32>, f32, usize)> {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback to CPU registry on error
-        cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback to CPU registry on error
+            cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
+        });
     closest_points_on_mesh_ctx(queries, mesh, &runner)
 }
 
