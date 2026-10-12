@@ -725,16 +725,63 @@ pub mod point_cloud {
 
     /// Transfer voxel normals onto the points that fall in each voxel.
     ///
-    /// Not implemented. It previously returned a zero vector per point, which is
-    /// a valid-length result carrying no information - a caller had no way to
-    /// distinguish "no normals" from "normals are zero". It is a public API, so
-    /// the honest signal is an empty result rather than fabricated normals.
+    /// **Convention** (pinned here because nothing else defines it): the
+    /// occupied voxels of the grid built from `points` at `voxel_size` are
+    /// ordered lexicographically by `(x, y, z)` key, and `normals[j]` is the
+    /// normal of the j-th voxel in that order. Every point copies the normal
+    /// of its voxel. (Pairing against `voxel_downsample`'s output would not
+    /// work: that runs through a `HashMap`, whose iteration order is not
+    /// reproducible, so the same call can number voxels differently.)
+    ///
+    /// It previously returned `Vec::new()` - before that a zero vector per
+    /// point. Both are `points.len()`-shaped answers carrying no normals; this
+    /// one is the contract above, and it is tested.
     pub fn voxel_to_point_normal_transfer(
         points: &[Point3<f32>],
-        _normals: &[Vector3<f32>],
-        _voxel_size: f32,
+        normals: &[Vector3<f32>],
+        voxel_size: f32,
     ) -> Vec<Vector3<f32>> {
-        Vec::new()
+        use std::collections::BTreeMap;
+
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let vs = if voxel_size > 0.0 {
+            voxel_size
+        } else {
+            compute_adaptive_voxel_size(points, 6)
+        };
+        if vs <= 0.0 {
+            return vec![Vector3::zeros(); points.len()];
+        }
+
+        let key = |p: &Point3<f32>| -> (i32, i32, i32) {
+            (
+                (p.x / vs).floor() as i32,
+                (p.y / vs).floor() as i32,
+                (p.z / vs).floor() as i32,
+            )
+        };
+
+        // Occupied voxels in lexicographic key order: the index j that
+        // `normals` is written against.
+        let mut cells: BTreeMap<(i32, i32, i32), usize> = BTreeMap::new();
+        for p in points {
+            *cells.entry(key(p)).or_insert(0) += 1;
+        }
+        let index: BTreeMap<(i32, i32, i32), usize> =
+            cells.keys().enumerate().map(|(j, k)| (*k, j)).collect();
+
+        points
+            .iter()
+            .map(|p| {
+                index
+                    .get(&key(p))
+                    .and_then(|&j| normals.get(j))
+                    .copied()
+                    .unwrap_or(Vector3::zeros())
+            })
+            .collect()
     }
 
     pub fn approximate_normals_simple(
@@ -846,6 +893,34 @@ pub fn force_gpu_mode() -> cv_hal::gpu_kernels::unified::ComputeConfig {
 mod normal_tests {
     use super::point_cloud as pc;
     use nalgebra::Point3;
+
+    /// The transfer convention: voxels in lexicographic key order, each point
+    /// copying its voxel's normal. The old versions answered `Vec::new()` and
+    /// zero-per-point - same shape as a real answer, no normals in it.
+    #[test]
+    fn voxel_normal_transfer_follows_the_documented_voxel_order() {
+        use nalgebra::Vector3;
+
+        // Two voxels at size 1.0: keys (0,0,0) and (1,0,0), in that order.
+        let pts = vec![
+            Point3::new(0.1, 0.1, 0.1),
+            Point3::new(0.9, 0.2, 0.3),
+            Point3::new(1.5, 0.1, 0.1),
+        ];
+        let n0 = Vector3::new(1.0, 0.0, 0.0);
+        let n1 = Vector3::new(0.0, 1.0, 0.0);
+        let out = pc::voxel_to_point_normal_transfer(&pts, &[n0, n1], 1.0);
+
+        assert_eq!(out.len(), pts.len(), "one normal per point");
+        assert_eq!(out[0], n0, "x=0.1 falls in voxel (0,0,0), index 0");
+        assert_eq!(out[1], n0, "x=0.9 falls in the same voxel");
+        assert_eq!(out[2], n1, "x=1.5 falls in voxel (1,0,0), index 1");
+
+        // A missing normal for a voxel yields zeros for its points rather than
+        // an out-of-range answer.
+        let out = pc::voxel_to_point_normal_transfer(&pts, &[n0], 1.0);
+        assert_eq!(out[2], Vector3::zeros());
+    }
 
     /// Build an n×n flat grid of points at z=0 in [0, 1]².
     fn flat_plane(n: usize) -> Vec<Point3<f32>> {

@@ -1732,10 +1732,16 @@ pub mod mesh_gpu {
         Ok(())
     }
 
-    /// Simplify mesh on GPU - simplified version using voxel grid sampling
     #[allow(clippy::type_complexity)]
+    /// Simplify a mesh by uniform voxel-grid decimation. **Runs on CPU.**
+    ///
+    /// This used to take a `&GpuContext` it never used while its doc said
+    /// "Simplify mesh on GPU" - GPU in the signature, CPU in the body, and the
+    /// caller had no way to tell. There is no GPU kernel for this (yet); the
+    /// handle is gone and the doc says CPU, so what runs is what is claimed.
+    /// A GPU implementation would be a voxel-accumulation kernel plus face
+    /// remapping; when one exists this is where it goes.
     pub fn simplify_mesh(
-        _gpu: &crate::gpu::GpuContext,
         vertices: &[Point3<f32>],
         faces: &[[u32; 3]],
         target_ratio: f32,

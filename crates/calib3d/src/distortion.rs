@@ -292,7 +292,14 @@ fn undistort_gpu(
 
     let interp = match interpolation {
         cv_imgproc::Interpolation::Nearest => cv_hal::context::Interpolation::Nearest,
-        _ => cv_hal::context::Interpolation::Linear,
+        cv_imgproc::Interpolation::Linear => cv_hal::context::Interpolation::Linear,
+        // Decline rather than run cubic/lanczos as bilinear: the dispatcher's
+        // CPU fallback (`remap_ex_ctx`) honours every mode.
+        other => {
+            return Err(cv_hal::Error::NotSupported(format!(
+                "GPU undistort supports Nearest and Linear; got {other:?}"
+            )))
+        }
     };
 
     let border_hal = match border {
@@ -320,7 +327,7 @@ fn undistort_gpu(
         .as_slice()
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to get CPU slice".into()))?
         .iter()
-        .map(|v: &f32| v.clamp(0.0, 255.0) as u8)
+        .map(|v: &f32| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
 
     GrayImage::from_raw(new_intrinsics.width, new_intrinsics.height, res_data)

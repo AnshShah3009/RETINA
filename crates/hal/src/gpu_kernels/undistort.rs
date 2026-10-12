@@ -137,7 +137,15 @@ pub fn undistort(
         dst_h,
         interpolation: match interpolation {
             Interpolation::Nearest => 0,
-            _ => 1, // Default to bilinear for now
+            Interpolation::Linear => 1,
+            // The kernel implements nearest and bilinear. Anything else is
+            // declined rather than silently run as bilinear - the caller's CPU
+            // path honours cubic and lanczos.
+            other => {
+                return Err(crate::Error::NotSupported(format!(
+                    "GPU undistort supports Nearest and Linear; got {other:?}"
+                )))
+            }
         },
         border_mode: b_mode,
         border_val: b_val,
