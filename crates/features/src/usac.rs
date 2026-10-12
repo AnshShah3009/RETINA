@@ -311,56 +311,55 @@ fn refine_local<M: Clone>(
 pub mod scorers {
     use super::*;
 
-    /// MSAC scoring: robust M-estimator with soft threshold
+    /// MSAC scoring: the truncated quadratic cost `sum(min(d^2, t^2))`,
+    /// minimized, with the hard-threshold inlier count alongside it.
     ///
-    /// **Not implemented.** A correct score requires a per-model residual
-    /// metric (`residual(model, point)`), but this generic API only receives an
-    /// opaque `M: Clone` and no way to measure how far a point lies from the
-    /// model, so no meaningful score can be computed here. This previously
-    /// returned `(0, 0.0, vec![false; n])`, which silently reported zero
-    /// inliers for *every* model; it now fails loudly instead of lying.
-    ///
-    /// # Panics
-    ///
-    /// Always panics until a model-distance trait is introduced and threaded
-    /// through the scorer API.
-    pub fn score_msac<M>(
-        _model: &M,
-        _points: &[Point2<f64>],
-        _threshold: f64,
-    ) -> (usize, f64, Vec<bool>)
-    where
-        M: Clone,
-    {
-        unimplemented!(
-            "score_msac: no model residual metric is available for a generic \
-             `M: Clone`; the previous stub silently returned zero inliers"
-        )
-    }
-
-    /// MAGSAC scoring: σ-consensus with adaptive margin
-    ///
-    /// # Panics
-    ///
-    /// **Always panics**, because every iteration calls [`scorers::score_msac`],
-    /// which is unimplemented for a generic `M`. This function previously carried no
-    /// `# Panics` section at all, so a caller reading its documentation had no
-    /// warning — while `score_msac`'s own docs did say so.
-    ///
-    /// `scorers::score_ransac` is the usable scorer; it shares the same generic
-    /// bound. Making these work needs a model-distance trait threaded through the
-    /// scorer API, which is a design change rather than a fix: a generic `M: Clone`
-    /// carries no way to compute a residual, which is why the original stub
-    /// silently returned zero inliers for every model and was replaced with a
-    /// panic. A panic is the honest of the two, but it is not a working scorer.
-    pub fn score_magsac<M: Clone>(
+    /// The `residual` closure is the model-distance metric this API always
+    /// needed: a generic `M: Clone` carries no way to measure how far a point
+    /// lies from a model. Before it existed this function could not work - it
+    /// first returned `(0, 0.0, mask)` for *every* model (silently zero
+    /// inliers), then panicked - so no working caller can be broken by the
+    /// signature.
+    pub fn score_msac<M, F>(
         model: &M,
         points: &[Point2<f64>],
         threshold: f64,
-        sigma_max: f64,
+        residual: F,
     ) -> (usize, f64, Vec<bool>)
     where
-        M: Clone,
+        F: Fn(&M, &Point2<f64>) -> f64,
+    {
+        let t2 = threshold * threshold;
+        let mut inliers = 0;
+        let mut score = 0.0;
+        let mut mask = vec![false; points.len()];
+        for (i, p) in points.iter().enumerate() {
+            let d = residual(model, p);
+            let d2 = d * d;
+            if d < threshold {
+                inliers += 1;
+                mask[i] = true;
+            }
+            score += if d2 < t2 { d2 } else { t2 };
+        }
+        (inliers, score, mask)
+    }
+
+    /// MAGSAC scoring: sigma-consensus over thresholds `1..=sigma_max` (in the
+    /// units of `residual`), keeping the model with the most inliers and, at
+    /// equal inlier counts, the lowest MSAC cost.
+    ///
+    /// The old signature carried a `threshold` parameter that the body never
+    /// read - the sigma sweep *is* the threshold range - so it is gone rather
+    /// than left to mislead.
+    pub fn score_magsac<M, F>(
+        model: &M,
+        points: &[Point2<f64>],
+        sigma_max: f64,
+        residual: F,
+    ) -> (usize, f64, Vec<bool>)
+    where
+        F: Fn(&M, &Point2<f64>) -> f64,
     {
         let mut best_inliers = 0;
         let mut best_score = f64::MAX;
@@ -368,7 +367,7 @@ pub mod scorers {
 
         for s in (1..=sigma_max as usize).rev() {
             let t = s as f64;
-            let (inliers, score, mask) = score_msac(model, points, t);
+            let (inliers, score, mask) = score_msac(model, points, t, &residual);
             if inliers > best_inliers || (inliers == best_inliers && score < best_score) {
                 best_inliers = inliers;
                 best_score = score;
@@ -379,13 +378,33 @@ pub mod scorers {
         (best_inliers, best_score, best_mask)
     }
 
-    /// RANSAC hard-threshold scoring
-    pub fn score_ransac<M: Clone>(
+    /// RANSAC hard-threshold scoring: the inlier count decides, and the score
+    /// is the **outlier** count so the caller's `score < best_score` minimizer
+    /// ranks more-inlier models first.
+    ///
+    /// This used to delegate to [`score_msac`] and therefore panicked exactly
+    /// as it did, while its documentation called it "the usable scorer".
+    pub fn score_ransac<M, F>(
         model: &M,
         points: &[Point2<f64>],
         threshold: f64,
-    ) -> (usize, f64, Vec<bool>) {
-        score_msac(model, points, threshold)
+        residual: F,
+    ) -> (usize, f64, Vec<bool>)
+    where
+        F: Fn(&M, &Point2<f64>) -> f64,
+    {
+        let mut inliers = 0;
+        let mut score = 0.0;
+        let mut mask = vec![false; points.len()];
+        for (i, p) in points.iter().enumerate() {
+            if residual(model, p) < threshold {
+                inliers += 1;
+                mask[i] = true;
+            } else {
+                score += 1.0;
+            }
+        }
+        (inliers, score, mask)
     }
 }
 
@@ -426,6 +445,42 @@ mod tests {
             }
         }
         (inliers, score, mask)
+    }
+
+    /// The residual metric the `scorers` functions take.
+    fn line_residual(model: &(f64, f64), p: &Point2<f64>) -> f64 {
+        (p.y - (model.0 * p.x + model.1)).abs()
+    }
+
+    /// The scorers are real functions now, so they are tested like any other:
+    /// each must rank a true model above a wrong one, and report the same
+    /// inlier set. (They previously panicked unconditionally - `score_ransac`
+    /// included, despite its docs - so there was nothing to test.)
+    #[test]
+    fn scorers_rank_the_true_model_first() {
+        let pts: Vec<Point2<f64>> = (0..20)
+            .map(|i| Point2::new(i as f64, 2.0 * i as f64 + 1.0))
+            .collect();
+        let good = (2.0, 1.0);
+        let bad = (0.0, 10.0);
+
+        let (gi, gs, gm) = scorers::score_ransac(&good, &pts, 0.1, line_residual);
+        let (bi, bs, _bm) = scorers::score_ransac(&bad, &pts, 0.1, line_residual);
+        assert_eq!(gi, 20, "the true model fits every point");
+        assert_eq!(bi, 0, "the wrong model fits none");
+        assert!(gs < bs, "outlier count must decrease with quality");
+        assert!(gm.iter().all(|&m| m));
+
+        let (mi, ms, _) = scorers::score_msac(&good, &pts, 0.1, line_residual);
+        assert_eq!(mi, 20);
+        assert!(
+            ms < scorers::score_msac(&bad, &pts, 0.1, line_residual).1,
+            "MSAC cost must rank the true model lower"
+        );
+
+        let (ai, _, am) = scorers::score_magsac(&good, &pts, 3.0, line_residual);
+        assert_eq!(ai, 20);
+        assert_eq!(am.len(), pts.len());
     }
 
     #[test]
@@ -481,14 +536,5 @@ mod tests {
         let res = result.unwrap();
         assert!(res.iterations > 0);
         assert!(res.inliers >= 40);
-    }
-
-    #[test]
-    #[should_panic(expected = "score_msac")]
-    fn msac_scorer_is_not_a_silent_stub() {
-        // The generic scorer cannot compute a residual, so it must fail
-        // loudly rather than silently reporting zero inliers for every model.
-        let pts = [Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)];
-        let _ = scorers::score_ransac(&(1.0f64, 0.0f64), &pts, 1.0);
     }
 }
