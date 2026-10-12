@@ -115,22 +115,25 @@ cv2's nearest exactly.
 
 What remains in the report, all attributed and none a Rust defect:
 
-- **Linear, ±1 LSB** (e.g. `resize_smooth_linear_96x72`, 11.7% over): Rust's
-  bilinear is the exact float mapping (verified bit-for-bit in the warpaffine
-  probe); `cv2.resize` computes its interpolation weights in fixed point
-  (1/32 tables), worth up to 1 LSB - measured directly: exact float bilinear vs
-  `INTER_LINEAR` differs on 607/6912 pixels by max 1, exactly the case's shape.
-- **Cubic/Lanczos interior, ≤3 LSB on high-contrast inputs**: the Rust side is
-  bit-exact a numpy mirror of its own kernel (Catmull-Rom / Lanczos-3, per-tap
-  edge replicate, half-pixel positions - 0 pixels differ on all 4 warp cases and
-  the 96x72 resize); cv2's kernels are fixed-point tables with integer
-  accumulation. On smooth input the same class is ≤1 LSB.
-- **Cubic/Lanczos borders, up to 13 LSB at corners**: cv2's edge extension is
-  not reproducible from behaviour alone - it matches neither tap-replicate
-  (13 off), nor position-clamp (37 off), nor zero-extend (90 off) exactly.
-  OpenCV's `resize.cpp` border handling would have to be read to close this.
-  The Rust side is exactly its documented kernel, so the residue is attributed
-  to the reference's border handling, flagged open rather than called a defect.
+- **Linear and Lanczos, ±1 LSB** (e.g. `resize_smooth_linear_96x72`, 11.7%
+  over): Rust's resampling is exact float; `cv2.resize` quantises its
+  interpolation weights to 1/2048 and accumulates in integers
+  (`INTER_RESIZE_COEF_BITS = 11`). Measured directly for linear: exact float
+  bilinear vs `INTER_LINEAR` differs on 607/6912 pixels by max 1, exactly the
+  case's shape, and the Lanczos-4 recipe lands at the same ±1.
+- **`resize` cubic now matches cv2 bit-for-bit.** The entire former cubic
+  divergence (interior up to 3 LSB, borders up to 13) was **one definitional
+  choice: the kernel**. OpenCV's `INTER_CUBIC` is Keys a = -0.75
+  (`interpolateCubic`); the crate used Catmull-Rom (a = -0.5). Decoding this
+  needed resize.cpp itself - earlier behavioural probing had wrongly blamed
+  cv2's fixed-point tables and even its border handling (its `sxj += cn`
+  clamping degenerates to tap-replicate for cubic's 1-tap overrun, which is
+  what the crate already did). With a = -0.75 the float recipe reproduces
+  `INTER_CUBIC` with **0 differing pixels** on every case tried, so both the
+  kernel and Lanczos-4 (8 taps, OpenCV's `INTER_LANCZOS4` window) are now the
+  crate's kernels - see `kernels.rs`. This is the same contract class as the
+  coordinate mapping: an OpenCV replacement must not silently use a different
+  kernel under the same method name.
 
 **The `warpaffine` cases deviate by 1-4 grey levels — attributed, and not a Rust
 defect.** Probed to the standard of the resize attribution below: an exact float
