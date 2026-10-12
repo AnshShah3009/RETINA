@@ -417,7 +417,7 @@ whatever happened to pass.
 `factorial` also gained a note: its reference is `float(math.factorial(n))`, itself
 only f64-accurate, so it cannot be held to 1e-13 however good our side is.
 
-## `crates/plot` vs Matplotlib 3.11.2 — TWO structural divergences, measured
+## `crates/plot` vs Matplotlib 3.11.2 — both structural divergences resolved
 
 The last of the five targets to get a comparison. **Rendered-image diffing was
 deliberately not used**: Agg antialiases, so a pixel comparison against a
@@ -447,25 +447,20 @@ data [-5, 5]       span 10     matplotlib xlim [-5.5, 5.5]    5% per side
 plots are framed differently, and the two libraries will never put the same data at the
 same place on the same figure size.
 
-Note the `max(span, 1.0)` clamp is doing real work the other way: for data with
-`span < 1` the padding becomes `0.1` *absolute*, so a tiny range gets a large
-relative margin. Matplotlib's margin is always relative to the span, so it shrinks with
-the data. For a range of `1e-5` the two differ by five orders of magnitude.
+**RESOLVED - the contract is Matplotlib's 5%, relative.** The same reasoning
+as the resize coordinate contract: a library whose target is Matplotlib must
+not frame every figure differently from it **silently**. The pad is now
+`0.05 * span` per side, no absolute floor - and the singular axis follows
+Matplotlib's measured rule too (it substitutes `v ± 5%` of the value's scale
+and pads that, which measures as `±0.055·|v|`, `±0.055` at v = 0). Pinned
+against matplotlib 3.11.2 by `export::margin_tests`, including the 1e-5-span
+relativity that the old `max(span, 1)` clamp broke by five orders of magnitude.
 
-### 2. There are no tick values at all
+### 2. Tick values — shipped
 
-Emitted SVG from `Figure::scatter(...)` with 21 points spanning x in `[0, 100]`:
-
-```xml
-<text x="400" y="33" class="title"  text-anchor="middle">ticks</text>
-<text x="400" y="590" class="label"  text-anchor="middle">X</text>
-<text x="15"  y="300" class="label"  text-anchor="middle" transform="rotate(-90, 15, 300)">Y</text>
-<text x="688" y="70"  class="legend">s</text>
-```
-
-A title, axis labels and a legend — and **no numeric ticks on either axis, and no
-tick marks**. `grep -rn "tick" crates/plot/src/` returns nothing: there is no tick
-generation in the crate. Matplotlib emits them by default:
+There were none at all: a title, axis labels and a legend, and **no numeric ticks on
+either axis** (`grep -rn "tick" crates/plot/src/` returned nothing). Matplotlib emits
+them by default:
 
 ```
 data [0, 1]      -> ticks [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
@@ -473,11 +468,11 @@ data [0, 100]    -> ticks [0.0, 20.0, 40.0, 60.0, 80.0, 100.0]
 data [3.14159, 3.14160] -> ticks [3.14159, 3.141592, ..., 3.1416]
 ```
 
-This is a **capability gap, not a convention difference**, and it is the one that
-matters most for the Matplotlib target: an axis with no numbers on it is not a
-plotting axis. Tick *placement* is well-defined — Matplotlib's `MaxNLocator` picks
-from a scale, and that is a reference to compare against. It is also the natural next
-task, and unlike the margin it is additive rather than a behaviour change.
+A **capability gap, not a convention difference**, and the one that mattered most for
+the Matplotlib target: an axis with no numbers on it is not a plotting axis. Tick
+generation now exists (`nice_ticks`, snapping to a nice scale the way Matplotlib's
+`MaxNLocator` picks from one) and `tests/axis_ticks.rs` gates the values, the marks,
+and the degenerate-range case.
 
 ### Not compared, and why
 
