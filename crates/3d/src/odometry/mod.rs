@@ -106,6 +106,7 @@ pub fn compute_rgbd_odometry_ctx(
     // Multi-scale pyramid
     let scales = vec![0.125, 0.25, 0.5, 1.0];
     let mut transformation = Matrix4::identity();
+    let mut solved = false;
 
     for scale in scales {
         let scaled_width = (width as f32 * scale) as usize;
@@ -124,6 +125,12 @@ pub fn compute_rgbd_odometry_ctx(
         // Downsample depth images
         let source_scaled = downsample_depth(source_depth, width, height, scale);
         let target_scaled = downsample_depth(target_depth, width, height, scale);
+        // Colours shrink with the frame. They used to be passed at full
+        // resolution against scaled dimensions - the photometric paths then
+        // indexed a full-res buffer with scaled strides, reading the wrong
+        // pixels at every level but the finest.
+        let source_color_scaled = source_color.map(|c| downsample_color(c, width, height, scale));
+        let target_color_scaled = target_color.map(|c| downsample_color(c, width, height, scale));
 
         // Compute odometry at this scale
         let scale_result = match method {
@@ -139,8 +146,8 @@ pub fn compute_rgbd_odometry_ctx(
             OdometryMethod::Intensity => compute_intensity(
                 &source_scaled,
                 &target_scaled,
-                source_color,
-                target_color,
+                source_color_scaled.as_deref(),
+                target_color_scaled.as_deref(),
                 &scaled_intrinsics,
                 scaled_width,
                 scaled_height,
@@ -149,8 +156,8 @@ pub fn compute_rgbd_odometry_ctx(
             OdometryMethod::Hybrid => compute_hybrid(
                 &source_scaled,
                 &target_scaled,
-                source_color,
-                target_color,
+                source_color_scaled.as_deref(),
+                target_color_scaled.as_deref(),
                 &scaled_intrinsics,
                 scaled_width,
                 scaled_height,
@@ -160,7 +167,16 @@ pub fn compute_rgbd_odometry_ctx(
 
         if let Some(result) = scale_result {
             transformation = result.transformation;
+            solved = true;
         }
+    }
+
+    // No scale produced an answer. Returning `Some(identity)` here would hand
+    // the caller a successful-looking result containing no information - the
+    // exact failure `compute_hybrid` used to have, reintroduced at the
+    // dispatch level. Nothing solved, nothing to report.
+    if !solved {
+        return None;
     }
 
     // Compute final fitness
@@ -213,12 +229,11 @@ fn compute_point_to_plane_ctx(
 ) -> Option<OdometryResult> {
     let mut transformation = *init_transform;
     let max_iterations = 10;
+    let mut prev_rmse = f32::MAX;
 
     // Precompute target vertex and normal maps
     let (target_vertices, target_normals) =
         compute_vertex_normal_map_ctx(target_depth, intrinsics, width, height, group);
-
-    let mut prev_rmse = f32::MAX;
 
     for _ in 0..max_iterations {
         // Build 6x6 linear system in parallel
@@ -445,41 +460,456 @@ pub(crate) fn exponential_map_se3(delta: &Vector6<f32>) -> Matrix4<f32> {
     transform
 }
 
-/// Intensity-based odometry (uses color)
-#[allow(clippy::too_many_arguments)]
-fn compute_intensity(
-    _source_depth: &[f32],
-    _target_depth: &[f32],
-    _source_color: Option<&[Vector3<u8>]>,
-    _target_color: Option<&[Vector3<u8>]>,
-    _intrinsics: &crate::tsdf::CameraIntrinsics,
-    _width: usize,
-    _height: usize,
-    _init_transform: &Matrix4<f32>,
-) -> Option<OdometryResult> {
-    // Placeholder - full implementation would compute photometric error
-    None
+/// Luminance of an RGB triple, the photometric signal direct alignment uses.
+fn luminance(c: &Vector3<u8>) -> f32 {
+    0.299 * c.x as f32 + 0.589 * c.y as f32 + 0.114 * c.z as f32
 }
 
-/// Hybrid odometry (combines depth and intensity)
+/// Bilinear sample of a single-channel image at floating coordinates;
+/// `None` when the sample would touch outside the image.
+fn sample_bilinear(img: &[f32], width: usize, height: usize, x: f32, y: f32) -> Option<f32> {
+    if x < 0.0 || y < 0.0 || x > (width - 1) as f32 || y > (height - 1) as f32 {
+        return None;
+    }
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let v00 = img[y0 * width + x0];
+    let v10 = img[y0 * width + x1];
+    let v01 = img[y1 * width + x0];
+    let v11 = img[y1 * width + x1];
+    Some(
+        v00 * (1.0 - fx) * (1.0 - fy)
+            + v10 * fx * (1.0 - fy)
+            + v01 * (1.0 - fx) * fy
+            + v11 * fx * fy,
+    )
+}
+
+/// Central-difference gradients of a single-channel image.
+fn image_gradients(img: &[f32], width: usize, height: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut gx = vec![0.0f32; width * height];
+    let mut gy = vec![0.0f32; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let xm = x.saturating_sub(1);
+            let xp = (x + 1).min(width - 1);
+            let ym = y.saturating_sub(1);
+            let yp = (y + 1).min(height - 1);
+            gx[y * width + x] = 0.5 * (img[y * width + xp] - img[y * width + xm]);
+            gy[y * width + x] = 0.5 * (img[yp * width + x] - img[ym * width + x]);
+        }
+    }
+    (gx, gy)
+}
+
+/// Intensity (photometric) odometry: direct image alignment.
+///
+/// Residual per source pixel: `I_target(pi(T * backproject(u, d))) - I_source`,
+/// minimized by the same Gauss-Newton / SE(3) loop shape as the point-to-plane
+/// method. The pixel Jacobian chains the projection derivative into the target
+/// intensity gradient. Requires colour on both sides - a colourless call is
+/// not a photometric problem, so it is `None`, not a depth-only guess.
+///
+/// This used to be `None` unconditionally, so `OdometryMethod::Intensity` was
+/// a public enum variant that could not succeed.
+#[allow(clippy::too_many_arguments)]
+fn compute_intensity(
+    source_depth: &[f32],
+    _target_depth: &[f32],
+    source_color: Option<&[Vector3<u8>]>,
+    target_color: Option<&[Vector3<u8>]>,
+    intrinsics: &crate::tsdf::CameraIntrinsics,
+    width: usize,
+    height: usize,
+    init_transform: &Matrix4<f32>,
+) -> Option<OdometryResult> {
+    let src = source_color?;
+    let tgt = target_color?;
+    if src.len() < width * height || tgt.len() < width * height {
+        return None;
+    }
+
+    let target_i: Vec<f32> = tgt.iter().map(luminance).collect();
+    let (gx, gy) = image_gradients(&target_i, width, height);
+    let source_i: Vec<f32> = src.iter().map(luminance).collect();
+
+    let mut transformation = *init_transform;
+    let max_iterations = 50;
+    let mut last_valid = 0usize;
+    let mut last_rmse = 0f32;
+    // Levenberg-Marquardt damping. Undamped Gauss-Newton overshoots on the
+    // weakly-constrained directions a planar scene leaves (translation along
+    // the plane and the rotation about the in-plane normal both shift the
+    // image the same way to first order - the normal equations see a condition
+    // number of ~4e4) and then *settles into a neighbouring local minimum*,
+    // returning a wrong pose with a straight face. Damping with accept/reject
+    // keeps every accepted step a decrease.
+    let mut lambda = 1e-3_f32;
+
+    for _ in 0..max_iterations {
+        let mut ata = Matrix6::<f32>::zeros();
+        let mut atb = Vector6::<f32>::zeros();
+        let mut total_residual = 0.0f32;
+        let mut valid = 0usize;
+
+        for v in 0..height {
+            for u in 0..width {
+                let idx = v * width + u;
+                let Some(&depth) = source_depth.get(idx) else {
+                    continue;
+                };
+                if depth <= 0.0 {
+                    continue;
+                }
+
+                let p = Point3::new(
+                    (u as f32 - intrinsics.cx) * depth / intrinsics.fx,
+                    (v as f32 - intrinsics.cy) * depth / intrinsics.fy,
+                    depth,
+                );
+                let tp = transformation.transform_point(&p);
+                if tp.z <= 1e-6 {
+                    continue;
+                }
+
+                let su = tp.x * intrinsics.fx / tp.z + intrinsics.cx;
+                let sv = tp.y * intrinsics.fy / tp.z + intrinsics.cy;
+                let (Some(i_t), Some(didx), Some(didy)) = (
+                    sample_bilinear(&target_i, width, height, su, sv),
+                    sample_bilinear(&gx, width, height, su, sv),
+                    sample_bilinear(&gy, width, height, su, sv),
+                ) else {
+                    continue;
+                };
+
+                let residual = i_t - source_i[idx];
+
+                // d(pixel)/d(point): the projection's 2x3 derivative, chained
+                // with the intensity gradient into grad_p = d(residual)/dP'.
+                let (fx, fy, z) = (intrinsics.fx, intrinsics.fy, tp.z);
+                let gux = didx * fx / z;
+                let guy = didy * fy / z;
+                let guz = -didx * fx * tp.x / (z * z) - didy * fy * tp.y / (z * z);
+                let grad_p = Vector3::new(gux, guy, guz);
+                // dP'/d(t) = I and dP'/d(omega) = -[P']x for a left-multiplied
+                // increment delta = (t, omega), and with
+                // a^T [b]x = (a x b)^T that leaves the omega block as
+                // +(P' x grad_p)^T. (An earlier version carried a spurious
+                // minus here and the solver walked away from the minimum.)
+                let omega_block = tp.coords.cross(&grad_p);
+                let jac = Vector6::new(
+                    grad_p.x,
+                    grad_p.y,
+                    grad_p.z,
+                    omega_block.x,
+                    omega_block.y,
+                    omega_block.z,
+                );
+
+                ata += jac * jac.transpose();
+                atb += jac * residual;
+                total_residual += residual * residual;
+                valid += 1;
+            }
+        }
+
+        if valid < 100 {
+            return None;
+        }
+        last_valid = valid;
+        last_rmse = (total_residual / valid as f32).sqrt();
+
+        // Marquardt: damp along the diagonal, and accept the step only if it
+        // actually decreases the cost.
+        let mut damped = ata;
+        for i in 0..6 {
+            damped[(i, i)] += lambda * ata[(i, i)].max(1e-12);
+        }
+        let Some(damped_inv) = damped.try_inverse() else {
+            break;
+        };
+        let delta = -(damped_inv * atb);
+        let trial = exponential_map_se3(&delta) * transformation;
+
+        let mut trial_residual = 0.0f32;
+        let mut trial_valid = 0usize;
+        for v in 0..height {
+            for u in 0..width {
+                let idx = v * width + u;
+                let Some(&depth) = source_depth.get(idx) else {
+                    continue;
+                };
+                if depth <= 0.0 {
+                    continue;
+                }
+                let p = Point3::new(
+                    (u as f32 - intrinsics.cx) * depth / intrinsics.fx,
+                    (v as f32 - intrinsics.cy) * depth / intrinsics.fy,
+                    depth,
+                );
+                let tp = trial.transform_point(&p);
+                if tp.z <= 1e-6 {
+                    continue;
+                }
+                let su = tp.x * intrinsics.fx / tp.z + intrinsics.cx;
+                let sv = tp.y * intrinsics.fy / tp.z + intrinsics.cy;
+                if let Some(i_t) = sample_bilinear(&target_i, width, height, su, sv) {
+                    let r = i_t - source_i[idx];
+                    trial_residual += r * r;
+                    trial_valid += 1;
+                }
+            }
+        }
+        if trial_valid > 0 && trial_residual < total_residual {
+            // Converged when an accepted step barely helps. A rejected step is
+            // NOT convergence - the old check broke out whenever nothing
+            // moved, which is what a run of rejections looks like.
+            let improved = total_residual - trial_residual;
+            transformation = trial;
+            lambda = (lambda / 3.0).max(1e-9);
+            if improved <= 1e-9 * total_residual.max(1.0) {
+                break;
+            }
+        } else {
+            lambda = (lambda * 10.0).min(1e9);
+            if lambda >= 1e9 {
+                break;
+            }
+        }
+    }
+
+    Some(OdometryResult {
+        transformation,
+        fitness: last_valid as f32 / (width * height) as f32,
+        inlier_rmse: last_rmse,
+    })
+}
+
+/// Hybrid odometry (combines depth and intensity).
+///
+/// One Gauss-Newton system carries **both** residual kinds per source pixel:
+/// the point-to-plane residual against the target's vertex/normal maps (in
+/// metres) and the photometric residual (normalised by 255 into ~[0,1], a
+/// relative weighting kept visible here rather than hidden in a magic
+/// constant - tuning it is a parameter for later, not a correctness question).
+/// Geometric rows need `target_depth`; photometric rows need both colours, so
+/// a call missing either is not a hybrid problem and returns `None` rather
+/// than quietly solving a weaker one.
+///
+/// This used to be `None` unconditionally (after first returning a fabricated
+/// identity transform), so `OdometryMethod::Hybrid` was a public enum variant
+/// that could not succeed.
 #[allow(clippy::too_many_arguments)]
 fn compute_hybrid(
-    _source_depth: &[f32],
-    _target_depth: &[f32],
-    _source_color: Option<&[Vector3<u8>]>,
-    _target_color: Option<&[Vector3<u8>]>,
-    _intrinsics: &crate::tsdf::CameraIntrinsics,
-    _width: usize,
-    _height: usize,
-    _init_transform: &Matrix4<f32>,
+    source_depth: &[f32],
+    target_depth: &[f32],
+    source_color: Option<&[Vector3<u8>]>,
+    target_color: Option<&[Vector3<u8>]>,
+    intrinsics: &crate::tsdf::CameraIntrinsics,
+    width: usize,
+    height: usize,
+    init_transform: &Matrix4<f32>,
 ) -> Option<OdometryResult> {
-    // Not implemented. It previously returned `Some` with the identity
-    // transform and a fabricated `fitness: 0.0`, so a caller selecting
-    // `OdometryMethod::Hybrid` got a successful-looking answer containing no
-    // information - worse than a failure, because nothing downstream could tell
-    // it apart from a real result. `compute_intensity` already returns `None`
-    // for the same reason; this now matches it.
-    None
+    let src = source_color?;
+    let tgt = target_color?;
+    if src.len() < width * height || tgt.len() < width * height {
+        return None;
+    }
+
+    let (target_vertices, target_normals) = compute_vertex_normal_map_ctx(
+        target_depth,
+        intrinsics,
+        width,
+        height,
+        &RuntimeRunner::Sync(cv_runtime::registry().ok()?.default_cpu().id()),
+    );
+    let target_i: Vec<f32> = tgt.iter().map(luminance).collect();
+    let (gx, gy) = image_gradients(&target_i, width, height);
+    let source_i: Vec<f32> = src.iter().map(luminance).collect();
+    const PHOTOMETRIC_SCALE: f32 = 1.0 / 255.0;
+
+    let mut transformation = *init_transform;
+    let max_iterations = 50;
+    let mut last_valid = 0usize;
+    let mut last_rmse = 0f32;
+    // Marquardt damping for the same reason as `compute_intensity`: undamped
+    // Gauss-Newton overshoots on weakly-constrained directions and settles
+    // into a neighbouring minimum with a straight face.
+    let mut lambda = 1e-3_f32;
+
+    // Accumulate the combined normal equations at a given pose. Used for the
+    // trial step too, so accept/reject measures the real cost.
+    let accumulate = |t: &Matrix4<f32>| -> (Matrix6<f32>, Vector6<f32>, f32, usize) {
+        let mut ata = Matrix6::<f32>::zeros();
+        let mut atb = Vector6::<f32>::zeros();
+        let mut total_residual = 0.0f32;
+        let mut valid = 0usize;
+
+        for v in 0..height {
+            for u in 0..width {
+                let idx = v * width + u;
+                let Some(&depth) = source_depth.get(idx) else {
+                    continue;
+                };
+                if depth <= 0.0 {
+                    continue;
+                }
+
+                let p = Point3::new(
+                    (u as f32 - intrinsics.cx) * depth / intrinsics.fx,
+                    (v as f32 - intrinsics.cy) * depth / intrinsics.fy,
+                    depth,
+                );
+                let tp = t.transform_point(&p);
+                if tp.z <= 1e-6 {
+                    continue;
+                }
+
+                let mut contributed = false;
+
+                // Geometric row: point-to-plane against the target maps.
+                let tu = (tp.x * intrinsics.fx / tp.z + intrinsics.cx) as i32;
+                let tv = (tp.y * intrinsics.fy / tp.z + intrinsics.cy) as i32;
+                if tu >= 0 && tu < width as i32 && tv >= 0 && tv < height as i32 {
+                    let tidx = (tv as usize) * width + (tu as usize);
+                    let (tvert, tnorm) = (target_vertices[tidx], target_normals[tidx]);
+                    if tvert.z > 0.0 && tnorm.norm_squared() > 1e-6 {
+                        let residual = (tp - tvert).dot(&tnorm);
+                        let cross = tp.coords.cross(&tnorm);
+                        let jac =
+                            Vector6::new(tnorm.x, tnorm.y, tnorm.z, cross.x, cross.y, cross.z);
+                        ata += jac * jac.transpose();
+                        atb += jac * residual;
+                        total_residual += residual * residual;
+                        contributed = true;
+                    }
+                }
+
+                // Photometric row: intensity at the projected sample.
+                let su = tp.x * intrinsics.fx / tp.z + intrinsics.cx;
+                let sv = tp.y * intrinsics.fy / tp.z + intrinsics.cy;
+                if let (Some(i_t), Some(didx), Some(didy)) = (
+                    sample_bilinear(&target_i, width, height, su, sv),
+                    sample_bilinear(&gx, width, height, su, sv),
+                    sample_bilinear(&gy, width, height, su, sv),
+                ) {
+                    let residual = (i_t - source_i[idx]) * PHOTOMETRIC_SCALE;
+                    let (fx, fy, z) = (intrinsics.fx, intrinsics.fy, tp.z);
+                    let gux = didx * fx / z;
+                    let guy = didy * fy / z;
+                    let guz = -didx * fx * tp.x / (z * z) - didy * fy * tp.y / (z * z);
+                    let grad_p = Vector3::new(gux, guy, guz) * PHOTOMETRIC_SCALE;
+                    let omega_block = tp.coords.cross(&grad_p);
+                    let jac = Vector6::new(
+                        grad_p.x,
+                        grad_p.y,
+                        grad_p.z,
+                        omega_block.x,
+                        omega_block.y,
+                        omega_block.z,
+                    );
+                    ata += jac * jac.transpose();
+                    atb += jac * residual;
+                    contributed = true;
+                }
+
+                if contributed {
+                    valid += 1;
+                }
+            }
+        }
+        (ata, atb, total_residual, valid)
+    };
+
+    for _ in 0..max_iterations {
+        let (ata, atb, total_residual, valid) = accumulate(&transformation);
+        if valid < 100 {
+            return None;
+        }
+        last_valid = valid;
+        last_rmse = (total_residual / valid as f32).sqrt();
+
+        let mut damped = ata;
+        for i in 0..6 {
+            damped[(i, i)] += lambda * ata[(i, i)].max(1e-12);
+        }
+        let Some(damped_inv) = damped.try_inverse() else {
+            break;
+        };
+        let delta = -(damped_inv * atb);
+        let trial = exponential_map_se3(&delta) * transformation;
+
+        let (_, _, trial_cost, trial_valid) = accumulate(&trial);
+        if trial_valid > 0 && trial_cost < total_residual {
+            // Converged when an accepted step barely helps. A rejected step is
+            // NOT convergence - the old check broke out of the loop whenever
+            // nothing moved, which is exactly what a run of rejections looks
+            // like.
+            let improved = total_residual - trial_cost;
+            transformation = trial;
+            lambda = (lambda / 3.0).max(1e-9);
+            if improved <= 1e-9 * total_residual.max(1.0) {
+                break;
+            }
+        } else {
+            lambda = (lambda * 10.0).min(1e9);
+            if lambda >= 1e9 {
+                break;
+            }
+        }
+    }
+
+    Some(OdometryResult {
+        transformation,
+        fitness: last_valid as f32 / (width * height) as f32,
+        inlier_rmse: last_rmse,
+    })
+}
+
+/// Downsample a colour image the way [`downsample_depth`] shrinks depth: box
+/// average over each output pixel's source footprint.
+fn downsample_color(
+    input: &[Vector3<u8>],
+    width: usize,
+    height: usize,
+    scale: f32,
+) -> Vec<Vector3<u8>> {
+    let new_width = (width as f32 * scale) as usize;
+    let new_height = (height as f32 * scale) as usize;
+    if new_width == 0 || new_height == 0 || input.len() < width * height {
+        return Vec::new();
+    }
+    let mut output = vec![Vector3::new(0u8, 0, 0); new_width * new_height];
+    let sx = width as f32 / new_width as f32;
+    let sy = height as f32 / new_height as f32;
+    for y in 0..new_height {
+        for x in 0..new_width {
+            let x0 = (x as f32 * sx) as usize;
+            let x1 = (((x + 1) as f32 * sx) as usize).max(x0 + 1).min(width);
+            let y0 = (y as f32 * sy) as usize;
+            let y1 = (((y + 1) as f32 * sy) as usize).max(y0 + 1).min(height);
+            let (mut r, mut g, mut b, mut n) = (0f32, 0f32, 0f32, 0f32);
+            for yy in y0..y1 {
+                for xx in x0..x1 {
+                    let c = input[yy * width + xx];
+                    r += c.x as f32;
+                    g += c.y as f32;
+                    b += c.z as f32;
+                    n += 1.0;
+                }
+            }
+            output[y * new_width + x] = Vector3::new(
+                (r / n).round() as u8,
+                (g / n).round() as u8,
+                (b / n).round() as u8,
+            );
+        }
+    }
+    output
 }
 
 /// Downsample depth image
