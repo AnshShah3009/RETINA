@@ -63,8 +63,8 @@ pub fn resize(src: &GrayImage, width: u32, height: u32, interpolation: Interpola
 /// CPU dispatch for the requested interpolation.
 ///
 /// Every variant is honoured: `Nearest`/`Linear` replicate/clamp sample the
-/// source, `Cubic` uses the Catmull-Rom kernel and `Lanczos` the Lanczos-3
-/// kernel (both separable and edge-clamped).
+/// source, `Cubic` uses OpenCV's cubic kernel (Keys a = -0.75) and `Lanczos`
+/// OpenCV's Lanczos-4 window - see `kernels.rs` for why those are the choices.
 fn resize_cpu(src: &GrayImage, width: u32, height: u32, interpolation: Interpolation) -> GrayImage {
     if width == 0 || height == 0 {
         return GrayImage::new(0, 0);
@@ -83,7 +83,7 @@ fn resize_cpu(src: &GrayImage, width: u32, height: u32, interpolation: Interpola
             None => GrayImage::new(width, height),
         },
         Interpolation::Cubic => resize_sampled(src, width, height, 2, cubic_weights),
-        Interpolation::Lanczos => resize_sampled(src, width, height, 3, lanczos_weights),
+        Interpolation::Lanczos => resize_sampled(src, width, height, 4, lanczos_weights),
     }
 }
 
@@ -238,7 +238,7 @@ pub fn resize_rgb(
         Interpolation::Nearest => resize_rgb_nearest(src, width, height),
         Interpolation::Linear => resize_rgb_linear(src, width, height),
         Interpolation::Cubic => resize_rgb_sampled(src, width, height, 2, cubic_weights),
-        Interpolation::Lanczos => resize_rgb_sampled(src, width, height, 3, lanczos_weights),
+        Interpolation::Lanczos => resize_rgb_sampled(src, width, height, 4, lanczos_weights),
     }
 }
 
@@ -335,11 +335,11 @@ fn cubic_weights(f: f32) -> Vec<f32> {
     ]
 }
 
-/// Lanczos-3 weights for the taps `floor(f) - 2 ..= floor(f) + 3`,
-/// normalized so that they sum to 1.
+/// Lanczos-4 weights for the taps `floor(f) - 3 ..= floor(f) + 4`
+/// (OpenCV's `INTER_LANCZOS4` window), normalized so that they sum to 1.
 fn lanczos_weights(f: f32) -> Vec<f32> {
     let t = f - f.floor();
-    let mut weights: Vec<f32> = (-2..=3).map(|i| lanczos_kernel(i as f32 - t)).collect();
+    let mut weights: Vec<f32> = (-3..=4).map(|i| lanczos_kernel(i as f32 - t)).collect();
     let sum: f32 = weights.iter().sum();
     if sum != 0.0 {
         for w in &mut weights {
@@ -488,7 +488,7 @@ mod tests {
             assert!((c.iter().sum::<f32>() - 1.0).abs() < 1e-5, "cubic @ {f}");
 
             let l = lanczos_weights(f);
-            assert_eq!(l.len(), 6);
+            assert_eq!(l.len(), 8);
             assert!((l.iter().sum::<f32>() - 1.0).abs() < 1e-5, "lanczos @ {f}");
         }
 
@@ -498,7 +498,7 @@ mod tests {
             assert!((w - expected).abs() < 1e-5);
         }
         for (i, &w) in lanczos_weights(3.0).iter().enumerate() {
-            let expected = if i == 2 { 1.0 } else { 0.0 };
+            let expected = if i == 3 { 1.0 } else { 0.0 };
             assert!((w - expected).abs() < 1e-5);
         }
     }

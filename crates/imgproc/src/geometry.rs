@@ -73,12 +73,13 @@ fn get_pixel_lanczos_with_border(img: &GrayImage, x: f32, y: f32, border: Border
     let tx = x - x0 as f32;
     let ty = y - y0 as f32;
 
-    // 6 taps per axis: floor(c) - 2 ..= floor(c) + 3, normalized to unit sum.
-    let mut wx = [0.0f32; 6];
-    let mut wy = [0.0f32; 6];
-    for k in 0..6 {
-        wx[k] = lanczos_kernel(k as f32 - 2.0 - tx);
-        wy[k] = lanczos_kernel(k as f32 - 2.0 - ty);
+    // 8 taps per axis: floor(c) - 3 ..= floor(c) + 4 (the `INTER_LANCZOS4`
+    // window), normalized to unit sum.
+    let mut wx = [0.0f32; 8];
+    let mut wy = [0.0f32; 8];
+    for k in 0..8 {
+        wx[k] = lanczos_kernel(k as f32 - 3.0 - tx);
+        wy[k] = lanczos_kernel(k as f32 - 3.0 - ty);
     }
     let (sx, sy) = (wx.iter().sum::<f32>(), wy.iter().sum::<f32>());
     if sx != 0.0 {
