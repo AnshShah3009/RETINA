@@ -18,22 +18,81 @@ pub fn compute_normals_morton_gpu_or_cpu(
             return normals;
         }
     }
-    // CPU fallback: voxel-hash kNN + analytic eigensolver
+    // CPU fallback: brute-force kNN + PCA eigensolver (see below).
     normals_cpu_analytic(points, k as usize)
 }
 
-/// Approximate normals by PCA over each point's k nearest neighbours.
+/// Normals by PCA over each point's k nearest neighbours - the CPU fallback
+/// the GPU path never had.
 ///
-/// Not implemented. This is the CPU fallback reached when the GPU context is
-/// unavailable, and it previously returned a zero vector per point - so a
-/// caller who lost the GPU got silently wrong normals rather than an error. A
-/// full implementation lives in `cv-3d`; returning an empty vector here makes
-/// the absence visible instead of returning fabricated data.
+/// This previously returned `Vec::new()`, so a caller who lost the GPU got
+/// zero normals for N points and could not tell (before that it returned a
+/// zero vector per point - fabricated data). It now computes the same thing
+/// the GPU pipeline does: brute-force k nearest neighbours, the covariance of
+/// those neighbours, and the eigenvector of the *smallest* eigenvalue - the
+/// direction the neighbourhood varies least in.
+///
+/// Cost is O(n^2) kNN; the fallback trades speed for availability, and the
+/// GPU path remains the fast one. The eigenvector's sign is mathematically
+/// arbitrary, so it is pinned deterministically (largest-magnitude component
+/// made positive) rather than left to the eigensolver's mood - callers wanting
+/// viewpoint-facing normals should orient them afterwards.
 pub fn normals_cpu_analytic(
     points: &[nalgebra::Vector3<f32>],
-    _k: usize,
+    k: usize,
 ) -> Vec<nalgebra::Vector3<f32>> {
-    Vec::new()
+    use nalgebra::{Matrix3, Vector3};
+
+    let n = points.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let k = k.clamp(3, n.max(3));
+
+    let mut normals = Vec::with_capacity(n);
+    for i in 0..n {
+        // k nearest neighbours (the point itself is at distance 0 and is
+        // always among them; that is also what the GPU pipeline does).
+        let mut neigh: Vec<(f32, usize)> = (0..n)
+            .map(|j| ((points[i] - points[j]).norm_squared(), j))
+            .collect();
+        neigh.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let take = k.min(n);
+
+        let mut mean = Vector3::zeros();
+        for &(_, j) in &neigh[..take] {
+            mean += points[j];
+        }
+        mean /= take as f32;
+
+        let mut cov = Matrix3::zeros();
+        for &(_, j) in &neigh[..take] {
+            let d = points[j] - mean;
+            cov += d * d.transpose();
+        }
+
+        let eig = nalgebra::linalg::SymmetricEigen::new(cov);
+        let mut smallest = 0usize;
+        for (c, &v) in eig.eigenvalues.iter().enumerate() {
+            if v < eig.eigenvalues[smallest] {
+                smallest = c;
+            }
+        }
+        let mut normal = eig.eigenvectors.column(smallest).into_owned();
+
+        // Deterministic sign: largest-magnitude component positive.
+        let mut pivot = 0usize;
+        for c in 1..3 {
+            if normal[c].abs() > normal[pivot].abs() {
+                pivot = c;
+            }
+        }
+        if normal[pivot] < 0.0 {
+            normal = -normal;
+        }
+        normals.push(normal);
+    }
+    normals
 }
 
 pub fn compute_normals(
