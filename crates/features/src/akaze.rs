@@ -531,43 +531,6 @@ struct EvolutionLevel {
     pub octave: usize,
 }
 
-#[allow(dead_code)]
-fn to_cpu_f32<S: Storage<f32> + cv_core::StorageFactory<f32> + 'static>(
-    ctx: &ComputeDevice,
-    tensor: &Tensor<f32, S>,
-) -> crate::Result<CpuTensor<f32>> {
-    use cv_core::storage::CpuStorage;
-    use cv_hal::storage::GpuStorage;
-    use cv_hal::tensor_ext::TensorToCpu;
-
-    if let Some(gpu_storage) = tensor.storage.as_any().downcast_ref::<GpuStorage<f32>>() {
-        let gpu_tensor = Tensor {
-            storage: gpu_storage.clone(),
-            shape: tensor.shape,
-            dtype: tensor.dtype,
-            _phantom: std::marker::PhantomData,
-        };
-        match ctx {
-            ComputeDevice::Gpu(gpu) => gpu_tensor
-                .to_cpu_ctx(gpu)
-                .map_err(|e| Error::AlgorithmError(format!("Download from GPU failed: {}", e))),
-            _ => Err(Error::AlgorithmError(
-                "GpuStorage with non-GPU context".into(),
-            )),
-        }
-    } else if let Some(cpu_storage) = tensor.storage.as_any().downcast_ref::<CpuStorage<f32>>() {
-        let cpu_tensor = Tensor {
-            storage: cpu_storage.clone(),
-            shape: tensor.shape,
-            dtype: tensor.dtype,
-            _phantom: std::marker::PhantomData,
-        };
-        Ok(cpu_tensor)
-    } else {
-        Err(Error::AlgorithmError("Unsupported storage type".into()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

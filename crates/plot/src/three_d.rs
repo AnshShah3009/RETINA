@@ -733,31 +733,6 @@ impl Plot3D {
     }
 }
 
-/// Get bounding box of combined point clouds
-#[allow(dead_code)]
-fn bounding_box_all(point_clouds: &[PointCloud3D]) -> (f64, f64, f64, f64, f64, f64) {
-    if point_clouds.is_empty() {
-        return (0.0, 1.0, 0.0, 1.0, 0.0, 1.0);
-    }
-    let mut min_x = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    let mut min_z = f64::INFINITY;
-    let mut max_z = f64::NEG_INFINITY;
-
-    for pc in point_clouds {
-        let (x1, x2, y1, y2, z1, z2) = pc.bounding_box();
-        min_x = min_x.min(x1);
-        max_x = max_x.max(x2);
-        min_y = min_y.min(y1);
-        max_y = max_y.max(y2);
-        min_z = min_z.min(z1);
-        max_z = max_z.max(z2);
-    }
-    (min_x, max_x, min_y, max_y, min_z, max_z)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

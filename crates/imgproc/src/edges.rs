@@ -28,17 +28,6 @@ fn scharr_kernels_1d() -> (Vec<f32>, Vec<f32>) {
     (vec![-1.0, 0.0, 1.0], vec![3.0, 10.0, 3.0])
 }
 
-#[allow(dead_code)]
-fn kernel_from_1d(kx: &[f32], ky: &[f32]) -> Kernel {
-    let mut data = vec![0.0f32; kx.len() * ky.len()];
-    for (y, &vy) in ky.iter().enumerate() {
-        for (x, &vx) in kx.iter().enumerate() {
-            data[y * kx.len() + x] = vx * vy;
-        }
-    }
-    Kernel::new(data, kx.len(), ky.len())
-}
-
 fn apply_linear_transform(mut img: GrayImage, scale: f32, delta: f32) -> GrayImage {
     img.as_mut().par_iter_mut().for_each(|px| {
         let v = (*px as f32) * scale + delta;

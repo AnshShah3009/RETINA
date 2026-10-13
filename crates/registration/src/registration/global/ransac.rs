@@ -537,26 +537,6 @@ fn evaluate_registration(
     (fitness, rmse)
 }
 
-/// Random sample without replacement
-#[allow(dead_code)]
-fn random_sample(n: usize, max: usize) -> Vec<usize> {
-    use std::collections::HashSet;
-    let mut rng = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    let mut indices = HashSet::new();
-    while indices.len() < n && indices.len() < max {
-        // Simple LCG random number generator
-        rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-        let idx = (rng % max as u64) as usize;
-        indices.insert(idx);
-    }
-
-    indices.into_iter().collect()
-}
-
 #[cfg(test)]
 mod fgr_rejects_degenerate_matching {
     use super::*;

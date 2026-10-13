@@ -179,7 +179,7 @@ fn ray_triangle_intersection(
     v0: Point3<f32>,
     v1: Point3<f32>,
     v2: Point3<f32>,
-) -> Option<RayHitInfo> {
+) -> Option<f32> {
     let epsilon = 1e-6;
 
     let edge1 = v1 - v0;
@@ -224,28 +224,14 @@ fn ray_triangle_intersection(
 
     let t = f * edge2.dot(&q);
 
+    // Only the distance is read by callers; the intersection point, face
+    // normal and barycentric weights (formerly in `RayHitInfo`) were computed
+    // and discarded. They are gone too, in keeping with the c8 dead-field cleanup.
     if t > epsilon {
-        let w = 1.0 - u - v;
-        let point = ray.point_at(t);
-        let normal = edge1.cross(&edge2).normalize();
-
-        Some(RayHitInfo {
-            distance: t,
-            point,
-            normal,
-            barycentric: (u, v, w),
-        })
+        Some(t)
     } else {
         None
     }
-}
-
-#[allow(dead_code)]
-struct RayHitInfo {
-    distance: f32,
-    point: Point3<f32>,
-    normal: Vector3<f32>,
-    barycentric: (f32, f32, f32),
 }
 
 /// Triangle index returned by [`closest_point_on_mesh`] when the mesh has no
@@ -493,8 +479,8 @@ pub fn point_inside_mesh_bvh(query: &Point3<f32>, mesh: &TriangleMesh, _bvh: &Bv
         let v0 = mesh.vertices[face[0]];
         let v1 = mesh.vertices[face[1]];
         let v2 = mesh.vertices[face[2]];
-        if let Some(hit) = ray_triangle_intersection(&ray, v0, v1, v2) {
-            if hit.distance > 0.0 {
+        if let Some(t) = ray_triangle_intersection(&ray, v0, v1, v2) {
+            if t > 0.0 {
                 intersection_count += 1;
             }
         }
@@ -517,11 +503,11 @@ mod tests {
         let hit = ray_triangle_intersection(&ray, v0, v1, v2);
         assert!(hit.is_some(), "Ray should hit the triangle");
 
-        let hit = hit.unwrap();
+        let t = hit.unwrap();
         assert!(
-            (hit.distance - 1.0).abs() < 1e-5,
+            (t - 1.0).abs() < 1e-5,
             "Expected hit distance ~1.0, got {}",
-            hit.distance
+            t
         );
     }
 

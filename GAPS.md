@@ -234,19 +234,15 @@ re-exported by the root crate (§Unreachable API).
   wrapper around CPU code (see also (b1) #5).
 
 ### (c8) Other dead-field/dead-item evidence (compiler-measured unless noted)
-- `crates/video/src/optical_flow.rs:625` — `PolyCoeffs` carries `F`, "computed by full 6x6 solve, reserved for
-  future use"; never read.
-- `crates/hal/src/gpu_sparse.rs:12` — `#[allow(dead_code)] pub struct GpuSparseMatrix` (whole GPU CSR type dead).
-- `crates/3d/src/raycasting/mod.rs:241` — `RayHitInfo { distance, point, normal, barycentric }` dead: no caller
-  receives hit details.
-- `crates/features/src/akaze.rs:534` — `to_cpu_f32` dead (AKAZE never converts GPU→CPU).
-- `crates/imgproc/src/edges.rs:31` — `kernel_from_1d` dead (Scharr is hand-built).
-- `crates/calib3d/src/essential_fundamental.rs:313` — `sample_unique_indices` dead.
-- `crates/registration/src/registration/global/ransac.rs:541` — `random_sample` dead.
-- `crates/plot/src/three_d.rs:731` — `bounding_box_all` (union bbox over several clouds) dead → multi-cloud 3D
-  plots are not jointly scaled. **Compiler-measured**, meaning not read: not a functional bug by itself.
-- `crates/features/src/orb.rs:17-24` — three spec ORB params (`first_level`, `edge_threshold`, `wta_k`)
-  deliberately absent; the comment states they were removed as dead fields rather than silently kept.
+- `crates/video/src/optical_flow.rs:625` — **CLOSED — removed.** `PolyCoeffs` no longer carries `F`; the fitted constant term is produced by the unchanged 6×6 solve but discarded rather than stored unused. `PolyCoeffs` is now the 5 gradient coefficients the flow consumes (A..E).
+- `crates/3d/src/raycasting/mod.rs:241` — **CLOSED — removed.** `RayHitInfo { distance, point, normal, barycentric }` is deleted; the only field read by callers was `distance`, so `ray_triangle_intersection` now returns `Option<f32>`. The dead `point`/`normal`/`barycentric` math is gone with it.
+- `crates/features/src/akaze.rs:534` — **CLOSED — removed.** `to_cpu_f32` (AKAZE never converts GPU→CPU).
+- `crates/imgproc/src/edges.rs:31` — **CLOSED — removed.** `kernel_from_1d` (Scharr is hand-built).
+- `crates/calib3d/src/essential_fundamental.rs:313` — **CLOSED — removed.** `sample_unique_indices`.
+- `crates/registration/src/registration/global/ransac.rs:541` — **CLOSED — removed.** `random_sample`.
+- `crates/plot/src/three_d.rs:731` — **CLOSED — removed.** free `bounding_box_all` over a slice of point clouds (multi-cloud 3D plots are not jointly scaled). The `Plot3D::bounding_box` *method* is still used and is unchanged.
+- `crates/hal/src/gpu_sparse.rs:12` — **Retained (intentional).** `#[allow(dead_code)] pub struct GpuSparseMatrix` is public API in `cv-hal` with its own unit test (`test_triplets_to_csr`); deleting public surface is out of scope for a dead-code pass. Still honestly `#[allow(dead_code)]`-marked, so it is not silently dead — noted, not fixed here.
+- `crates/features/src/orb.rs:17-24` — three spec ORB params (`first_level`, `edge_threshold`, `wta_k`) deliberately absent; the comment states they were removed as dead fields rather than silently kept.
 
 ---
 

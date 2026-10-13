@@ -619,11 +619,14 @@ impl Farneback {
     }
 }
 
-/// Polynomial expansion coefficients for f(x,y) ~ Ax^2 + Bxy + Cy^2 + Dx + Ey + F.
-/// Fields: (A: x^2, B: xy, C: y^2, D: x, E: y, F: constant)
+/// Polynomial expansion coefficients for f(x,y) ~ Ax^2 + Bxy + Cy^2 + Dx + Ey.
+///
+/// The constant term `F` of the full quadratic is produced by the 6x6 solve
+/// but is never used by the flow (which only reads the gradients A..E that
+/// feed the structure tensor), so it is dropped here rather than carried as a
+/// dead field.
 #[derive(Clone, Copy)]
-#[allow(dead_code)] // Field .5 (F constant) computed by full 6x6 solve, reserved for future use
-struct PolyCoeffs(f32, f32, f32, f32, f32, f32);
+struct PolyCoeffs(f32, f32, f32, f32, f32);
 
 /// Polynomial expansion result
 struct PolynomialExpansion {
@@ -638,7 +641,7 @@ impl PolynomialExpansion {
         self.coeffs
             .get(idx)
             .copied()
-            .unwrap_or(PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+            .unwrap_or(PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0))
     }
 }
 
@@ -762,10 +765,10 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
                         sol[2], // C: y^2
                         sol[3], // D: x
                         sol[4], // E: y
-                        sol[5], // F: constant
+                                // sol[5] is the constant term F; see PolyCoeffs.
                     )
                 })
-                .unwrap_or_else(|| PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+                .unwrap_or_else(|| PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0));
 
             coeffs.push(c);
         }
