@@ -159,7 +159,7 @@ Its sibling on the same struct is **still open**:
   no face in the narrow band stay at `+∞`. Pinned by
   `distance_field_is_signed_surface_distance_not_closest_vertex`.
 
-### (c4) `cv-hal` — `build_kdtree` returns Morton codes, not a tree
+### (c4) `cv-hal` — `build_kdtree` returns Morton codes, not a tree — **CLOSED (honest docs)**
 - `crates/hal/src/gpu_kernels/mod.rs:1172-1175` — doc: "Build KDTree on GPU (parallel construction) - simplified
   version / Returns sorted Morton codes as a basic spatial index".
 - `GpuKDTree` (`:1436-1441`) has only `points_buffer`, `morton_buffer`, `num_points`, `device` — no node
@@ -190,7 +190,7 @@ Consequences for a reader:
   configuration at all". That is a silent-wrongness bug being **fixed** by someone else, not one I
   found; recorded here so it is not double-counted or re-investigated.
 
-### (c5) `cv-viewer` — the crate doc says it renders nothing; **that doc is stale and wrong**
+### (c5) `cv-viewer` — the crate doc said it renders nothing; **CLOSED (doc corrected)**
 
 **Correction of my own first pass.** `crates/viewer/src/lib.rs:3-13` states "**It does not render
 anything.** `native_viewer` opens an egui window that reports each cloud's point and normal count;
@@ -218,13 +218,13 @@ re-exported by the root crate (§Unreachable API).
   *benign* — `new()` binds a local `let format = state.target_format` at `:78` which is the value used in
   the `ColorTargetState` at `:148`; the field is a dead copy of it.
 
-### (c6) `cv-optimize` — `Isam2` config is accepted and ignored
+### (c6) `cv-optimize` — `Isam2` config is accepted and ignored — **CLOSED (ignored params documented; field removed)**
 - `crates/optimize/src/isam2.rs:911-917` — "Legacy Isam2 interface for backward compatibility with Python
   bindings". `#[allow(dead_code)] optimize_on_update: bool` — the attribute is compiler-proof that the field is
   **never read**; `with_config(optimize_on_update, _batch_optimize)` takes a second argument `_batch_optimize`
   that is likewise discarded. `Isam2::new()` sets `true` for a flag nothing consults.
 
-### (c7) `cv-3d` — two "different" normal algorithms ignore their distinguishing parameters
+### (c7) `cv-3d` — two "different" normal algorithms ignore their distinguishing parameters — **CLOSED (params documented as currently ignored)**
 - `crates/3d/src/gpu/mod.rs:718-721` — `voxel_based_normals_simple(points, _voxel_size)` → body is
   `compute_normals(points, 30)`: `_voxel_size` unused, k hardcoded to 30.
 - `crates/3d/src/gpu/mod.rs:734-741` — `approximate_normals_simple(points, k, _epsilon)` → `compute_normals(points, k)`:

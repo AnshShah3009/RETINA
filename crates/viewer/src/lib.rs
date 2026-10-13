@@ -3,10 +3,10 @@ use cv_core::point_cloud::PointCloud;
 
 /// Point cloud collection, and a window that lists what has been collected.
 ///
-/// **It does not render anything.** `native_viewer` opens an egui window that
-/// reports each cloud's point and normal count; there is no 3D viewport, no wgpu
-/// pipeline, and no use of `CreationContext::wgpu_render_state`. The window says
-/// so rather than implying a renderer exists.
+/// It renders. `native_viewer` builds a real wgpu point-cloud pipeline from
+/// `CreationContext::wgpu_render_state` (see `native_viewer::PointCloudRenderer`)
+/// and draws the uploaded clouds each frame; on the glow path the renderer is
+/// `None` and the window says so rather than pretending.
 ///
 /// This replaced a Rerun-based logger, which was removed over a wasm-bindgen
 /// version conflict (rerun pins 0.2.100, eframe needs 0.2.101). "Replaced" is

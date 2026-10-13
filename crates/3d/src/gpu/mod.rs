@@ -720,6 +720,9 @@ pub mod point_cloud {
             .collect()
     }
 
+    /// **Honest contract:** `_voxel_size` is currently **ignored** and the result is
+    /// identical to `compute_normals(points, 30)`. The parameter is retained for
+    /// API compatibility only; passing a different voxel size changes nothing.
     pub fn voxel_based_normals_simple(
         points: &[Point3<f32>],
         _voxel_size: f32,
@@ -788,6 +791,9 @@ pub mod point_cloud {
             .collect()
     }
 
+    /// **Honest contract:** `_epsilon` is currently **ignored** and the result is
+    /// identical to `compute_normals(points, k)`. The parameter is retained for
+    /// API compatibility only; passing a different epsilon changes nothing.
     pub fn approximate_normals_simple(
         points: &[Point3<f32>],
         k: usize,

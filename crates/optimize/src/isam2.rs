@@ -910,12 +910,15 @@ use crate::factors::BetweenFactor;
 use std::sync::RwLock;
 
 /// Legacy Isam2 interface for backward compatibility with Python bindings.
+///
+/// **Honest contract:** `optimize_on_update` and `batch_optimize` in
+/// `with_config` are accepted for API compatibility and have **no effect** today.
+/// `update()` always applies the pending factors/values and `optimize()` always
+/// runs a full batch optimisation; there is no incremental/conditional mode.
 pub struct Isam2 {
     solver: RwLock<Isam2Solver>,
     pending_factors: RwLock<Vec<Box<dyn Factor>>>,
     pending_values: RwLock<Values>,
-    #[allow(dead_code)]
-    optimize_on_update: bool,
 }
 
 impl Isam2 {
@@ -923,12 +926,11 @@ impl Isam2 {
         Self::with_config(true, false)
     }
 
-    pub fn with_config(optimize_on_update: bool, _batch_optimize: bool) -> Self {
+    pub fn with_config(_optimize_on_update: bool, _batch_optimize: bool) -> Self {
         Self {
             solver: RwLock::new(Isam2Solver::default()),
             pending_factors: RwLock::new(Vec::new()),
             pending_values: RwLock::new(Values::new()),
-            optimize_on_update,
         }
     }
 

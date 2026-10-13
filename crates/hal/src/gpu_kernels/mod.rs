@@ -1169,8 +1169,13 @@ pub mod spatial_gpu {
         Ok(())
     }
 
-    /// Build KDTree on GPU (parallel construction) - simplified version
-    /// Returns sorted Morton codes as a basic spatial index
+    /// Build a Morton-ordered spatial index on the GPU.
+    ///
+    /// This is NOT a KDTree: it sorts nothing into nodes and stores no split
+    /// planes. `GpuKDTree` holds the point cloud plus one Morton code per point;
+    /// the query kernels are brute force over the cloud, so calling this
+    /// `build_kdtree` is a misnomer kept for API compatibility. The Morton codes
+    /// are computed but not traversed today.
     pub fn build_kdtree(
         gpu: &crate::gpu::GpuContext,
         points: &[Vector3<f32>],
@@ -1544,7 +1549,8 @@ pub mod spatial_gpu {
         Ok(result)
     }
 
-    /// GPU KDTree handle
+    /// GPU "KDTree" handle - see `build_kdtree`: this is Morton-ordered points,
+    /// not a tree. Fields are named for what they hold.
     pub struct GpuKDTree {
         /// The point cloud, as `vec4<f32>` (w unused).
         pub points_buffer: wgpu::Buffer,
