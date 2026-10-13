@@ -151,14 +151,13 @@ Its sibling on the same struct is **still open**:
 - This is an **OpenCV-named** API (`createBackgroundSubtractorMOG2`) whose shadow-detection contract is absent
   with no error and no flag on the output.
 
-### (c3) `cv-hal` — `compute_distance_field` is neither signed nor a surface distance
-- `crates/hal/src/gpu_kernels/mod.rs:1787-1788` — doc: "Compute distance field on GPU - **signed** distance to
-  mesh surface".
-- Body: initialises `vec![f32::MAX; total_voxels]` (`:1800`) and keeps `min_dist = min_dist.min(d)` over the
-  **three vertices** of each face (`:1867` comment: "distance to triangle (simplified: distance to closest
-  vertex)"). No inside/outside test and no negation anywhere in the function — the value is never negative,
-  so it is an **unsigned** field; unfilled voxels stay at `f32::MAX`, and a point may sit below the true surface.
-  Both `signed` and `surface` in the doc are unearned.
+### (c3) `cv-hal` — `compute_distance_field` is neither signed nor a surface distance — **CLOSED**
+- Was: doc claimed "on GPU" / "**signed** distance to mesh surface" while the body ignored the GPU
+  handle and returned unsigned distance to the closest *vertex* of each face (never negative, not a
+  surface distance). Now: unused handle gone; each voxel is the signed Euclidean distance to the
+  closest point on any triangle (Ericson), sign from the winning face's winding normal; voxels with
+  no face in the narrow band stay at `+∞`. Pinned by
+  `distance_field_is_signed_surface_distance_not_closest_vertex`.
 
 ### (c4) `cv-hal` — `build_kdtree` returns Morton codes, not a tree
 - `crates/hal/src/gpu_kernels/mod.rs:1172-1175` — doc: "Build KDTree on GPU (parallel construction) - simplified
@@ -324,8 +323,9 @@ non-trivial.
   point upload and a WGSL pipeline (`viewer/src/native_viewer.rs:114-117`, `render.rs:59-150`);
   the crate's header doc denying this is stale (see (c5)). wgpu-only: `None` on the glow path.
 - **Absent — `3d::gpu` normal transfer / hybrid odometry**: (b1) #5, #6.
-- **Partial — GPU mesh ops**: `hal::gpu_kernels::simplify_mesh` and `batch_nearest_neighbors` are CPU
-  bodies under GPU names (see (d1), (d2)); `compute_distance_field` is unsigned (see (c3)).
+- **Partial — GPU mesh ops**: `hal::gpu_kernels::simplify_mesh` is honest CPU (see (d2));
+  `batch_nearest_neighbors` is now a real GPU kernel (see (d1)); `compute_distance_field` is a real
+  signed surface field on CPU (see (c3)).
 - **Small surface for a target:** `pointcloud` has 10 public items and 18 tests — the Open3D
   replacement's dedicated point-cloud crate is an order of magnitude smaller than `3d`.
 
@@ -469,8 +469,7 @@ eval, dnn, distributed, core, cli: 0.** (Note: 4 of the geometry2d hits are a lo
 - `gpu_kernels/mod.rs:1172` `build_kdtree` "simplified version / Returns sorted Morton codes" — see below.
 - `gpu_kernels/mod.rs:1238` batch NN "simplified brute force" → CPU (see b1 #3).
 - `gpu_kernels/mod.rs:1619` `simplify_mesh` "on GPU - simplified" (see b1 #4).
-- `gpu_kernels/mod.rs:1808` distance field "simplified brute-force".
-- `gpu_kernels/mod.rs:1867` "distance to triangle (simplified: distance to closest vertex)".
+- `gpu_kernels/mod.rs` distance field closest-vertex stub — **closed** (see c3).
 - `gpu_kernels/pointcloud.rs:27` normals CPU fallback not implemented (see b1 #2).
 - `gpu_kernels/undistort.rs:140` `_ => 1, // Default to bilinear for now`.
 - `gpu/mod.rs:578` "Create a simplified compute pipeline".

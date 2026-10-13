@@ -1909,110 +1909,179 @@ pub mod raycasting_gpu {
         crate::gpu_kernels::raycasting::cast_rays(gpu, rays, vertices, faces)
     }
 
-    /// Compute distance field on GPU - signed distance to mesh surface
+    /// Closest point on triangle `a,b,c` to query `p` (Ericson), plus the
+    /// triangle's unit face normal. Returns `None` for a degenerate face.
+    fn closest_point_on_triangle(
+        p: Point3<f32>,
+        a: Point3<f32>,
+        b: Point3<f32>,
+        c: Point3<f32>,
+    ) -> Option<(Point3<f32>, Vector3<f32>)> {
+        let ab = b - a;
+        let ac = c - a;
+        let mut normal = ab.cross(&ac);
+        let n2 = normal.norm_squared();
+        if n2 < 1e-20 {
+            return None;
+        }
+        normal /= n2.sqrt();
+
+        let ap = p - a;
+        let d1 = ab.dot(&ap);
+        let d2 = ac.dot(&ap);
+        if d1 <= 0.0 && d2 <= 0.0 {
+            return Some((a, normal));
+        }
+
+        let bp = p - b;
+        let d3 = ab.dot(&bp);
+        let d4 = ac.dot(&bp);
+        if d3 >= 0.0 && d4 <= d3 {
+            return Some((b, normal));
+        }
+
+        let vc = d1 * d4 - d3 * d2;
+        if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            let v = d1 / (d1 - d3);
+            return Some((a + ab * v, normal));
+        }
+
+        let cp = p - c;
+        let d5 = ab.dot(&cp);
+        let d6 = ac.dot(&cp);
+        if d6 >= 0.0 && d5 <= d6 {
+            return Some((c, normal));
+        }
+
+        let vb = d5 * d2 - d1 * d6;
+        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            let w = d2 / (d2 - d6);
+            return Some((a + ac * w, normal));
+        }
+
+        let va = d3 * d6 - d5 * d4;
+        if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+            let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+            return Some((b + (c - b) * w, normal));
+        }
+
+        let denom = 1.0 / (va + vb + vc);
+        Some((a + ab * (vb * denom) + ac * (vc * denom), normal))
+    }
+
+    /// Signed distance field of a triangle mesh on a regular grid. **Runs on CPU.**
+    ///
+    /// This used to claim "on GPU" / "signed distance to mesh surface" while
+    /// the body ignored the GPU handle and returned the unsigned distance to
+    /// the closest *vertex* of each face — never negative, and not a surface
+    /// distance. The unused handle is gone; each voxel now stores the signed
+    /// Euclidean distance to the closest point on any triangle (Ericson), with
+    /// the sign taken from the winning face's winding normal (positive on the
+    /// normal side). Voxels with no face inside the search band stay at
+    /// `+∞` (`f32::MAX`). A GPU path would be a narrow-band kernel against a
+    /// BVH; when one exists this is where it goes.
     pub fn compute_distance_field(
-        _gpu: &crate::gpu::GpuContext,
         mesh_vertices: &[Point3<f32>],
         mesh_faces: &[[u32; 3]],
         grid_origin: Point3<f32>,
         grid_size: (u32, u32, u32),
         voxel_size: f32,
     ) -> crate::Result<Vec<f32>> {
-        if mesh_vertices.is_empty() || mesh_faces.is_empty() {
+        if mesh_vertices.is_empty() || mesh_faces.is_empty() || voxel_size <= 0.0 {
             return Ok(vec![]);
         }
 
         let (gx, gy, gz) = grid_size;
+        if gx == 0 || gy == 0 || gz == 0 {
+            return Ok(vec![]);
+        }
         let total_voxels = (gx * gy * gz) as usize;
         let mut distance_field = vec![f32::MAX; total_voxels];
 
-        // For each grid point, find distance to nearest mesh face
-        // This is a simplified brute-force implementation
-        // A proper implementation would use spatial acceleration structures
-
         let inv_voxel = 1.0 / voxel_size;
+        // Narrow-band radius in voxels. Faces are hashed into a dilated AABB
+        // of this radius so each query only probes its own cell.
+        let search_radius = 2i32;
 
-        // Build a simple spatial index using voxel hashing
-        let mut voxel_map: std::collections::HashMap<(u32, u32, u32), Vec<usize>> =
+        let mut voxel_map: std::collections::HashMap<(i32, i32, i32), Vec<usize>> =
             std::collections::HashMap::new();
 
         for (face_idx, face) in mesh_faces.iter().enumerate() {
-            let v0 = mesh_vertices[face[0] as usize];
-            let v1 = mesh_vertices[face[1] as usize];
-            let v2 = mesh_vertices[face[2] as usize];
+            let i0 = face[0] as usize;
+            let i1 = face[1] as usize;
+            let i2 = face[2] as usize;
+            if i0 >= mesh_vertices.len() || i1 >= mesh_vertices.len() || i2 >= mesh_vertices.len() {
+                continue;
+            }
+            let v0 = mesh_vertices[i0];
+            let v1 = mesh_vertices[i1];
+            let v2 = mesh_vertices[i2];
 
-            // Find voxel bounds for this face
-            let min_x = ((v0.x.min(v1.x).min(v2.x) - grid_origin.x) * inv_voxel).floor() as i32;
-            let max_x = ((v0.x.max(v1.x).max(v2.x) - grid_origin.x) * inv_voxel).ceil() as i32;
-            let min_y = ((v0.y.min(v1.y).min(v2.y) - grid_origin.y) * inv_voxel).floor() as i32;
-            let max_y = ((v0.y.max(v1.y).max(v2.y) - grid_origin.y) * inv_voxel).ceil() as i32;
-            let min_z = ((v0.z.min(v1.z).min(v2.z) - grid_origin.z) * inv_voxel).floor() as i32;
-            let max_z = ((v0.z.max(v1.z).max(v2.z) - grid_origin.z) * inv_voxel).ceil() as i32;
+            let min_x = ((v0.x.min(v1.x).min(v2.x) - grid_origin.x) * inv_voxel).floor() as i32
+                - search_radius;
+            let max_x = ((v0.x.max(v1.x).max(v2.x) - grid_origin.x) * inv_voxel).ceil() as i32
+                + search_radius;
+            let min_y = ((v0.y.min(v1.y).min(v2.y) - grid_origin.y) * inv_voxel).floor() as i32
+                - search_radius;
+            let max_y = ((v0.y.max(v1.y).max(v2.y) - grid_origin.y) * inv_voxel).ceil() as i32
+                + search_radius;
+            let min_z = ((v0.z.min(v1.z).min(v2.z) - grid_origin.z) * inv_voxel).floor() as i32
+                - search_radius;
+            let max_z = ((v0.z.max(v1.z).max(v2.z) - grid_origin.z) * inv_voxel).ceil() as i32
+                + search_radius;
 
             for z in min_z..=max_z {
                 for y in min_y..=max_y {
                     for x in min_x..=max_x {
-                        let key = (x as u32, y as u32, z as u32);
-                        voxel_map.entry(key).or_insert_with(Vec::new).push(face_idx);
+                        voxel_map.entry((x, y, z)).or_default().push(face_idx);
                     }
                 }
             }
         }
 
-        // For each voxel, compute distance to nearest face in its neighborhood
-        let search_radius = 2i32; // voxels
+        for z in 0..gz as i32 {
+            for y in 0..gy as i32 {
+                for x in 0..gx as i32 {
+                    let idx = ((z as u32 * gy + y as u32) * gx + x as u32) as usize;
+                    let p = Point3::new(
+                        grid_origin.x + x as f32 * voxel_size,
+                        grid_origin.y + y as f32 * voxel_size,
+                        grid_origin.z + z as f32 * voxel_size,
+                    );
 
-        for z in 0..gz {
-            for y in 0..gy {
-                for x in 0..gx {
-                    let idx = ((z * gy + y) * gx + x) as usize;
+                    let Some(face_indices) = voxel_map.get(&(x, y, z)) else {
+                        continue;
+                    };
 
-                    // Check nearby voxels for faces
-                    let mut min_dist = f32::MAX;
+                    let mut best_dist_sq = f32::MAX;
+                    let mut best_signed = f32::MAX;
 
-                    for dz in -search_radius..=search_radius {
-                        for dy in -search_radius..=search_radius {
-                            for dx in -search_radius..=search_radius {
-                                let key = (
-                                    (x as i32 + dx) as u32,
-                                    (y as i32 + dy) as u32,
-                                    (z as i32 + dz) as u32,
-                                );
-
-                                if let Some(faces_in_voxel) = voxel_map.get(&key) {
-                                    for &face_idx in faces_in_voxel {
-                                        let face = mesh_faces[face_idx];
-                                        let v0 = mesh_vertices[face[0] as usize];
-                                        let v1 = mesh_vertices[face[1] as usize];
-                                        let v2 = mesh_vertices[face[2] as usize];
-
-                                        // Compute distance to triangle (simplified: distance to closest vertex)
-                                        let px = grid_origin.x + x as f32 * voxel_size;
-                                        let py = grid_origin.y + y as f32 * voxel_size;
-                                        let pz = grid_origin.z + z as f32 * voxel_size;
-
-                                        let d0 = ((v0.x - px).powi(2)
-                                            + (v0.y - py).powi(2)
-                                            + (v0.z - pz).powi(2))
-                                        .sqrt();
-                                        let d1 = ((v1.x - px).powi(2)
-                                            + (v1.y - py).powi(2)
-                                            + (v1.z - pz).powi(2))
-                                        .sqrt();
-                                        let d2 = ((v2.x - px).powi(2)
-                                            + (v2.y - py).powi(2)
-                                            + (v2.z - pz).powi(2))
-                                        .sqrt();
-
-                                        let d = d0.min(d1).min(d2);
-                                        min_dist = min_dist.min(d);
-                                    }
-                                }
-                            }
+                    for &face_idx in face_indices {
+                        let face = mesh_faces[face_idx];
+                        let v0 = mesh_vertices[face[0] as usize];
+                        let v1 = mesh_vertices[face[1] as usize];
+                        let v2 = mesh_vertices[face[2] as usize];
+                        let Some((closest, normal)) = closest_point_on_triangle(p, v0, v1, v2)
+                        else {
+                            continue;
+                        };
+                        let delta = p - closest;
+                        let dist_sq = delta.norm_squared();
+                        if dist_sq < best_dist_sq {
+                            best_dist_sq = dist_sq;
+                            let dist = dist_sq.sqrt();
+                            // Positive on the face-normal side; zero on the surface.
+                            best_signed = if delta.dot(&normal) >= 0.0 {
+                                dist
+                            } else {
+                                -dist
+                            };
                         }
                     }
 
-                    distance_field[idx] = min_dist;
+                    if best_dist_sq < f32::MAX {
+                        distance_field[idx] = best_signed;
+                    }
                 }
             }
         }

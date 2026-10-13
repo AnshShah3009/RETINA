@@ -645,3 +645,85 @@ fn test_normal_map_consistency() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+/// Index into a dense `(gx, gy, gz)` field laid out `z-major` as the function returns.
+fn field_at(field: &[f32], gx: u32, gy: u32, x: u32, y: u32, z: u32) -> f32 {
+    field[((z * gy + y) * gx + x) as usize]
+}
+
+#[test]
+fn distance_field_is_signed_surface_distance_not_closest_vertex() {
+    // Unit triangle in the xy-plane, winding CCW → normal +z.
+    // Old body returned unsigned distance to the nearest *vertex*; a sample
+    // above the centroid must now report ≈ +height (surface) and flip sign
+    // below the plane — neither of which a closest-vertex field can do.
+    let vertices = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    let faces = [[0u32, 1, 2]];
+
+    // Centroid of the triangle is at (2/3, 2/3, 0). Put that on a grid cell
+    // and sample one voxel above and one below.
+    let voxel = 0.5_f32;
+    let gx = 5u32;
+    let gy = 5u32;
+    let gz = 5u32;
+    // Origin so cell (1,1,2) sits at world (2/3, 2/3, 0):
+    //   origin + i * voxel = target  ⇒  origin = target - i * voxel
+    let cx = 2.0 / 3.0;
+    let cy = 2.0 / 3.0;
+    let origin = Point3::new(cx - 1.0 * voxel, cy - 1.0 * voxel, 0.0 - 2.0 * voxel);
+
+    let field = cv_hal::gpu_kernels::raycasting_gpu::compute_distance_field(
+        &vertices,
+        &faces,
+        origin,
+        (gx, gy, gz),
+        voxel,
+    )
+    .expect("distance field");
+    assert_eq!(field.len(), (gx * gy * gz) as usize);
+
+    let on_surface = field_at(&field, gx, gy, 1, 1, 2);
+    let above = field_at(&field, gx, gy, 1, 1, 3); // +voxel in z
+    let below = field_at(&field, gx, gy, 1, 1, 1); // -voxel in z
+
+    assert!(
+        on_surface.abs() < 1e-4,
+        "centroid cell should be on the surface, got {on_surface}"
+    );
+    assert!(
+        (above - voxel).abs() < 1e-4,
+        "one voxel above must be +{voxel} (surface distance), got {above}"
+    );
+    assert!(
+        (below + voxel).abs() < 1e-4,
+        "one voxel below must be -{voxel} (signed), got {below}"
+    );
+
+    // Closest-vertex would have reported distance to (0,0,0)/(2,0,0)/(0,2,0)
+    // from the raised centroid ≈ sqrt((2/3)^2 + (2/3)^2 + voxel^2) ≈ 1.05,
+    // not `voxel`. Pin that the old answer is gone.
+    let vertex_lie = (cx * cx + cy * cy + voxel * voxel).sqrt();
+    assert!(
+        (above - vertex_lie).abs() > 0.2,
+        "must not still be returning closest-vertex distance ({vertex_lie}), got {above}"
+    );
+}
+
+#[test]
+fn distance_field_empty_inputs_return_empty() {
+    let empty: Vec<Point3<f32>> = vec![];
+    let faces: Vec<[u32; 3]> = vec![];
+    let out = cv_hal::gpu_kernels::raycasting_gpu::compute_distance_field(
+        &empty,
+        &faces,
+        Point3::origin(),
+        (4, 4, 4),
+        0.1,
+    )
+    .unwrap();
+    assert!(out.is_empty());
+}
