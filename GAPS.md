@@ -127,7 +127,7 @@ The Plot3D `.grid(bool)` precedent cited in the brief is **closed** — `Figure:
 read by the exporter at `crates/plot/src/export.rs:72` and `Figure::legend` at `:216`.
 Its sibling on the same struct is **still open**:
 
-### (c1) `cv-plot` — `subplot()` accepts an index and discards it; no panel layout exists
+### (c1) `cv-plot` — `subplot()` accepts an index and discards it; no panel layout exists — **CLOSED** (panel layout + `subplot_grid` implemented and tested; see `subplot_layout` tests)
 - `crates/plot/src/chart.rs:173` — `pub fn subplot(&mut self, rows: usize, cols: usize, _index: usize) -> &mut Self`.
   Doc: "Add a new subplot". Body: `while self.subplots.len() < rows * cols { push(SubPlot::default()) }` — `_index`
   is **unused**, and there is no "current subplot" field on `Figure` (`chart.rs:84-91`: title, width, height,
@@ -141,7 +141,7 @@ Its sibling on the same struct is **still open**:
   Net: `rows`/`cols` have no visual effect either beyond padding a Vec. A 2x2 figure renders as overlaid series
   in one axes.
 
-### (c2) `cv-video` — two `MOG2::new` parameters are inert
+### (c2) `cv-video` — two `MOG2::new` parameters are inert — **CLOSED (honest docs)** (detect_shadows/var_threshold documented as inert; `_detect_shadows` unread; no shadow detection added)
 - `crates/video/src/mog2.rs:96,117` — `detect_shadows` is stored as `_detect_shadows` (underscore = deliberately
   unread) and the doc says "**Currently has no effect**". Only "reads" are in tests (`:566,575`).
 - `mog2.rs:37,55,114` — `var_threshold` doc'd as "Variance threshold for detecting shadows … **Not currently used
