@@ -405,15 +405,15 @@ pub fn solve_pnp_ransac(
     reprojection_threshold_px: f64,
     max_iters: usize,
 ) -> Result<(Pose, Vec<bool>)> {
-    if object_points.len() != image_points.len() || object_points.len() < 6 {
+    if object_points.len() != image_points.len() || object_points.len() < 4 {
         return Err(cv_core::Error::AlgorithmError(
-            "solve_pnp_ransac needs >=6 paired points".to_string(),
+            "solve_pnp_ransac needs >=4 paired points".to_string(),
         ));
     }
     require_finite_correspondences(object_points, image_points)?;
 
     let n = object_points.len();
-    let sample_k = 6usize;
+    let sample_k = 3usize;
     let iters = max_iters.max(64);
     let mut best_pose = None;
     let mut best_inliers = vec![false; n];
@@ -422,40 +422,56 @@ pub fn solve_pnp_ransac(
 
     for i in 0..iters {
         let idx = sample_unique_indices(n, sample_k, i as u64 + 11);
-        let sample_obj: Vec<Point3<f64>> = idx.iter().map(|&j| object_points[j]).collect();
-        let sample_img: Vec<Point2<f64>> = idx.iter().map(|&j| image_points[j]).collect();
+        let sample_obj: [nalgebra::Vector3<f64>; 3] = [
+            object_points[idx[0]].coords,
+            object_points[idx[1]].coords,
+            object_points[idx[2]].coords,
+        ];
+        let sample_img: [[f64; 2]; 3] = [
+            [image_points[idx[0]].x, image_points[idx[0]].y],
+            [image_points[idx[1]].x, image_points[idx[1]].y],
+            [image_points[idx[2]].x, image_points[idx[2]].y],
+        ];
 
-        let pose = match solve_pnp_dlt(&sample_obj, &sample_img, intrinsics) {
+        let model = cv_core::PinholeModel::new(
+            *intrinsics,
+            distortion
+                .cloned()
+                .unwrap_or_else(cv_core::Distortion::none),
+        );
+        let poses = match PnpSolver::estimate_p3p(&sample_obj, &sample_img, &model) {
             Ok(v) => v,
             Err(_) => continue,
         };
 
-        let mut inliers = vec![false; n];
-        let mut count = 0usize;
-        let mut sum_err = 0.0f64;
-        for j in 0..n {
-            let err = reprojection_error_px_dist(
-                &pose,
-                intrinsics,
-                distortion,
-                &object_points[j],
-                &image_points[j],
-            );
-            if err.is_finite() && err <= reprojection_threshold_px {
-                inliers[j] = true;
-                count += 1;
-                sum_err += err;
+        for pose in poses {
+            let mut inliers = vec![false; n];
+            let mut count = 0usize;
+            let mut sum_err = 0.0f64;
+            for j in 0..n {
+                let err = reprojection_error_px_dist(
+                    &pose,
+                    intrinsics,
+                    distortion,
+                    &object_points[j],
+                    &image_points[j],
+                );
+                if err.is_finite() && err <= reprojection_threshold_px {
+                    inliers[j] = true;
+                    count += 1;
+                    sum_err += err;
+                }
             }
-        }
-        if count == 0 {
-            continue;
-        }
-        let mean_err = sum_err / count as f64;
-        if count > best_count || (count == best_count && mean_err < best_error) {
-            best_pose = Some(pose);
-            best_inliers = inliers;
-            best_count = count;
-            best_error = mean_err;
+            if count == 0 {
+                continue;
+            }
+            let mean_err = sum_err / count as f64;
+            if count > best_count || (count == best_count && mean_err < best_error) {
+                best_pose = Some(pose);
+                best_inliers = inliers.clone();
+                best_count = count;
+                best_error = mean_err;
+            }
         }
     }
 
