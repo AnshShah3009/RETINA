@@ -1,6 +1,7 @@
 # GAP REPORT — Rust CV workspace at /home/Phoenix/RUST/RETINA
 
-status: **complete**. Source left unmodified — this file is the only write.
+status: **complete** (survey), **living** (closures). The survey itself was read-only; entries
+have since been marked **CLOSED** in the same commit as each fix.
 
 Survey, read-only on source. Method note: counts below are **measured** with the
 `grep -rc` command given in the brief; individual stub claims are verified by reading the body
@@ -34,9 +35,12 @@ Targets claimed by the workspace README/root crate: OpenCV, Open3D, Matplotlib, 
 >   `footprint_is_the_placement_jacobian`.
 >
 > Still open and worth reading before planning: the facade re-exports 11 of 30
-> crates, `erf` is accurate to ~1.5e-7 against SciPy's ~1e-16, `Interpolation::Linear`
-> aliases when downscaling, and `score_msac` is the workspace's only
-> `unimplemented!()`.
+> crates. `Interpolation::Linear` aliases when downscaling — the same as OpenCV's
+> `INTER_LINEAR` (use `INTER_AREA`-style filtering for decimation), so it is a parity
+> property, not a defect. Since closed and kept here only so they are not re-opened:
+> `erf` (now machine precision, `5f17b5b`), `score_msac`'s `unimplemented!()` (b1 #7 —
+> the workspace now has **zero** `todo!`/`unimplemented!`), and the Nistér 5-point
+> solver (`ca4ca75`).
 
 ## (a) Coverage table — public items vs `#[test]` functions, per crate
 
@@ -110,8 +114,8 @@ stubs now return `Err`/`None`/empty **loudly** and say so in a doc comment. Thos
 
 ### (b2) Formerly-silent stubs that now fail loudly (closed — re-reported only so they are not re-opened)
 
-- `crates/calib3d/src/essential.rs:35` — Nistér 5-point solver returns `Err("... is not implemented")`;
-  test at `:72-75` asserts it must not return matrices. **Capability still absent**, but honestly.
+- `crates/calib3d/src/essential.rs` — Nistér 5-point solver used to return `Err("... is not implemented")`.
+  **CLOSED — implemented** (`ca4ca75`); PnP RANSAC also moved to P3P minimal samples (`4d6fcd2`).
 - `crates/hal/src/gpu/compute_context_impl.rs:473,548,563` — GPU `detect_objects`,
   `triangulate_points`, `find_chessboard_corners` return `Err(NotSupported("...use CPU backend"))`.
 - `crates/optimize/src/sparse.rs:109,263` — MLX SpMV / transpose-SpMV return `Err("not implemented yet")`.
