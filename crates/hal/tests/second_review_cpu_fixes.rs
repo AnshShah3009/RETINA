@@ -1,0 +1,80 @@
+//! Second-review CPU HAL fixes (GAPS g-h3, g-h9, g-h10).
+
+use cv_core::storage::CpuStorage;
+use cv_core::tensor::Tensor;
+use cv_core::TensorShape;
+use cv_hal::context::{ComputeContext, DiffusivityType, StereoMatchMethod, StereoMatchParams};
+use cv_hal::cpu::CpuBackend;
+
+fn cpu() -> CpuBackend {
+    CpuBackend::new().expect("CPU backend unavailable")
+}
+
+/// g-h3: on a mostly flat image the zero gradients used to put the 70th
+/// percentile at k = 0, and one Perona-Malik step then wrote NaN over almost
+/// the whole image (4032/4096 pixels).
+#[test]
+fn akaze_k_ignores_zero_gradients_and_diffusion_stays_finite() {
+    let (w, h) = (64usize, 64usize);
+    let mut data = vec![0.0f32; w * h];
+    for y in 28..36 {
+        for x in 28..36 {
+            data[y * w + x] = 1.0;
+        }
+    }
+    let img: Tensor<f32, CpuStorage<f32>> =
+        Tensor::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+    let backend = cpu();
+    let k = backend.akaze_contrast_k(&img).unwrap();
+    assert!(k > 0.0, "k = {k}");
+    let out = backend
+        .akaze_diffusion(&img, k, 0.25, DiffusivityType::PeronaMalik2)
+        .unwrap();
+    let nan = out
+        .as_slice()
+        .unwrap()
+        .iter()
+        .filter(|v| !v.is_finite())
+        .count();
+    assert_eq!(nan, 0, "{nan} non-finite pixels after one diffusion step");
+
+    // No gradient at all: OpenCV's fallback, not 0.
+    let flat: Tensor<f32, CpuStorage<f32>> =
+        Tensor::from_vec(vec![0.5; w * h], TensorShape::new(1, h, w)).unwrap();
+    assert_eq!(backend.akaze_contrast_k(&flat).unwrap(), 0.03);
+}
+
+/// g-h9: a pixel where no disparity in the range can be tested is
+/// "no match" (-1), not disparity 0.
+#[test]
+fn stereo_pixels_with_no_testable_disparity_are_no_match() {
+    let (w, h) = (32usize, 9usize);
+    let data: Vec<f32> = (0..w * h).map(|i| (i % 7) as f32).collect();
+    let l: Tensor<f32, CpuStorage<f32>> =
+        Tensor::from_vec(data.clone(), TensorShape::new(1, h, w)).unwrap();
+    let r: Tensor<f32, CpuStorage<f32>> =
+        Tensor::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+    let params = StereoMatchParams {
+        method: StereoMatchMethod::BlockMatching,
+        min_disparity: 8,
+        num_disparities: 8,
+        block_size: 5,
+    };
+    let out: Tensor<f32, CpuStorage<f32>> = cpu().stereo_match(&l, &r, &params).unwrap();
+    let out = out.as_slice().unwrap();
+    // Row 4, x in 2..=9: every candidate x - d lies left of the image.
+    for x in 2..10 {
+        assert_eq!(out[4 * w + x], -1.0, "x = {x}");
+    }
+}
+
+/// g-h10: an empty train set must give no matches, whatever the ratio.
+#[test]
+fn matching_against_nothing_matches_nothing() {
+    let q: Tensor<u8, CpuStorage<u8>> =
+        Tensor::from_vec(vec![0xAA; 32], TensorShape::new(1, 1, 32)).unwrap();
+    let t: Tensor<u8, CpuStorage<u8>> =
+        Tensor::from_vec(Vec::new(), TensorShape::new(1, 0, 32)).unwrap();
+    let m = cpu().match_descriptors(&q, &t, 1.0).unwrap();
+    assert!(m.matches.is_empty(), "{:?}", m.matches);
+}

@@ -269,27 +269,27 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (57 open, was 77)
+## (g) Second review, 2026-10-31 — findings (54 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
 features/imgproc, `g-i` io/runtime/distributed/video/photo/videoio, `g-m` slam/rendering/
 plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
-### (g1) hal (11 open, was 12)
+### (g1) hal (8 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-h1 | `gpu_kernels/{threshold,color,icp,subtract,pointcloud_transform}.rs` | 1-D dispatches exceed wgpu's 65535-group limit: `threshold` / `cvt_color` on a 3840x2160 frame panic with `dispatch group size dimension ([129600, 1, 1]) must be less or equal to 65535` | HIGH | CONFIRMED |
 | g-h2 | `cpu/border.rs` | **CLOSED.** Was: `Reflect` and `Reflect101` swapped vs OpenCV (cb25ce4 swapped them and pinned the swap in tests); `cv-imgproc`'s own mapping was right. Now the same periodic folding as imgproc; test tables are `cv2.copyMakeBorder` output, including coordinates more than one width outside | was HIGH — fixed | CONFIRMED vs `cv2.copyMakeBorder` |
-| g-h3 | `cpu/compute_context_impl.rs` `akaze_contrast_k` | 70th-percentile gradient over all pixels is 0 on mostly flat images; diffusion then divides `0/0` → 4032/4096 pixels NaN | HIGH | CONFIRMED |
+| g-h3 | `cpu/compute_context_impl.rs` `akaze_contrast_k` | **CLOSED.** Zero gradients excluded on CPU and in the GPU shader (OpenCV's `compute_k_percentile`), 0.03 fallback when none remain. Pinned by `tests/second_review_cpu_fixes.rs`. Was: 70th-percentile gradient over all pixels is 0 on mostly flat images; diffusion then divides `0/0` → 4032/4096 pixels NaN | was HIGH — fixed | CONFIRMED |
 | g-h4 | `cpu/compute_context_impl.rs` `tsdf_extract_mesh` | vertex positions use `i*vs` while integration uses `(i+0.5)*vs` (half-voxel shift), and zero-weight corners are meshed → phantom back surface (wall at z=0.4 gives vertices at 0.375 and 0.471) | HIGH | CONFIRMED |
 | g-h5 | `cpu/compute_context_impl.rs` `hough_lines` | one full accumulator allocated per image row (~3.4 GB at 1080p) | HIGH | ARGUED |
 | g-h6 | `cpu/compute_context_impl.rs` `hough_lines` | no peak suppression (GPU path has 3x3 NMS): one line returns 3 | MED | CONFIRMED |
 | g-h7 | `cpu/compute_context_impl.rs` `optical_flow_lk` | sub-pixel part applied twice; 2.3 px shift oscillates 2.15…2.76 and does not converge | MED | CONFIRMED |
 | g-h8 | `cpu/compute_context_impl.rs` `convolve_2d`, `morphology`, `warp`, `nms`, `stereo` | interleaved multi-channel input treated as `c*h` rows → scrambled output | MED | CONFIRMED |
-| g-h9 | `cpu/compute_context_impl.rs` `stereo_match` | pixels with no testable disparity report 0 (valid) instead of the no-match marker | MED | CONFIRMED |
-| g-h10 | `cpu/compute_context_impl.rs` `match_descriptors` | empty train set + ratio ≥ 1 fabricates a match to index 0 | LOW | CONFIRMED |
+| g-h9 | `cpu/compute_context_impl.rs` `stereo_match` | **CLOSED.** Best disparity starts at the NO_MATCH sentinel. Same test file. Was: pixels with no testable disparity report 0 (valid) instead of the no-match marker | was MED — fixed | CONFIRMED |
+| g-h10 | `cpu/compute_context_impl.rs` `match_descriptors` | **CLOSED.** Queries with no candidate are skipped. Same test file. Was: empty train set + ratio ≥ 1 fabricates a match to index 0 | was LOW — fixed | CONFIRMED |
 | g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | not renormalised after the 0.2 clamp | LOW | ARGUED |
 | g-h12 | AKAZE Scharr derivatives (CPU + WGSL) | taps `[1,3,1]/32` give gain 0.3125 on a unit ramp; should be `[3,10,3]/32` | LOW | ARGUED |
 

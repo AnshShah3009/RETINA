@@ -863,8 +863,12 @@ impl ComputeContext for CpuBackend {
                     continue;
                 }
 
+                // NO_MATCH unless some disparity could actually be tested.
+                // Starting from 0 reported disparity 0 - a valid value - for
+                // pixels where every candidate fell outside the right image
+                // (e.g. `min_disparity = 8` near the left edge).
                 let mut best_sad = T::from_f32(f32::MAX);
-                let mut best_disp = T::ZERO;
+                let mut best_disp = T::from_f32(NO_MATCH);
 
                 for d in 0..num_disp {
                     let disp = min_disp + d;
@@ -4121,7 +4125,11 @@ impl ComputeContext for CpuBackend {
                     }
                 }
 
-                if best_dist as f32 <= ratio_threshold * second_best as f32 {
+                // An empty train set leaves `best_dist` at its sentinel; with
+                // `ratio >= 1` the test below passed (`MAX <= MAX`) and a match
+                // to train index 0 - which does not exist - was fabricated.
+                if best_dist != u32::MAX && best_dist as f32 <= ratio_threshold * second_best as f32
+                {
                     Some(cv_core::FeatureMatch::new(
                         qi as i32,
                         best_idx as i32,
@@ -4697,7 +4705,14 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
 
-        // Sample gradients
+        // Sample gradients. Zero gradients are excluded, as OpenCV's
+        // `compute_k_percentile` does: on a mostly flat image (a small bright
+        // square on black, blurred) they put the 70th percentile at k = 0, and
+        // the Perona-Malik conductance `1 / (1 + |grad|^2 / k^2)` then turned
+        // 4032 of 4096 pixels into NaN (`0 / 0`) in a single diffusion step.
+        if h < 3 || w < 3 {
+            return Ok(T::from_f32(0.03));
+        }
         let mut mags: Vec<T> = (1..h - 1)
             .into_par_iter()
             .flat_map(|y| {
@@ -4705,7 +4720,10 @@ impl ComputeContext for CpuBackend {
                 for x in 1..w - 1 {
                     let lx = src[y * w + x + 1] - src[y * w + x - 1];
                     let ly = src[(y + 1) * w + x] - src[(y - 1) * w + x];
-                    row_mags.push((lx * lx + ly * ly).sqrt());
+                    let mag = (lx * lx + ly * ly).sqrt();
+                    if mag > T::ZERO {
+                        row_mags.push(mag);
+                    }
                 }
                 row_mags
             })
