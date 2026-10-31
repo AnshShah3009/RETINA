@@ -1,7 +1,7 @@
 use nalgebra::Point3;
 use rayon::prelude::*;
 
-use super::dist_sq;
+use super::{knn_excluding_self, knn_tree};
 
 /// Statistical outlier removal (Open3D equivalent).
 ///
@@ -23,21 +23,18 @@ pub fn statistical_outlier_removal(
 
     let k = nb_neighbors.max(1).min(points.len() - 1);
 
-    // Compute mean distance to k nearest neighbours for every point (parallel).
-    let mean_dists: Vec<f64> = points
-        .par_iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let mut dists: Vec<f64> = points
+    // Mean distance to the k nearest neighbours of every point (parallel),
+    // via an f64 KD-tree: O(n log n) instead of an O(n) scan plus a Vec per
+    // point. The neighbour distances are bit-identical to the brute-force
+    // scan's; they are now summed in ascending order.
+    let tree = knn_tree(points);
+    let mean_dists: Vec<f64> = (0..points.len())
+        .into_par_iter()
+        .map(|i| {
+            let sum: f64 = knn_excluding_self(&tree, points, i, k)
                 .iter()
-                .enumerate()
-                .filter(|&(j, _)| j != i)
-                .map(|(_, q)| dist_sq(p, q))
-                .collect();
-            dists.select_nth_unstable_by(k - 1, |a, b| {
-                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let sum: f64 = dists[..k].iter().map(|d| d.sqrt()).sum();
+                .map(|&(_, d)| d)
+                .sum();
             sum / k as f64
         })
         .collect();

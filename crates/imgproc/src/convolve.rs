@@ -630,8 +630,181 @@ pub fn gaussian_blur(image: &GrayImage, sigma: f32) -> GrayImage {
 }
 
 pub fn box_blur(image: &GrayImage, size: usize) -> GrayImage {
-    let kernel = box_kernel(size);
-    convolve(image, &kernel)
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
+    box_blur_ctx(image, size, &runner)
+}
+
+/// `box_blur` on an explicit runner.
+///
+/// GPU runners take the generic `convolve_2d` shader, exactly as before. The
+/// CPU path returns the same bytes as
+/// `convolve_with_border_into_ctx(image, out, &box_kernel(size), Replicate, _)`
+/// (the dense O(size^2)-per-pixel loop) but runs in O(1) per pixel: see
+/// [`box_blur_cpu_into`].
+pub fn box_blur_ctx(image: &GrayImage, size: usize, group: &RuntimeRunner) -> GrayImage {
+    if let Ok(ComputeDevice::Gpu(_)) = group.device() {
+        return convolve_ctx(image, &box_kernel(size), BorderMode::Replicate, group);
+    }
+    let mut out = GrayImage::new(image.width(), image.height());
+    group.run(|| box_blur_cpu_into(image, &mut out, size));
+    out
+}
+
+/// Largest box side the running-sum path handles. The rounding argument in
+/// [`box_blur_cpu_into`] needs `size^2 * 2^-24` well below 1 (the classic
+/// `gamma_n` bound only holds for `n * u < 1`); 1024 keeps it under 1/16, and
+/// also keeps `size^2` exact in `f32` and `255 * size^2` inside `u32`.
+const BOX_BLUR_MAX_FAST_SIZE: usize = 1024;
+
+/// Sentinel in the window-sum lookup table: replay the dense loop.
+const BOX_BLUR_REPLAY: u16 = u16::MAX;
+
+/// Replicate-border box filter, byte-identical to the dense convolution with
+/// [`box_kernel`] but O(1) per pixel.
+///
+/// The dense loop computes `round_ties_even(sum_f32(p_i * w))` with
+/// `w = 1 / (size*size) as f32`, accumulating `n = size^2` products in kernel
+/// order. That float sum is within `(n + 3) * 2^-24 * m` of the exact mean
+/// `m = S / n`, `S` the integer window sum (each product and each of the `n`
+/// additions rounds once, and `w` itself is `1/n` to half an ulp, all terms
+/// non-negative). Whenever `m` lies farther than twice that bound from the
+/// nearest `j + 0.5`, both the float sum and `m` round to the same integer, so
+/// the exact integer `S` (from separable running sums) decides the byte. The
+/// rest - exact ties for even `n`, and the rare near-ties of large kernels -
+/// replay the dense loop for that pixel, so every output byte is the one the
+/// dense loop produced.
+pub fn box_blur_cpu_into(image: &GrayImage, out: &mut GrayImage, size: usize) {
+    let width = image.width() as usize;
+    let height = image.height() as usize;
+    if out.width() != image.width() || out.height() != image.height() {
+        *out = GrayImage::new(image.width(), image.height());
+    }
+    if width == 0 || height == 0 {
+        return;
+    }
+    if size == 0 || size > BOX_BLUR_MAX_FAST_SIZE {
+        // size 0: the dense loop sums nothing and writes 0 everywhere; huge
+        // kernels: keep the dense loop rather than widen the accumulators.
+        let runner = RuntimeRunner::Sync(cv_hal::DeviceId(0));
+        convolve_with_border_into_ctx(
+            image,
+            out,
+            &box_kernel(size),
+            BorderMode::Replicate,
+            &runner,
+        );
+        return;
+    }
+
+    let src = image.as_raw();
+    let lo = -((size / 2) as isize);
+    let hi = lo + size as isize - 1;
+    let clamp = |c: isize, n: usize| c.clamp(0, n as isize - 1) as usize;
+
+    // Horizontal window sums, replicate border.
+    let mut hsum = vec![0u32; width * height];
+    hsum.par_chunks_mut(width)
+        .zip(src.par_chunks(width))
+        .for_each(|(hrow, row)| {
+            let mut s: u32 = (lo..=hi).map(|k| row[clamp(k, width)] as u32).sum();
+            hrow[0] = s;
+            for x in 1..width {
+                s += row[clamp(x as isize + hi, width)] as u32;
+                s -= row[clamp(x as isize - 1 + lo, width)] as u32;
+                hrow[x] = s;
+            }
+        });
+
+    let n = size * size;
+    let w = 1.0 / n as f32;
+    // Twice the float-sum error bound, relative to the mean (see doc comment).
+    let rel_tol = 2.0 * (n as f64 + 3.0) * f64::from(f32::EPSILON) * 0.5 * 1.01;
+    // Output byte for window sum `S`, or `BOX_BLUR_REPLAY` where the float
+    // loop's rounding must be replayed.
+    let decide = |s: u32| -> u16 {
+        let m = s as f64 / n as f64;
+        let dist_to_half = (m - (m.floor() + 0.5)).abs();
+        if dist_to_half > m * rel_tol {
+            m.round() as u16
+        } else {
+            BOX_BLUR_REPLAY
+        }
+    };
+    // Tabulate every possible `S` in `0..=255 n` when that is small (boxes up
+    // to 64x64, ~1 M entries); larger boxes decide per pixel.
+    let lut: Option<Vec<u16>> = (n <= 64 * 64).then(|| (0..=255 * n as u32).map(decide).collect());
+
+    // Vertical running sums over bands of rows.
+    const BAND: usize = 32;
+    out.as_mut()
+        .par_chunks_mut(width * BAND)
+        .enumerate()
+        .for_each(|(band, out_band)| {
+            let y0 = band * BAND;
+            let rows = out_band.len() / width;
+            let mut col: Vec<u32> = vec![0; width];
+            for k in lo..=hi {
+                let r = &hsum[clamp(y0 as isize + k, height) * width..][..width];
+                for (c, &v) in col.iter_mut().zip(r) {
+                    *c += v;
+                }
+            }
+            for dy in 0..rows {
+                let y = y0 + dy;
+                if dy > 0 {
+                    let add = &hsum[clamp(y as isize + hi, height) * width..][..width];
+                    let sub = &hsum[clamp(y as isize - 1 + lo, height) * width..][..width];
+                    for ((c, &a), &s) in col.iter_mut().zip(add).zip(sub) {
+                        *c = *c + a - s;
+                    }
+                }
+                let out_row = &mut out_band[dy * width..(dy + 1) * width];
+                for (x, (o, &s)) in out_row.iter_mut().zip(&col).enumerate() {
+                    let v = match &lut {
+                        Some(lut) => lut[s as usize],
+                        None => decide(s),
+                    };
+                    *o = if v != BOX_BLUR_REPLAY {
+                        v as u8
+                    } else {
+                        box_blur_dense_pixel(src, width, height, x, y, lo, hi, w)
+                    };
+                }
+            }
+        });
+}
+
+/// One pixel of the dense replicate-border box convolution, in the dense
+/// loop's exact accumulation order (rows outer, columns inner).
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn box_blur_dense_pixel(
+    src: &[u8],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    lo: isize,
+    hi: isize,
+    w: f32,
+) -> u8 {
+    let mut sum = 0.0f32;
+    for ky in lo..=hi {
+        let iy = (y as isize + ky).clamp(0, height as isize - 1) as usize;
+        let row = &src[iy * width..(iy + 1) * width];
+        for kx in lo..=hi {
+            let ix = (x as isize + kx).clamp(0, width as isize - 1) as usize;
+            sum += row[ix] as f32 * w;
+        }
+    }
+    sum.round_ties_even().clamp(0.0, 255.0) as u8
 }
 
 pub fn sharpen(image: &GrayImage, amount: f32) -> GrayImage {

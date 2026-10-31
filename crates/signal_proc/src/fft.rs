@@ -324,6 +324,87 @@ mod tests {
         }
     }
 
+    fn signal(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed.wrapping_add(0x9E3779B97F4A7C15);
+        (0..n)
+            .map(|i| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 11) as f64 / (1u64 << 53) as f64 - 0.5 + (i as f64 * 0.01).sin()
+            })
+            .collect()
+    }
+
+    /// `max |a - b| / ||x||_2` (the transforms are orthonormal, so outputs
+    /// have the input's norm).
+    fn rel_err(a: &[f64], b: &[f64], x: &[f64]) -> f64 {
+        let norm = x.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
+        a.iter()
+            .zip(b)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0, f64::max)
+            / norm
+    }
+
+    /// FFT-based DCT-II / DCT-III / DST-I against the O(n^2) definitions they
+    /// replaced: odd, even, prime, power-of-two lengths around the switch-over.
+    #[test]
+    fn fft_dct_dst_match_direct_definitions() {
+        let lengths = [
+            0usize, 1, 2, 3, 7, 16, 17, 18, 31, 32, 33, 64, 100, 127, 255, 256, 257, 1000, 1024,
+            2047,
+        ];
+        for (seed, &n) in lengths.iter().enumerate() {
+            let x = signal(n, seed as u64);
+            let tol = 1e-12;
+            let e = rel_err(&dct(&x), &dct_direct(&x), &x);
+            assert!(e <= tol, "dct n={n}: {e:e}");
+            let e = rel_err(&idct(&x), &idct_direct(&x), &x);
+            assert!(e <= tol, "idct n={n}: {e:e}");
+            let e = rel_err(&dst(&x), &dst_direct(&x), &x);
+            assert!(e <= tol, "dst n={n}: {e:e}");
+            let e = rel_err(&idct(&dct(&x)), &x, &x);
+            assert!(e <= tol, "idct(dct) n={n}: {e:e}");
+            let e = rel_err(&idst(&dst(&x)), &x, &x);
+            assert!(e <= tol, "idst(dst) n={n}: {e:e}");
+        }
+    }
+
+    /// `cargo test --release -p cv-signal --lib dct_dst_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dct_dst_timing() {
+        use std::time::Instant;
+        let time = |f: &dyn Fn(&[f64]) -> Vec<f64>, x: &[f64], reps: usize| {
+            let t = Instant::now();
+            for _ in 0..reps {
+                std::hint::black_box(f(x));
+            }
+            t.elapsed().as_secs_f64() / reps as f64 * 1e3
+        };
+        for n in [64usize, 256, 1024, 4096, 16384] {
+            let x = signal(n, 1);
+            let reps = if n >= 4096 { 3 } else { 50 };
+            let worst = [
+                rel_err(&dct(&x), &dct_direct(&x), &x),
+                rel_err(&idct(&x), &idct_direct(&x), &x),
+                rel_err(&dst(&x), &dst_direct(&x), &x),
+            ]
+            .into_iter()
+            .fold(0.0, f64::max);
+            println!(
+                "n={n:5}: dct {:9.3} -> {:7.3} ms, idct {:9.3} -> {:7.3} ms, dst {:9.3} -> {:7.3} ms, max rel diff {worst:.1e}",
+                time(&dct_direct, &x, reps),
+                time(&dct, &x, reps),
+                time(&idct_direct, &x, reps),
+                time(&idct, &x, reps),
+                time(&dst_direct, &x, reps),
+                time(&dst, &x, reps),
+            );
+        }
+    }
+
     #[test]
     fn test_dst_roundtrip() {
         let x: Vec<f64> = (0..8).map(|i| (i as f64 * 0.3).cos()).collect();
@@ -336,12 +417,108 @@ mod tests {
 }
 
 // ── DCT / DST (Discrete Cosine / Sine Transform) ───────────────────────────
+//
+// Each transform is evaluated through one complex FFT (O(n log n)); below
+// `DIRECT_MAX_LEN` points the O(n^2) definition is cheaper than planning an
+// FFT and is used as-is. Both agree to ~1e-15 relative to the signal norm
+// (see the tests).
+
+/// Lengths up to this use the O(n^2) direct sums.
+const DIRECT_MAX_LEN: usize = 16;
 
 /// Type-II Discrete Cosine Transform (DCT-II), the "standard" DCT.
 ///
-/// Used in JPEG compression, BM3D, and signal processing.
-#[allow(clippy::needless_range_loop)]
+/// Orthonormal scaling: `X[0] = sqrt(1/N) * sum(x)`, `X[k] = sqrt(2/N) *
+/// sum_i x[i] cos(pi (i + 1/2) k / N)`. Used in JPEG compression, BM3D, and
+/// signal processing.
 pub fn dct(input: &[f64]) -> Vec<f64> {
+    let n = input.len();
+    if n <= DIRECT_MAX_LEN {
+        return dct_direct(input);
+    }
+    // Makhoul (1980): with v = [x0, x2, x4, ..., x5, x3, x1] (even samples
+    // forward, odd samples backward) and V = FFT(v),
+    // sum_i x[i] cos(pi (2i + 1) k / 2N) = Re(exp(-i pi k / 2N) V[k]).
+    let mut v: Vec<Complex<f64>> = vec![Complex::new(0.0, 0.0); n];
+    for (i, &x) in input.iter().enumerate() {
+        let j = if i % 2 == 0 { i / 2 } else { n - 1 - i / 2 };
+        v[j] = Complex::new(x, 0.0);
+    }
+    FftPlanner::<f64>::new().plan_fft_forward(n).process(&mut v);
+    let norm0 = (1.0 / n as f64).sqrt();
+    let norm = (2.0 / n as f64).sqrt();
+    v.iter()
+        .enumerate()
+        .map(|(k, c)| {
+            let (s, co) = (-std::f64::consts::PI * k as f64 / (2 * n) as f64).sin_cos();
+            let re = c.re * co - c.im * s;
+            re * if k == 0 { norm0 } else { norm }
+        })
+        .collect()
+}
+
+/// Type-III Discrete Cosine Transform (inverse of the orthonormal [`dct`]).
+pub fn idct(input: &[f64]) -> Vec<f64> {
+    let n = input.len();
+    if n <= DIRECT_MAX_LEN {
+        return idct_direct(input);
+    }
+    // Undo the orthonormal scaling to unnormalised DCT-II coefficients X
+    // (x[i] = (X[0] + 2 sum_{k>0} X[k] cos(..)) / N), rebuild the FFT of
+    // Makhoul's reordered sequence, V[k] = exp(i pi k / 2N) (X[k] - i X[N-k])
+    // with X[N] = 0, invert it, and undo the reordering.
+    let nf = n as f64;
+    let x_un = |k: usize| -> f64 {
+        if k == 0 {
+            input[0] * nf * (1.0 / nf).sqrt()
+        } else if k < n {
+            input[k] * nf * 0.5 * (2.0 / nf).sqrt()
+        } else {
+            0.0
+        }
+    };
+    let mut v: Vec<Complex<f64>> = (0..n)
+        .map(|k| {
+            let (s, co) = (std::f64::consts::PI * k as f64 / (2 * n) as f64).sin_cos();
+            let (a, b) = (x_un(k), -x_un(n - k));
+            // (co + i s) * (a + i b)
+            Complex::new(co * a - s * b, co * b + s * a)
+        })
+        .collect();
+    FftPlanner::<f64>::new().plan_fft_inverse(n).process(&mut v);
+    let mut out = vec![0.0; n];
+    for (i, o) in out.iter_mut().enumerate() {
+        let j = if i % 2 == 0 { i / 2 } else { n - 1 - i / 2 };
+        *o = v[j].re / nf;
+    }
+    out
+}
+
+/// Discrete Sine Transform (DST-I, orthogonal).
+///
+/// Uses the Type-I DST basis: `sin(pi * (i+1) * (k+1) / (N+1))`.
+/// Orthogonal and self-inverse (up to scaling): `idst(dst(x)) == x`.
+pub fn dst(input: &[f64]) -> Vec<f64> {
+    let n = input.len();
+    if n <= DIRECT_MAX_LEN {
+        return dst_direct(input);
+    }
+    // Odd extension a = [0, x0..x_{N-1}, 0, -x_{N-1}..-x0] of length 2N + 2:
+    // FFT(a)[m] = -2i sum_i x[i] sin(pi (i + 1) m / (N + 1)).
+    let m = 2 * n + 2;
+    let mut a: Vec<Complex<f64>> = vec![Complex::new(0.0, 0.0); m];
+    for (i, &x) in input.iter().enumerate() {
+        a[i + 1] = Complex::new(x, 0.0);
+        a[m - 1 - i] = Complex::new(-x, 0.0);
+    }
+    FftPlanner::<f64>::new().plan_fft_forward(m).process(&mut a);
+    let norm = (2.0 / (n + 1) as f64).sqrt();
+    (0..n).map(|k| -a[k + 1].im * 0.5 * norm).collect()
+}
+
+/// O(n^2) evaluation of [`dct`] straight from the definition.
+#[allow(clippy::needless_range_loop)]
+fn dct_direct(input: &[f64]) -> Vec<f64> {
     let n = input.len();
     if n == 0 {
         return vec![];
@@ -364,9 +541,9 @@ pub fn dct(input: &[f64]) -> Vec<f64> {
     output
 }
 
-/// Type-III Discrete Cosine Transform (inverse DCT).
+/// O(n^2) evaluation of [`idct`] straight from the definition.
 #[allow(clippy::needless_range_loop)]
-pub fn idct(input: &[f64]) -> Vec<f64> {
+fn idct_direct(input: &[f64]) -> Vec<f64> {
     let n = input.len();
     if n == 0 {
         return vec![];
@@ -385,12 +562,9 @@ pub fn idct(input: &[f64]) -> Vec<f64> {
     output
 }
 
-/// Discrete Sine Transform (DST-I, orthogonal).
-///
-/// Uses the Type-I DST basis: `sin(pi * (i+1) * (k+1) / (N+1))`.
-/// Orthogonal and self-inverse (up to scaling): `idst(dst(x)) == x`.
+/// O(n^2) evaluation of [`dst`] straight from the definition.
 #[allow(clippy::needless_range_loop)]
-pub fn dst(input: &[f64]) -> Vec<f64> {
+fn dst_direct(input: &[f64]) -> Vec<f64> {
     let n = input.len();
     if n == 0 {
         return vec![];

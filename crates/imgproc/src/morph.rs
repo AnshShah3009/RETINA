@@ -110,6 +110,49 @@ fn map_coord(coord: i32, len: i32, border: BorderMode) -> Option<i32> {
     }
 }
 
+/// Separable fast path for rectangular kernels: identical bytes to the
+/// per-tap loops below (min/max are exact and the border maps are per-axis;
+/// see `cv_hal::cpu::morph_rect`). Returns `false` for any other kernel.
+fn rect_morph_once_into(
+    src: &GrayImage,
+    output: &mut GrayImage,
+    kernel: &[(i32, i32)],
+    border: BorderMode,
+    is_max: bool,
+) -> bool {
+    let Some((x0, x1, y0, y1)) = cv_hal::cpu::morph_rect::as_rectangle(kernel) else {
+        return false;
+    };
+    let width = src.width() as i32;
+    let height = src.height() as i32;
+    let kw = (x1 as i64 - x0 as i64 + 1) as usize;
+    let kh = (y1 as i64 - y0 as i64 + 1) as usize;
+    let axis_map = |n: i32, lo: i32, k: usize| -> Vec<Option<usize>> {
+        (0..n as usize + k - 1)
+            .map(|j| map_coord(j as i32 + lo, n, border).map(|c| c as usize))
+            .collect()
+    };
+    let fill = match border {
+        BorderMode::Constant(v) => v,
+        // Every other mode maps each coordinate into a non-empty image.
+        _ if is_max => 0,
+        _ => 255,
+    };
+    cv_hal::cpu::morph_rect::rect_extremum(
+        src.as_raw(),
+        width as usize,
+        height as usize,
+        output.as_mut(),
+        kw,
+        kh,
+        &axis_map(width, x0, kw),
+        &axis_map(height, y0, kh),
+        fill,
+        is_max,
+    );
+    true
+}
+
 fn dilate_once_into(
     src: &GrayImage,
     output: &mut GrayImage,
@@ -123,6 +166,9 @@ fn dilate_once_into(
         *output = GrayImage::new(src.width(), src.height());
     }
     if width == 0 || height == 0 {
+        return;
+    }
+    if rect_morph_once_into(src, output, kernel, border, true) {
         return;
     }
 
@@ -165,6 +211,9 @@ fn erode_once_into(
         *output = GrayImage::new(src.width(), src.height());
     }
     if width == 0 || height == 0 {
+        return;
+    }
+    if rect_morph_once_into(src, output, kernel, border, false) {
         return;
     }
 

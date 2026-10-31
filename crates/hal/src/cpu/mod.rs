@@ -11,7 +11,10 @@ use wide::*;
 pub mod border;
 pub mod canny_opencv;
 pub mod hough_standard;
+pub mod morph_rect;
 pub mod simd;
+pub mod stereo_sad;
+pub mod template_match;
 pub mod utils;
 
 static NEXT_CPU_ID: AtomicU32 = AtomicU32::new(0);
