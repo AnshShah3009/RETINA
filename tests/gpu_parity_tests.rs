@@ -1371,8 +1371,12 @@ fn shader_storage_element_types_match_their_hosts() {
 
     // (binding index) -> the element type the host binds there.
     let expected: &[(&str, &[(u32, &str)])] = &[
-        ("canny.wgsl", &[(0, "f32"), (1, "f32"), (2, "u32")]),
-        ("hough.wgsl", &[(0, "f32"), (1, "u32")]),
+        // canny: binding 1 is the integer gradient/direction map and 2 the packed
+        // 8-bit NMS states since the bit-exact OpenCV port (4d34877).
+        ("canny.wgsl", &[(0, "f32"), (1, "u32"), (2, "u32")]),
+        // hough: binding 1 is the vec2 angle table (a layout view, not asserted);
+        // 2 is the accumulator and 3 the host-checked ambiguous-vote list.
+        ("hough.wgsl", &[(0, "f32"), (2, "u32"), (3, "u32")]),
         ("hough_circles.wgsl", &[(0, "f32"), (1, "u32")]),
         ("icp_reduce.wgsl", &[(0, "f32"), (1, "f32")]),
         ("lbvh_build.wgsl", &[(0, "u32"), (1, "u32")]),
@@ -1391,7 +1395,6 @@ fn shader_storage_element_types_match_their_hosts() {
         ("convolve_2d.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("fast_f32.wgsl", &[(0, "f32")]),
         ("fast_nms_f32.wgsl", &[(0, "f32")]),
-        ("hough_f32.wgsl", &[(0, "f32")]),
         ("icp_dense.wgsl", &[(0, "f32")]),
         ("iou_matrix.wgsl", &[(0, "f32")]),
         (
@@ -1515,9 +1518,9 @@ fn shader_storage_element_types_match_their_hosts() {
 /// declare only `array<u32>` are the packed-u8 set (`sobel`, `resize`,
 /// `threshold`, `bilateral`, `fast`, `color_cvt`, `morphology`, `undistort`, the
 /// `_bf16` variants, and the two integer-indexed kernels), and every `_f32`
-/// variant declares only f32. The one apparent exception is `hough_f32`, whose
-/// second binding is a u32 accumulator - an atomic, not pixel data - which is
-/// why `atomic` is excluded below.
+/// variant declares only f32. (`hough_f32`, whose second binding was a u32
+/// accumulator, was folded into `hough.wgsl` in 4d34877; `atomic` stays
+/// excluded below for the accumulators that remain.)
 #[test]
 fn f32_suffixed_shaders_declare_f32_storage() {
     use std::collections::BTreeMap;
