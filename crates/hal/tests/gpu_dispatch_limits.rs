@@ -402,13 +402,8 @@ fn exclusive_scan_past_the_workgroup_limit_matches_cpu() {
 #[test]
 fn radix_sort_past_the_workgroup_limit_keeps_every_key_and_orders_the_top_byte() {
     // 2^24 + 4096 keys at 256 per workgroup = 65552 histogram/scatter groups.
-    //
-    // radix_sort_u32 is not a correct sort even for small inputs: its scatter
-    // ranks keys within a workgroup with atomicAdd, which is not stable, so
-    // LSD passes scramble the lower digits (pre-existing, separate from the
-    // dispatch limit). What the dispatch fix must guarantee is that every
-    // histogram/scatter workgroup lands in its own column: the output is a
-    // permutation of the input, and the last pass (top byte) is ordered.
+    // Every histogram/scatter workgroup must land in its own column, and the
+    // (stable) LSD passes must produce exactly the CPU sort.
     let Some(gpu) = require_gpu() else { return };
 
     let n = (1usize << 24) + 4096;
@@ -426,14 +421,9 @@ fn radix_sort_past_the_workgroup_limit_keeps_every_key_and_orders_the_top_byte()
             .unwrap();
     let got = sorted.storage.as_slice().unwrap().to_vec();
     assert_eq!(got.len(), n);
-    let unordered = got.windows(2).position(|w| (w[0] >> 24) > (w[1] >> 24));
-    assert_eq!(unordered, None, "top byte not ordered");
-    let mut multiset = got;
-    multiset.sort_unstable();
-    assert!(
-        multiset == expected,
-        "output is not a permutation of the input"
-    );
+    let unordered = got.windows(2).filter(|w| w[0] > w[1]).count();
+    assert_eq!(unordered, 0, "{unordered} adjacent pairs out of order");
+    assert!(got == expected, "output differs from sort()");
 }
 
 #[test]

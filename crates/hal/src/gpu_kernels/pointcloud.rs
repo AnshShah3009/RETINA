@@ -263,12 +263,12 @@ pub fn compute_normals(
         _phantom: PhantomData,
     };
 
-    let (_sorted_codes, sorted_indices) =
+    let (sorted_codes, sorted_indices) =
         radix_sort_key_value_u32(ctx, &codes_tensor, &indices_tensor)?;
 
     // 3.5 Build LBVH
     let nodes_tensor =
-        crate::gpu_kernels::lbvh::build_lbvh(ctx, points, &sorted_indices, &codes_tensor)?;
+        crate::gpu_kernels::lbvh::build_lbvh(ctx, points, &sorted_indices, &sorted_codes)?;
 
     // 4. kNN + Covariance
     let covs_buf = ctx.get_buffer(

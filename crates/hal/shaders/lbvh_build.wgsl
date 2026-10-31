@@ -115,7 +115,9 @@ fn build_radix_tree(
                 split = new_split;
             }
         }
-        if (step == 1) { break; }
+        // `<= 1`, not `== 1`: with l == 0 (only possible when the codes
+        // are not sorted) step stays 0 and `== 1` never breaks.
+        if (step <= 1) { break; }
     }
     let m = i + split * d + min(0, d);
 
