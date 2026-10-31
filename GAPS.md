@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (28 open, was 86)
+## (g) Second review, 2026-10-31 — findings (27 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -329,12 +329,12 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
 Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` uses it as the match threshold. Doc fix only.
 
-### (g4) slam / rendering / plot / cli / dnn / python (2 open, was 11)
+### (g4) slam / rendering / plot / cli / dnn / python (1 open, was 11)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-m1 | `slam/src/tracking.rs` | **CLOSED.** RGB-D bootstrap from depth, monocular two-view (5-point) initialisation, visible tracking loss (`Err` + `Tracker::state`), descriptor/keypoint pairing fixed. Pinned by `tests/slam_bootstrap.rs` (RGB-D ≤ 1.25 cm / 0.13° over 5 frames). Was: map is never populated, so `process_frame` / `process_frame_with_depth` / Python `PySlam` always fail | was HIGH — fixed | CONFIRMED |
-| g-m2 | `rendering/.../rasterize.rs` `backward` | returns all-zero gradients; trainer never fits | HIGH | CONFIRMED |
+| g-m2 | `rendering/.../rasterize.rs` `backward` | **CLOSED.** Real backward (colour, opacity, 2D mean, position, scale, quaternion) matching finite differences; Adam optimizer; background composited; `train_with_report` reports `Stalled` on zero gradient. Toy fit loss 1.49e-2 → 5.6e-12. Was: returns all-zero gradients; trainer never fits | was HIGH — fixed | CONFIRMED |
 | g-m3 | `rendering/.../optimize.rs` `densify` | every small Gaussian doubled each call (exponential growth); `grad_threshold` unread | HIGH | CONFIRMED |
 | g-m4 | `rendering/.../io.rs` | **CLOSED.** Columns read by property name; ascii and binary (LE/BE) PLY; 3DGS storage conventions (sigmoid opacity, exp scale, SH-DC colour, rot w-first); writer emits the INRIA layout. Pinned by `tests/ply_inria_format.rs`. Was: Gaussian PLY columns read by position, header ignored; binary → `Ok(empty)`; `rot_0` read as x not w | was HIGH — fixed | CONFIRMED |
 | g-m5 | `cli/src/main.rs` EuRoC | **CLOSED.** Paired by timestamp via `tum::associate` and `--max-dt`; pinned by `euroc_pairs_by_timestamp_across_sampling_rates` (ATE 0.500087 → ~0). Was: GT/estimate paired by index not timestamp: identical 200 Hz vs 20 Hz trajectories give ATE 0.5 m | was HIGH — fixed | CONFIRMED |
