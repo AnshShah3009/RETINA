@@ -96,13 +96,13 @@ pub struct Tracker {
     /// consecutive frames are tracked, and after tracking is lost.
     pub velocity: Option<Pose>,
     /// Keyframes optimised by the local bundle adjustment that runs after each
-    /// new monocular keyframe; 0 disables it.
+    /// new keyframe; 0 disables it.
     ///
-    /// Monocular only. The adjustment minimises reprojection error alone, and
-    /// an RGB-D keyframe's fresh points are back-projected from depth with a
-    /// single observation, so they are not adjusted - moving their keyframe
-    /// would leave them behind. Measured on the 20-frame sweep: centre error
-    /// 3 cm without, jumps of 0.4-0.6 m at keyframes with it.
+    /// Monocular adjustment minimises reprojection error, then removes the
+    /// scale gauge. RGB-D adjustment adds the creating keyframe's depth as a
+    /// residual (see [`MapPoint::depth_m`]), which is what keeps the metric
+    /// scale: reprojection alone moved keyframes 0.4–0.6 m off their depth
+    /// points on the 20-frame sweep.
     pub local_ba_window: usize,
 }
 
@@ -218,13 +218,13 @@ impl Tracker {
             match depth {
                 Some(d) => {
                     let fresh = depth_points(&self.intrinsics, &frame, d, &tracked.query_indices)?;
-                    add_keyframe(&frame, &tracked, fresh, map);
+                    add_keyframe(&frame, &tracked, fresh, true, map);
                 }
                 None => {
                     // Monocular: the keyframe links what it tracked, then new
                     // points are triangulated against its predecessors from
                     // features neither has mapped yet.
-                    add_keyframe(&frame, &tracked, Vec::new(), map);
+                    add_keyframe(&frame, &tracked, Vec::new(), false, map);
                     local_map::triangulate_new_points(
                         &self.intrinsics,
                         map,
@@ -232,7 +232,7 @@ impl Tracker {
                     );
                 }
             }
-            if self.local_ba_window > 0 && depth.is_none() {
+            if self.local_ba_window > 0 {
                 if local_ba::local_bundle_adjust(
                     &self.intrinsics,
                     map,
@@ -470,7 +470,7 @@ impl Tracker {
                 MIN_BOOTSTRAP_POINTS
             ));
         }
-        let created = add_keyframe(&frame, &empty, candidates, map);
+        let created = add_keyframe(&frame, &empty, candidates, true, map);
         self.state = TrackingState::Tracking;
         self.init_reference = None;
         let pose = frame.pose;
@@ -548,7 +548,10 @@ impl Tracker {
     /// * Non-empty map: tracked against the map (see `track_against_map`); a
     ///   keyframe with new depth points is inserted when too few of the last
     ///   keyframe's established points remain tracked or the camera has moved
-    ///   or turned far enough from it (see `needs_keyframe`).
+    ///   or turned far enough from it (see `needs_keyframe`). The same local
+    ///   bundle adjustment as the monocular path then runs, with each new
+    ///   point's depth as an extra residual so the keyframe cannot slide off
+    ///   the measurement that placed it.
     pub fn process_frame_with_depth<
         S: Storage<u8> + cv_core::StorageFactory<u8> + 'static,
         D: Storage<f32> + cv_core::StorageFactory<f32> + 'static,
@@ -867,10 +870,17 @@ fn depth_points(
 /// Make `frame` a keyframe: link the tracked map points and add `new_points`
 /// (camera coordinates, keyed by descriptor index) to the map. Returns the map
 /// indices of the created points.
+///
+/// `from_depth` is set only when `new_points` were back-projected from a depth
+/// image. Monocular initialisation also passes points here, but those are
+/// triangulated in the reference camera and their z is not a measurement: the
+/// scale is arbitrary, and stamping it made local bundle adjustment pin that
+/// gauge.
 fn add_keyframe(
     frame: &TrackingFrame<CpuStorage<u8>>,
     tracked: &MapTrack,
     new_points: Vec<(usize, Point3<f64>)>,
+    from_depth: bool,
     map: &mut WorldMap,
 ) -> Vec<usize> {
     let kf_id = map.keyframes.len() as u64;
@@ -908,6 +918,9 @@ fn add_keyframe(
             frame.descriptors.descriptors[qi].data.clone(),
         );
         mp.observations.push((kf_id, qi));
+        if from_depth && p_cam.z.is_finite() && p_cam.z > 0.0 {
+            mp.depth_m = Some(p_cam.z as f32);
+        }
         map.add_point(mp);
         kf.map_points[qi] = Some(idx as u64);
         created.push(idx);
@@ -1162,14 +1175,14 @@ fn insert_two_view_map(
     // Reference keyframe at the origin: points are in its camera frame.
     let ref_points: Vec<(usize, Point3<f64>)> =
         init.points.iter().map(|&(ri, _, x)| (ri, x)).collect();
-    let created = add_keyframe(reference, &none, ref_points, map);
+    let created = add_keyframe(reference, &none, ref_points, false, map);
     // Current keyframe observes the same points.
     let tracked = MapTrack {
         pose: frame.pose,
         map_indices: created.clone(),
         query_indices: init.points.iter().map(|&(_, qi, _)| qi).collect(),
     };
-    add_keyframe(frame, &tracked, Vec::new(), map);
+    add_keyframe(frame, &tracked, Vec::new(), false, map);
     created
 }
 
