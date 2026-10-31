@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (47 open, was 77)
+## (g) Second review, 2026-10-31 — findings (46 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -364,12 +364,12 @@ calibration, all of `crates/sfm`.
 | g-c5 | `calib3d/src/pnp.rs` PnP RANSAC | final refinement only with ≥ 6 inliers; 4–5 return the raw P3P pose | MED | ARGUED |
 | g-c6 | `core/src/robust.rs` adaptive iterations | all-inlier case never lowers the iteration bound | LOW | ARGUED |
 
-### (g6) 3d / registration / pointcloud (6 open, was 12)
+### (g6) 3d / registration / pointcloud (5 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-d1 | `3d/src/tsdf/mod.rs` `integrate_ctx` / `extract_mesh` | **CLOSED.** KinectFusion sign (positive = free), per-voxel projective integration, zero-weight cells skipped, seam cells meshed from neighbour blocks: all vertices on the plane (was 8153/12921 > 3 cm off). Pinned by `cv-3d/tests/tsdf_surface_accuracy.rs`. Was: free space negative while untouched voxels are +1 (phantom surface at the band edge), z-depth used as ray range, block-seam cells never meshed: 8153/12921 vertices > 3 cm off a z=1 plane | was HIGH — fixed | CONFIRMED |
-| g-d2 | `registration/.../colored.rs` | unsigned residuals, Jacobian at the untransformed point, ad-hoc photometric term: 0.01 offset not recovered (point-to-plane recovers it) | HIGH | CONFIRMED |
+| g-d2 | `registration/.../colored.rs` | **CLOSED.** Reimplemented per Park/Zhou/Koltun 2017 (target colour gradients, √λ/√(1−λ) weighting, Jacobians at the transformed point); pose error ~6e-8. Pinned by `tests/colored_icp_converges.rs`. Was: unsigned residuals, Jacobian at the untransformed point, ad-hoc photometric term: 0.01 offset not recovered (point-to-plane recovers it) | was HIGH — fixed | CONFIRMED |
 | g-d3 | `registration/.../gnc.rs` | **CLOSED.** Schedule from a saved reference loss, loss restored on return: μ stays in [μ0, 100μ0], repeated calls identical. Pinned by `tests/gnc_schedule_anneals.rs`. Was: schedule read from the already-updated loss → μ grows to 2.7e12; loss state leaks across calls | was HIGH — fixed | CONFIRMED |
 | g-d4 | `registration/mod.rs` `get_information_matrix_from_point_clouds` | **CLOSED.** Open3D's Σ GᵀG with G = [-[q]× │ I] and a `max_correspondence_distance` parameter. Pinned by `tests/information_matrix_open3d.rs`. Was: not Open3D's `Σ GᵀG`, `G = [-[q]x │ I]`: zero rotation information at perfect alignment, origin-dependent | was HIGH — fixed | CONFIRMED |
 | g-d5 | `3d/src/raycasting/mod.rs` `point_inside_mesh_bvh` | shared-edge hits counted twice: cube centre reported outside | MED | CONFIRMED |

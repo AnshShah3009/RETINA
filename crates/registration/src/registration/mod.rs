@@ -47,6 +47,15 @@ impl SimpleNN {
     pub(crate) fn nearest(&self, query: &Point3<f32>) -> Option<(Point3<f32>, usize, f32)> {
         self.tree.nearest_neighbor(query)
     }
+
+    /// Up to `k` nearest neighbours, closest first, as `(point, index, dist_sq)`.
+    pub(crate) fn k_nearest(
+        &self,
+        query: &Point3<f32>,
+        k: usize,
+    ) -> Vec<(Point3<f32>, usize, f32)> {
+        self.tree.k_nearest_neighbors(query, k)
+    }
 }
 
 /// ICP (Iterative Closest Point) registration result

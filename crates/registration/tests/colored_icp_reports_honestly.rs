@@ -219,16 +219,16 @@ fn the_reported_metrics_describe_the_returned_transform() {
         )
         .unwrap_or_else(|| panic!("lambda={lambda} returned None"));
 
-        // Re-derive the metric at the transform actually returned, by
-        // re-running the same correspondence/residual definition.
-        let actual = residual_rmse(&source, &target, &r.transformation, lambda, 1.0);
-
+        // Re-derive the metrics at the transform actually returned. Colored
+        // ICP reports Open3D's point-to-point fitness/rmse, so this is exactly
+        // `evaluate_registration` at the same gate.
+        let (fitness, actual) =
+            cv_registration::evaluate_registration(&source, &target, &r.transformation, 1.0);
         assert!(
-            actual <= r.inlier_rmse as f64 * 1.05 + 1e-9,
-            "lambda={lambda}: the reported inlier_rmse ({:.6e}) is worse than the \
-             residual actually achieved at the returned transform ({actual:.6e}), \
-             so the two describe different poses. Reported metrics are frozen at \
-             iteration 0 while the transform keeps moving.",
+            (r.fitness - fitness).abs() < 1e-6 && (r.inlier_rmse - actual).abs() <= 1e-6,
+            "lambda={lambda}: reported ({}, {:.6e}) but the returned transform \
+             achieves ({fitness}, {actual:.6e}), so the two describe different poses.",
+            r.fitness,
             r.inlier_rmse
         );
         assert!(
@@ -238,43 +238,4 @@ fn the_reported_metrics_describe_the_returned_transform() {
             r.inlier_rmse
         );
     }
-}
-
-/// The residual the implementation itself would report at `transformation`:
-/// nearest-target distance combined with the grayscale difference, exactly as
-/// `registration_colored_icp` accumulates it, under the same correspondence
-/// gate.
-fn residual_rmse(
-    source: &PointCloud,
-    target: &PointCloud,
-    transformation: &Matrix4<f32>,
-    lambda: f32,
-    max_dist: f32,
-) -> f64 {
-    let s_colors = source.colors.as_ref().expect("colors");
-    let t_colors = target.colors.as_ref().expect("colors");
-    let mut total = 0.0f64;
-    let mut n = 0usize;
-    for i in 0..source.points.len() {
-        let moved = transformation.transform_point(&source.points[i]);
-        let mut best = f32::MAX;
-        let mut best_idx = 0usize;
-        for (j, t) in target.points.iter().enumerate() {
-            let d = f64::from((moved - t).norm_squared()).sqrt() as f32;
-            if d < best {
-                best = d;
-                best_idx = j;
-            }
-        }
-        if best > max_dist {
-            continue;
-        }
-        let gray = |c: &Point3<f32>| 0.299 * c.x + 0.587 * c.y + 0.114 * c.z;
-        let photometric = (gray(&s_colors[i]) - gray(&t_colors[best_idx])).abs();
-        let residual = lambda * best + (1.0 - lambda) * photometric * 0.1;
-        total += f64::from(residual) * f64::from(residual);
-        n += 1;
-    }
-    assert!(n > 0, "the re-derived residual used no correspondences");
-    (total / n as f64).sqrt()
 }
