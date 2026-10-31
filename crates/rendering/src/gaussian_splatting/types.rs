@@ -42,6 +42,26 @@
 
 use nalgebra::{Matrix3, Matrix3x4, Point3, Vector2, Vector3, Vector4};
 
+/// Real spherical-harmonics basis constants for bands 1-3, as in the 3DGS
+/// reference implementation.
+const SH_C1: f32 = 0.488_602_5;
+const SH_C2: [f32; 5] = [
+    1.092_548_4,
+    -1.092_548_4,
+    0.315_391_57,
+    -1.092_548_4,
+    0.546_274_2,
+];
+const SH_C3: [f32; 7] = [
+    -0.590_043_6,
+    2.890_611_4,
+    -0.457_045_8,
+    0.373_176_33,
+    -0.457_045_8,
+    1.445_305_7,
+    -0.590_043_6,
+];
+
 /// Spherical Harmonics (SH) coefficients for view-dependent color
 ///
 /// SH provides a compact representation of view-dependent lighting effects.
@@ -139,16 +159,50 @@ impl SphericalHarmonics {
         };
         let degree = self.degree.min(available);
 
+        // Real SH basis in the 3DGS reference's order and sign convention
+        // (`eval_sh` in gaussian-splatting / `forward.cu`), evaluated on the
+        // normalised view direction. Coefficients are interleaved per basis
+        // function ([R_k, G_k, B_k]); the DC term above is already stored as
+        // a colour (0.5 + C0 * f_dc, see `io.rs`), so the higher bands add to
+        // it directly. This used to mix basis functions across channels (the
+        // R channel got y, x*y and 3z^2-1 terms; G and B others), with no
+        // basis constants and no band 3.
+        let n = view_dir.norm();
+        let (x, y, z) = if n > 0.0 && n.is_finite() {
+            (view_dir.x / n, view_dir.y / n, view_dir.z / n)
+        } else {
+            (x, y, z)
+        };
+        let (xx, yy, zz) = (x * x, y * y, z * z);
+        let mut basis: Vec<f32> = Vec::with_capacity(16);
         if degree >= 1 {
-            result.x += self.coeffs[3] * y;
-            result.y += self.coeffs[4] * z;
-            result.z += self.coeffs[5] * x;
-            result.x += self.coeffs[6] * x * y;
-            result.y += self.coeffs[7] * y * z;
-            result.z += self.coeffs[8] * z * x;
-            result.x += self.coeffs[9] * (3.0 * z * z - 1.0);
-            result.y += self.coeffs[10] * x * z;
-            result.z += self.coeffs[11] * (x * x - y * y);
+            basis.extend([-SH_C1 * y, SH_C1 * z, -SH_C1 * x]);
+        }
+        if degree >= 2 {
+            basis.extend([
+                SH_C2[0] * x * y,
+                SH_C2[1] * y * z,
+                SH_C2[2] * (2.0 * zz - xx - yy),
+                SH_C2[3] * x * z,
+                SH_C2[4] * (xx - yy),
+            ]);
+        }
+        if degree >= 3 {
+            basis.extend([
+                SH_C3[0] * y * (3.0 * xx - yy),
+                SH_C3[1] * x * y * z,
+                SH_C3[2] * y * (4.0 * zz - xx - yy),
+                SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy),
+                SH_C3[4] * x * (4.0 * zz - xx - yy),
+                SH_C3[5] * z * (xx - yy),
+                SH_C3[6] * x * (xx - 3.0 * yy),
+            ]);
+        }
+        for (k, b) in basis.iter().enumerate() {
+            let i = 3 * (k + 1);
+            result.x += b * self.coeffs[i];
+            result.y += b * self.coeffs[i + 1];
+            result.z += b * self.coeffs[i + 2];
         }
 
         result
