@@ -1495,6 +1495,43 @@ impl ComputeContext for CpuBackend {
         let mut current = src_data.to_vec();
         let mut next = vec![0u8; src_data.len()];
 
+        // Rectangular kernel (every tap set): separable min/max, bit-identical
+        // to the per-tap loop below (see `cpu::morph_rect`). Up to 5x5 the
+        // 32-lane per-tap loop is as fast (measured 0.7 vs 1.4 ms at 3x3 on
+        // 1920x1080), so small rectangles stay on it.
+        let is_rect = kw > 0
+            && kh > 0
+            && kw * kh > 25
+            && k_data.len() >= kh * kw
+            && k_data[..kh * kw].iter().all(|&k| k != 0);
+        if is_rect && w > 0 && h > 0 {
+            let is_max = typ != MorphologyType::Erode;
+            let axis_map = |n: usize, c: usize, k: usize| -> Vec<Option<usize>> {
+                (0..n + k - 1)
+                    .map(|j| {
+                        let p = j as isize - c as isize;
+                        (p >= 0 && p < n as isize).then_some(p as usize)
+                    })
+                    .collect()
+            };
+            let col_map = axis_map(w, cx, kw);
+            let row_map = axis_map(h, cy, kh);
+            for _ in 0..iterations {
+                for (src_plane, dst_plane) in current.chunks(h * w).zip(next.chunks_mut(h * w)) {
+                    crate::cpu::morph_rect::rect_extremum(
+                        src_plane, w, h, dst_plane, kw, kh, &col_map, &row_map, identity, is_max,
+                    );
+                }
+                std::mem::swap(&mut current, &mut next);
+            }
+            return Ok(Tensor {
+                storage: S::from_vec(current).map_err(crate::Error::MemoryError)?,
+                shape: input.shape,
+                dtype: input.dtype,
+                _phantom: std::marker::PhantomData,
+            });
+        }
+
         for _ in 0..iterations {
             // CHW planes are eroded/dilated independently (see convolve_2d).
             next.par_chunks_mut(w)
@@ -1527,15 +1564,20 @@ impl ComputeContext for CpuBackend {
                                 let sx_base = x as isize + kx as isize - cx as isize;
 
                                 // Load 32 bytes, using identity for out-of-bounds columns
-                                let mut bytes = [identity; 32];
-                                for i in 0..32 {
-                                    let sx = sx_base + i as isize;
-                                    if sx >= 0 && sx < w as isize {
-                                        bytes[i] = row_src[sx as usize];
+                                let v = if sx_base >= 0 && sx_base as usize + 32 <= w {
+                                    let s = sx_base as usize;
+                                    let bytes: [u8; 32] = row_src[s..s + 32].try_into().unwrap();
+                                    u8x32::from(bytes)
+                                } else {
+                                    let mut bytes = [identity; 32];
+                                    for i in 0..32 {
+                                        let sx = sx_base + i as isize;
+                                        if sx >= 0 && sx < w as isize {
+                                            bytes[i] = row_src[sx as usize];
+                                        }
                                     }
-                                }
-
-                                let v = u8x32::from(bytes);
+                                    u8x32::from(bytes)
+                                };
                                 if typ == MorphologyType::Erode {
                                     res_v = res_v.min(v);
                                 } else {

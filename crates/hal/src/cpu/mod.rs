@@ -11,6 +11,7 @@ use wide::*;
 pub mod border;
 pub mod canny_opencv;
 pub mod hough_standard;
+pub mod morph_rect;
 pub mod simd;
 pub mod utils;
 
