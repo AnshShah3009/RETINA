@@ -15,8 +15,10 @@
 // Note this requires the examples to have been built first:
 //   cargo build --release --workspace --examples
 
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
 
 /// Seconds a smoke example may take. Generous - a few of these initialise a GPU
 /// context, which is slow on a cold driver - but short enough that a hang is
@@ -63,13 +65,24 @@ fn run(name: &str) {
 
     let mut child = match Command::new(&path)
         .current_dir(&workdir)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
     {
         Ok(c) => c,
         Err(e) => panic!("{name}: could not be spawned: {e}"),
     };
+
+    // Drain both pipes on other threads. `wait_with_output` only reads them
+    // after the child exits, and a pipe that fills (64 KiB) blocks the child
+    // on its next write. A chatty GPU init then looks like a hang and dies at
+    // the deadline with no output. macOS MLX CI did that to `orb_benchmark`:
+    // the same commit finished in 4.2 s on develop and was killed at 120 s
+    // on master, with an empty log.
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let out_rx = drain(stdout);
+    let err_rx = drain(stderr);
 
     // Poll rather than `wait_with_output`, so a hang is a failure with a name
     // rather than a stalled test run.
@@ -77,27 +90,70 @@ fn run(name: &str) {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = child.wait_with_output().ok();
-                let stderr = out
-                    .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
-                    .unwrap_or_default();
+                let err = collected(&err_rx);
                 assert!(
                     status.success(),
                     "{name} exited {status}\n--- stderr ---\n{}",
-                    stderr.lines().rev().take(12).collect::<Vec<_>>().join("\n")
+                    tail(&err)
                 );
                 return;
             }
             Ok(None) => {
                 if std::time::Instant::now() > deadline {
                     let _ = child.kill();
-                    panic!("{name} did not finish within {TIMEOUT_SECS}s");
+                    let _ = child.wait();
+                    let err = collected(&err_rx);
+                    let out = collected(&out_rx);
+                    panic!(
+                        "{name} did not finish within {TIMEOUT_SECS}s\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                        tail(&out),
+                        tail(&err)
+                    );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Err(e) => panic!("{name}: wait failed: {e}"),
         }
     }
+}
+
+/// Read a pipe until it closes, keeping the last 16 KiB.
+fn drain(mut pipe: impl Read + Send + 'static) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            match pipe.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.len() > 16 * 1024 {
+                        let drop_n = buf.len() - 16 * 1024;
+                        buf.drain(..drop_n);
+                    }
+                }
+            }
+        }
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+fn collected(rx: &mpsc::Receiver<Vec<u8>>) -> String {
+    let bytes = rx.recv().unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn tail(text: &str) -> String {
+    text.lines()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 macro_rules! smoke {

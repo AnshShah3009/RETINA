@@ -24,7 +24,7 @@ fn create_benchmark_image(width: u32, height: u32) -> GrayImage {
 fn main() {
     let width = 1280;
     let height = 720;
-    println!("Creating benchmark image {}x{}...", width, height);
+    eprintln!("orb_benchmark: creating {width}x{height} image");
     let img = create_benchmark_image(width, height);
 
     let n_features = 1000;
@@ -39,10 +39,7 @@ fn main() {
     );
 
     // 1. CPU Benchmark
-    println!(
-        "
-[CPU Benchmark]"
-    );
+    eprintln!("orb_benchmark: cpu detect");
     let start_cpu = Instant::now();
     let (kps_cpu, _) = orb_detect_and_compute(&img, n_features);
     let duration_cpu = start_cpu.elapsed();
@@ -53,10 +50,7 @@ fn main() {
     );
 
     // 2. GPU Benchmark
-    println!(
-        "
-[GPU Benchmark]"
-    );
+    eprintln!("orb_benchmark: gpu context");
     let gpu = match GpuContext::new() {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -74,7 +68,7 @@ fn main() {
         Tensor::from_vec(img.to_vec(), shape).unwrap();
     let tensor_gpu = cv_hal::tensor_ext::TensorToGpu::to_gpu_ctx(&tensor_cpu, &gpu).unwrap();
 
-    // Warm-up
+    eprintln!("orb_benchmark: gpu warmup");
     let _ = detect_and_compute_ctx(&orb, &device, &group, &tensor_gpu);
 
     let start_gpu = Instant::now();
