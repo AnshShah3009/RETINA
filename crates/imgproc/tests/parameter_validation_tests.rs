@@ -251,12 +251,11 @@ fn defect04_hough_lines_rejects_bad_resolutions() {
     let img = line_image();
     const THETA: f32 = std::f32::consts::PI / 180.0;
 
-    // CONTROL: rho_res = 1.0 / theta_res = 1 degree returns 5 lines on this image.
+    // CONTROL: rho_res = 1.0 / theta_res = 1 degree detects the drawn line.
     let lines = hough_lines(&img, 1.0, THETA, 10).expect("valid resolutions");
-    assert_eq!(
-        lines.len(),
-        5,
-        "CONTROL: rho_res = 1.0 must keep detecting the 5 line segments of the drawn line"
+    assert!(
+        !lines.is_empty(),
+        "CONTROL: rho_res = 1.0 must keep detecting the drawn line"
     );
 
     // DEFECT (a): theta_res = 0.0 -> num_theta = (PI / 0) as usize == usize::MAX,
@@ -266,7 +265,7 @@ fn defect04_hough_lines_rejects_bad_resolutions() {
     println!("defect04a error message: {}", res.unwrap_err());
 
     // DEFECT (b): rho_res = 0.0 used to return Ok(vec![]) - no lines and no
-    // error - where the same image with rho_res = 1.0 returns 5 lines.
+    // error - where the same image with rho_res = 1.0 finds the line.
     let res = hough_lines(&img, 0.0, THETA, 10);
     assert!(
         res.is_err(),

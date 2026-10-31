@@ -5,7 +5,6 @@ use cv_runtime::orchestrator::RuntimeRunner;
 use image::GrayImage;
 use rayon::prelude::*;
 use tracing::{info, warn};
-use wide::*;
 
 use crate::convolve::{convolve_with_border_into_ctx, gaussian_blur_ctx, BorderMode, Kernel};
 
@@ -336,224 +335,178 @@ pub fn laplacian_ctx(src: &GrayImage, group: &RuntimeRunner) -> GrayImage {
     out
 }
 
-fn gradients_and_directions(src: &GrayImage) -> (Vec<f32>, Vec<u8>) {
-    let width = src.width() as usize;
-    let height = src.height() as usize;
+/// Options for [`canny_with_options`].
+///
+/// The default reproduces `cv2.Canny(img, low, high)`: aperture 3,
+/// `L2gradient = false`, no smoothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CannyOptions {
+    /// Use `sqrt(dx² + dy²)` instead of `|dx| + |dy|` (OpenCV's
+    /// `L2gradient`). Thresholds stay in gradient units either way.
+    pub l2_gradient: bool,
+    /// Gaussian pre-blur (σ, BORDER_REFLECT_101) before the gradient.
+    /// OpenCV's Canny does not smooth; `None` matches it.
+    pub blur_sigma: Option<f32>,
+}
+
+/// 3x3 Sobel with BORDER_REPLICATE, as `cv::Canny` computes it.
+fn sobel3_replicate(src: &GrayImage) -> (Vec<i32>, Vec<i32>) {
+    let w = src.width() as usize;
+    let h = src.height() as usize;
     let data = src.as_raw();
-    let mut magnitude = vec![0.0f32; width * height];
-    let mut direction = vec![0u8; width * height];
-
-    magnitude
-        .par_chunks_mut(width)
-        .zip(direction.par_chunks_mut(width))
+    let mut dx = vec![0i32; w * h];
+    let mut dy = vec![0i32; w * h];
+    dx.par_chunks_mut(w)
+        .zip(dy.par_chunks_mut(w))
         .enumerate()
-        .for_each(|(y, (mag_row, dir_row))| {
-            if y == 0 || y >= height - 1 {
-                return;
+        .for_each(|(y, (dx_row, dy_row))| {
+            let r0 = &data[y.saturating_sub(1) * w..][..w];
+            let r1 = &data[y * w..][..w];
+            let r2 = &data[(y + 1).min(h - 1) * w..][..w];
+            for x in 0..w {
+                let xm = x.saturating_sub(1);
+                let xp = (x + 1).min(w - 1);
+                let p = |r: &[u8], i: usize| r[i] as i32;
+                dx_row[x] =
+                    (p(r0, xp) - p(r0, xm)) + 2 * (p(r1, xp) - p(r1, xm)) + (p(r2, xp) - p(r2, xm));
+                dy_row[x] =
+                    (p(r2, xm) + 2 * p(r2, x) + p(r2, xp)) - (p(r0, xm) + 2 * p(r0, x) + p(r0, xp));
             }
-            let r0_idx = (y - 1) * width;
-            let r1_idx = y * width;
-            let r2_idx = (y + 1) * width;
-            let r0 = &data[r0_idx..r0_idx + width];
-            let r1 = &data[r1_idx..r1_idx + width];
-            let r2 = &data[r2_idx..r2_idx + width];
+        });
+    (dx, dy)
+}
 
-            let mut x = 1;
+/// OpenCV's Canny on an 8-bit image: Sobel 3x3 (BORDER_REPLICATE), integer
+/// L1 or squared-L2 magnitude, NMS strict towards left/up (`>`) and
+/// non-strict towards right/down (`>=`), strict on both diagonal neighbours,
+/// thresholds strict, 8-connected hysteresis. Pixels outside the image have
+/// magnitude 0.
+fn canny_cpu(src: &GrayImage, low: f64, high: f64, l2: bool) -> GrayImage {
+    let w = src.width() as usize;
+    let h = src.height() as usize;
+    if w == 0 || h == 0 {
+        return GrayImage::new(src.width(), src.height());
+    }
 
-            // SIMD Loop
-            while x + 8 < width - 1 {
-                // Load 3x10 block to cover 8 outputs (needs x-1 to x+8+1)
-                // We load 8-wide vectors shifted by -1, 0, 1
-                // Actually easier to load unaligned? f32x8 requires alignment? No, but load is from u8.
-                // We load u8 slices and convert.
+    let (mut lo, mut hi) = (low, high);
+    if lo > hi {
+        std::mem::swap(&mut lo, &mut hi);
+    }
+    if l2 {
+        lo = lo.min(32767.0);
+        hi = hi.min(32767.0);
+        if lo > 0.0 {
+            lo *= lo;
+        }
+        if hi > 0.0 {
+            hi *= hi;
+        }
+    }
+    let lo = lo.floor() as i64;
+    let hi = hi.floor() as i64;
 
-                let load_f32x8 = |slice: &[u8]| -> f32x8 {
-                    let mut arr = [0.0f32; 8];
-                    for i in 0..8 {
-                        arr[i] = slice[i] as f32;
-                    }
-                    f32x8::from(arr)
-                };
-
-                let p00 = load_f32x8(&r0[x - 1..]);
-                let p01 = load_f32x8(&r0[x..]);
-                let p02 = load_f32x8(&r0[x + 1..]);
-
-                let p10 = load_f32x8(&r1[x - 1..]);
-                // p11 unused for gradients
-                let p12 = load_f32x8(&r1[x + 1..]);
-
-                let p20 = load_f32x8(&r2[x - 1..]);
-                let p21 = load_f32x8(&r2[x..]);
-                let p22 = load_f32x8(&r2[x + 1..]);
-
-                // Sobel
-                let gx = p02 - p00 + (p12 - p10) * 2.0 + p22 - p20;
-                let gy = p20 - p00 + (p21 - p01) * 2.0 + p22 - p02;
-
-                // Magnitude
-                let mag = (gx * gx + gy * gy).sqrt();
-                let mag_arr: [f32; 8] = mag.into();
-                mag_row[x..x + 8].copy_from_slice(&mag_arr);
-
-                // Direction
-                // 0: |gy| <= |gx| * tan(22.5) => 0.4142
-                // 90: |gx| <= |gy| * 0.4142
-                // 45: sign(gx) == sign(gy)
-                // 135: else
-
-                let abs_gx = gx.abs();
-                let abs_gy = gy.abs();
-                let tan_22_5 = 0.41421356;
-
-                let is_0 = abs_gy.cmp_lt(abs_gx * tan_22_5);
-                let is_90 = abs_gx.cmp_lt(abs_gy * tan_22_5);
-
-                // For diagonal check:
-                // sign bit check. f32x8 doesn't have direct sign access efficiently?
-                // gx * gy > 0 means same sign.
-                let same_sign = (gx * gy).cmp_gt(f32x8::ZERO);
-
-                // Blend chain
-                // Default 135 (3)
-                // if same_sign -> 45 (1)
-                // if is_90 -> 90 (2)
-                // if is_0 -> 0 (0)
-                // Order matters? 0 and 90 take precedence over diagonals in ambiguous near-center cases?
-                // Logic:
-                // Region 0: [-22.5, 22.5] -> |y| < |x| * tan
-                // Region 90: [67.5, 112.5] -> |x| < |y| * cot(67.5) = |y| * tan(22.5)
-                // So is_0 and is_90 checks are correct and exclusive.
-
-                // Values: 0=0, 1=45, 2=90, 3=135
-                let val_diag = same_sign.blend(f32x8::splat(1.0), f32x8::splat(3.0));
-                let val_90 = is_90.blend(f32x8::splat(2.0), val_diag);
-                let val_0 = is_0.blend(f32x8::splat(0.0), val_90);
-
-                let dir_arr: [f32; 8] = val_0.into();
-                for i in 0..8 {
-                    dir_row[x + i] = dir_arr[i] as u8;
-                }
-
-                x += 8;
+    let (dx, dy) = sobel3_replicate(src);
+    let mag: Vec<i64> = dx
+        .par_iter()
+        .zip(dy.par_iter())
+        .map(|(&gx, &gy)| {
+            let (gx, gy) = (gx as i64, gy as i64);
+            if l2 {
+                gx * gx + gy * gy
+            } else {
+                gx.abs() + gy.abs()
             }
+        })
+        .collect();
+    let at = |x: isize, y: isize| -> i64 {
+        if x < 0 || y < 0 || x >= w as isize || y >= h as isize {
+            0
+        } else {
+            mag[y as usize * w + x as usize]
+        }
+    };
 
-            // Scalar tail
-            for cx in x..width - 1 {
-                let p00 = r0[cx - 1] as f32;
-                let p02 = r0[cx + 1] as f32;
-                let p10 = r1[cx - 1] as f32;
-                let p12 = r1[cx + 1] as f32;
-                let p20 = r2[cx - 1] as f32;
-                let p22 = r2[cx + 1] as f32;
-                let p01 = r0[cx] as f32;
-                let p21 = r2[cx] as f32;
-
-                let gx = -p00 + p02 - 2.0 * p10 + 2.0 * p12 - p20 + p22;
-                let gy = -p00 - 2.0 * p01 - p02 + p20 + 2.0 * p21 + p22;
-
-                mag_row[cx] = (gx * gx + gy * gy).sqrt();
-
-                // Scalar direction logic (consistent with SIMD)
-                let abs_gx = gx.abs();
-                let abs_gy = gy.abs();
-                let tan_22_5 = 0.41421356;
-
-                if abs_gy <= abs_gx * tan_22_5 {
-                    dir_row[cx] = 0;
-                } else if abs_gx <= abs_gy * tan_22_5 {
-                    dir_row[cx] = 2;
-                } else if gx * gy > 0.0 {
-                    dir_row[cx] = 1;
+    // 0 = not an edge, 1 = weak (low < m <= high), 2 = strong.
+    const SHIFT: i64 = 15;
+    let tg22: i64 = (0.414_213_562_373_095_05 * (1i64 << SHIFT) as f64 + 0.5) as i64;
+    let mut state = vec![0u8; w * h];
+    state.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let yi = y as isize;
+        for (x, st) in row.iter_mut().enumerate() {
+            let j = y * w + x;
+            let m = mag[j];
+            if m <= lo {
+                continue;
+            }
+            let xi = x as isize;
+            let (xs, ys) = (dx[j] as i64, dy[j] as i64);
+            let ax = xs.abs();
+            let ay = ys.abs() << SHIFT;
+            let tg22x = ax * tg22;
+            let is_max = if ay < tg22x {
+                m > at(xi - 1, yi) && m >= at(xi + 1, yi)
+            } else {
+                let tg67x = tg22x + (ax << (SHIFT + 1));
+                if ay > tg67x {
+                    m > at(xi, yi - 1) && m >= at(xi, yi + 1)
                 } else {
-                    dir_row[cx] = 3;
+                    let s: isize = if (xs ^ ys) < 0 { -1 } else { 1 };
+                    m > at(xi - s, yi - 1) && m > at(xi + s, yi + 1)
                 }
-            }
-        });
-
-    (magnitude, direction)
-}
-
-fn non_max_suppression(width: usize, height: usize, mag: &[f32], dir: &[u8]) -> Vec<f32> {
-    let mut out = vec![0.0f32; width * height];
-
-    out.par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(y, out_row)| {
-            if y == 0 || y >= height - 1 {
-                return;
-            }
-            let r0_idx = (y - 1) * width;
-            let r1_idx = y * width;
-            let r2_idx = (y + 1) * width;
-
-            for x in 1..width - 1 {
-                let m = mag[r1_idx + x];
-                // Gradients here use image-space y-down: gy = bottom - top.
-                // A same-sign gradient (gx>0, gy>0) points right-and-DOWN,
-                // so its normal line is the "\" diagonal (x-1,y-1)..(x+1,y+1).
-                // A previous revision sampled the "/" diagonal for bin 1 and
-                // vice versa, suppressing true diagonal edges.
-                let (m1, m2) = match dir[r1_idx + x] {
-                    0 => (mag[r1_idx + x - 1], mag[r1_idx + x + 1]),
-                    1 => (mag[r0_idx + x - 1], mag[r2_idx + x + 1]),
-                    2 => (mag[r0_idx + x], mag[r2_idx + x]),
-                    _ => (mag[r0_idx + x + 1], mag[r2_idx + x - 1]),
-                };
-
-                if m >= m1 && m >= m2 {
-                    out_row[x] = m;
-                }
-            }
-        });
-
-    out
-}
-
-fn hysteresis(width: usize, height: usize, nms: &[f32], low: f32, high: f32) -> GrayImage {
-    const STRONG: u8 = 255;
-    const WEAK: u8 = 75;
-
-    let mut state = vec![0u8; width * height];
-    let mut stack = Vec::new();
-
-    for y in 1..height.saturating_sub(1) {
-        for x in 1..width.saturating_sub(1) {
-            let idx = y * width + x;
-            let v = nms[idx];
-            if v >= high {
-                state[idx] = STRONG;
-                stack.push((x, y));
-            } else if v >= low {
-                state[idx] = WEAK;
+            };
+            if is_max {
+                *st = if m > hi { 2 } else { 1 };
             }
         }
-    }
-
-    while let Some((x, y)) = stack.pop() {
-        let y0 = y.saturating_sub(1);
-        let y1 = (y + 1).min(height - 1);
-        let x0 = x.saturating_sub(1);
-        let x1 = (x + 1).min(width - 1);
-        for ny in y0..=y1 {
-            for nx in x0..=x1 {
-                let nidx = ny * width + nx;
-                if state[nidx] == WEAK {
-                    state[nidx] = STRONG;
-                    stack.push((nx, ny));
-                }
-            }
-        }
-    }
-
-    let mut out = GrayImage::new(width as u32, height as u32);
-    out.as_mut().par_iter_mut().enumerate().for_each(|(i, px)| {
-        *px = if state[i] == STRONG { 255 } else { 0 };
     });
-    out
+
+    let mut stack: Vec<usize> = (0..w * h).filter(|&i| state[i] == 2).collect();
+    while let Some(i) = stack.pop() {
+        let (x, y) = (i % w, i / w);
+        for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+            for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                let n = ny * w + nx;
+                if state[n] == 1 {
+                    state[n] = 2;
+                    stack.push(n);
+                }
+            }
+        }
+    }
+
+    let out: Vec<u8> = state
+        .par_iter()
+        .map(|&s| if s == 2 { 255 } else { 0 })
+        .collect();
+    GrayImage::from_raw(src.width(), src.height(), out).expect("buffer sized w*h")
 }
 
+/// Canny edge detector, `cv2.Canny(src, low_threshold, high_threshold)`.
+///
+/// No smoothing is applied (OpenCV does not smooth either); blur the input
+/// first, or use [`canny_with_options`] with `blur_sigma`, if it is noisy.
+/// The gradient is a 3x3 Sobel and the magnitude is L1 (`|dx| + |dy|`).
+/// Output is 0/255.
 pub fn canny(src: &GrayImage, low_threshold: u8, high_threshold: u8) -> GrayImage {
+    canny_with_options(
+        src,
+        low_threshold as f32,
+        high_threshold as f32,
+        &CannyOptions::default(),
+    )
+}
+
+/// Canny with f32 thresholds (may exceed 255: the L1 Sobel magnitude goes up
+/// to 2040) and [`CannyOptions`]. `CannyOptions::default()` matches
+/// `cv2.Canny(src, low, high)`; `l2_gradient: true` matches
+/// `cv2.Canny(src, low, high, L2gradient=True)`. `low > high` are swapped, as
+/// in OpenCV.
+pub fn canny_with_options(
+    src: &GrayImage,
+    low_threshold: f32,
+    high_threshold: f32,
+    options: &CannyOptions,
+) -> GrayImage {
     let runner = cv_runtime::default_runner().unwrap_or_else(|_| {
         warn!("GPU not available for canny, falling back to CPU");
         cv_runtime::registry()
@@ -561,37 +514,69 @@ pub fn canny(src: &GrayImage, low_threshold: u8, high_threshold: u8) -> GrayImag
             .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
-    canny_ctx(src, low_threshold, high_threshold, &runner)
+    canny_with_options_ctx(src, low_threshold, high_threshold, options, &runner)
 }
 
+/// [`canny`] on a given runner.
 pub fn canny_ctx(
     src: &GrayImage,
     low_threshold: u8,
     high_threshold: u8,
     group: &RuntimeRunner,
 ) -> GrayImage {
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(res) = canny_gpu(gpu, src, low_threshold as f32, high_threshold as f32) {
-            info!(
-                "GPU canny: executed on GPU ({}x{})",
-                src.width(),
-                src.height()
-            );
-            return res;
+    canny_with_options_ctx(
+        src,
+        low_threshold as f32,
+        high_threshold as f32,
+        &CannyOptions::default(),
+        group,
+    )
+}
+
+/// [`canny_with_options`] on a given runner.
+///
+/// On a GPU runner with default options the `canny.wgsl` kernel is tried
+/// first; that kernel is not bit-exact with OpenCV (L2 magnitude, `>=` NMS).
+/// The CPU path is.
+pub fn canny_with_options_ctx(
+    src: &GrayImage,
+    low_threshold: f32,
+    high_threshold: f32,
+    options: &CannyOptions,
+    group: &RuntimeRunner,
+) -> GrayImage {
+    if src.width() == 0 || src.height() == 0 {
+        return GrayImage::new(src.width(), src.height());
+    }
+    if *options == CannyOptions::default() {
+        if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+            if let Ok(res) = canny_gpu(gpu, src, low_threshold, high_threshold) {
+                info!(
+                    "GPU canny: executed on GPU ({}x{})",
+                    src.width(),
+                    src.height()
+                );
+                return res;
+            }
+            warn!("GPU canny failed, falling back to CPU");
         }
-        warn!("GPU canny failed, falling back to CPU");
     }
 
-    let blurred = gaussian_blur_ctx(src, 1.0, BorderMode::Reflect101, group);
-    let width = blurred.width() as usize;
-    let height = blurred.height() as usize;
-
+    let blurred;
+    let input = match options.blur_sigma {
+        Some(sigma) if sigma > 0.0 => {
+            blurred = gaussian_blur_ctx(src, sigma, BorderMode::Reflect101, group);
+            &blurred
+        }
+        _ => src,
+    };
     group.run(|| {
-        let (mag, dir) = gradients_and_directions(&blurred);
-        let nms = non_max_suppression(width, height, &mag, &dir);
-        let low = low_threshold as f32;
-        let high = high_threshold.max(low_threshold) as f32;
-        hysteresis(width, height, &nms, low, high)
+        canny_cpu(
+            input,
+            low_threshold as f64,
+            high_threshold as f64,
+            options.l2_gradient,
+        )
     })
 }
 
@@ -816,7 +801,7 @@ mod tests {
         // Count edge pixels in columns 30-33 vs. the rest of the image
         let mut edge_count_near_boundary = 0u32;
         let mut edge_count_elsewhere = 0u32;
-        // Only check interior rows to avoid border effects from Gaussian blur
+        // Only check interior rows
         for y in 5..59 {
             for x in 0..64 {
                 if edges.get_pixel(x, y)[0] > 0 {
