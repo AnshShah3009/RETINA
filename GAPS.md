@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (68 open, was 77)
+## (g) Second review, 2026-10-31 — findings (66 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -381,7 +381,7 @@ calibration, all of `crates/sfm`.
 | g-d11 | `registration/.../global/ransac.rs` | one distance gates FPFH feature space and metric space; `ransac_n` ignored | LOW | ARGUED |
 | g-d12 | `pointcloud/src/point_cloud.rs` `cluster_dbscan` | visited neighbours re-queued → O(N²) seed memory | LOW | ARGUED |
 
-### (g7) core / math / optimize / geometry2d / signal_proc / scientific (9 open, was 12)
+### (g7) core / math / optimize / geometry2d / signal_proc / scientific (7 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -392,9 +392,9 @@ calibration, all of `crates/sfm`.
 | g-n5 | `optimize/src/brent.rs` `brentq` | **CLOSED.** Port of SciPy's `brentq.c`: x-tolerance only, exact-zero stop; 8 evaluations on the cubic (SciPy 8). Pinned in `tests/regression_tests.rs`. Was: `tol` also gates \|f\| (returns 2.0 for root 1.5); stale `fc` → 81 evals vs SciPy's 8 | was HIGH — fixed | CONFIRMED |
 | g-n6 | `optimize/src/lbfgsb.rs` | direction ignores the active set; failed line search accepted: f = 1.0135 vs SciPy 1.0 | HIGH | CONFIRMED |
 | g-n7 | `math/src/sparse.rs` `gmres_solve` / `cg_solve` | lucky breakdown skips Givens; absolute thresholds; `Ok` when not converged | MED | CONFIRMED |
-| g-n8 | `signal_proc` `resample` | even-length Nyquist bin halved, not folded | MED | CONFIRMED vs SciPy |
+| g-n8 | `signal_proc` `resample` | **CLOSED.** Even-length downsample folds `X[num/2]` into the Nyquist bin; matches SciPy to 1e-8 in the same test file. Was: even-length Nyquist bin halved, not folded | was MED — fixed | CONFIRMED vs SciPy |
 | g-n9 | `signal_proc` `welch` / `stft` / `spectrogram` | no constant detrend, symmetric Hann: PSD[0] 249.9 vs SciPy 0.175 | MED | CONFIRMED vs SciPy |
-| g-n10 | `signal_proc` `find_peaks` | plateau peaks never found | MED | CONFIRMED vs SciPy |
+| g-n10 | `signal_proc` `find_peaks` | **CLOSED.** SciPy's `_local_maxima_1d` plateau scan (midpoint, rounded down). Pinned by `tests/scipy_find_peaks_resample.rs`. Was: plateau peaks never found | was MED — fixed | CONFIRMED vs SciPy |
 | g-n11 | `math/src/stats.rs` normal cdf/ppf, p-values | lower-tail cancellation (`cdf(-10)` = 0), unrefined `ppf`, `1 - cdf` p-values | MED | CONFIRMED vs SciPy |
 | g-n12 | `math/src/integrate.rs` | `quad` is a fixed trapezoid with error 0 and evaluates endpoints; `ode_solve` overshoots `t_end` and stops silently at 10k steps | MED | ARGUED |
 

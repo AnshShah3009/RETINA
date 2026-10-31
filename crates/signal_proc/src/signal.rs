@@ -634,17 +634,29 @@ pub fn find_peaks(
         return Vec::new();
     }
 
-    // Find all local maxima
+    // Find all local maxima, SciPy's `_local_maxima_1d`: a flat top counts
+    // as one peak at its midpoint (rounded down). Requiring strictly greater
+    // on both sides never found a plateau: `[0, 1, 1, 0, 2, 0]` gave `[4]`
+    // where SciPy gives `[1, 4]`.
+    let n = data.len();
     let mut peaks: Vec<usize> = Vec::new();
-    for i in 1..data.len() - 1 {
-        if data[i] > data[i - 1] && data[i] > data[i + 1] {
-            if let Some(h) = min_height {
-                if data[i] < h {
-                    continue;
-                }
+    let mut i = 1;
+    while i < n - 1 {
+        if data[i - 1] < data[i] {
+            let mut ahead = i + 1;
+            while ahead < n - 1 && data[ahead] == data[i] {
+                ahead += 1;
             }
-            peaks.push(i);
+            if data[ahead] < data[i] {
+                let mid = (i + ahead - 1) / 2;
+                if min_height.is_none_or(|h| data[mid] >= h) {
+                    peaks.push(mid);
+                }
+                i = ahead;
+                continue;
+            }
         }
+        i += 1;
     }
 
     // Enforce minimum distance (greedy, prefer taller peaks)
@@ -711,14 +723,18 @@ pub fn resample(x: &[f64], num: usize) -> Vec<f64> {
             new_spectrum[num - nyq] = spectrum[nyq] * Complex::new(0.5, 0.0);
         }
     } else {
-        // Truncate. The source Nyquist bin (even n) lies outside both copied
-        // windows and its energy is intentionally dropped — splitting it into
-        // two half-weight bins would require shifting one of them onto the
-        // other side of DC.
+        // Truncate. For even `num` the output's Nyquist bin aliases both
+        // `X[num/2]` and `X[-num/2]`; SciPy folds them together. Only the
+        // negative one was copied, so that bin carried half its energy:
+        // `resample([1, 3, -2, 5, .5, -1, 2, 4], 4)` gave `[2.405, 1.259, ..]`
+        // against SciPy's `[2.593, 1.071, ..]`.
         let half = num.div_ceil(2);
         new_spectrum[..half].copy_from_slice(&spectrum[..half]);
         let neg_count = num - half;
         new_spectrum[half..half + neg_count].copy_from_slice(&spectrum[n - neg_count..n]);
+        if num.is_multiple_of(2) {
+            new_spectrum[num / 2] += spectrum[num / 2];
+        }
     }
 
     let result = ifft(&new_spectrum);
