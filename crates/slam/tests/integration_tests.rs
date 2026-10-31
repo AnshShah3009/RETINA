@@ -28,9 +28,8 @@ fn test_slam_basic_pipeline() {
     // Just verify it doesn't panic
     let _ = res1;
 
-    // We haven't implemented map initialization in Slam::process_image yet,
-    // it just tries to track. But we verified it compiles and doesn't panic.
-    // In a real scenario, we'd add points to the map here.
+    // Initialisation and tracking on a scene with known poses are covered by
+    // tests/slam_bootstrap.rs; this only checks the entry point runs.
 }
 
 /// A single monocular frame must not produce a pose.

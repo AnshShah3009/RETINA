@@ -77,19 +77,27 @@ impl PySlam {
         })
     }
 
+    /// Track one grayscale frame. `depth` (optional, row-major metric depth,
+    /// `width * height` values) enables RGB-D mode, where the first frame
+    /// bootstraps the map. Without depth the first frame raises while it is
+    /// held as the monocular initialisation reference. Frames without a
+    /// measured pose (initialising, tracking lost) raise `RuntimeError`.
+    #[pyo3(signature = (image, width, height, depth=None))]
     pub fn process_frame(
         &mut self,
         image: Vec<u8>,
         width: usize,
         height: usize,
+        depth: Option<Vec<f32>>,
     ) -> PyResult<(Vec<f32>, Vec<usize>)> {
         let gray = image::GrayImage::from_raw(width as u32, height as u32, image)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid image"))?;
 
-        let (pose, tracked) = self
-            .inner
-            .process_image(&gray)
-            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+        let result = match depth {
+            Some(d) => self.inner.process_image_with_depth(&gray, &d),
+            None => self.inner.process_image(&gray),
+        };
+        let (pose, tracked) = result.map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
         let mat = pose.matrix();
         let flat_mat: Vec<f32> = mat.iter().map(|&v| v as f32).collect();

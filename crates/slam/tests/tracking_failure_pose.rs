@@ -1,7 +1,12 @@
 //! A frame that fails to track must not report a pose of its own.
 //!
-//! `Tracker::process_frame` falls back to the previous pose when matching or PnP
-//! fails:
+//! Current contract: a frame that cannot be tracked against a non-empty map
+//! returns `Err("Tracking lost: ...")`, sets `Tracker::state` to `Lost`, and
+//! leaves the last good frame in place. Returning the previous pose as `Ok` (the
+//! fix described below) still made a lost frame look like a measurement.
+//!
+//! History: `Tracker::process_frame` fell back to the previous pose when
+//! matching or PnP failed:
 //!
 //! ```text
 //! if !tracking_success {
@@ -26,7 +31,7 @@
 use cv_core::storage::CpuStorage;
 use cv_core::{CameraIntrinsics, CpuTensor, Descriptors, KeyPoints, Pose, Tensor, TensorShape};
 use cv_slam::mapping::MapExt;
-use cv_slam::tracking::{Tracker, TrackingFrame};
+use cv_slam::tracking::{Tracker, TrackingFrame, TrackingState};
 use cv_slam::{MapPoint, WorldMap};
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 
@@ -99,65 +104,55 @@ fn matrix_error(a: &Pose, b: &Pose) -> f64 {
         .fold(0.0f64, |m, v| m.max(v.abs()))
 }
 
-/// Control: when a previous pose *is* available, the failed frame reuses it. The
-/// invariant below is not "always fail" - it is "never invent".
-#[test]
-fn a_failed_frame_reuses_the_last_pose_when_there_is_one() {
-    let mut tracker = tracker();
-    let previous = known_pose();
-    tracker.last_frame = Some(frame_with_pose(previous));
-
+/// Assert the failure contract: `Err`, state `Lost`, and the last good frame
+/// left in place untouched.
+fn assert_reported_loss(tracker: &mut Tracker, previous: &Pose) {
     let mut map = unmatchable_map();
-    let (pose, inliers) = tracker
-        .process_frame(&query_image(), &mut map)
-        .expect("a failure with a pose to fall back on is not an error");
-
-    assert!(inliers.is_empty(), "no correspondence can be reported");
+    match tracker.process_frame(&query_image(), &mut map) {
+        Ok((pose, inliers)) => panic!(
+            "a frame that failed to track returned Ok(({:?}, {} inliers)); a lost frame \
+             must be reported, not given a pose as if it had been measured",
+            pose.translation,
+            inliers.len()
+        ),
+        Err(e) => {
+            println!("reported: {e}");
+            assert!(e.contains("Tracking lost"), "unexpected error: {e}");
+        }
+    }
+    assert_eq!(tracker.state, TrackingState::Lost);
+    let kept = tracker
+        .current_frame
+        .as_ref()
+        .or(tracker.last_frame.as_ref())
+        .expect("the last good frame must be kept");
     assert!(
-        matrix_error(&pose, &previous) < 1e-12,
-        "expected the previous pose {:?}, got {:?}",
-        previous.matrix(),
-        pose.matrix()
+        matrix_error(&kept.pose, previous) < 1e-12,
+        "the last good pose was overwritten: {:?}",
+        kept.pose.translation
     );
 }
 
-/// The defect: after one successful frame the tracker holds that frame in
-/// `current_frame` and nothing in `last_frame`. A failure on the next frame has
-/// no fallback branch and returns the *identity* instead of the last pose - or an
-/// error.
+/// A failure with an older frame in `last_frame` is reported as lost. This
+/// used to return `Ok(previous pose)`: indistinguishable from a frame that had
+/// actually been tracked to the same place.
+#[test]
+fn a_failed_frame_is_reported_when_there_is_a_previous_pose() {
+    let mut tracker = tracker();
+    let previous = known_pose();
+    tracker.last_frame = Some(frame_with_pose(previous));
+    assert_reported_loss(&mut tracker, &previous);
+}
+
+/// After one successful frame the tracker holds that frame in `current_frame`
+/// and nothing in `last_frame`. A failure on the next frame once returned the
+/// *identity* (the fabricated `Pose::default()`); it must be reported as lost
+/// and leave the successful frame in place.
 #[test]
 fn a_failed_frame_after_a_successful_one_does_not_invent_a_pose() {
     let mut tracker = tracker();
     let previous = known_pose();
     tracker.current_frame = Some(frame_with_pose(previous));
-
-    // The state the tracker's own bookkeeping produces: the successful frame is
-    // in `current_frame`, `last_frame` is still empty.
     assert!(tracker.last_frame.is_none());
-
-    let mut map = unmatchable_map();
-    match tracker.process_frame(&query_image(), &mut map) {
-        // Failing is an honest answer when there is no pose to fall back on.
-        Err(e) => println!("reported an error: {e}"),
-        Ok((pose, inliers)) => {
-            assert!(inliers.is_empty(), "no correspondence can be reported");
-            let err = matrix_error(&pose, &previous);
-            println!(
-                "failed frame reported translation {:?} (last successful pose was {:?}), \
-                 error vs the previous pose {err:.6}, distance from the identity {:.6}",
-                pose.translation,
-                previous.translation,
-                pose.translation.norm()
-            );
-            assert!(
-                err < 1e-12,
-                "a frame that failed to track reported a pose of its own: {:?} instead of \
-                 the last successful {:?} (or an error). It is {:.6} from the identity, \
-                 which is exactly what the fabricated Pose::default() looks like.",
-                pose.translation,
-                previous.translation,
-                pose.translation.norm()
-            );
-        }
-    }
+    assert_reported_loss(&mut tracker, &previous);
 }

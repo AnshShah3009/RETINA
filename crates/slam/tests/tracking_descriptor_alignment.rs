@@ -73,8 +73,6 @@ fn tracker() -> Tracker {
 }
 
 #[test]
-#[ignore = "only 1 landmark tracks from a coherent map; cause undiagnosed - see the \
-            assertion message. Fails if un-ignored, deliberately."]
 fn inliers_reproject_onto_the_keypoint_of_the_descriptor_that_matched_them() {
     let img = noise_image();
     let tensor: CpuTensor<u8> =
@@ -144,15 +142,10 @@ fn inliers_reproject_onto_the_keypoint_of_the_descriptor_that_matched_them() {
     assert!(
         inliers.len() >= 10,
         "tracked only {} landmarks - too few for the correspondence set to mean \
-         anything. KNOWN OPEN, not diagnosed: this guard (the test's own control \
-         for a meaningful correspondence set) fails because only 1 of {} landmarks \
-         tracks, from a map whose landmarks are the exact back-projections of this \
-         frame's own keypoints through a known pose - so a correct tracker should \
-         reproduce all of them. Either the tracker has a defect here, or \
-         `process_frame` has a precondition this single-frame scene does not meet \
-         (it has no previous frame, so an optical-flow-based path has nothing to \
-         match against). Not enough evidence to say which, and guessing would be \
-         worse than recording it. See the ignored marker on this test.",
+         anything (of {} landmarks, each the exact back-projection of this frame's \
+         own keypoint through a known pose). Only 1 tracked while the tracker \
+         paired descriptor i with `keypoints[i]` instead of the descriptor's own \
+         keypoint; measured after the fix: 249 of 391, worst 0.000 px.",
         inliers.len(),
         map.points.len()
     );

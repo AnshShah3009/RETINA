@@ -187,14 +187,14 @@ fn slam_process_image_survives_a_global_gpu_context() {
     }
 }
 
-/// A frame that fails to track must fall back to the previous pose, not error -
-/// and it must do so on a GPU machine too.
+/// A frame that fails to track must be reported as lost (keeping the last good
+/// frame) - and it must get that far on a GPU machine too, rather than dying on
+/// a storage error.
 ///
-/// This is the branch the reported symptom sat on ("a failure with a pose to
-/// fall back on is not an error"), so it is the cheapest end-to-end way to see
-/// whether the tracker got far enough to reach its own bookkeeping at all.
+/// It is the cheapest end-to-end way to see whether the tracker got far enough
+/// to reach its own bookkeeping at all.
 #[test]
-fn a_failed_frame_still_falls_back_to_the_last_pose_on_a_gpu_machine() {
+fn a_failed_frame_reaches_loss_reporting_on_a_gpu_machine() {
     if global_gpu_context().is_none() {
         return;
     }
@@ -217,17 +217,21 @@ fn a_failed_frame_still_falls_back_to_the_last_pose_on_a_gpu_machine() {
     });
 
     let mut map = unmatchable_map();
-    let (pose, inliers) = tracker
+    let e = tracker
         .process_frame(&query_image(), &mut map)
-        .expect("a failure with a pose to fall back on is not an error");
-
-    assert!(inliers.is_empty(), "no correspondence can be reported");
-    let err = (pose.matrix() - previous.matrix())
+        .expect_err("a frame that cannot be tracked must be reported as lost");
+    // Reaching the tracker's own loss bookkeeping (rather than a storage error)
+    // is what shows the device selection worked.
+    assert!(e.contains("Tracking lost"), "unexpected error: {e}");
+    assert!(!e.contains("GpuStorage"), "device-selection failure: {e}");
+    assert_eq!(tracker.state, cv_slam::tracking::TrackingState::Lost);
+    let kept = tracker.last_frame.as_ref().expect("last good frame kept");
+    let err = (kept.pose.matrix() - previous.matrix())
         .iter()
         .fold(0.0f64, |m, v| m.max(v.abs()));
     assert!(
         err < 1e-12,
-        "expected the previous pose, got {pose:?} (max element error {err:.3e})"
+        "the last good pose was overwritten ({err:.3e})"
     );
 }
 
