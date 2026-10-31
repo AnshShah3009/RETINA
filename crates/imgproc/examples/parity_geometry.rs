@@ -173,9 +173,7 @@ fn main() {
                 Interpolation::Nearest | Interpolation::Linear => 1,
                 Interpolation::Cubic => 2,
                 Interpolation::Lanczos => 4,
-                Interpolation::Area => {
-                    ((rgb.width() / tw).max(rgb.height() / th)).max(1) as usize
-                }
+                Interpolation::Area => ((rgb.width() / tw).max(rgb.height() / th)).max(1) as usize,
             };
             for c in 0..3 {
                 emit_meta(&format!("{case}_c{c}"), radius);
