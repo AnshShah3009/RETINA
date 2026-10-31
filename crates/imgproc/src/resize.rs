@@ -7,44 +7,23 @@ use crate::kernels::{cubic_kernel, lanczos_kernel};
 
 /// Resampling filter.
 ///
-/// # `Linear` is a *bilinear point sample*, not an area average — and that
-/// matters when **downscaling**.
-///
-/// Verified against OpenCV 4.13 on an exact 2x downscale (48x36 -> 24x18) of a
-/// sinusoid, row 0:
-///
-/// ```text
-/// src row0       : 127 153 177 198 214 224 227 224 214 198 177 153 127
-/// this crate     : 127 178 215 227 211 172 120  71  37  28  47  88 141
-/// cv2 INTER_LINEAR: 148 194 222 224 200 157 106  60  33  31  54  97 148
-/// cv2 INTER_AREA  : 148 194 222 224 200 157 106  60  33  31  54  97 148
-/// ```
-///
-/// `this[0] == src[0,0]` exactly: this samples the source at the output pixel's
-/// mapped coordinate. OpenCV's two algorithms agree with each other to `0.0` here
-/// while both differ from this crate by 21 levels, and the amplitudes match
-/// (peak-to-peak 199 vs 193), so **both do filter** — the difference is where the
-/// filter is centred, not whether there is one.
-///
-/// Consequences, which are why this is documented rather than left implicit:
-///
-/// * For **upscaling** this is the right choice and is not a defect.
-/// * For **downscaling** it **aliases**: on the 2x case above it discards 3 of every
-///   4 source pixels. OpenCV offers `INTER_AREA` for this reason; there is no `Area`
-///   variant here.
-///
-/// Everything downstream of a resize inherits this, so a caller reducing resolution
-/// should be aware that fine detail above the output Nyquist rate is not averaged
-/// out. Whether to add an area-average variant, or to match OpenCV by changing
-/// `Linear`, is an open design decision — see `docs/PARITY.md`. Adding the variant is
-/// additive and safe; changing `Linear` is not, because it would alter every
-/// existing caller that upscales with it.
+/// `Linear` is half-pixel bilinear, the same mapping as OpenCV `INTER_LINEAR`
+/// (see `resize_sampling_convention`). It point-samples, so a 2× shrink
+/// discards three of every four source pixels and aliases. That is OpenCV's
+/// choice for `INTER_LINEAR` too. [`Interpolation::Area`] averages the source
+/// rectangle each output pixel covers, which is the decimation filter.
+/// Changing `Linear` would alter every caller that upscales with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interpolation {
     Nearest,
     Linear,
     Cubic,
     Lanczos,
+    /// Pixel-area average. On an integer shrink this is a box filter, so a
+    /// checkerboard does not survive as stripes. On a zoom each output pixel
+    /// falls inside one source pixel, which is what OpenCV's `INTER_AREA` does
+    /// (nearest, not bilinear).
+    Area,
 }
 
 pub fn resize(src: &GrayImage, width: u32, height: u32, interpolation: Interpolation) -> GrayImage {
@@ -84,6 +63,7 @@ fn resize_cpu(src: &GrayImage, width: u32, height: u32, interpolation: Interpola
         },
         Interpolation::Cubic => resize_sampled(src, width, height, 2, cubic_weights),
         Interpolation::Lanczos => resize_sampled(src, width, height, 4, lanczos_weights),
+        Interpolation::Area => resize_area(src, width, height),
     }
 }
 
@@ -191,6 +171,101 @@ fn resize_gpu(
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
 }
 
+/// Average of the source rectangle each output pixel covers.
+///
+/// An output pixel `(x, y)` owns `[x, x+1) * src_w/dst_w` by
+/// `[y, y+1) * src_h/dst_h` in source coordinates. Every source pixel that
+/// overlaps that rectangle contributes its value times the overlap area.
+/// On a 2× shrink that is exactly the four source pixels, so a checkerboard
+/// becomes the mean instead of one of the two colours.
+fn resize_area(src: &GrayImage, width: u32, height: u32) -> GrayImage {
+    let sw = src.width();
+    let sh = src.height();
+    let src_raw = src.as_raw();
+    let scale_x = sw as f64 / width as f64;
+    let scale_y = sh as f64 / height as f64;
+    let mut dst = vec![0u8; (width * height) as usize];
+    dst.par_chunks_mut(width as usize)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y0 = y as f64 * scale_y;
+            let y1 = (y as f64 + 1.0) * scale_y;
+            for x in 0..width {
+                row[x as usize] = area_sample(src_raw, sw, sh, 1, scale_x, y0, y1, x as f64)[0];
+            }
+        });
+    GrayImage::from_raw(width, height, dst).unwrap_or_else(|| GrayImage::new(width, height))
+}
+
+fn resize_rgb_area(src: &RgbImage, width: u32, height: u32) -> RgbImage {
+    let sw = src.width();
+    let sh = src.height();
+    let src_raw = src.as_raw();
+    let scale_x = sw as f64 / width as f64;
+    let scale_y = sh as f64 / height as f64;
+    let mut dst = vec![0u8; (width * height * 3) as usize];
+    dst.par_chunks_mut(width as usize * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y0 = y as f64 * scale_y;
+            let y1 = (y as f64 + 1.0) * scale_y;
+            for x in 0..width {
+                let px = area_sample(src_raw, sw, sh, 3, scale_x, y0, y1, x as f64);
+                let o = x as usize * 3;
+                row[o] = px[0];
+                row[o + 1] = px[1];
+                row[o + 2] = px[2];
+            }
+        });
+    RgbImage::from_raw(width, height, dst).unwrap_or_else(|| RgbImage::new(width, height))
+}
+
+/// One output sample. `channels` is 1 or 3, packed in `src`.
+fn area_sample(
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    channels: usize,
+    scale_x: f64,
+    y0: f64,
+    y1: f64,
+    x: f64,
+) -> [u8; 3] {
+    let x0 = x * scale_x;
+    let x1 = (x + 1.0) * scale_x;
+    let ix0 = x0.floor() as u32;
+    let ix1 = (x1.ceil() as u32).min(sw);
+    let iy0 = y0.floor() as u32;
+    let iy1 = (y1.ceil() as u32).min(sh);
+    let mut acc = [0.0f64; 3];
+    let mut wsum = 0.0f64;
+    for sy in iy0..iy1 {
+        let wy = (((sy + 1) as f64).min(y1) - (sy as f64).max(y0)).max(0.0);
+        if wy == 0.0 {
+            continue;
+        }
+        for sx in ix0..ix1 {
+            let wx = (((sx + 1) as f64).min(x1) - (sx as f64).max(x0)).max(0.0);
+            if wx == 0.0 {
+                continue;
+            }
+            let w = wx * wy;
+            let base = ((sy * sw + sx) as usize) * channels;
+            for c in 0..channels {
+                acc[c] += src[base + c] as f64 * w;
+            }
+            wsum += w;
+        }
+    }
+    let mut out = [0u8; 3];
+    if wsum > 0.0 {
+        for c in 0..channels {
+            out[c] = (acc[c] / wsum).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
 fn resize_nearest(src: &GrayImage, width: u32, height: u32) -> GrayImage {
     let mut dst = GrayImage::new(width, height);
     let src_width = src.width() as f32;
@@ -239,6 +314,7 @@ pub fn resize_rgb(
         Interpolation::Linear => resize_rgb_linear(src, width, height),
         Interpolation::Cubic => resize_rgb_sampled(src, width, height, 2, cubic_weights),
         Interpolation::Lanczos => resize_rgb_sampled(src, width, height, 4, lanczos_weights),
+        Interpolation::Area => resize_rgb_area(src, width, height),
     }
 }
 
@@ -631,6 +707,40 @@ mod tests {
 
         let linear = resize_rgb(&img, 4, 1, Interpolation::Linear);
         assert_ne!(nearest.as_raw(), linear.as_raw());
+    }
+
+    /// A one-pixel spike must be averaged across the pixels it shares an
+    /// output with. Bilinear samples the spike and reports 255.
+    #[test]
+    fn area_downscale_averages_what_linear_aliases() {
+        let mut img = GrayImage::new(3, 1);
+        img.put_pixel(0, 0, Luma([0]));
+        img.put_pixel(1, 0, Luma([255]));
+        img.put_pixel(2, 0, Luma([0]));
+        assert_eq!(resize(&img, 1, 1, Interpolation::Area).as_raw(), &[85]);
+        assert_eq!(resize(&img, 1, 1, Interpolation::Linear).as_raw(), &[255]);
+
+        let mut block = GrayImage::new(2, 2);
+        block.put_pixel(0, 0, Luma([10]));
+        block.put_pixel(1, 0, Luma([20]));
+        block.put_pixel(0, 1, Luma([30]));
+        block.put_pixel(1, 1, Luma([40]));
+        assert_eq!(resize(&block, 1, 1, Interpolation::Area).as_raw(), &[25]);
+        // A zoom puts each output pixel inside one source pixel.
+        assert_eq!(
+            resize(&block, 4, 4, Interpolation::Area).as_raw(),
+            resize(&block, 4, 4, Interpolation::Nearest).as_raw()
+        );
+
+        let mut rgb = RgbImage::new(2, 2);
+        rgb.put_pixel(0, 0, Rgb([0, 0, 0]));
+        rgb.put_pixel(1, 0, Rgb([10, 20, 30]));
+        rgb.put_pixel(0, 1, Rgb([40, 50, 60]));
+        rgb.put_pixel(1, 1, Rgb([70, 80, 90]));
+        assert_eq!(
+            resize_rgb(&rgb, 1, 1, Interpolation::Area).as_raw(),
+            &[30, 38, 45]
+        );
     }
 
     #[test]

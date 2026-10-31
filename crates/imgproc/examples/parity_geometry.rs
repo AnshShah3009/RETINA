@@ -136,6 +136,7 @@ fn main() {
         ("linear", Interpolation::Linear),
         ("cubic", Interpolation::Cubic),
         ("lanczos", Interpolation::Lanczos),
+        ("area", Interpolation::Area),
     ];
     for (iname, img) in [("smooth", &src), ("checker", &checker)] {
         for (tw, th) in targets {
@@ -148,6 +149,9 @@ fn main() {
                     Interpolation::Nearest | Interpolation::Linear => 1,
                     Interpolation::Cubic => 2,
                     Interpolation::Lanczos => 4,
+                    Interpolation::Area => {
+                        ((img.width() / tw).max(img.height() / th)).max(1) as usize
+                    }
                 };
                 emit_meta(&case, radius);
                 let out = resize(img, tw, th, mode);
@@ -169,6 +173,9 @@ fn main() {
                 Interpolation::Nearest | Interpolation::Linear => 1,
                 Interpolation::Cubic => 2,
                 Interpolation::Lanczos => 4,
+                Interpolation::Area => {
+                    ((rgb.width() / tw).max(rgb.height() / th)).max(1) as usize
+                }
             };
             for c in 0..3 {
                 emit_meta(&format!("{case}_c{c}"), radius);
@@ -235,7 +242,7 @@ fn main() {
         for (mname, mode) in modes {
             let case = format!("remap_{iname}_{mname}_c0");
             let radius = match mode {
-                Interpolation::Nearest | Interpolation::Linear => 1,
+                Interpolation::Nearest | Interpolation::Linear | Interpolation::Area => 1,
                 Interpolation::Cubic => 2,
                 Interpolation::Lanczos => 3,
             };

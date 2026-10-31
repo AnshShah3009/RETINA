@@ -34,10 +34,9 @@ Targets claimed by the workspace README/root crate: OpenCV, Open3D, Matplotlib, 
 >   different projection than the one placing it — **fixed**, and now pinned by
 >   `footprint_is_the_placement_jacobian`.
 >
-> Still open and worth reading before planning: `Interpolation::Linear` aliases
-> when downscaling — the same as OpenCV's
-> `INTER_LINEAR` (use `INTER_AREA`-style filtering for decimation), so it is a parity
-> property, not a defect. Since closed and kept here only so they are not re-opened:
+> `Interpolation::Linear` still aliases when downscaling, the same as OpenCV's
+> `INTER_LINEAR`. Decimation is [`imgproc::resize::Interpolation::Area`].
+> Since closed and kept here only so they are not re-opened:
 > `erf` (now machine precision, `5f17b5b`), `score_msac`'s `unimplemented!()` (b1 #7 —
 > the workspace now has **zero** `todo!`/`unimplemented!`), and the Nistér 5-point
 > solver (`ca4ca75`).
