@@ -424,6 +424,16 @@ fn scan_body(body: &str) -> (BTreeSet<String>, BTreeSet<String>) {
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
+            // A member access or swizzle (`gid.x`, `num_wg.y`) is never a
+            // module-scope binding, even when a global shares its name -
+            // `vector_ops.wgsl` binds globals called `x` and `y`.
+            let mut k = start;
+            while k > 0 && chars[k - 1].is_whitespace() {
+                k -= 1;
+            }
+            if k > 0 && chars[k - 1] == '.' {
+                continue;
+            }
             let mut j = i;
             while j < chars.len() && chars[j].is_whitespace() {
                 j += 1;

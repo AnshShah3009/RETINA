@@ -186,21 +186,22 @@ pub fn build_lbvh(
         // 0. Initialize parent pointers to -1
         compute_pass.set_pipeline(&pipeline_init);
         compute_pass.set_bind_group(0, &bg_init, &[]);
-        compute_pass.dispatch_workgroups(num_nodes.div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_nodes, 256);
+        compute_pass.dispatch_workgroups(wg_x, wg_y, wg_z);
 
         // 1. Build tree structure
         compute_pass.set_pipeline(&pipeline_tree);
         compute_pass.set_bind_group(0, &bg_tree, &[]);
-        let workgroup_count_tree = (num_elements - 1).div_ceil(256);
-        if workgroup_count_tree > 0 {
-            compute_pass.dispatch_workgroups(workgroup_count_tree, 1, 1);
+        if num_elements > 1 {
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_elements - 1, 256);
+            compute_pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
 
         // 2. Compute AABBs
         compute_pass.set_pipeline(&pipeline_aabb);
         compute_pass.set_bind_group(0, &bg_aabb, &[]);
-        let workgroup_count_aabb = num_elements.div_ceil(256);
-        compute_pass.dispatch_workgroups(workgroup_count_aabb, 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_elements, 256);
+        compute_pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
 
     ctx.submit(encoder);

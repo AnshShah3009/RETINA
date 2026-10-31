@@ -153,7 +153,8 @@ pub fn lucas_kanade(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((num_points as u32).div_ceil(64), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_points as u32, 64);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 

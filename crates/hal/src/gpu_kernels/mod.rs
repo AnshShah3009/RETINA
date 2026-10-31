@@ -8,7 +8,10 @@ pub const WORKGROUP_SIZE_1D: u32 = 256;
 pub const WORKGROUP_SIZE_2D: u32 = 16;
 pub const WORKGROUP_SIZE_3D: u32 = 8;
 
-/// Compute dispatch helpers
+/// Compute dispatch helpers.
+///
+/// `dispatch_size_1d` returns a single x count and can exceed
+/// [`MAX_WORKGROUPS_PER_DIM`] for large inputs; prefer [`dispatch_1d`].
 pub fn dispatch_size_1d(count: u32) -> u32 {
     count.div_ceil(WORKGROUP_SIZE_1D)
 }
@@ -663,7 +666,7 @@ mod tests {
 /// GPU-accelerated point cloud operations
 pub mod pointcloud_gpu {
     use crate::gpu::GpuContext;
-    use crate::gpu_kernels::{dispatch_size_1d, pointcloud};
+    use crate::gpu_kernels::{pointcloud, WORKGROUP_SIZE_1D};
     use crate::tensor_ext::{TensorToCpu, TensorToGpu};
     use nalgebra::{Matrix4, Point3, Vector3};
     /// Transform point cloud on GPU
@@ -758,8 +761,8 @@ pub mod pointcloud_gpu {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            let x = dispatch_size_1d(num_points);
-            pass.dispatch_workgroups(x, 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_points, WORKGROUP_SIZE_1D);
+            pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
 
         ctx.submit(encoder);
@@ -1363,7 +1366,8 @@ pub mod spatial_gpu {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups((queries.len() as u32).div_ceil(64), 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(queries.len() as u32, 64);
+            pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         gpu.queue.submit(std::iter::once(encoder.finish()));
 
@@ -1676,14 +1680,14 @@ pub mod mesh_gpu {
         });
 
         // Dispatch compute shader
-        let workgroup_count = num_vertices.div_ceil(256);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_vertices, 256);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut compute_pass =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             compute_pass.set_pipeline(&pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
+            compute_pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         queue.submit(Some(encoder.finish()));
 

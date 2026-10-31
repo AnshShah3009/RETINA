@@ -32,8 +32,13 @@ struct Params {
 @group(0) @binding(4) var<uniform> params: Params;
 
 @compute @workgroup_size(256)
-fn compute_aabbs(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let leaf_idx = i32(global_id.x);
+fn compute_aabbs(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d).
+    let leaf_idx = i32(global_id.x + global_id.y * num_wg.x * 256u);
     if (leaf_idx >= i32(params.num_elements)) {
         return;
     }

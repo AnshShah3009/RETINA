@@ -51,8 +51,14 @@ fn compute_normal(point_idx: u32) -> vec3<f32> {
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let idx = global_id.x + global_id.y * num_wg.x * 256u;
     
     if (idx >= num_points) {
         return;

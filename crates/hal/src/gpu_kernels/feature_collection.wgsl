@@ -14,8 +14,14 @@ struct Params {
 
 // Pass 1: Count keypoints per thread or block
 @compute @workgroup_size(256)
-fn count_points(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let gid = global_id.x;
+fn count_points(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let gid = global_id.x + global_id.y * num_wg.x * 256u;
     if (gid >= params.num_elements) { return; }
     
     // Check 4 pixels at once
@@ -47,8 +53,14 @@ struct Keypoint {
 @group(0) @binding(3) var<uniform> params_2: Params;
 
 @compute @workgroup_size(256)
-fn collect_points(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let gid = global_id.x;
+fn collect_points(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let gid = global_id.x + global_id.y * num_wg.x * 256u;
     if (gid >= params_2.num_elements) { return; }
     
     let val4 = score_map_2[gid];

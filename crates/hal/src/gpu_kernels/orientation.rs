@@ -93,7 +93,9 @@ pub fn compute_orientation(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(num_kp, 1, 1);
+        // One workgroup per keypoint; split over x/y past 65535 keypoints.
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_kp);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 

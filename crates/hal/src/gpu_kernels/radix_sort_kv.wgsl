@@ -26,10 +26,18 @@ fn histogram(
     @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
+    // Workgroups are spread over a 2-D grid so neither axis exceeds 65535
+    // (see gpu_kernels::dispatch_groups_1d). Surplus tail workgroups have no
+    // histogram column; the test is workgroup-uniform, so returning before
+    // the barriers is allowed.
+    let wid = group_id.x + group_id.y * num_wg.x;
+    if (wid >= params.num_workgroups) {
+        return;
+    }
     let tid = local_id.x;
-    let gid = global_id.x;
-    let wid = group_id.x;
+    let gid = wid * 256u + tid;
     
     atomicStore(&local_hist[tid], 0u);
     workgroupBarrier();
@@ -51,10 +59,18 @@ fn scatter(
     @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
+    // Workgroups are spread over a 2-D grid so neither axis exceeds 65535
+    // (see gpu_kernels::dispatch_groups_1d). Surplus tail workgroups have no
+    // histogram column; the test is workgroup-uniform, so returning before
+    // the barriers is allowed.
+    let wid = group_id.x + group_id.y * num_wg.x;
+    if (wid >= params.num_workgroups) {
+        return;
+    }
     let tid = local_id.x;
-    let gid = global_id.x;
-    let wid = group_id.x;
+    let gid = wid * 256u + tid;
     
     atomicStore(&local_hist[tid], 0u);
     workgroupBarrier();
@@ -91,8 +107,14 @@ fn scatter(
 @group(0) @binding(2) var<storage, read_write> out_kv_pack: array<KV>;
 
 @compute @workgroup_size(256)
-fn pack(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let gid = global_id.x;
+fn pack(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let gid = global_id.x + global_id.y * num_wg.x * 256u;
     if (gid >= params.num_elements) { return; }
     out_kv_pack[gid] = KV(in_keys[gid], in_vals[gid]);
 }
@@ -102,8 +124,14 @@ fn pack(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @group(0) @binding(2) var<storage, read_write> out_vals: array<u32>;
 
 @compute @workgroup_size(256)
-fn unpack(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let gid = global_id.x;
+fn unpack(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let gid = global_id.x + global_id.y * num_wg.x * 256u;
     if (gid >= params.num_elements) { return; }
     let kv = in_kv_unpack[gid];
     out_keys[gid] = kv.key;

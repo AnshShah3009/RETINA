@@ -1901,8 +1901,9 @@ impl ComputeContext for GpuContext {
                     });
                     pass.set_pipeline(&pipeline);
                     pass.set_bind_group(0, &bind_group, &[]);
-                    let x = (kp_data.len() as u32).div_ceil(64);
-                    pass.dispatch_workgroups(x, 1, 1);
+                    let (wg_x, wg_y, wg_z) =
+                        crate::gpu_kernels::dispatch_1d(kp_data.len() as u32, 64);
+                    pass.dispatch_workgroups(wg_x, wg_y, wg_z);
                 }
                 self.submit(encoder);
 

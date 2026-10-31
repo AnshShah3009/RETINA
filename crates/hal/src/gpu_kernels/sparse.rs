@@ -114,8 +114,8 @@ pub fn spmv(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (rows as u32).div_ceil(256);
-        pass.dispatch_workgroups(x, 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(rows as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 
@@ -171,7 +171,8 @@ pub fn dot(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(num_groups, 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_groups);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 
@@ -232,7 +233,8 @@ pub fn axpy(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((len as u32).div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(len as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
     Ok(())
@@ -274,7 +276,8 @@ pub fn vec_scale(ctx: &GpuContext, alpha: f32, v: &mut Tensor<f32, GpuStorage<f3
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((len as u32).div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(len as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
     Ok(())

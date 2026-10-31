@@ -210,7 +210,8 @@ pub fn cast_rays(
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bg0, &[]);
         pass.set_bind_group(1, &bg1, &[]);
-        pass.dispatch_workgroups(num_rays.div_ceil(256) as u32, 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_rays as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 

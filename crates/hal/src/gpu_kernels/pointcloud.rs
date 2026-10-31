@@ -149,7 +149,8 @@ pub fn compute_normals(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&bounds_pipeline);
         pass.set_bind_group(0, &bounds_bg, &[]);
-        pass.dispatch_workgroups(num_workgroups, 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_workgroups);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     queue.submit(std::iter::once(encoder.finish()));
 
@@ -243,7 +244,8 @@ pub fn compute_normals(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&morton_pipeline);
         pass.set_bind_group(0, &morton_bg, &[]);
-        pass.dispatch_workgroups(num_points_u32.div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_points_u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     queue.submit(std::iter::once(encoder.finish()));
 
@@ -328,7 +330,8 @@ pub fn compute_normals(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&knn_pipeline);
         pass.set_bind_group(0, &knn_bg, &[]);
-        pass.dispatch_workgroups(num_points_u32.div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_points_u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     queue.submit(std::iter::once(encoder.finish()));
 
@@ -363,7 +366,8 @@ pub fn compute_normals(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pca_pipeline);
         pass.set_bind_group(0, &pca_bg, &[]);
-        pass.dispatch_workgroups(num_points_u32.div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_points_u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     queue.submit(std::iter::once(encoder.finish()));
 
@@ -434,7 +438,8 @@ pub fn compute_normals_from_covariances_gpu(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((n as u32).div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(n as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     queue.submit(std::iter::once(encoder.finish()));
 
@@ -514,7 +519,8 @@ pub fn compute_normals_fast_gpu(
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         // Shader is @workgroup_size(256): one workgroup per 256 points.
-        pass.dispatch_workgroups((num_points as u32).div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_points as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     queue.submit(std::iter::once(encoder.finish()));
 

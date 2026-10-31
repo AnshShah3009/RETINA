@@ -299,3 +299,209 @@ fn u8_threshold_kernel_via_dispatch_covers_an_8k_frame() {
     let first = got.iter().zip(&expected).position(|(g, e)| g != e);
     assert_eq!(bad, 0, "{bad} of {len} pixels wrong, first at {first:?}");
 }
+
+#[test]
+fn u8_to_f32_cast_on_a_3_channel_4k_frame_is_exact() {
+    // tensor_ext's u8 -> f32 cast: one invocation per pixel at 256 per
+    // workgroup, 3 * 3840 * 2160 = 24.9M pixels = 97200 groups.
+    use cv_hal::tensor_ext::TensorCast;
+    let Some(gpu) = require_gpu() else { return };
+
+    let shape = TensorShape::new(3, H_4K, W_4K);
+    let data: Vec<u8> = (0..shape.len())
+        .map(|i| ((i as u32).wrapping_mul(2654435761) >> 24) as u8)
+        .collect();
+    let expected: Vec<f32> = data.iter().map(|&v| v as f32 / 255.0).collect();
+    let input: CpuTensor<u8> = Tensor::from_vec(data, shape).unwrap();
+
+    let got = input
+        .to_gpu_ctx(gpu)
+        .unwrap()
+        .to_f32_ctx(gpu)
+        .unwrap()
+        .to_cpu_ctx(gpu)
+        .unwrap();
+    assert_close(
+        "u8_to_f32",
+        got.storage.as_slice().unwrap(),
+        &expected,
+        1e-6,
+    );
+}
+
+#[test]
+fn f32_to_u8_cast_writes_the_trailing_partial_word() {
+    // The f32 -> u8 cast packs four pixels per invocation. Its dispatch used
+    // `(size / 4).div_ceil(256)`, which for 4 * 256 + 1 pixels launched one
+    // workgroup for 257 words and left the last pixel unwritten.
+    use cv_hal::tensor_ext::TensorCast;
+    let Some(gpu) = require_gpu() else { return };
+
+    let len = 4 * 256 + 1;
+    let data: Vec<f32> = (0..len).map(|i| ((i % 250) + 1) as f32 / 255.0).collect();
+    let expected: Vec<u8> = (0..len).map(|i| ((i % 250) + 1) as u8).collect();
+    let input: CpuTensor<f32> = Tensor::from_vec(data, TensorShape::new(1, 1, len)).unwrap();
+
+    let got = input
+        .to_gpu_ctx(gpu)
+        .unwrap()
+        .to_u8_ctx(gpu)
+        .unwrap()
+        .to_cpu_ctx(gpu)
+        .unwrap();
+    let got = got.storage.as_slice().unwrap();
+    assert_eq!(got.len(), len);
+    let first = got.iter().zip(&expected).position(|(g, e)| g != e);
+    assert_eq!(
+        first,
+        None,
+        "first wrong pixel (last is {} vs {})",
+        got[len - 1],
+        expected[len - 1]
+    );
+}
+
+#[test]
+fn exclusive_scan_past_the_workgroup_limit_matches_cpu() {
+    // scan_blocks handles 512 elements per workgroup: 2^25 + 8192 elements =
+    // 65552 groups, and the recursive block-sum scan + add_offsets follow.
+    let Some(gpu) = require_gpu() else { return };
+
+    let n = (1usize << 25) + 8192;
+    let data: Vec<u32> = (0..n as u32)
+        .map(|i| (i.wrapping_mul(2654435761) >> 29) + 1)
+        .collect();
+    let mut expected = Vec::with_capacity(n);
+    let mut acc = 0u32;
+    for &v in &data {
+        expected.push(acc);
+        acc = acc.wrapping_add(v);
+    }
+
+    let t: CpuTensor<u32> = Tensor::from_vec(data, TensorShape::new(1, 1, n)).unwrap();
+    let t = t.to_gpu_ctx(gpu).unwrap();
+    cv_hal::gpu_kernels::radix_sort::gpu_exclusive_scan(
+        gpu,
+        t.storage.buffer(),
+        n as u32,
+        include_str!("../src/gpu_kernels/prefix_sum.wgsl"),
+    )
+    .unwrap();
+    let got = t.to_cpu_ctx(gpu).unwrap();
+    let got = got.storage.as_slice().unwrap();
+    let first = got.iter().zip(&expected).position(|(g, e)| g != e);
+    assert_eq!(
+        first,
+        None,
+        "scan differs from CPU at {first:?}: gpu {:?} cpu {:?}",
+        first.map(|i| got[i]),
+        first.map(|i| expected[i])
+    );
+}
+
+#[test]
+fn radix_sort_past_the_workgroup_limit_keeps_every_key_and_orders_the_top_byte() {
+    // 2^24 + 4096 keys at 256 per workgroup = 65552 histogram/scatter groups.
+    //
+    // radix_sort_u32 is not a correct sort even for small inputs: its scatter
+    // ranks keys within a workgroup with atomicAdd, which is not stable, so
+    // LSD passes scramble the lower digits (pre-existing, separate from the
+    // dispatch limit). What the dispatch fix must guarantee is that every
+    // histogram/scatter workgroup lands in its own column: the output is a
+    // permutation of the input, and the last pass (top byte) is ordered.
+    let Some(gpu) = require_gpu() else { return };
+
+    let n = (1usize << 24) + 4096;
+    let keys: Vec<u32> = (0..n as u32)
+        .map(|i| i.wrapping_mul(2654435761) ^ (i >> 7))
+        .collect();
+    let mut expected = keys.clone();
+    expected.sort_unstable();
+
+    let input: CpuTensor<u32> = Tensor::from_vec(keys, TensorShape::new(1, 1, n)).unwrap();
+    let sorted =
+        cv_hal::gpu_kernels::radix_sort::radix_sort_u32(gpu, &input.to_gpu_ctx(gpu).unwrap())
+            .unwrap()
+            .to_cpu_ctx(gpu)
+            .unwrap();
+    let got = sorted.storage.as_slice().unwrap().to_vec();
+    assert_eq!(got.len(), n);
+    let unordered = got.windows(2).position(|w| (w[0] >> 24) > (w[1] >> 24));
+    assert_eq!(unordered, None, "top byte not ordered");
+    let mut multiset = got;
+    multiset.sort_unstable();
+    assert!(
+        multiset == expected,
+        "output is not a permutation of the input"
+    );
+}
+
+#[test]
+fn axpy_past_the_workgroup_limit_matches_cpu() {
+    // y = 2x + y over 2^24 + 4096 elements = 65552 groups of 256.
+    let Some(gpu) = require_gpu() else { return };
+
+    let n = (1usize << 24) + 4096;
+    let x = pattern(n, 7);
+    let y = pattern(n, 8);
+    let expected: Vec<f32> = x.iter().zip(&y).map(|(a, b)| 2.0 * a + b).collect();
+
+    let shape = TensorShape::new(1, 1, n);
+    let xg = CpuTensor::<f32>::from_vec(x, shape)
+        .unwrap()
+        .to_gpu_ctx(gpu)
+        .unwrap();
+    let mut yg = CpuTensor::<f32>::from_vec(y, shape)
+        .unwrap()
+        .to_gpu_ctx(gpu)
+        .unwrap();
+    cv_hal::gpu_kernels::sparse::axpy(gpu, 2.0, &xg, &mut yg).unwrap();
+
+    let got = yg.to_cpu_ctx(gpu).unwrap();
+    assert_close("axpy", got.storage.as_slice().unwrap(), &expected, 1e-6);
+}
+
+#[test]
+fn orb_orientation_for_more_than_65535_keypoints() {
+    // compute_orientation launches one workgroup per keypoint, so 65535
+    // keypoints was the hard cap. Keypoints repeat with period P, so every
+    // result must equal the one for the same position in the first period.
+    let Some(gpu) = require_gpu() else { return };
+
+    let (w, h) = (256usize, 256usize);
+    let img: Vec<u8> = (0..w * h)
+        .map(|i| (((i % w) * 3 + (i / w) * 5) % 256) as u8)
+        .collect();
+    let img: CpuTensor<u8> = Tensor::from_vec(img, TensorShape::new(1, h, w)).unwrap();
+    let img = img.to_gpu_ctx(gpu).unwrap();
+
+    const P: usize = 97;
+    let n = 70_000usize;
+    let kps: Vec<cv_core::KeyPointF32> = (0..n)
+        .map(|i| {
+            let j = i % P;
+            cv_core::KeyPointF32 {
+                x: (20 + (j * 7) % 200) as f32,
+                y: (20 + (j * 13) % 200) as f32,
+                size: 31.0,
+                angle: 0.0,
+                response: 1.0,
+                octave: 0,
+                class_id: 0,
+                padding: 0,
+            }
+        })
+        .collect();
+
+    let angles =
+        cv_hal::gpu_kernels::orientation::compute_orientation(gpu, &img, &kps, 15).unwrap();
+    assert_eq!(angles.len(), n);
+    let bad = (0..n).filter(|&i| angles[i] != angles[i % P]).count();
+    let first = (0..n).find(|&i| angles[i] != angles[i % P]);
+    assert_eq!(
+        bad, 0,
+        "{bad} keypoints disagree with their first-period twin, first at {first:?}"
+    );
+    // Sanity: the pattern is not degenerate.
+    assert!(angles[..P].iter().any(|a| *a != 0.0));
+}

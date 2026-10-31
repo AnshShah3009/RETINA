@@ -55,8 +55,13 @@ fn delta(i: i32, j: i32) -> i32 {
 }
 
 @compute @workgroup_size(256)
-fn init_nodes(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let i = i32(global_id.x);
+fn init_nodes(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d).
+    let i = i32(global_id.x + global_id.y * num_wg.x * 256u);
     if (i >= i32(params.num_elements) * 2 - 1) {
         return;
     }
@@ -66,8 +71,13 @@ fn init_nodes(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 
 @compute @workgroup_size(256)
-fn build_radix_tree(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let i = i32(global_id.x);
+fn build_radix_tree(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d).
+    let i = i32(global_id.x + global_id.y * num_wg.x * 256u);
     if (i >= i32(params.num_elements) - 1) {
         return;
     }

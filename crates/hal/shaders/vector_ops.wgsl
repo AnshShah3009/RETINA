@@ -7,8 +7,14 @@
 @group(0) @binding(2) var<uniform> alpha: f32;
 
 @compute @workgroup_size(256)
-fn axpy(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+fn axpy(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let idx = gid.x + gid.y * num_wg.x * 256u;
     if (idx >= arrayLength(&x)) {
         return;
     }
@@ -20,8 +26,14 @@ fn axpy(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(1) @binding(1) var<storage, read_write> dst: array<f32>;
 
 @compute @workgroup_size(256)
-fn vec_copy(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+fn vec_copy(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let idx = gid.x + gid.y * num_wg.x * 256u;
     if (idx >= arrayLength(&src)) {
         return;
     }
@@ -39,10 +51,19 @@ var<workgroup> shared_data: array<f32, 256>;
 fn dot_product(
     @builtin(global_invocation_id) gid: vec3<u32>,
     @builtin(local_invocation_id) lid: vec3<u32>,
-    @builtin(workgroup_id) wid: vec3<u32>
+    @builtin(workgroup_id) wid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
-    let idx = gid.x;
+    // Workgroups are spread over a 2-D grid so neither axis exceeds 65535
+    // (see gpu_kernels::dispatch_groups_1d). Surplus tail workgroups own no
+    // elements and have no partial-sum slot; the test is workgroup-uniform,
+    // so returning before the barriers is allowed.
+    let wg = wid.x + wid.y * num_wg.x;
+    if (wg >= arrayLength(&partial_sums)) {
+        return;
+    }
     let local_idx = lid.x;
+    let idx = wg * 256u + local_idx;
     
     // Load and multiply
     if (idx < arrayLength(&a)) {
@@ -65,7 +86,7 @@ fn dot_product(
     
     // Write partial sum
     if (local_idx == 0u) {
-        partial_sums[wid.x] = shared_data[0];
+        partial_sums[wg] = shared_data[0];
     }
 }
 
@@ -74,8 +95,14 @@ fn dot_product(
 @group(3) @binding(1) var<uniform> scale: f32;
 
 @compute @workgroup_size(256)
-fn vec_scale(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+fn vec_scale(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let idx = gid.x + gid.y * num_wg.x * 256u;
     if (idx >= arrayLength(&v)) {
         return;
     }

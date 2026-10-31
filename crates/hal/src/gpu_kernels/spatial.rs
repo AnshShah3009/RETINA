@@ -66,8 +66,14 @@ fn voxel_hash(v: vec3<i32>) -> u32 {
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let idx = global_id.x + global_id.y * num_wg.x * 256u;
     if (idx >= params.num_points) { return; }
 
     let p = input_points[idx];
@@ -196,7 +202,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &voxel_bind_group, &[]);
-        pass.dispatch_workgroups((num_points as u32).div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_points as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 
@@ -333,8 +340,14 @@ struct BuildParams {
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let idx = global_id.x + global_id.y * num_wg.x * 256u;
     if (idx >= params.num_points) { return; }
 
     let p = tgt_points[idx];
@@ -388,7 +401,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let mut pass = build_enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&build_pipeline);
         pass.set_bind_group(0, &build_bg, &[]);
-        pass.dispatch_workgroups((num_tgt as u32).div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_tgt as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(build_enc);
 
@@ -415,8 +429,14 @@ fn get_bucket(hash: u32, bucket_idx: u32) -> u32 {
 }
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let src_idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let src_idx = global_id.x + global_id.y * num_wg.x * 64u;
     if (src_idx >= params.num_src) { return; }
 
     let p_s = src_points[src_idx];
@@ -500,7 +520,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let mut pass = corr_enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&corr_pipeline);
         pass.set_bind_group(0, &corr_bg, &[]);
-        pass.dispatch_workgroups((num_src as u32).div_ceil(64), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_src as u32, 64);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(corr_enc);
 

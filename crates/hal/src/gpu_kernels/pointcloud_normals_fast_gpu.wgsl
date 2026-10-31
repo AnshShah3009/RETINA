@@ -78,8 +78,10 @@ fn min_eigenvector(cxx: f32, cxy: f32, cxz: f32, cyy: f32, cyz: f32, czz: f32) -
 fn main(
     @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
-    let idx = global_id.x;
+    // 1-D range dispatched as a 2-D grid (see gpu_kernels::dispatch_1d).
+    let idx = global_id.x + global_id.y * num_wg.x * 256u;
     let lid = local_id.x;
     let num_points = u32(params.num_points);
     // Cap k at 16 to reduce register pressure; still high-quality results.

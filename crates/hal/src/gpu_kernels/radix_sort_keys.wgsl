@@ -20,10 +20,18 @@ fn histogram(
     @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
+    // Workgroups are spread over a 2-D grid so neither axis exceeds 65535
+    // (see gpu_kernels::dispatch_groups_1d). Surplus tail workgroups have no
+    // histogram column; the test is workgroup-uniform, so returning before
+    // the barriers is allowed.
+    let wid = group_id.x + group_id.y * num_wg.x;
+    if (wid >= params.num_workgroups) {
+        return;
+    }
     let tid = local_id.x;
-    let gid = global_id.x;
-    let wid = group_id.x;
+    let gid = wid * 256u + tid;
     
     atomicStore(&local_hist[tid], 0u);
     workgroupBarrier();
@@ -45,10 +53,18 @@ fn scatter(
     @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
+    // Workgroups are spread over a 2-D grid so neither axis exceeds 65535
+    // (see gpu_kernels::dispatch_groups_1d). Surplus tail workgroups have no
+    // histogram column; the test is workgroup-uniform, so returning before
+    // the barriers is allowed.
+    let wid = group_id.x + group_id.y * num_wg.x;
+    if (wid >= params.num_workgroups) {
+        return;
+    }
     let tid = local_id.x;
-    let gid = global_id.x;
-    let wid = group_id.x;
+    let gid = wid * 256u + tid;
     
     atomicStore(&local_hist[tid], 0u);
     workgroupBarrier();
