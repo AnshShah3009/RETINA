@@ -1,4 +1,4 @@
-use nalgebra::{DMatrix, Matrix3, SymmetricEigen};
+use nalgebra::{DMatrix, Matrix3};
 
 /// Essential Matrix solver using Nistér's 5-point Algorithm.
 pub struct EssentialSolver;
@@ -43,39 +43,53 @@ impl EssentialSolver {
             q[i * 9 + 8] = 1.0;
         }
 
-        let qm = DMatrix::from_row_slice(5, 9, &q);
-        // Nullspace of Q (dimension 4) via symmetric eigendecomposition of Q^T Q.
-        let m = qm.transpose() * &qm;
-        let eig = m.symmetric_eigen();
-        // sort eigenvalues ascending
-        let mut pairs: Vec<(usize, f64)> = eig
-            .eigenvalues
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (i, *v))
-            .collect();
-        pairs.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        let mut ee = DMatrix::zeros(9, 4);
-        for (k, (i, _)) in pairs.iter().take(4).enumerate() {
-            for r in 0..9 {
-                ee[(r, k)] = eig.eigenvectors[(r, *i)];
+        // Null space of Q (dimension 4) from the SVD of Q padded with zero
+        // rows to 9x9, so the full V is available. An eigendecomposition of
+        // Q^T Q squares the condition number and leaves the basis accurate
+        // only to ~1e-8, which the cubic constraints amplify into det(E)
+        // residuals of ~1e-4.
+        let mut q_square = DMatrix::<f64>::zeros(9, 9);
+        for r in 0..5 {
+            for c in 0..9 {
+                q_square[(r, c)] = q[r * 9 + c];
             }
         }
+        let svd = q_square.svd(false, true);
+        let v_t = svd
+            .v_t
+            .ok_or_else(|| cv_core::Error::AlgorithmError("SVD of Q failed".into()))?;
+        // `svd` sorts singular values descending: rows 5..9 of V^T span the
+        // null space (OpenCV's `Vt.t().colRange(5, 9)`).
+        let mut ee = DMatrix::zeros(9, 4);
+        for k in 0..4 {
+            for r in 0..9 {
+                ee[(r, k)] = v_t[(5 + k, r)];
+            }
+        }
+        // `get_coeff_mat` reads the basis basis-major: `e[k * 9 + i]` is entry
+        // `i` (row-major E index) of null-space vector `k`. OpenCV gets this
+        // layout from `EE = EE.t()` before the call; writing `ee` row-major
+        // (`e[r * 4 + c]`) feeds the generated code a scrambled basis.
         let mut e = [0.0f64; 36];
         for r in 0..9 {
             for c in 0..4 {
-                e[r * 4 + c] = ee[(r, c)];
+                e[c * 9 + r] = ee[(r, c)];
             }
         }
 
         let mut a = [0.0f64; 200];
         get_coeff_mat(&e, &mut a);
 
-        // A is 10x20 row-major. Convert to DMatrix.
+        // `get_coeff_mat` fills A (10x20, row-major) with the det constraint
+        // in row 0 and the nine entries of `E E^T E - tr(E E^T) E / 2` in
+        // rows 1..10, for E = x*EE0 + y*EE1 + z*EE2 + EE3. Its columns,
+        // however, come out in the generator's monomial order, not Nistér's.
+        // The elimination below (left 10 columns inverted, rows 4..10 paired
+        // into B) assumes Nistér's order, so permute into it.
         let mut am = DMatrix::zeros(10, 20);
         for r in 0..10 {
-            for c in 0..20 {
-                am[(r, c)] = a[r * 20 + c];
+            for (c, &src) in NISTER_COLUMN_ORDER.iter().enumerate() {
+                am[(r, c)] = a[r * 20 + src];
             }
         }
         let left = am.columns(0, 10).into_owned();
@@ -663,6 +677,19 @@ impl EssentialSolver {
         Ok(result)
     }
 }
+
+/// Column of `get_coeff_mat`'s output holding each monomial of Nistér's
+/// ordering
+/// `x^3, y^3, x^2y, xy^2, x^2z, x^2, y^2z, y^2, xyz, xy |
+///  xz^2, xz, x, yz^2, yz, y, z^3, z^2, z, 1`.
+///
+/// `get_coeff_mat` itself emits the columns as
+/// `1, x, z, y, xyz, x^2, x^3, y^2, y^3, z^2, z^3, xy, x^2z, xz, y^2z, xy^2,
+///  yz^2, yz, x^2y, xz^2` (determined by fitting each row against the
+/// directly evaluated constraint polynomials; agreement to ~1e-14).
+const NISTER_COLUMN_ORDER: [usize; 20] = [
+    6, 8, 18, 15, 12, 5, 14, 7, 4, 11, 19, 13, 1, 16, 17, 3, 10, 9, 2, 0,
+];
 
 fn get_coeff_mat(e: &[f64; 36], a: &mut [f64; 200]) {
     let mut ep2 = [0.0f64; 36];
@@ -6333,19 +6360,54 @@ mod tests {
 
     #[test]
     fn test_estimate_5point_returns_matrices() {
-        let points = vec![
+        // Camera 2 = rotation of 0.2 rad about y plus translation along x.
+        let (s, c) = 0.2f64.sin_cos();
+        let r = nalgebra::Matrix3::new(c, 0.0, s, 0.0, 1.0, 0.0, -s, 0.0, c);
+        let t = nalgebra::Vector3::new(1.0, 0.0, 0.0);
+        let world = [
+            [0.5, 0.8, 6.0],
+            [2.0, -0.4, 8.0],
+            [-1.5, 1.0, 7.0],
+            [3.0, 1.6, 9.5],
+            [-2.4, -1.6, 6.5],
+        ];
+        let mut pts1 = [[0.0; 2]; 5];
+        let mut pts2 = [[0.0; 2]; 5];
+        for (i, p) in world.iter().enumerate() {
+            let p1 = nalgebra::Vector3::new(p[0], p[1], p[2]);
+            let p2 = r * p1 + t;
+            pts1[i] = [p1.x / p1.z, p1.y / p1.z];
+            pts2[i] = [p2.x / p2.z, p2.y / p2.z];
+        }
+        let result =
+            EssentialSolver::estimate_5point(&pts1, &pts2).expect("solver should return matrices");
+        assert!(!result.is_empty(), "solver returned no matrices");
+        let e_true = t.cross_matrix() * r;
+        let e_true = e_true / e_true.norm();
+        let mut hit = false;
+        for m in &result {
+            assert!(m.iter().all(|v| v.is_finite()), "non-finite entry");
+            assert!(m.determinant().abs() < 1e-8, "returned E is not singular");
+            let m = m / m.norm();
+            hit |= (m - e_true).norm() < 1e-8 || (m + e_true).norm() < 1e-8;
+        }
+        assert!(hit, "true essential matrix not among the solutions");
+    }
+
+    #[test]
+    fn test_estimate_5point_zero_baseline_does_not_panic() {
+        // Identical views: every [t]x is consistent, so there are no isolated
+        // solutions. An error is fine; garbage matrices are not.
+        let points = [
             [0.1, 0.2],
             [0.4, -0.1],
             [-0.3, 0.5],
             [0.7, 0.3],
             [-0.6, -0.4],
         ];
-        let result = EssentialSolver::estimate_5point(&points, &points)
-            .expect("solver should return matrices");
-        assert!(!result.is_empty(), "solver returned no matrices");
-        for m in &result {
-            for v in m.iter() {
-                assert!(v.is_finite(), "non-finite entry in essential matrix");
+        if let Ok(result) = EssentialSolver::estimate_5point(&points, &points) {
+            for m in &result {
+                assert!(m.iter().all(|v| v.is_finite()), "non-finite entry");
             }
         }
     }
