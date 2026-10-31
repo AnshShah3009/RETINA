@@ -78,3 +78,23 @@ fn matching_against_nothing_matches_nothing() {
     let m = cpu().match_descriptors(&q, &t, 1.0).unwrap();
     assert!(m.matches.is_empty(), "{:?}", m.matches);
 }
+
+/// g-h5/g-h6: one straight segment is one line, strongest first.
+#[test]
+fn hough_lines_suppresses_neighbouring_bins() {
+    let (w, h) = (64usize, 64usize);
+    let mut data = vec![0.0f32; w * h];
+    for x in 0..w {
+        data[32 * w + x] = 255.0;
+    }
+    let img: Tensor<f32, CpuStorage<f32>> =
+        Tensor::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+    let lines = cpu()
+        .hough_lines(&img, 1.0, std::f32::consts::PI / 180.0, 40)
+        .unwrap();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].score, 64);
+    assert!((lines[0].theta - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+    // cv2.HoughLines on the same image: [[32.0, 1.5707964]], 64 votes.
+    assert!((lines[0].rho - 32.0).abs() < 1e-4, "{:?}", lines[0]);
+}

@@ -311,10 +311,22 @@ impl ComputeContext for CpuBackend {
         let rho_f = rho.to_f32();
         let theta_f = theta.to_f32();
 
-        // Accumulator dimensions
-        let diag = ((w * w + h * h) as f32).sqrt();
-        let num_rho = ((2.0 * diag) / rho_f.max(1e-6)).ceil() as usize + 1;
-        let num_theta = (std::f32::consts::PI / theta_f.max(1e-6)).ceil() as usize;
+        // Accumulator layout is OpenCV's `HoughLinesStandard`: rho bins centred
+        // on integer multiples of `rho` (`round(r / rho) + (numrho - 1) / 2`)
+        // and `floor(pi / theta) + 1` angles, dropping the last when it would
+        // duplicate theta = 0. The previous layout offset rho by the image
+        // diagonal (90.51 for 64x64), so bin centres sat at fractional rho
+        // and one line at y = 32 came back at rho 32.49 split across two bins.
+        let rho_f = rho_f.max(1e-6);
+        let theta_f = theta_f.max(1e-6);
+        let num_rho = (((w + h) * 2 + 1) as f32 / rho_f).round() as usize;
+        let mut num_theta = (std::f32::consts::PI / theta_f).floor() as usize + 1;
+        if num_theta > 1
+            && (std::f32::consts::PI - (num_theta - 1) as f32 * theta_f).abs() < theta_f / 2.0
+        {
+            num_theta -= 1;
+        }
+        let rho_center = ((num_rho - 1) / 2) as f32;
 
         // Check for overflow in accumulator size
         let acc_size = num_rho
@@ -325,64 +337,70 @@ impl ComputeContext for CpuBackend {
         let cos_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).cos()).collect();
         let sin_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).sin()).collect();
 
-        let rho_offset = diag; // rho can be negative, shift by diagonal
-
-        // Accumulate votes (parallel per row, then merge)
-        let row_accums: Vec<Vec<u32>> = (0..h)
+        // Accumulate votes. One accumulator per rayon *task*, not per image
+        // row: a per-row `vec![0; acc_size]` held h accumulators at once -
+        // at 1920x1080 with rho = 1, theta = 1 deg that is 793k bins x 4 B x
+        // 1080 rows, ~3.4 GB - and then summed them all serially.
+        let accumulator = (0..h)
             .into_par_iter()
-            .map(|y| {
-                let mut acc = vec![0u32; acc_size];
-                for x in 0..w {
-                    if src[y * w + x] > T::ZERO {
-                        let xf = x as f32;
-                        let yf = y as f32;
-                        for t in 0..num_theta {
-                            let r = xf * cos_table[t] + yf * sin_table[t];
-                            let r_idx = ((r + rho_offset) / rho_f).round() as usize;
-                            if r_idx < num_rho {
-                                if let Some(idx) =
-                                    t.checked_mul(num_rho).and_then(|v| v.checked_add(r_idx))
-                                {
-                                    if idx < acc_size {
-                                        acc[idx] += 1;
-                                    }
+            .fold(
+                || vec![0u32; acc_size],
+                |mut acc, y| {
+                    for x in 0..w {
+                        if src[y * w + x] > T::ZERO {
+                            let xf = x as f32;
+                            let yf = y as f32;
+                            for t in 0..num_theta {
+                                let r = xf * cos_table[t] + yf * sin_table[t];
+                                let r_idx = (r / rho_f).round() + rho_center;
+                                if r_idx >= 0.0 && (r_idx as usize) < num_rho {
+                                    acc[t * num_rho + r_idx as usize] += 1;
                                 }
                             }
                         }
                     }
-                }
-                acc
-            })
-            .collect();
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0u32; acc_size],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(&b) {
+                        *x += y;
+                    }
+                    a
+                },
+            );
 
-        // Merge accumulators
-        let mut accumulator = vec![0u32; acc_size];
-        for row_acc in &row_accums {
-            for i in 0..accumulator.len() {
-                accumulator[i] += row_acc[i];
-            }
-        }
-
-        // Extract peaks above threshold
+        // Extract peaks: OpenCV's `findLocalMaximums` - a bin is a line only
+        // if it beats its rho and theta neighbours (`>` on the lower side,
+        // `>=` on the upper, so a flat pair yields one peak; out-of-range
+        // neighbours count as 0). Without it a single 64-px segment came back
+        // as three lines (theta 1.553/1.571/1.588, votes 58/64/57), and the
+        // GPU path, which does suppress, disagreed with this one.
+        let at = |t: usize, r: usize| accumulator[t * num_rho + r];
         let mut lines = Vec::new();
         for t in 0..num_theta {
             for r in 0..num_rho {
-                if let Some(idx) = t.checked_mul(num_rho).and_then(|v| v.checked_add(r)) {
-                    if idx < acc_size {
-                        let votes = accumulator[idx];
-                        if votes >= threshold {
-                            let rho_val = r as f32 * rho_f - rho_offset;
-                            let theta_val = t as f32 * theta_f;
-                            lines.push(cv_core::HoughLine {
-                                rho: rho_val,
-                                theta: theta_val,
-                                score: votes,
-                            });
-                        }
-                    }
+                let votes = at(t, r);
+                if votes < threshold {
+                    continue;
+                }
+                let r_lo = if r > 0 { at(t, r - 1) } else { 0 };
+                let r_hi = if r + 1 < num_rho { at(t, r + 1) } else { 0 };
+                let t_lo = if t > 0 { at(t - 1, r) } else { 0 };
+                let t_hi = if t + 1 < num_theta { at(t + 1, r) } else { 0 };
+                if votes > r_lo && votes >= r_hi && votes > t_lo && votes >= t_hi {
+                    lines.push(cv_core::HoughLine {
+                        rho: (r as f32 - (num_rho - 1) as f32 * 0.5) * rho_f,
+                        theta: t as f32 * theta_f,
+                        score: votes,
+                    });
                 }
             }
         }
+        // Strongest first, as OpenCV returns them.
+        lines.sort_by(|a, b| b.score.cmp(&a.score));
 
         Ok(lines)
     }
