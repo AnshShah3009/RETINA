@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (14 open, was 87)
+## (g) Second review, 2026-10-31 — findings (18 open, was 91)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -324,7 +324,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-i8 | `distributed/.../shared_memory.rs` `acquire_slot` | slot adopted by PID alone (PID namespaces, PID reuse) | MED | ARGUED |
 | g-i9 | `distributed/.../shared_memory.rs` | atomics written through `as_ptr()` of a shared slice (Stacked Borrows UB); reapers' non-saturating `fetch_sub` | LOW | ARGUED |
 | g-i10 | `runtime/src/pipeline/allocator.rs` | `trim` uses `shrink_to` (frees nothing); re-`allocate` leaks accounting | LOW | ARGUED |
-| g-i11 | `videoio/src/backends/ffmpeg.rs` `grab` | one frame per packet; multi-frame packets → EAGAIN → stream dies | LOW | ARGUED |
+| g-i11 | `videoio/src/backends/ffmpeg.rs` `grab` | one frame per packet; multi-frame packets → EAGAIN → stream dies — **BLOCKED locally**: `cargo check -p cv-videoio --features ffmpeg` fails building `ffmpeg-sys-next 7.1.3` against the system FFmpeg 8 (libavcodec 63), so a fix cannot be compiled or tested here; left open rather than edited blind | LOW | ARGUED |
 | g-i12 | `photo/src/bilateral.rs` | **CLOSED.** Rounded and clamped; pinned by `tests/bilateral_rounding.rs` (uniform images now fixed points; step-edge mean 100.18 → within 0.1 of 100.5). Was: output truncated not rounded | was LOW — fixed | ARGUED |
 
 Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` uses it as the match threshold. Doc fix only.
@@ -415,6 +415,15 @@ matches finite differences (~1e-7, including θ≈π) — checked, not defects.
 | g-s7 | `sfm/src/bundle_adjustment.rs` `compute_point_reprojection_error_index` | **CLOSED.** Behind-camera observation scores `INFINITY`; pinned by `landmark_behind_its_camera_is_pruned`. Was: behind-camera observations skipped (error 0) → never pruned | was MED — fixed | ARGUED |
 | g-s8 | `calib3d/src/calibration.rs` | **CLOSED.** Removed. Was: leftover debug `eprintln!` on every calibration / every 10 LM iterations | was LOW — fixed | CONFIRMED |
 | g-s9 | `calib3d/src/distortion.rs` `fisheye_init_undistort_rectify_map` | **CLOSED.** Zero-size guard copied from the pinhole map; pinned in `tests/undistort_map_singular_intrinsics.rs`. Was: zero-size image panics (`chunk_size must not be zero`) | was LOW — fixed | CONFIRMED |
+
+### (g9) follow-ups found while fixing (g1)–(g8) (4 open, was 4)
+
+| id | location | defect | severity | evidence |
+|---|---|---|---|---|
+| g-x1 | `hal/src/cpu/compute_context_impl.rs` `hough_lines` | when `numrho` is even, cv2 4.13 still reports rho on whole multiples of the resolution; the formula from `6b527e5` is half a bin off there, and it keeps `>= threshold` where OpenCV uses `>`. imgproc's `hough_lines` matches 4.13 exactly; the two should share one implementation | LOW | ARGUED (found during g-f4) |
+| g-x2 | `hal/shaders/canny.wgsl`, `hough.wgsl` | GPU Canny and Hough still run the pre-g-f4/g-f5 algorithms, so `*_ctx` on a GPU runner disagrees with cv2 and with the CPU path (documented on the `_ctx` functions) | MED | ARGUED |
+| g-x3 | `imgproc` Gaussian kernels | OpenCV's 8-bit Gaussian uses fixed small-kernel tables (and `cvRound(6σ+1)\|1` sizing); applied for `adaptive_threshold` only - other Gaussian paths may differ by ±1 LSB | LOW | ARGUED |
+| g-x4 | `rendering` `SphericalHarmonics::eval` | degree ≥ 1 is not the standard SH basis (channels mixed, constants missing); rendering uses DC only, so loaded `f_rest` view-dependence is wrong | LOW | ARGUED (noted in g4, still open) |
 
 ---
 
