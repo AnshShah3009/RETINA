@@ -125,7 +125,11 @@ impl Polygon {
         if self.exterior.len() < 3 {
             return false;
         }
-        if ring_signed_area(&self.exterior).abs() <= EPS {
+        // Zero area means every vertex is collinear with the first two
+        // distinct ones; decided with the exact orientation sign. Comparing
+        // the (length²) area against an absolute EPS called every ring
+        // smaller than ~1e-5 on a side degenerate.
+        if !ring_has_turn(&self.exterior) {
             return false;
         }
         !ring_self_intersects(&self.exterior)
@@ -158,6 +162,15 @@ fn ring_signed_area(ring: &[Point2D]) -> f64 {
         sum -= ring[j].x * ring[i].y;
     }
     sum * 0.5
+}
+
+/// Whether a ring has three vertices that are not collinear (exact test).
+fn ring_has_turn(ring: &[Point2D]) -> bool {
+    let a = &ring[0];
+    let Some(b) = ring.iter().find(|p| *p != a) else {
+        return false;
+    };
+    ring.iter().any(|c| cross2d(a, b, c) != 0.0)
 }
 
 fn ring_perimeter(ring: &[Point2D]) -> f64 {
@@ -253,17 +266,25 @@ fn ring_self_intersects(ring: &[Point2D]) -> bool {
 
 // ─── Low-level geometry helpers ──────────────────────────────────────────────
 
-/// 2D cross product of vectors (b-a) x (c-a).
+/// 2D cross product of vectors (b-a) x (c-a), with an exact sign.
+///
+/// Shewchuk's adaptive `orient2d`: the magnitude is the usual cross product
+/// (to rounding), the sign is exact. Every caller only uses the sign, so the
+/// result does not depend on the units of the coordinates - an absolute
+/// `EPS` on this length² quantity used to drop hull vertices once the input
+/// was scaled by 1e-3 and collapse the hull at 1e-5.
 fn cross2d(a: &Point2D, b: &Point2D, c: &Point2D) -> f64 {
-    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    robust::orient2d(coord(a), coord(b), coord(c))
 }
 
-/// Whether point p lies on segment (a, b).
+fn coord(p: &Point2D) -> robust::Coord<f64> {
+    robust::Coord { x: p.x, y: p.y }
+}
+
+/// Whether point p, already known to be collinear with (a, b), lies on the
+/// closed segment (a, b).
 fn on_segment(a: &Point2D, p: &Point2D, b: &Point2D) -> bool {
-    p.x <= a.x.max(b.x) + EPS
-        && p.x >= a.x.min(b.x) - EPS
-        && p.y <= a.y.max(b.y) + EPS
-        && p.y >= a.y.min(b.y) - EPS
+    p.x <= a.x.max(b.x) && p.x >= a.x.min(b.x) && p.y <= a.y.max(b.y) && p.y >= a.y.min(b.y)
 }
 
 /// Properly-intersecting segments (excludes shared endpoints / collinear overlaps).
@@ -273,8 +294,8 @@ fn segments_intersect_proper(a1: &Point2D, a2: &Point2D, b1: &Point2D, b2: &Poin
     let d3 = cross2d(a1, a2, b1);
     let d4 = cross2d(a1, a2, b2);
 
-    if ((d1 > EPS && d2 < -EPS) || (d1 < -EPS && d2 > EPS))
-        && ((d3 > EPS && d4 < -EPS) || (d3 < -EPS && d4 > EPS))
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
     {
         return true;
     }
@@ -290,8 +311,8 @@ pub fn segments_intersect(a1: &Point2D, a2: &Point2D, b1: &Point2D, b2: &Point2D
     let d3 = cross2d(a1, a2, b1);
     let d4 = cross2d(a1, a2, b2);
 
-    if ((d1 > EPS && d2 < -EPS) || (d1 < -EPS && d2 > EPS))
-        && ((d3 > EPS && d4 < -EPS) || (d3 < -EPS && d4 > EPS))
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
     {
         return true;
     }
@@ -304,16 +325,16 @@ pub fn segments_intersect(a1: &Point2D, a2: &Point2D, b1: &Point2D, b2: &Point2D
     // `a`'s box and `d3` against `b`'s box), which reported
     // `(0,0)-(6,3)` vs `(5,0)-(10,0)` as intersecting and missed both shared
     // endpoints and T-touches.
-    if d1.abs() <= EPS && on_segment(b1, a1, b2) {
+    if d1 == 0.0 && on_segment(b1, a1, b2) {
         return true;
     }
-    if d2.abs() <= EPS && on_segment(b1, a2, b2) {
+    if d2 == 0.0 && on_segment(b1, a2, b2) {
         return true;
     }
-    if d3.abs() <= EPS && on_segment(a1, b1, a2) {
+    if d3 == 0.0 && on_segment(a1, b1, a2) {
         return true;
     }
-    if d4.abs() <= EPS && on_segment(a1, b2, a2) {
+    if d4 == 0.0 && on_segment(a1, b2, a2) {
         return true;
     }
     false
@@ -668,7 +689,7 @@ pub fn convex_hull(points: &[Point2D]) -> Polygon {
     // pattern, so this line cannot panic even if a non-finite value is ever
     // reintroduced upstream. Before the fix, one NaN coordinate panicked here.
     pts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
-    pts.dedup_by(|a, b| (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS);
+    pts.dedup_by(|a, b| a.x == b.x && a.y == b.y);
 
     let n = pts.len();
     if n == 0 {
@@ -686,7 +707,7 @@ pub fn convex_hull(points: &[Point2D]) -> Polygon {
     let mut lower = Vec::new();
     for p in &pts {
         while lower.len() >= 2
-            && cross2d(&lower[lower.len() - 2], &lower[lower.len() - 1], p) <= EPS
+            && cross2d(&lower[lower.len() - 2], &lower[lower.len() - 1], p) <= 0.0
         {
             lower.pop();
         }
@@ -696,7 +717,7 @@ pub fn convex_hull(points: &[Point2D]) -> Polygon {
     let mut upper = Vec::new();
     for p in pts.iter().rev() {
         while upper.len() >= 2
-            && cross2d(&upper[upper.len() - 2], &upper[upper.len() - 1], p) <= EPS
+            && cross2d(&upper[upper.len() - 2], &upper[upper.len() - 1], p) <= 0.0
         {
             upper.pop();
         }
@@ -868,11 +889,15 @@ fn dp_simplify(coords: &[Point2D], tolerance: f64) -> Vec<Point2D> {
 fn perpendicular_distance(p: &Point2D, a: &Point2D, b: &Point2D) -> f64 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
-    let len_sq = dx * dx + dy * dy;
-    if len_sq < EPS {
+    // Only an exactly zero-length chord has no direction. Comparing the
+    // squared length against an absolute 1e-10 made every chord shorter than
+    // 1e-5 measure the distance to its start point instead.
+    let len = dx.hypot(dy);
+    if len == 0.0 {
         return p.distance(a);
     }
-    ((dy * p.x - dx * p.y + b.x * a.y - b.y * a.x).abs()) / len_sq.sqrt()
+    // Relative to `a`, so a chord far from the origin does not cancel.
+    (dy * (p.x - a.x) - dx * (p.y - a.y)).abs() / len
 }
 
 /// Bowyer-Watson incremental Delaunay triangulation.

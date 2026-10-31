@@ -1342,6 +1342,7 @@ name = "cv-geometry2d"
 version = "0.1.0"
 dependencies = [
  "geo 0.28.0",
+ "robust 1.2.0",
 ]
 
 [[package]]

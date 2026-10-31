@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (10 open, was 96)
+## (g) Second review, 2026-10-31 — findings (9 open, was 96)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -381,12 +381,12 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-d11 | `registration/.../global/ransac.rs` | **CLOSED.** Nearest-feature matching without a metric gate (Open3D); `ransac_n` sets the sample size. Pinned by `tests/global_ransac_feature_gate.rs` (3 mm noise: error 2.83 → < 0.15). Was: one distance gates FPFH feature space and metric space; `ransac_n` ignored | was LOW — fixed | ARGUED |
 | g-d12 | `pointcloud/src/point_cloud.rs` `cluster_dbscan` | **CLOSED.** Each point queued at most once; noise points reached become border points directly. Pinned by `tests/dbscan_queue.rs`. Was: visited neighbours re-queued → O(N²) seed memory | was LOW — fixed | ARGUED |
 
-### (g7) core / math / optimize / geometry2d / signal_proc / scientific (7 open, was 12)
+### (g7) core / math / optimize / geometry2d / signal_proc / scientific (6 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-n1 | `geometry2d` `in_circumcircle` / `delaunay_triangulation` | absolute EPS on a length⁴ determinant: same 40 points scaled 1e-5 → 0 triangles | HIGH | CONFIRMED |
-| g-n2 | `geometry2d` `convex_hull` / `is_valid` / `perpendicular_distance` | absolute EPS on length² quantities: hull loses vertices at 1e-3, degenerate at 1e-5 | MED | CONFIRMED |
+| g-n2 | `geometry2d` `convex_hull` / `is_valid` / `perpendicular_distance` | **CLOSED.** Exact/relative predicates (`robust` orient2d): hull vertex sets and areas match SciPy at scales 1, 1e-3, 1e-6, 1e6 (`tests/hull_and_validity_scale_invariance.rs`). Was: absolute EPS on length² quantities: hull loses vertices at 1e-3, degenerate at 1e-5 | was MED — fixed | CONFIRMED |
 | g-n3 | `math/src/linalg.rs` `null_space` | **CLOSED.** Wide matrices zero-padded to square before the SVD. Pinned by `tests/eig_and_null_space.rs`. Was: thin SVD: `null_space([[1,0,0]])` is 3x0 (should be 3x2) | was HIGH — fixed | CONFIRMED |
 | g-n4 | `math/src/linalg.rs` `eig` | **CLOSED.** Eigenvectors are null vectors of `A − λI` (complex SVD), packed like LAPACK `dgeev`; repeated eigenvalues get independent vectors. Same test file. Was: returns Schur vectors as eigenvectors: `[[1,1],[0,2]]` residual 1.0 | was HIGH — fixed | CONFIRMED |
 | g-n5 | `optimize/src/brent.rs` `brentq` | **CLOSED.** Port of SciPy's `brentq.c`: x-tolerance only, exact-zero stop; 8 evaluations on the cubic (SciPy 8). Pinned in `tests/regression_tests.rs`. Was: `tol` also gates \|f\| (returns 2.0 for root 1.5); stale `fc` → 81 evals vs SciPy's 8 | was HIGH — fixed | CONFIRMED |
