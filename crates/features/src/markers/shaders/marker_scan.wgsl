@@ -163,9 +163,14 @@ fn hamming_distance(a_low: u32, a_high: u32, b_low: u32, b_high: u32) -> u32 {
 
 // Main compute shader - one workgroup per candidate
 @compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let candidate_idx = global_id.x;
-    
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // Dispatched as a 2-D grid when there are more than 65535 candidates
+    // (cv_hal::gpu_kernels::dispatch_groups_1d); workgroup size is 1.
+    let candidate_idx = global_id.x + global_id.y * num_wg.x;
+
     if (candidate_idx >= params.num_candidates) {
         return;
     }
