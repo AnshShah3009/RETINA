@@ -3,14 +3,23 @@
 /// Find a root of `f` in the bracket `[a, b]` using Brent's method.
 ///
 /// Requires `f(a)` and `f(b)` to have opposite signs. Iteration stops when the
-/// bracket is narrower than `tol` or `|f| < tol` at an endpoint.
+/// root is bracketed to within `tol + 4·ε·|x|` in **x** (SciPy's `xtol` with its
+/// default `rtol`), or when `f` is exactly zero. This is a line-for-line port
+/// of SciPy's `brentq.c` (Charles Harris's implementation, BSD-licensed).
+///
+/// `tol` used to gate `|f|` as well. That is a statement in the units of `f`,
+/// so a shallow function stopped anywhere: `brentq(|x| 1e-13 * (x - 1.5), 1, 2,
+/// 1e-12, 100)` returned the bracket end `2.0`. The old loop also froze the
+/// contrapoint's value (`let fc = fa`, never updated), so inverse quadratic
+/// interpolation ran on a stale point: `x^3 - 2x - 5` on `[2, 3]` took 81
+/// evaluations where SciPy takes 8.
 ///
 /// # Errors
 /// * `f(a)` and `f(b)` have the same sign (no bracket), or
-/// * `max_iter` iterations are exhausted while the bracket is still wider than
-///   `tol` and `|f|` is still above it. Running out of iterations is not a root
-///   find — returning the last iterate as `Ok` would report `1.4141414141` as a
-///   root of `x^2 - 2` at `tol = 1e-12`, where `|f| = 2.0e-4`.
+/// * `max_iter` iterations are exhausted before the bracket is narrower than
+///   the tolerance. Running out of iterations is not a root find — returning
+///   the last iterate as `Ok` would report `1.4141414141` as a root of
+///   `x^2 - 2` at `tol = 1e-12`, where `|f| = 2.0e-4`.
 pub fn brentq(
     f: impl Fn(f64) -> f64,
     a: f64,
@@ -18,104 +27,86 @@ pub fn brentq(
     tol: f64,
     max_iter: usize,
 ) -> Result<f64, String> {
-    let mut a = a;
-    let mut b = b;
-    let mut fa = f(a);
-    let mut fb = f(b);
+    let rtol = 4.0 * f64::EPSILON;
+    let (mut xpre, mut xcur) = (a, b);
+    let (mut xblk, mut fblk) = (0.0, 0.0);
+    let (mut spre, mut scur) = (0.0f64, 0.0f64);
+    let mut fpre = f(xpre);
+    let mut fcur = f(xcur);
 
-    if fa * fb > 0.0 {
+    if fpre == 0.0 {
+        return Ok(xpre);
+    }
+    if fcur == 0.0 {
+        return Ok(xcur);
+    }
+    if fpre.is_sign_negative() == fcur.is_sign_negative() {
         return Err("f(a) and f(b) must have opposite signs".into());
     }
 
-    if fa.abs() < fb.abs() {
-        std::mem::swap(&mut a, &mut b);
-        std::mem::swap(&mut fa, &mut fb);
-    }
-
-    let mut c = a;
-    let fc = fa;
-    let mut mflag = true;
-    let mut d = 0.0; // will be set before used
-
+    let mut width = (b - a).abs();
     for _ in 0..max_iter {
-        if fb.abs() < tol {
-            return Ok(b);
+        if fpre != 0.0 && fcur != 0.0 && fpre.is_sign_negative() != fcur.is_sign_negative() {
+            xblk = xpre;
+            fblk = fpre;
+            spre = xcur - xpre;
+            scur = spre;
         }
-        if fa.abs() < tol {
-            return Ok(a);
-        }
-        if (b - a).abs() < tol {
-            return Ok(b);
+        if fblk.abs() < fcur.abs() {
+            xpre = xcur;
+            xcur = xblk;
+            xblk = xpre;
+            fpre = fcur;
+            fcur = fblk;
+            fblk = fpre;
         }
 
-        let s = if (fa - fc).abs() > 1e-30 && (fb - fc).abs() > 1e-30 {
-            // Inverse quadratic interpolation
-            a * fb * fc / ((fa - fb) * (fa - fc))
-                + b * fa * fc / ((fb - fa) * (fb - fc))
-                + c * fa * fb / ((fc - fa) * (fc - fb))
-        } else {
-            // Secant method
-            b - fb * (b - a) / (fb - fa)
-        };
+        let delta = (tol + rtol * xcur.abs()) / 2.0;
+        let sbis = (xblk - xcur) / 2.0;
+        width = 2.0 * sbis.abs();
+        if fcur == 0.0 || sbis.abs() < delta {
+            return Ok(xcur);
+        }
 
-        let cond1 = {
-            let lo = (3.0 * a + b) / 4.0;
-            let (min_ab, max_ab) = if lo < b { (lo, b) } else { (b, lo) };
-            s < min_ab || s > max_ab
-        };
-        let cond2 = mflag && (s - b).abs() >= (b - c).abs() / 2.0;
-        let cond3 = !mflag && (s - b).abs() >= (c - d).abs() / 2.0;
-        let cond4 = mflag && (b - c).abs() < tol;
-        let cond5 = !mflag && (c - d).abs() < tol;
-
-        if cond1 || cond2 || cond3 || cond4 || cond5 {
-            // Bisection
-            let s_new = (a + b) / 2.0;
-            mflag = true;
-            d = c; // safe: d used only when mflag is false on next iteration, and we set c below
-            c = b;
-            let fs = f(s_new);
-            if fa * fs < 0.0 {
-                b = s_new;
-                fb = fs;
+        if spre.abs() > delta && fcur.abs() < fpre.abs() {
+            let stry = if xpre == xblk {
+                // Secant (interpolation).
+                -fcur * (xcur - xpre) / (fcur - fpre)
             } else {
-                a = s_new;
-                fa = fs;
+                // Inverse quadratic (extrapolation).
+                let dpre = (fpre - fcur) / (xpre - xcur);
+                let dblk = (fblk - fcur) / (xblk - xcur);
+                -fcur * (fblk * dblk - fpre * dpre) / (dblk * dpre * (fblk - fpre))
+            };
+            if 2.0 * stry.abs() < spre.abs().min(3.0 * sbis.abs() - delta) {
+                // Good short step.
+                spre = scur;
+                scur = stry;
+            } else {
+                spre = sbis;
+                scur = sbis;
             }
         } else {
-            mflag = false;
-            d = c;
-            c = b;
-            let fs = f(s);
-            if fa * fs < 0.0 {
-                b = s;
-                fb = fs;
-            } else {
-                a = s;
-                fa = fs;
-            }
+            // Bisect.
+            spre = sbis;
+            scur = sbis;
         }
 
-        if fa.abs() < fb.abs() {
-            std::mem::swap(&mut a, &mut b);
-            std::mem::swap(&mut fa, &mut fb);
+        xpre = xcur;
+        fpre = fcur;
+        if scur.abs() > delta {
+            xcur += scur;
+        } else {
+            xcur += if sbis > 0.0 { delta } else { -delta };
         }
+        fcur = f(xcur);
     }
 
-    // Iterations exhausted. Only accept `b` if it is a root by one of the two
-    // criteria the loop itself uses; otherwise say so instead of returning a
-    // number that merely looks like a root.
-    let fb = f(b);
-    if fb.abs() < tol || (b - a).abs() < tol {
-        Ok(b)
-    } else {
-        Err(format!(
-            "Brent's method did not converge in {max_iter} iterations: bracket width {:.3e}, \
-             |f(b)| = {:.3e} > tol {tol:e}",
-            (b - a).abs(),
-            fb.abs()
-        ))
-    }
+    Err(format!(
+        "Brent's method did not converge in {max_iter} iterations: bracket width {width:.3e} > \
+         tol {tol:e} (|f| = {:.3e})",
+        fcur.abs()
+    ))
 }
 
 #[cfg(test)]

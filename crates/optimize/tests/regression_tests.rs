@@ -321,3 +321,32 @@ fn curve_fit_covariance_control_matches_the_closed_form() {
         }
     }
 }
+
+/// `tol` is an x-tolerance. It used to gate `|f|` too, so a shallow function
+/// "converged" at the bracket end: this returned `Ok(2.0)` for a root at 1.5.
+#[test]
+fn brentq_tolerance_is_in_x_not_in_f() {
+    let root = brentq(|x| 1e-13 * (x - 1.5), 1.0, 2.0, 1e-12, 100).expect("converges");
+    assert!((root - 1.5).abs() <= 2e-12, "{root}");
+}
+
+/// The contrapoint value was frozen (`let fc = fa`), so interpolation ran on
+/// a stale point: `x^3 - 2x - 5` on `[2, 3]` took 81 evaluations at
+/// `tol = 1e-14`. SciPy's brentq takes 8; the port must stay in that range.
+#[test]
+fn brentq_evaluation_count_matches_scipy() {
+    let calls = std::cell::Cell::new(0usize);
+    let root = brentq(
+        |x| {
+            calls.set(calls.get() + 1);
+            x * x * x - 2.0 * x - 5.0
+        },
+        2.0,
+        3.0,
+        1e-14,
+        100,
+    )
+    .expect("converges");
+    assert!((root - 2.0945514815423265).abs() < 1e-13, "{root}");
+    assert!(calls.get() <= 12, "{} evaluations", calls.get());
+}
