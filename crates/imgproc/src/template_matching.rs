@@ -43,6 +43,13 @@ pub fn match_template_ctx(
     method: TemplateMatchMethod,
     group: &RuntimeRunner,
 ) -> MatchResult {
+    if image.width() == 0 || image.height() == 0 {
+        return MatchResult {
+            data: Vec::new(),
+            width: 0,
+            height: 0,
+        };
+    }
     assert!(
         image.width() >= templ.width() && image.height() >= templ.height(),
         "template must fit inside source image"

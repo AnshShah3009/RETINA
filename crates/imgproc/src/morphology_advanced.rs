@@ -126,6 +126,9 @@ fn zhang_suen_pass(img: &[bool], width: usize, height: usize, step_one: bool) ->
 /// Extracts bright features smaller than the structuring element from an
 /// uneven background. Uses a rectangular kernel of `kernel_size x kernel_size`.
 pub fn top_hat(image: &GrayImage, kernel_size: usize) -> GrayImage {
+    if image.width() == 0 || image.height() == 0 {
+        return image.clone();
+    }
     let kernel = create_morph_kernel(
         MorphShape::Rectangle,
         kernel_size as u32,
@@ -157,6 +160,9 @@ pub fn top_hat(image: &GrayImage, kernel_size: usize) -> GrayImage {
 /// Extracts dark features (holes, gaps) smaller than the structuring element.
 /// Uses a rectangular kernel of `kernel_size x kernel_size`.
 pub fn black_hat(image: &GrayImage, kernel_size: usize) -> GrayImage {
+    if image.width() == 0 || image.height() == 0 {
+        return image.clone();
+    }
     let kernel = create_morph_kernel(
         MorphShape::Rectangle,
         kernel_size as u32,
@@ -194,6 +200,9 @@ pub fn black_hat(image: &GrayImage, kernel_size: usize) -> GrayImage {
 /// `kernel` should be a flat row-major slice with dimensions `kw x kh`.
 #[allow(clippy::needless_range_loop)]
 pub fn hit_or_miss(image: &GrayImage, kernel: &[i8], kw: usize, kh: usize) -> GrayImage {
+    if image.width() == 0 || image.height() == 0 {
+        return image.clone();
+    }
     let width = image.width() as usize;
     let height = image.height() as usize;
     let cx = kw / 2;

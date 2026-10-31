@@ -29,6 +29,9 @@ pub fn compute_cdf(hist: &[u32; 256]) -> [u32; 256] {
 
 #[allow(clippy::needless_range_loop)]
 pub fn histogram_equalization(image: &GrayImage) -> GrayImage {
+    if image.width() == 0 || image.height() == 0 {
+        return image.clone();
+    }
     let hist = compute_histogram(image);
     let cdf = compute_cdf(&hist);
 

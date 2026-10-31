@@ -67,7 +67,7 @@ pub fn resize(src: &GrayImage, width: u32, height: u32, interpolation: Interpola
 /// OpenCV's Lanczos-4 window - see `kernels.rs` for why those are the choices.
 fn resize_cpu(src: &GrayImage, width: u32, height: u32, interpolation: Interpolation) -> GrayImage {
     if width == 0 || height == 0 {
-        return GrayImage::new(0, 0);
+        return GrayImage::new(width, height);
     }
     if src.width() == 0 || src.height() == 0 {
         return GrayImage::new(width, height);
@@ -95,7 +95,7 @@ pub fn resize_ctx(
     group: &ResourceGroup,
 ) -> GrayImage {
     if width == 0 || height == 0 {
-        return GrayImage::new(0, 0);
+        return GrayImage::new(width, height);
     }
     if src.width() == 0 || src.height() == 0 {
         return GrayImage::new(width, height);
@@ -228,7 +228,7 @@ pub fn resize_rgb(
     interpolation: Interpolation,
 ) -> RgbImage {
     if width == 0 || height == 0 {
-        return RgbImage::new(0, 0);
+        return RgbImage::new(width, height);
     }
     if src.width() == 0 || src.height() == 0 {
         return RgbImage::new(width, height);

@@ -23,6 +23,9 @@ pub fn threshold(src: &GrayImage, thresh: u8, max_value: u8, typ: ThresholdType)
 pub fn threshold_cpu(src: &GrayImage, thresh: u8, max_value: u8, typ: ThresholdType) -> GrayImage {
     use rayon::prelude::*;
     let mut dst = GrayImage::new(src.width(), src.height());
+    if src.width() == 0 || src.height() == 0 {
+        return dst;
+    }
     let width = src.width() as usize;
     let src_raw = src.as_raw();
     let dst_raw = dst.as_mut();

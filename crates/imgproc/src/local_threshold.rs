@@ -71,6 +71,9 @@ pub fn local_threshold(
     let width = src.width();
     let height = src.height();
     let mut dst = GrayImage::new(width, height);
+    if width == 0 || height == 0 {
+        return Ok(dst);
+    }
 
     let half_block = (block_size / 2) as i32;
 

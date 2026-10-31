@@ -398,6 +398,9 @@ pub fn convolve_with_border_into_ctx(
     }
     let width = image.width() as usize;
     let height = image.height() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
     let input_data = image.as_raw();
 
     group.run(|| {
@@ -484,6 +487,9 @@ pub fn separable_convolve_into_ctx(
 
     let width = image.width() as usize;
     let height = image.height() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
     let rx = kx.len() / 2;
     let ry = ky.len() / 2;
     let src = image.as_raw();

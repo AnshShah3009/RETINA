@@ -204,6 +204,28 @@ pub fn warp_perspective_ex(
     warp_perspective_ex_ctx(src, matrix, width, height, interpolation, border, &runner)
 }
 
+/// Output for a warp/remap whose source or destination is empty: an empty
+/// image for an empty destination, otherwise the destination filled with the
+/// border constant (every sample falls outside an empty source).
+fn degenerate_warp_output(
+    src: &GrayImage,
+    width: u32,
+    height: u32,
+    border: BorderMode,
+) -> Option<GrayImage> {
+    if width == 0 || height == 0 {
+        return Some(GrayImage::new(width, height));
+    }
+    if src.width() == 0 || src.height() == 0 {
+        let fill = match border {
+            BorderMode::Constant(v) => v,
+            _ => 0,
+        };
+        return Some(GrayImage::from_pixel(width, height, image::Luma([fill])));
+    }
+    None
+}
+
 pub fn warp_perspective_ex_ctx(
     src: &GrayImage,
     matrix: &Matrix3<f32>,
@@ -218,6 +240,9 @@ pub fn warp_perspective_ex_ctx(
     // the caller's matrix once here. `warp_affine_ex_ctx` delegates to this
     // function and therefore passes its forward matrix uninverted.
     let inv = matrix.try_inverse().unwrap_or(*matrix);
+    if let Some(out) = degenerate_warp_output(src, width, height, border) {
+        return out;
+    }
 
     // Check for GPU acceleration
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
@@ -476,6 +501,9 @@ pub fn remap_ex_ctx(
         (width * height) as usize,
         "map_y size must equal width*height"
     );
+    if let Some(out) = degenerate_warp_output(src, width, height, border) {
+        return out;
+    }
 
     // Check for GPU acceleration
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
@@ -593,6 +621,9 @@ pub fn remap(
         (width * height) as usize,
         "map_y size must equal width*height"
     );
+    if let Some(out) = degenerate_warp_output(src, width, height, border) {
+        return out;
+    }
 
     let mut dst = GrayImage::new(width, height);
 
