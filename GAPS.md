@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (71 open, was 77)
+## (g) Second review, 2026-10-31 — findings (69 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -381,14 +381,14 @@ calibration, all of `crates/sfm`.
 | g-d11 | `registration/.../global/ransac.rs` | one distance gates FPFH feature space and metric space; `ransac_n` ignored | LOW | ARGUED |
 | g-d12 | `pointcloud/src/point_cloud.rs` `cluster_dbscan` | visited neighbours re-queued → O(N²) seed memory | LOW | ARGUED |
 
-### (g7) core / math / optimize / geometry2d / signal_proc / scientific (12 open, was 12)
+### (g7) core / math / optimize / geometry2d / signal_proc / scientific (10 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-n1 | `geometry2d` `in_circumcircle` / `delaunay_triangulation` | absolute EPS on a length⁴ determinant: same 40 points scaled 1e-5 → 0 triangles | HIGH | CONFIRMED |
 | g-n2 | `geometry2d` `convex_hull` / `is_valid` / `perpendicular_distance` | absolute EPS on length² quantities: hull loses vertices at 1e-3, degenerate at 1e-5 | MED | CONFIRMED |
-| g-n3 | `math/src/linalg.rs` `null_space` | thin SVD: `null_space([[1,0,0]])` is 3x0 (should be 3x2) | HIGH | CONFIRMED |
-| g-n4 | `math/src/linalg.rs` `eig` | returns Schur vectors as eigenvectors: `[[1,1],[0,2]]` residual 1.0 | HIGH | CONFIRMED |
+| g-n3 | `math/src/linalg.rs` `null_space` | **CLOSED.** Wide matrices zero-padded to square before the SVD. Pinned by `tests/eig_and_null_space.rs`. Was: thin SVD: `null_space([[1,0,0]])` is 3x0 (should be 3x2) | was HIGH — fixed | CONFIRMED |
+| g-n4 | `math/src/linalg.rs` `eig` | **CLOSED.** Eigenvectors are null vectors of `A − λI` (complex SVD), packed like LAPACK `dgeev`; repeated eigenvalues get independent vectors. Same test file. Was: returns Schur vectors as eigenvectors: `[[1,1],[0,2]]` residual 1.0 | was HIGH — fixed | CONFIRMED |
 | g-n5 | `optimize/src/brent.rs` `brentq` | `tol` also gates \|f\| (returns 2.0 for root 1.5); stale `fc` → 81 evals vs SciPy's 8 | HIGH | CONFIRMED |
 | g-n6 | `optimize/src/lbfgsb.rs` | direction ignores the active set; failed line search accepted: f = 1.0135 vs SciPy 1.0 | HIGH | CONFIRMED |
 | g-n7 | `math/src/sparse.rs` `gmres_solve` / `cg_solve` | lucky breakdown skips Givens; absolute thresholds; `Ok` when not converged | MED | CONFIRMED |
