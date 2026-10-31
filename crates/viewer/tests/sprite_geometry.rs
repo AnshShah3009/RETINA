@@ -30,6 +30,19 @@ const FOV_SCALE: f32 = 0.5;
 /// Distance from the camera to the origin.
 const CAMERA_DISTANCE: f32 = 5.0;
 
+/// Held for the whole of each test.
+///
+/// Creating two wgpu devices at once in this process segfaults. Measured:
+/// 2 of 8 runs of this file with `--test-threads=8` died with signal 11
+/// before any assertion, and the same file passes when the tests do not
+/// overlap. The sprite measurement is unchanged. This does not cover a
+/// second test binary (the crate's own unit tests, or another crate) using
+/// the GPU in parallel; that is a different process.
+fn gpu_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// A device and queue, or `None` when the machine has no wgpu adapter.
 fn device_and_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
@@ -332,6 +345,7 @@ fn measure_sprite(points: &[[f32; 3]], radius_px: f32) -> Measured {
 /// the same number of pixels on both axes, whatever the viewport's shape.
 #[test]
 fn a_point_radius_is_a_radius_in_pixels() {
+    let _gpu = gpu_test_lock();
     if device_and_queue().is_none() {
         eprintln!("skipping: no wgpu adapter");
         return;
@@ -384,6 +398,7 @@ fn a_point_radius_is_a_radius_in_pixels() {
 /// valid draw at all.
 #[test]
 fn every_point_gets_a_sprite_at_its_own_position() {
+    let _gpu = gpu_test_lock();
     if device_and_queue().is_none() {
         eprintln!("skipping: no wgpu adapter");
         return;
