@@ -181,18 +181,48 @@ fn minimize_nelder_mead(
         max_iters,
         ..cv_optimize::general::NelderMeadConfig::default()
     };
+    // A failure inside the user's objective is a failure of *this call*, not a
+    // large objective value. The `unwrap_or(f64::MAX)` that used to stand here
+    // collapsed every Python exception - a raising callback, a callback that
+    // returns a non-float, a callback that returns a numpy array - into "the
+    // objective was astronomically bad here", so Nelder-Mead happily steered
+    // away from the region that raised and converged on a point from a
+    // successful (or unvisited) evaluation, then reported `fun = f64::MAX` with
+    // a confidence a caller has no way to question.
+    //
+    // Measured: `minimize_nelder_mead(always_raises, [0.0])` returned
+    // `([0.0], 1.7976931348623157e+308)` - the unvisited start point, labelled
+    // as a converged result, with no Python exception raised.
+    let failure: std::sync::Mutex<Option<PyErr>> = std::sync::Mutex::new(None);
     let result = cv_optimize::general::minimize_nelder_mead(
         |x: &[f64]| {
             Python::with_gil(|py| {
+                // Propagate an earlier failure by refusing to call Python again:
+                // re-entering the interpreter from inside an optimiser callback
+                // that already holds the GIL would deadlock.
+                if failure.lock().map(|g| g.is_some()).unwrap_or(true) {
+                    return f64::MAX;
+                }
                 let args = (x.to_vec(),);
-                f.call1(py, args)
-                    .and_then(|r| r.extract::<f64>(py))
-                    .unwrap_or(f64::MAX)
+                match f.call1(py, args).and_then(|r| r.extract::<f64>(py)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let Ok(mut slot) = failure.lock() {
+                            *slot = Some(e);
+                        }
+                        f64::MAX
+                    }
+                }
             })
         },
         &x0,
         &config,
     );
+    if let Ok(slot) = failure.into_inner() {
+        if let Some(e) = slot {
+            return Err(e);
+        }
+    }
     Ok((result.x, result.fun))
 }
 
@@ -204,6 +234,21 @@ fn sparse_solve_cg(
     ncols: usize,
     b: Vec<f64>,
 ) -> PyResult<Vec<f64>> {
+    // `cg_solve` takes the right-hand side as a `DVector` and asserts its length
+    // against the matrix row count, so a mismatch was a Rust panic surfaced to
+    // Python as a `PanicException` from inside cv-math - not a Python exception
+    // this binding chose, and not something the caller could catch and act on.
+    //
+    // Measured: `sparse_solve_cg([(0,0,2.0)], 1, 1, [4.0, 5.0])` panicked with
+    // `assertion 'left == right' failed: Dimension mismatch / left: 1 /
+    // right: 2` (crates/math/src/sparse.rs:658).
+    if b.len() != ncols {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "sparse_solve_cg: the right-hand side has {} entries but the matrix has \
+             {ncols} columns ({nrows} rows)",
+            b.len()
+        )));
+    }
     let mat = cv_scientific::sparse::CsrMatrix::from_triplets(nrows, ncols, &triplets);
     let b_vec = DVector::from_vec(b);
     let result = cv_scientific::sparse::cg_solve(&mat, &b_vec, 1000, 1e-10)

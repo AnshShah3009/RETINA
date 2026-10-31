@@ -30,7 +30,13 @@ impl<T: Clone> Octree<T> {
         }
     }
 
-    pub fn insert(&mut self, point: Point3<f32>, data: T) {
+    /// Insert a point. Returns `false`, storing nothing, when the point lies
+    /// outside the octree's bounds; it used to be dropped silently, so a
+    /// later radius search simply never found it.
+    pub fn insert(&mut self, point: Point3<f32>, data: T) -> bool {
+        if !point_in_bounds(&point, &self.bounds) {
+            return false;
+        }
         if self.root.is_none() {
             let center = Point3::new(
                 (self.bounds.0.x + self.bounds.1.x) * 0.5,
@@ -43,6 +49,7 @@ impl<T: Clone> Octree<T> {
         if let Some(ref mut root) = self.root {
             Self::insert_recursive(root, point, data, self.max_depth, self.max_points_per_node);
         }
+        true
     }
 
     fn insert_recursive(

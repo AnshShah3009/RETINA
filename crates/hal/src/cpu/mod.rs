@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use wide::*;
 
 pub mod border;
+pub mod canny_opencv;
+pub mod hough_standard;
 pub mod simd;
 pub mod utils;
 

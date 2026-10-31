@@ -52,8 +52,6 @@ fn test_haar_detection_simple() {
     };
 
     let detections = cascade.detect(&img, 1.1, 0).expect("Detection failed");
-    println!("Detections: {:?}", detections);
-
     assert!(!detections.is_empty());
     // Check if at least one detection is near (40, 40)
     let found = detections

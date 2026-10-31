@@ -101,7 +101,8 @@ pub fn radix_sort_u32(
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             cpass.set_pipeline(&histogram_pipeline);
             cpass.set_bind_group(0, &bg_hist, &[]);
-            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_workgroups);
+            cpass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         ctx.submit(encoder);
 
@@ -144,7 +145,8 @@ pub fn radix_sort_u32(
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             cpass.set_pipeline(&scatter_pipeline);
             cpass.set_bind_group(0, &bg_scatter, &[]);
-            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_workgroups);
+            cpass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         ctx.submit(encoder);
 
@@ -247,7 +249,8 @@ pub fn radix_sort_key_value_u32(
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&pack_pipeline);
         cpass.set_bind_group(0, &bg_pack, &[]);
-        cpass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_elements, 256);
+        cpass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 
@@ -294,7 +297,8 @@ pub fn radix_sort_key_value_u32(
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             cpass.set_pipeline(&histogram_pipeline);
             cpass.set_bind_group(0, &bg_hist, &[]);
-            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_workgroups);
+            cpass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         ctx.submit(encoder);
 
@@ -334,7 +338,8 @@ pub fn radix_sort_key_value_u32(
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             cpass.set_pipeline(&scatter_pipeline);
             cpass.set_bind_group(0, &bg_scatter, &[]);
-            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_workgroups);
+            cpass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         ctx.submit(encoder);
 
@@ -377,7 +382,8 @@ pub fn radix_sort_key_value_u32(
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&unpack_pipeline);
         cpass.set_bind_group(0, &bg_unpack, &[]);
-        cpass.dispatch_workgroups(num_elements.div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_elements, 256);
+        cpass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 
@@ -463,7 +469,8 @@ pub fn gpu_exclusive_scan(
         let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         cpass.set_pipeline(&scan_pipeline);
         cpass.set_bind_group(0, &bg_scan, &[]);
-        cpass.dispatch_workgroups(num_workgroups, 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_workgroups);
+        cpass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 
@@ -502,7 +509,8 @@ pub fn gpu_exclusive_scan(
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             cpass.set_pipeline(&add_pipeline);
             cpass.set_bind_group(0, &bg_add, &[]);
-            cpass.dispatch_workgroups(num_workgroups, 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_workgroups);
+            cpass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         ctx.submit(encoder);
     }

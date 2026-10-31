@@ -1,286 +1,245 @@
 //! Colored ICP Registration
 //!
-//! ICP variant that uses both geometry and color for alignment.
-//! Useful for registering RGBD scans with rich texture.
+//! Park, Zhou, Koltun, "Colored Point Cloud Registration Revisited" (ICCV 2017),
+//! following Open3D's `TransformationEstimationForColoredICP`.
+//!
+//! Each target point carries a colour gradient `d_p` lying in its tangent plane,
+//! fitted by least squares to the intensity differences of its neighbours
+//! projected onto that plane. A correspondence `(s, t)` with the source point
+//! moved to `p = T s` then contributes two residuals:
+//!
+//! ```text
+//! r_G = sqrt(lambda)     * (p - q) . n                    (signed point-to-plane)
+//! r_I = sqrt(1 - lambda) * (I_s - (I_t + d . M (p - q)))  (M = I - n n^T)
+//! ```
+//!
+//! linearised at `p` with respect to a left-multiplied twist, solved by
+//! Gauss-Newton with the same `[v; w]` convention and SE(3) exponential map as
+//! point-to-plane ICP in `mod.rs`.
+//!
+//! Colours are expected in `[0, 1]` (Open3D's convention, and what `cv-io`
+//! loads); intensity is the mean of the three channels. With 0-255 colours the
+//! photometric term is weighted ~65000x more heavily than `lambda` suggests.
 
+use super::{
+    exponential_map_se3, find_correspondences, fitness_and_rmse, point_to_plane_row, SimpleNN,
+};
 use cv_core::point_cloud::PointCloud;
-use nalgebra::{Matrix3, Matrix4, Point3, Vector3};
-
-/// KDTree-backed nearest neighbor for O(log N) queries.
-struct SimpleNN {
-    tree: cv_3d::spatial::KDTree<usize>,
-}
-
-impl SimpleNN {
-    fn new(points: Vec<Point3<f32>>) -> Self {
-        let mut items: Vec<_> = points.iter().enumerate().map(|(i, &p)| (p, i)).collect();
-        let tree = cv_3d::spatial::KDTree::build(&mut items);
-        Self { tree }
-    }
-
-    fn nearest(&self, query: &Point3<f32>) -> Option<(Point3<f32>, usize, f32)> {
-        self.tree.nearest_neighbor(query)
-    }
-}
+use nalgebra::{Matrix3, Matrix4, Point3, Vector3, Vector6};
+use rayon::prelude::*;
 
 /// Colored ICP result
 #[derive(Debug, Clone)]
 pub struct ColoredICPResult {
     pub transformation: Matrix4<f32>,
+    /// Fraction of source points with a correspondence at `transformation`.
     pub fitness: f32,
+    /// Point-to-point RMSE of those correspondences, as Open3D reports it -
+    /// equal to `evaluate_registration` on `transformation`.
     pub inlier_rmse: f32,
 }
 
-/// Colored ICP registration
-#[allow(clippy::needless_range_loop)]
+/// Neighbours used for each target point's colour gradient (Open3D: 30).
+const GRADIENT_MAX_NN: usize = 30;
+/// Open3D's default relative convergence criteria.
+const RELATIVE_FITNESS: f32 = 1e-6;
+const RELATIVE_RMSE: f32 = 1e-6;
+
+fn intensity(c: &Point3<f32>) -> f32 {
+    (c.x + c.y + c.z) / 3.0
+}
+
+/// Colored ICP registration.
+///
+/// `lambda_geometric` in `[0, 1]` weighs the geometric term against the
+/// photometric one (Open3D's default is 0.968). The target must have normals
+/// and both clouds colours; otherwise, or with fewer than three
+/// correspondences at `init_transformation`, the result is `None`.
+///
+/// Previously the photometric Jacobian contained no colour gradient at all,
+/// the geometric Jacobian was evaluated at the *untransformed* source point,
+/// and the geometric residual was the unsigned distance, so the iteration did
+/// not converge: a 0.01 offset that point-to-plane ICP recovers to 1e-4 was
+/// not recovered (the function returned `None` on the regression scene).
 pub fn registration_colored_icp(
     source: &PointCloud,
     target: &PointCloud,
     max_correspondence_distance: f32,
     init_transformation: &Matrix4<f32>,
     max_iterations: usize,
-    lambda_geometric: f32, // Weight for geometric vs photometric (0-1)
+    lambda_geometric: f32,
 ) -> Option<ColoredICPResult> {
-    // Check if colors are available
     let source_colors = source.colors.as_ref()?;
     let target_colors = target.colors.as_ref()?;
+    // Open3D refuses colored ICP without target normals: both residuals live
+    // in the target's tangent plane.
+    let target_normals = target.normals.as_ref()?;
+    if source.points.is_empty()
+        || target.points.is_empty()
+        || source_colors.len() != source.points.len()
+        || target_colors.len() != target.points.len()
+        || target_normals.len() != target.points.len()
+        || !(0.0..=1.0).contains(&lambda_geometric)
+    {
+        return None;
+    }
 
-    // Build simple NN for target
     let target_nn = SimpleNN::new(target.points.clone());
+    let gradients = color_gradients(
+        target,
+        target_normals,
+        target_colors,
+        &target_nn,
+        2.0 * max_correspondence_distance,
+    );
+    let source_len = source.points.len();
+    let lambda_photometric = 1.0 - lambda_geometric;
 
     let mut transformation = *init_transformation;
-    let mut best_fitness = 0.0;
-    let mut best_rmse = f32::MAX;
+    let mut correspondences = find_correspondences(
+        source,
+        &target_nn,
+        &transformation,
+        max_correspondence_distance,
+    );
+    if correspondences.len() < 3 {
+        return None;
+    }
+    let (mut fitness, mut rmse) = fitness_and_rmse(&correspondences, source_len);
+    // Pose and the metrics measured at it, kept together (see the
+    // point-to-plane ICP for why the best rather than the last).
+    let mut best = (transformation, fitness, rmse);
 
-    for iter in 0..max_iterations {
-        // Build linear system
-        let mut ata = nalgebra::Matrix6::<f32>::zeros();
-        let mut atb = nalgebra::Vector6::<f32>::zeros();
-        let mut total_residual = 0.0;
-        let mut valid_points = 0;
+    for _ in 0..max_iterations {
+        let mut ata = nalgebra::Matrix6::<f64>::zeros();
+        let mut atb = Vector6::<f64>::zeros();
 
-        for i in 0..source.points.len() {
-            let source_point = source.points[i];
-            let source_color = source_colors[i];
+        for &(s, t, _) in &correspondences {
+            let p = transformation.transform_point(&source.points[s]);
+            let q = target.points[t];
+            let n = target_normals[t];
 
-            // Transform to target frame
-            let transformed = transformation.transform_point(&source_point);
+            // Geometric term: shared with point-to-plane ICP.
+            let (j_g, r_g) = point_to_plane_row(&p, &q, &n);
 
-            // Find nearest neighbor in target
-            if let Some((target_point, target_idx, dist_sq)) = target_nn.nearest(&transformed) {
-                let dist = dist_sq.sqrt();
+            // Photometric term. The target intensity is extrapolated to the
+            // projection of `p` onto the target's tangent plane:
+            //   I_t(p) = I_t + d . M (p - q),  M = I - n n^T
+            // so r_I = I_s - I_t(p) and dr_I/dp = -M d. A perturbation moves `p`
+            // by `v + w x p`, giving J_I = [g; p x g] with g = -M d - the same
+            // structure as the geometric row.
+            let m = Matrix3::identity() - n * n.transpose();
+            let d = gradients[t];
+            let r_i = intensity(&source_colors[s])
+                - (intensity(&target_colors[t]) + d.dot(&(m * (p - q))));
+            let g = -(m * d);
+            let pg = p.coords.cross(&g);
+            let j_i = Vector6::new(g.x, g.y, g.z, pg.x, pg.y, pg.z);
 
-                if dist > max_correspondence_distance {
-                    continue;
-                }
-
-                let target_color = target_colors[target_idx];
-
-                // Compute residuals
-                let geometric_residual = dist;
-
-                // Photometric residual (color difference in grayscale)
-                let source_gray =
-                    0.299 * source_color.x + 0.587 * source_color.y + 0.114 * source_color.z;
-                let target_gray =
-                    0.299 * target_color.x + 0.587 * target_color.y + 0.114 * target_color.z;
-                let photometric_residual = (source_gray - target_gray).abs();
-
-                // Combined residual
-                let residual = lambda_geometric * geometric_residual
-                    + (1.0 - lambda_geometric) * photometric_residual * 0.1;
-
-                // Compute jacobian (simplified)
-                // Full implementation would compute SE(3) jacobian
-                let normal = target
-                    .normals
-                    .as_ref()
-                    .map(|n| n[target_idx])
-                    .unwrap_or_else(|| {
-                        // `normalize` on a zero vector is NaN, which propagates
-                        // into the whole Jacobian and makes `ata` NaN - so the
-                        // solve fails for a reason that has nothing to do with
-                        // the data. An already-aligned pair gives exactly a zero
-                        // difference, so this is the ordinary convergence case,
-                        // not an edge case.
-                        let diff = transformed - target_point;
-                        diff.try_normalize(1e-8)
-                            .unwrap_or(nalgebra::Vector3::zeros())
-                    });
-
-                // Geometric jacobian
-                let jacobian_geo = compute_point_to_plane_jacobian(&source_point, &normal);
-
-                // Photometric jacobian (gradient of intensity w.r.t. pose)
-                let jacobian_photo =
-                    compute_photometric_jacobian(&source_point, &source_color, &target_color);
-
-                // Combined jacobian
-                let jacobian =
-                    jacobian_geo * lambda_geometric + jacobian_photo * (1.0 - lambda_geometric);
-
-                // Accumulate (jacobian * jacobian.transpose() gives 6x6)
-                ata += jacobian * jacobian.transpose();
-                atb += jacobian * residual;
-                total_residual += residual * residual;
-                valid_points += 1;
-            }
+            let (j_g, j_i) = (j_g.cast::<f64>(), j_i.cast::<f64>());
+            let (lg, lp) = (f64::from(lambda_geometric), f64::from(lambda_photometric));
+            ata += j_g * j_g.transpose() * lg + j_i * j_i.transpose() * lp;
+            atb += j_g * (f64::from(r_g) * lg) + j_i * (f64::from(r_i) * lp);
         }
 
-        if valid_points < 10 {
-            break;
-        }
-
-        // Solve for update.
-        //
-        // A singular `ata` is not a reason to carry on. It happens whenever the
-        // geometric term vanishes - `lambda_geometric = 0` makes every row the
-        // same outer product, so the matrix is rank 1 - and also when a target
-        // without normals drives the geometric Jacobian to NaN. In both cases
-        // the update was silently skipped while the function went on to report
-        // the caller's initial transform as a successful registration.
-        // Least squares rather than an exact inverse. A Gauss-Newton step is
-        // `A^-1 b` in the well-conditioned case, but a partially-constrained
-        // problem - which this always is, since the photometric term alone is
-        // rank-deficient by construction - needs the pseudo-inverse, and
-        // `try_inverse` returns `None` for a merely ill-conditioned matrix
-        // rather than for a truly singular one. Returning `None` there would
-        // reject configurations the solver can in fact make progress on.
-        let Some(delta) = ata.clone().qr().solve(&atb) else {
-            return None;
+        // Exact inverse when the system is well posed, pseudo-inverse for the
+        // partially-constrained cases (a plane with a weak texture, lambda at
+        // either end); `None` if neither yields a finite step.
+        let delta = match ata.try_inverse() {
+            Some(inv) => -(inv * atb),
+            None => -(ata.pseudo_inverse(1e-12).ok()? * atb),
         };
-        let delta = -delta;
         if !delta.iter().all(|v| v.is_finite()) {
             return None;
         }
+        transformation = exponential_map_se3(&delta.cast::<f32>()) * transformation;
 
-        // Convert delta to transformation update
-        let update = exponential_map(&delta);
-        transformation = update * transformation;
-
-        // Track best
-        let rmse = (total_residual / valid_points as f32).sqrt();
-        let fitness = valid_points as f32 / source.points.len() as f32;
-
-        if fitness > best_fitness {
-            best_fitness = fitness;
-            best_rmse = rmse;
+        let next = find_correspondences(
+            source,
+            &target_nn,
+            &transformation,
+            max_correspondence_distance,
+        );
+        if next.len() < 3 {
+            break;
         }
-
-        // Convergence check
-        if iter > 0 && rmse < 0.001 {
+        let (next_fitness, next_rmse) = fitness_and_rmse(&next, source_len);
+        let converged = (next_fitness - fitness).abs() < RELATIVE_FITNESS
+            && (next_rmse - rmse).abs() < RELATIVE_RMSE;
+        correspondences = next;
+        fitness = next_fitness;
+        rmse = next_rmse;
+        if fitness > best.1 || (fitness == best.1 && rmse < best.2) {
+            best = (transformation, fitness, rmse);
+        }
+        if converged {
             break;
         }
     }
 
     Some(ColoredICPResult {
-        transformation,
-        fitness: best_fitness,
-        inlier_rmse: best_rmse,
+        transformation: best.0,
+        fitness: best.1,
+        inlier_rmse: best.2,
     })
 }
 
-/// Compute point-to-plane jacobian
-fn compute_point_to_plane_jacobian(
-    point: &Point3<f32>,
-    normal: &Vector3<f32>,
-) -> nalgebra::Vector6<f32> {
-    // J = [n^T, (p x n)^T]
-    let p = point.coords;
-    let n = normal;
-    let cross = p.cross(n);
-
-    nalgebra::Vector6::new(n.x, n.y, n.z, cross.x, cross.y, cross.z)
-}
-
-/// Compute the photometric Jacobian with respect to a 6-DOF pose perturbation.
+/// Per-target-point colour gradient in the tangent plane (Open3D's
+/// `InitializePointCloudForColoredICP`).
 ///
-/// A point-to-point formulation is used: the residual is a colour difference and
-/// its gradient with respect to the perturbation is driven by that difference, so
-/// no image gradient is needed for a point-wise correspondence set.
+/// For point `q` with normal `n` and up to `GRADIENT_MAX_NN` neighbours within
+/// `radius`, solve in least squares
 ///
-/// This previously ignored all three arguments and returned a constant
-/// `(0.01, 0.01, 0.01, 0, 0, 0)`. Every row of the resulting `J J^T` block was
-/// then the same outer product, so the term was rank 1 and the normal equations
-/// were singular for any `lambda_geometric < 1` - the solver never moved while
-/// the function reported a successful registration. A constant Jacobian is not a
-/// simplification, it is a rank deficiency.
-fn compute_photometric_jacobian(
-    point: &Point3<f32>,
-    source_color: &Point3<f32>,
-    target_color: &Point3<f32>,
-) -> nalgebra::Vector6<f32> {
-    // Luma weights, matching the residual this is differentiated from.
-    let luma = |c: &Point3<f32>| 0.299 * c.x + 0.587 * c.y + 0.114 * c.z;
-    let d_luma = luma(source_color) - luma(target_color);
-    let p = point.coords;
-
-    // The direction each DOF moves the sample point, which is the same
-    // structure as the geometric Jacobian: translation axes, then the rotation
-    // axes as moments about the point.
-    // Weighting the three axes by fixed multiples of the *same* scalar made the
-    // translation block a rank-1 outer product with `d_luma`, so the x, y and z
-    // diagonals of `A` came out exactly zero. Scaling by the point's own
-    // coordinates instead makes the direction vary across correspondences, so
-    // the block is full rank as long as the cloud is not a single point.
-    let dir = nalgebra::Vector3::new(
-        d_luma * (1.0 + p.x),
-        d_luma * (1.0 + p.y),
-        d_luma * (1.0 + p.z),
-    );
-    let cross = p.cross(&dir);
-    let jacobian = nalgebra::Vector6::new(dir.x, dir.y, dir.z, cross.x, cross.y, cross.z);
-
-    // A point-wise colour residual has no spatial gradient, so this term is
-    // genuinely rank-deficient on its own: the six rows are fixed multiples of
-    // three directions. That is a property of the model, not a bug to paper
-    // over, and it is why `lambda_geometric = 0` remains unsupported - the
-    // normal equations are singular and the solve now says so by returning
-    // `None` instead of returning the input transform.
-    //
-    // What this fixes is the mixing: with a real, pose-dependent Jacobian the
-    // combined system is full rank for any `0 < lambda < 1`, where a constant
-    // one made it rank 1 for *every* lambda.
-    jacobian
-}
-
-/// Exponential map from se(3) to SE(3)
-fn exponential_map(delta: &nalgebra::Vector6<f32>) -> Matrix4<f32> {
-    // Extract rotation and translation components
-    let omega = Vector3::new(delta[3], delta[4], delta[5]);
-    let v = Vector3::new(delta[0], delta[1], delta[2]);
-
-    // Rodrigues' formula for rotation
-    let theta = omega.norm();
-    let rotation = if theta < 1e-6 {
-        Matrix3::identity()
-    } else {
-        let k = omega / theta;
-        let k_cross = Matrix3::new(0.0, -k.z, k.y, k.z, 0.0, -k.x, -k.y, k.x, 0.0);
-        Matrix3::identity() + k_cross * theta.sin() + k_cross * k_cross * (1.0 - theta.cos())
+/// ```text
+/// (proj(q_k) - q) . d = I_k - I_q     for each neighbour q_k
+/// (N - 1) n . d       = 0             keeps d in the tangent plane
+/// ```
+///
+/// with `proj` the projection onto the tangent plane. Fewer than three
+/// neighbours leaves the gradient at zero.
+fn color_gradients(
+    target: &PointCloud,
+    normals: &[Vector3<f32>],
+    colors: &[Point3<f32>],
+    nn: &SimpleNN,
+    radius: f32,
+) -> Vec<Vector3<f32>> {
+    let radius_sq = radius * radius;
+    let gradient = |i: usize| -> Vector3<f32> {
+        let q = target.points[i];
+        let n = normals[i].cast::<f64>();
+        let i_q = f64::from(intensity(&colors[i]));
+        let neighbours: Vec<_> = nn
+            .k_nearest(&q, GRADIENT_MAX_NN)
+            .into_iter()
+            .filter(|&(_, j, d2)| j != i && d2 <= radius_sq)
+            .collect();
+        if neighbours.len() < 3 {
+            return Vector3::zeros();
+        }
+        let mut ata = Matrix3::<f64>::zeros();
+        let mut atb = Vector3::<f64>::zeros();
+        for &(p, j, _) in &neighbours {
+            let diff = (p - q).cast::<f64>();
+            let row = diff - n * n.dot(&diff);
+            ata += row * row.transpose();
+            atb += row * (f64::from(intensity(&colors[j])) - i_q);
+        }
+        let w = neighbours.len() as f64;
+        ata += n * n.transpose() * (w * w);
+        match ata.try_inverse() {
+            Some(inv) => (inv * atb).cast::<f32>(),
+            None => Vector3::zeros(),
+        }
     };
-
-    // Proper SE(3) exponential map using left Jacobian
-    let translation = if theta < 1e-6 {
-        v
+    if target.points.len() > 5000 {
+        (0..target.points.len())
+            .into_par_iter()
+            .map(gradient)
+            .collect()
     } else {
-        let k = omega / theta;
-        let k_cross_v = Matrix3::new(0.0, -k.z, k.y, k.z, 0.0, -k.x, -k.y, k.x, 0.0);
-        let k_cross_sq_v = k_cross_v * k_cross_v;
-        let left_jacobian = Matrix3::identity()
-            + k_cross_v * ((1.0 - theta.cos()) / theta)
-            + k_cross_sq_v * ((theta - theta.sin()) / theta);
-        left_jacobian * v
-    };
-
-    // Build transformation
-    let mut transform = Matrix4::identity();
-    transform.fixed_view_mut::<3, 3>(0, 0).copy_from(&rotation);
-    transform
-        .fixed_view_mut::<3, 1>(0, 3)
-        .copy_from(&translation);
-
-    transform
+        (0..target.points.len()).map(gradient).collect()
+    }
 }
 
 #[cfg(test)]

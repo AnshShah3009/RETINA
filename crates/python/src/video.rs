@@ -77,24 +77,75 @@ impl PySlam {
         })
     }
 
+    /// Track one grayscale frame. `depth` (optional, row-major metric depth,
+    /// `width * height` values) enables RGB-D mode, where the first frame
+    /// bootstraps the map. Without depth the first frame raises while it is
+    /// held as the monocular initialisation reference. Frames without a
+    /// measured pose (initialising, tracking lost) raise `RuntimeError`.
+    #[pyo3(signature = (image, width, height, depth=None))]
     pub fn process_frame(
         &mut self,
         image: Vec<u8>,
         width: usize,
         height: usize,
+        depth: Option<Vec<f32>>,
     ) -> PyResult<(Vec<f32>, Vec<usize>)> {
         let gray = image::GrayImage::from_raw(width as u32, height as u32, image)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid image"))?;
 
-        let (pose, tracked) = self
-            .inner
-            .process_image(&gray)
-            .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
+        let result = match depth {
+            Some(d) => self.inner.process_image_with_depth(&gray, &d),
+            None => self.inner.process_image(&gray),
+        };
+        let (pose, tracked) = result.map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
 
-        let mat = pose.matrix();
-        let flat_mat: Vec<f32> = mat.iter().map(|&v| v as f32).collect();
+        Ok((pose_matrix_row_major(&pose), tracked))
+    }
+}
 
-        Ok((flat_mat, tracked))
+/// The 4x4 world -> camera pose matrix flattened for Python, so that
+/// `np.array(flat).reshape(4, 4)` is the matrix itself.
+///
+/// nalgebra stores matrices column-major, so `matrix().iter()` walks columns;
+/// flattening that directly handed numpy the transpose (translation in the
+/// bottom row). Iterate the transpose to emit rows.
+fn pose_matrix_row_major(pose: &cv_core::Pose) -> Vec<f32> {
+    pose.matrix()
+        .transpose()
+        .iter()
+        .map(|&v| v as f32)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pose_matrix_row_major;
+    use cv_core::Pose;
+    use nalgebra::{UnitQuaternion, Vector3};
+
+    /// numpy's `reshape(4, 4)` is row-major (C order): element `[r][c]` is
+    /// `flat[4 * r + c]`. The translation must therefore land at indices 3, 7
+    /// and 11, and the bottom row must be `[0, 0, 0, 1]`.
+    #[test]
+    fn pose_is_flattened_row_major_for_numpy() {
+        let pose = Pose::from_quat_translation(
+            UnitQuaternion::from_euler_angles(0.1, -0.4, 0.25),
+            Vector3::new(1.5, -2.0, 3.25),
+        );
+        let flat = pose_matrix_row_major(&pose);
+        let m = pose.matrix();
+        for r in 0..4 {
+            for c in 0..4 {
+                assert_eq!(
+                    flat[4 * r + c],
+                    m[(r, c)] as f32,
+                    "flat[{}] should be M[{r}][{c}]; flat = {flat:?}",
+                    4 * r + c
+                );
+            }
+        }
+        assert_eq!([flat[3], flat[7], flat[11]], [1.5, -2.0, 3.25]);
+        assert_eq!(&flat[12..], &[0.0, 0.0, 0.0, 1.0]);
     }
 }
 

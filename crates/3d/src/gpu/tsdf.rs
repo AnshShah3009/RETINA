@@ -35,6 +35,20 @@ pub fn integrate_depth(
         return Err("vol and weights must have the same length".to_string());
     }
 
+    // The depth slice must actually contain a `w x h` image.
+    //
+    // `px_i`/`py_i` are bounds-checked against the *declared* width and height,
+    // so a caller passing a short slice read past the end and panicked:
+    // `integrate_depth(&[1.0], 2, 2, ...)` indexed element 3 of a 1-element
+    // slice. The volume and weights were length-checked; the image was not.
+    if d.len() < w as usize * h as usize {
+        return Err(format!(
+            "depth image has {} elements, but {w}x{h} needs {}",
+            d.len(),
+            w as usize * h as usize
+        ));
+    }
+
     // Determine cube side length: n = cbrt(total), must be exact.
     let n = (total as f64).cbrt().round() as usize;
     if n * n * n != total {

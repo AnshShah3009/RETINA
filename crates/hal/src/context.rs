@@ -1,6 +1,40 @@
 use crate::{BackendType, DeviceId, Result};
 use cv_core::{storage::Storage, Float, Tensor};
 
+/// Resampling filter.
+///
+/// # `Linear` is a *bilinear point sample*, not an area average — and that
+/// matters when **downscaling**.
+///
+/// Verified against OpenCV 4.13 on an exact 2x downscale (48x36 -> 24x18) of a
+/// sinusoid, row 0:
+///
+/// ```text
+/// src row0       : 127 153 177 198 214 224 227 224 214 198 177 153 127
+/// this crate     : 127 178 215 227 211 172 120  71  37  28  47  88 141
+/// cv2 INTER_LINEAR: 148 194 222 224 200 157 106  60  33  31  54  97 148
+/// cv2 INTER_AREA  : 148 194 222 224 200 157 106  60  33  31  54  97 148
+/// ```
+///
+/// `this[0] == src[0,0]` exactly: this samples the source at the output pixel's
+/// mapped coordinate. OpenCV's two algorithms agree with each other to `0.0` here
+/// while both differ from this crate by 21 levels, and the amplitudes match
+/// (peak-to-peak 199 vs 193), so **both do filter** — the difference is where the
+/// filter is centred, not whether there is one.
+///
+/// Consequences, which are why this is documented rather than left implicit:
+///
+/// * For **upscaling** this is the right choice and is not a defect.
+/// * For **downscaling** it **aliases**: on the 2x case above it discards 3 of every
+///   4 source pixels. OpenCV offers `INTER_AREA` for this reason; there is no `Area`
+///   variant here.
+///
+/// Everything downstream of a resize inherits this, so a caller reducing resolution
+/// should be aware that fine detail above the output Nyquist rate is not averaged
+/// out. Whether to add an area-average variant, or to match OpenCV by changing
+/// `Linear`, is an open design decision — see `docs/PARITY.md`. Adding the variant is
+/// additive and safe; changing `Linear` is not, because it would alter every
+/// existing caller that upscales with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interpolation {
     Nearest,
@@ -41,7 +75,12 @@ pub trait ComputeContext: Send + Sync {
     /// * `name`: Name of the kernel (e.g., "gaussian_blur")
     /// * `buffers`: List of buffers (input/output)
     /// * `uniforms`: Uniform data (constants)
-    /// * `workgroups`: (x, y, z) dispatch size
+    /// * `workgroups`: (x, y, z) dispatch size. No axis may exceed 65535. The
+    ///   built-in 1-D kernels (e.g. `"threshold"`, `"color_cvt"`) linearise a
+    ///   2-D grid, so size them with
+    ///   [`crate::gpu_kernels::dispatch_1d`]`(invocations, 64)`; the packed u8
+    ///   kernels handle four pixels per invocation, so `invocations` is
+    ///   `len.div_ceil(4)`.
     fn dispatch<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         name: &str,
@@ -630,9 +669,16 @@ pub enum ThresholdType {
 pub enum BorderMode<T: Float> {
     Constant(T),
     Replicate,
+    /// Reflect without duplicating the border pixel: `fedcba|abcdefgh|fedcba`,
+    /// so index -1 maps to 1. OpenCV's `BORDER_REFLECT`.
     Reflect,
-    /// Reflect without duplicating the border pixel (period = 2n-2).
-    /// This is the default border mode in OpenCV (`BORDER_REFLECT_101`).
+    /// Reflect *with* the border pixel duplicated: `gfedcb|abcdefgh|gfedcb`, so
+    /// index -1 maps to 0.
+    ///
+    /// This is OpenCV's `BORDER_REFLECT_101` and its default border mode. The
+    /// doc comment previously read "without duplicating the border pixel", which
+    /// describes `Reflect` - the two had collapsed into the same folding, so
+    /// neither comment could have been checked against the other.
     Reflect101,
     Wrap,
 }

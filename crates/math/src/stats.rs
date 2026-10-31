@@ -72,6 +72,10 @@ pub fn percentile(data: &[f64], p: f64) -> f64 {
 }
 
 /// Pearson correlation coefficient.
+///
+/// Deviations are scaled by their largest magnitude before squaring, so data
+/// of any magnitude (1e-200 or 1e200) neither underflows nor overflows; the
+/// zero-variance test is relative to the data, not an absolute `1e-30`.
 pub fn pearson_correlation(x: &[f64], y: &[f64]) -> Result<f64, String> {
     if x.len() != y.len() {
         return Err("x and y must have the same length".to_string());
@@ -81,21 +85,33 @@ pub fn pearson_correlation(x: &[f64], y: &[f64]) -> Result<f64, String> {
     }
     let mx = mean(x);
     let my = mean(y);
+    let (Some(kx), Some(ky)) = (deviation_scale(x, mx), deviation_scale(y, my)) else {
+        return Err("Zero variance in one or both inputs".to_string());
+    };
     let mut sxy = 0.0;
     let mut sxx = 0.0;
     let mut syy = 0.0;
     for (&xi, &yi) in x.iter().zip(y.iter()) {
-        let dx = xi - mx;
-        let dy = yi - my;
+        let dx = (xi - mx) / kx;
+        let dy = (yi - my) / ky;
         sxy += dx * dy;
         sxx += dx * dx;
         syy += dy * dy;
     }
-    let denom = (sxx * syy).sqrt();
-    if denom < 1e-30 {
-        return Err("Zero variance in one or both inputs".to_string());
+    Ok((sxy / (sxx.sqrt() * syy.sqrt())).clamp(-1.0, 1.0))
+}
+
+/// Largest `|v - m|`, or `None` if the data are constant to rounding: every
+/// deviation is within a few ulps of the data's magnitude, which is all the
+/// error that computing the mean `m` can introduce.
+fn deviation_scale(data: &[f64], m: f64) -> Option<f64> {
+    let max_dev = data.iter().fold(0.0f64, |a, &v| a.max((v - m).abs()));
+    let max_abs = data.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
+    if max_dev.is_nan() || max_dev <= 4.0 * f64::EPSILON * max_abs || max_dev == 0.0 {
+        None
+    } else {
+        Some(max_dev)
     }
-    Ok(sxy / denom)
 }
 
 /// Sample covariance between x and y.
@@ -153,22 +169,28 @@ pub fn covariance_matrix(data: &[Vec<f64>]) -> Vec<Vec<f64>> {
 /// One-sample t-test.
 ///
 /// Returns `(t_statistic, p_value)` for a two-sided test of H0: mean = mu.
+/// The p-value is the t-distribution's two-sided tail computed directly
+/// (regularized incomplete beta), not `1 - cdf`, so it stays accurate far
+/// below 1e-16. Constant data (to rounding) give `(NaN, NaN)`.
 pub fn t_test_1sample(data: &[f64], mu: f64) -> (f64, f64) {
     let n = data.len() as f64;
-    let m = mean(data);
-    let s = sample_std(data);
-    if s < 1e-30 || n < 2.0 {
+    if n < 2.0 {
         return (f64::NAN, f64::NAN);
     }
+    let m = mean(data);
+    if deviation_scale(data, m).is_none() {
+        return (f64::NAN, f64::NAN);
+    }
+    let s = sample_std(data);
     let t = (m - mu) / (s / n.sqrt());
     let df = n - 1.0;
-    let p = 2.0 * (1.0 - t_cdf(t.abs(), df));
-    (t, p)
+    (t, t_two_sided_p(t, df))
 }
 
 /// Two-sample t-test (Welch's, unequal variances).
 ///
 /// Returns `(t_statistic, p_value)` for a two-sided test of H0: mean_a = mean_b.
+/// Two constant samples (to rounding) give `(NaN, NaN)`.
 pub fn t_test_2sample(a: &[f64], b: &[f64]) -> (f64, f64) {
     let na = a.len() as f64;
     let nb = b.len() as f64;
@@ -177,13 +199,13 @@ pub fn t_test_2sample(a: &[f64], b: &[f64]) -> (f64, f64) {
     }
     let ma = mean(a);
     let mb = mean(b);
+    if deviation_scale(a, ma).is_none() && deviation_scale(b, mb).is_none() {
+        return (f64::NAN, f64::NAN);
+    }
     let va = sample_var(a);
     let vb = sample_var(b);
 
     let se = (va / na + vb / nb).sqrt();
-    if se < 1e-30 {
-        return (f64::NAN, f64::NAN);
-    }
     let t = (ma - mb) / se;
 
     // Welch-Satterthwaite degrees of freedom
@@ -191,8 +213,7 @@ pub fn t_test_2sample(a: &[f64], b: &[f64]) -> (f64, f64) {
     let den = (va / na).powi(2) / (na - 1.0) + (vb / nb).powi(2) / (nb - 1.0);
     let df = num / den;
 
-    let p = 2.0 * (1.0 - t_cdf(t.abs(), df));
-    (t, p)
+    (t, t_two_sided_p(t, df))
 }
 
 // Sample variance (with Bessel's correction)
@@ -208,55 +229,66 @@ fn sample_std(data: &[f64]) -> f64 {
     sample_var(data).sqrt()
 }
 
-/// CDF of Student's t-distribution via regularized incomplete beta function.
-fn t_cdf(t: f64, df: f64) -> f64 {
-    let x = df / (df + t * t);
-    0.5 + 0.5 * (1.0 - regularized_incomplete_beta(df / 2.0, 0.5, x)) * t.signum()
+/// Two-sided tail `P(|T| >= |t|)` of Student's t with `df` degrees of freedom:
+/// `I_{df/(df+t²)}(df/2, 1/2)`, with both `x` and `1 - x` formed without
+/// cancellation. Replaces `2 * (1 - cdf(|t|))`, which was exactly 0 for every
+/// p-value below ~1.1e-16.
+fn t_two_sided_p(t: f64, df: f64) -> f64 {
+    if t.is_nan() || df.is_nan() {
+        return f64::NAN;
+    }
+    if t.is_infinite() {
+        return 0.0;
+    }
+    let t2 = t * t;
+    let denom = df + t2;
+    regularized_incomplete_beta(df / 2.0, 0.5, df / denom, t2 / denom)
 }
 
-/// Regularized incomplete beta function I_x(a,b) using continued fraction (Lentz's method).
-fn regularized_incomplete_beta(a: f64, b: f64, x: f64) -> f64 {
+/// Regularized incomplete beta function `I_x(a, b)`, with `y = 1 - x` supplied
+/// by the caller so it carries no cancellation. Continued fraction (modified
+/// Lentz, Numerical Recipes `betacf`) on whichever side converges.
+fn regularized_incomplete_beta(a: f64, b: f64, x: f64, y: f64) -> f64 {
     if !(0.0..=1.0).contains(&x) {
         return f64::NAN;
     }
     if x == 0.0 {
         return 0.0;
     }
-    if x == 1.0 {
+    if y == 0.0 {
         return 1.0;
     }
 
-    // Use symmetry relation if x > (a+1)/(a+b+2) for better convergence
+    // Symmetry I_x(a, b) = 1 - I_{1-x}(b, a) where the CF converges faster.
     if x > (a + 1.0) / (a + b + 2.0) {
-        return 1.0 - regularized_incomplete_beta(b, a, 1.0 - x);
+        return 1.0 - regularized_incomplete_beta(b, a, y, x);
     }
 
-    let ln_prefix = a * x.ln() + b * (1.0 - x).ln() - ln_beta(a, b) - a.ln();
+    let ln_prefix = a * x.ln() + b * y.ln() - ln_beta(a, b) - a.ln();
 
-    // Continued fraction (Lentz's method)
-    let tiny = 1e-30;
-    let eps = 1e-14;
+    const TINY: f64 = 1e-300;
+    let guard = |v: f64| if v.abs() < TINY { TINY } else { v };
     let mut c = 1.0;
-    let mut d = 1.0 / (1.0 - (a + b) * x / (a + 1.0)).max(tiny);
+    let mut d = 1.0 / guard(1.0 - (a + b) * x / (a + 1.0));
     let mut h = d;
 
-    for m in 1..=200 {
+    for m in 1..=300 {
         let m_f = m as f64;
 
         // Even step
         let num_even = m_f * (b - m_f) * x / ((a + 2.0 * m_f - 1.0) * (a + 2.0 * m_f));
-        d = 1.0 / (1.0 + num_even * d).max(tiny);
-        c = (1.0 + num_even / c).max(tiny);
+        d = 1.0 / guard(1.0 + num_even * d);
+        c = guard(1.0 + num_even / c);
         h *= d * c;
 
         // Odd step
         let num_odd = -(a + m_f) * (a + b + m_f) * x / ((a + 2.0 * m_f) * (a + 2.0 * m_f + 1.0));
-        d = 1.0 / (1.0 + num_odd * d).max(tiny);
-        c = (1.0 + num_odd / c).max(tiny);
+        d = 1.0 / guard(1.0 + num_odd * d);
+        c = guard(1.0 + num_odd / c);
         let delta = d * c;
         h *= delta;
 
-        if (delta - 1.0).abs() < eps {
+        if (delta - 1.0).abs() < 1e-16 {
             break;
         }
     }
@@ -294,16 +326,35 @@ impl NormalDistribution {
         (-0.5 * z * z).exp() / (self.std * (2.0 * PI).sqrt())
     }
 
-    /// Cumulative distribution function (uses erf from the special module).
+    /// Cumulative distribution function, `erfc(-z / √2) / 2`.
+    ///
+    /// Through `erfc`, so the lower tail keeps full relative accuracy:
+    /// `0.5 * (1 + erf(z))` cancelled to exactly 0 for `z <~ -8.3`
+    /// (`cdf(-10)` returned 0; SciPy `7.61985302416047e-24`).
     pub fn cdf(&self, x: f64) -> f64 {
         let z = (x - self.mean) / (self.std * std::f64::consts::SQRT_2);
-        0.5 * (1.0 + crate::special::erf(z))
+        0.5 * crate::special::erfc(-z)
     }
 
-    /// Percent point function (inverse CDF) using rational approximation.
+    /// Survival function `1 - cdf(x)`, computed directly as `erfc(z / √2) / 2`
+    /// so the upper tail does not cancel (`sf(10) = 7.6e-24`, not 0).
+    pub fn sf(&self, x: f64) -> f64 {
+        let z = (x - self.mean) / (self.std * std::f64::consts::SQRT_2);
+        0.5 * crate::special::erfc(z)
+    }
+
+    /// Percent point function (inverse CDF).
     ///
-    /// Abramowitz and Stegun approximation 26.2.23.
+    /// Acklam's rational approximation (relative error ~1e-9) as the starting
+    /// point, then one Halley step on the `erfc`-based cdf, which brings it to
+    /// machine precision across `[1e-300, 1 - 1e-16]` (matches
+    /// `scipy.stats.norm.ppf` to a few ulps). The previous version stopped at
+    /// the raw approximation and was documented as A&S 26.2.23, which it is
+    /// not. `ppf(0) = -inf`, `ppf(1) = +inf`, NaN in gives NaN.
     pub fn ppf(&self, p: f64) -> f64 {
+        if p.is_nan() {
+            return f64::NAN;
+        }
         if p <= 0.0 {
             return f64::NEG_INFINITY;
         }
@@ -315,9 +366,35 @@ impl NormalDistribution {
     }
 }
 
-/// Inverse standard normal CDF (Beasley-Springer-Moro algorithm).
+/// Inverse standard normal CDF: Acklam's approximation refined by Halley.
 fn inv_normal_cdf(p: f64) -> f64 {
-    // Rational approximation for the central region
+    if p > 0.5 {
+        // 1 - p is exact for p >= 0.5 (Sterbenz), and refining in the lower
+        // tail keeps the residual cdf(z) - q free of cancellation.
+        return -inv_normal_cdf_lower(1.0 - p);
+    }
+    inv_normal_cdf_lower(p)
+}
+
+/// `p <= 0.5`.
+fn inv_normal_cdf_lower(p: f64) -> f64 {
+    if p == 0.5 {
+        return 0.0;
+    }
+    let z = acklam(p);
+    // Halley step on F(z) = Φ(z) - p, with Φ via erfc: z <= 0 here, so Φ(z)
+    // is a lower-tail value with full relative accuracy.
+    let e = 0.5 * crate::special::erfc(-z / std::f64::consts::SQRT_2) - p;
+    let u = e * (2.0 * PI).sqrt() * (0.5 * z * z).exp();
+    if !u.is_finite() {
+        return z;
+    }
+    z - u / (1.0 + 0.5 * z * u)
+}
+
+/// Peter Acklam's rational approximation to the inverse normal CDF
+/// (relative error below 1.15e-9).
+fn acklam(p: f64) -> f64 {
     let a = [
         -3.969683028665376e+01,
         2.209460984245205e+02,
@@ -370,6 +447,10 @@ fn inv_normal_cdf(p: f64) -> f64 {
 /// Simple linear regression: y = slope * x + intercept.
 ///
 /// Returns a `LinregressResult` with slope, intercept, R-squared, standard error, and p-value.
+/// The p-value (two-sided, H0: slope = 0) is the t-distribution tail computed
+/// directly, so it is not rounded to 0 below ~1e-16 (SciPy-equivalent; on a
+/// near-perfect 30-point line: 1.44e-96, where `1 - cdf` gave 0). `x` that is
+/// constant to rounding is an error; constant `y` gives `r_squared = 1`.
 pub fn linregress(x: &[f64], y: &[f64]) -> Result<LinregressResult, String> {
     if x.len() != y.len() {
         return Err("x and y must have the same length".to_string());
@@ -381,6 +462,9 @@ pub fn linregress(x: &[f64], y: &[f64]) -> Result<LinregressResult, String> {
 
     let mx = mean(x);
     let my = mean(y);
+    if deviation_scale(x, mx).is_none() {
+        return Err("Zero variance in x".to_string());
+    }
     let mut ss_xx = 0.0;
     let mut ss_xy = 0.0;
     let mut ss_yy = 0.0;
@@ -390,10 +474,6 @@ pub fn linregress(x: &[f64], y: &[f64]) -> Result<LinregressResult, String> {
         ss_xx += dx * dx;
         ss_xy += dx * dy;
         ss_yy += dy * dy;
-    }
-
-    if ss_xx < 1e-30 {
-        return Err("Zero variance in x".to_string());
     }
 
     let slope = ss_xy / ss_xx;
@@ -408,7 +488,7 @@ pub fn linregress(x: &[f64], y: &[f64]) -> Result<LinregressResult, String> {
         })
         .sum();
 
-    let r_squared = if ss_yy > 1e-30 {
+    let r_squared = if deviation_scale(y, my).is_some() {
         1.0 - ss_res / ss_yy
     } else {
         1.0
@@ -417,14 +497,16 @@ pub fn linregress(x: &[f64], y: &[f64]) -> Result<LinregressResult, String> {
     let mse = ss_res / (n - 2) as f64;
     let std_err = (mse / ss_xx).sqrt();
 
-    // t-statistic for slope
-    let t = if std_err > 1e-30 {
+    // t-statistic for slope; an exact fit has std_err == 0 and t = ±inf.
+    let t = if std_err > 0.0 {
         slope / std_err
+    } else if slope == 0.0 {
+        0.0
     } else {
         f64::INFINITY
     };
     let df = (n - 2) as f64;
-    let p_value = 2.0 * (1.0 - t_cdf(t.abs(), df));
+    let p_value = t_two_sided_p(t, df);
 
     Ok(LinregressResult {
         slope,
@@ -447,29 +529,52 @@ pub struct LinregressResult {
 /// Compute a histogram of the data.
 ///
 /// Returns `(bin_edges, counts)` where `bin_edges` has length `bins + 1`
-/// and `counts` has length `bins`.
+/// and `counts` has length `bins`, like `numpy.histogram(data, bins)`: equal
+/// bins over `[min, max]`, each half-open except the last, which includes
+/// `max`; constant data get the range `[v - 0.5, v + 0.5]`.
+///
+/// Non-finite values (NaN, ±inf) are not counted - NaN used to land in bin 0
+/// because `NaN as usize` is 0. With no finite values the result is empty.
+/// (numpy raises for NaN/inf with an automatic range.) The constant-data test
+/// is exact; it was an absolute `1e-30`, which treated `[1e-40, 3e-40]` as a
+/// single value.
 pub fn histogram(data: &[f64], bins: usize) -> (Vec<f64>, Vec<usize>) {
-    if data.is_empty() || bins == 0 {
+    let finite = data.iter().copied().filter(|v| v.is_finite());
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for v in finite.clone() {
+        min = min.min(v);
+        max = max.max(v);
+    }
+    if bins == 0 || min > max {
         return (Vec::new(), Vec::new());
     }
+    if min == max {
+        min -= 0.5;
+        max += 0.5;
+    }
 
-    let min = data.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-
-    let range = if (max - min).abs() < 1e-30 {
-        1.0
-    } else {
-        max - min
-    };
-
+    let range = max - min;
     let bin_width = range / bins as f64;
-    let edges: Vec<f64> = (0..=bins).map(|i| min + i as f64 * bin_width).collect();
+    let edges: Vec<f64> = (0..=bins)
+        .map(|i| {
+            if i == bins {
+                max
+            } else {
+                min + i as f64 * bin_width
+            }
+        })
+        .collect();
     let mut counts = vec![0usize; bins];
 
-    for &v in data {
-        let mut idx = ((v - min) / bin_width) as usize;
-        if idx >= bins {
-            idx = bins - 1;
+    // numpy's binning: scaled index, then corrected against the actual
+    // edges so a value equal to an edge always lands in the bin it opens.
+    let norm = bins as f64 / range;
+    for v in finite {
+        let mut idx = (((v - min) * norm) as usize).min(bins - 1);
+        if v < edges[idx] {
+            idx -= 1;
+        } else if idx + 1 < bins && v >= edges[idx + 1] {
+            idx += 1;
         }
         counts[idx] += 1;
     }

@@ -18,10 +18,6 @@ fn create_test_tensor_f32(
     Tensor::from_vec(data.to_vec(), cv_core::TensorShape::new(c, h, w)).unwrap()
 }
 
-fn create_test_tensor_u8(data: &[u8], w: usize, h: usize, c: usize) -> Tensor<u8, CpuStorage<u8>> {
-    Tensor::from_vec(data.to_vec(), cv_core::TensorShape::new(c, h, w)).unwrap()
-}
-
 mod convolve_tests {
     use super::*;
 

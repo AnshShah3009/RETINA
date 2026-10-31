@@ -7,5 +7,12 @@ edition = "2021"
 cv-core = { workspace = true }
 image = { workspace = true }
 
+# Dev-only: the parity example in examples/ also exercises cv-imgproc's
+# tone-mapping routines (CLAHE, histogram equalisation) alongside this crate's
+# bilateral filter, and those crates are what the OpenCV reference is measured
+# against. Dev-dependency only, so the published library graph is unchanged.
+[dev-dependencies]
+cv-imgproc = { workspace = true }
+
 [features]
 default = []

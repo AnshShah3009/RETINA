@@ -54,7 +54,13 @@ pub fn read_pcd<R: BufRead>(mut reader: R) -> Result<PointCloud> {
     match header.data_format {
         PcdData::Ascii => {
             let lines = reader.lines();
-            parse_pcd_ascii(lines, header.points_count, &header.fields)
+            parse_pcd_ascii(
+                lines,
+                header.points_count,
+                &header.fields,
+                &header.types,
+                &header.counts,
+            )
         }
         PcdData::Binary => parse_pcd_binary(reader, &header),
         PcdData::BinaryCompressed => parse_pcd_binary_compressed(reader, &header),
@@ -139,12 +145,44 @@ fn parse_header<R: BufRead>(reader: &mut R) -> Result<PcdHeader> {
     }
 
     if points_count == 0 {
-        points_count = width * height;
+        // `POINTS` is optional, so this product is reachable from a file that
+        // has nothing but `WIDTH` and `HEIGHT` to go on, and both operands are
+        // file-controlled. `width * height` overflows: in a release build (this
+        // profile has no `overflow-checks`) the product WRAPS, so
+        // `WIDTH 9223372036854775808 / HEIGHT 2` became a count of 0 and the
+        // reader returned Ok with zero points while a complete, valid body sat
+        // unread - a silently empty cloud, which is indistinguishable from a
+        // file that really is empty. In a debug build the same line panics.
+        // Either way the answer is an error, not a plausible count.
+        points_count = width.checked_mul(height).ok_or_else(|| {
+            Error::ParseError(format!(
+                "PCD: WIDTH * HEIGHT overflows ({width} * {height}); a PCD header must \
+                 carry a POINTS line when the product does not fit"
+            ))
+        })?;
     }
 
     // Default counts to 1 if not specified
     if counts.is_empty() {
         counts = vec![1; fields.len()];
+    }
+
+    // A PCD record is only geometry if the header says which columns are the
+    // coordinates. The ASCII reader used to fall back to "column 0 is x,
+    // column 1 is y, column 2 is z" and the binary reader likewise, so a header
+    // such as `FIELDS intensity ring time` returned Ok with
+    // `[[10,20,30],[40,50,60]]` - intensity, ring index and timestamp handed
+    // back as a point cloud, with every downstream bound, centroid and
+    // normal-estimation step quietly wrong. ply.rs already refuses a header
+    // without x/y/z; do the same here.
+    for axis in ["x", "y", "z"] {
+        if !fields.iter().any(|f| f == axis) {
+            return Err(Error::ParseError(format!(
+                "PCD: FIELDS is missing '{axis}' ({:?}); x, y and z must all be declared \
+                 for a header to be interpreted as geometry",
+                fields
+            )));
+        }
     }
 
     Ok(PcdHeader {
@@ -181,10 +219,34 @@ fn check_finite(x: f32, y: f32, z: f32, point_index: usize) -> Result<()> {
     )))
 }
 
-fn parse_pcd_ascii<I>(lines: I, count: usize, fields: &[String]) -> Result<PointCloud>
+/// Parse ASCII PCD data after the header has been read.
+///
+/// `types` is the header's `TYPE` line, which is what decides whether an
+/// integer-typed colour field holds a byte or an already-normalised float.
+fn parse_pcd_ascii<I>(
+    lines: I,
+    count: usize,
+    fields: &[String],
+    types: &[char],
+    counts: &[usize],
+) -> Result<PointCloud>
 where
     I: Iterator<Item = std::io::Result<String>>,
 {
+    // A field with `COUNT k` occupies `k` columns, so the column a field
+    // starts at is the sum of the counts before it - the ASCII twin of
+    // `compute_field_offsets`. Indexing columns by *field* number shifted
+    // every field after a multi-count one: `FIELDS h x y z` / `COUNT 2 1 1 1`
+    // with row `9 9 1 2 3` read the point as (9, 1, 2).
+    let count_of = |i: usize| counts.get(i).copied().unwrap_or(1);
+    let column_of: Vec<usize> = (0..fields.len())
+        .scan(0usize, |col, i| {
+            let start = *col;
+            *col += count_of(i);
+            Some(start)
+        })
+        .collect();
+    let total_columns: usize = (0..fields.len()).map(count_of).sum();
     // `POINTS` is a header line, so it is worth exactly as much as the rest of
     // the header, and the body may hold no points at all. Reserving from it up
     // front meant `POINTS 40000000000` - twenty-six characters - committed
@@ -198,9 +260,24 @@ where
     let mut normals: Option<Vec<Vector3<f32>>> = None;
     let mut colors: Option<Vec<Point3<f32>>> = None;
 
-    // Check for normal and color fields
-    let has_normals =
-        fields.contains(&"normal_x".to_string()) || fields.contains(&"nx".to_string());
+    // A normal is a *triple*. Deciding from `normal_x`/`nx` alone - as this used
+    // to - means `FIELDS x y z nx` alone turned normal reading on, and the three
+    // `values[ny_idx.expect("normals are only read when all three exist")]`
+    // lookups below then panicked on `None`. That is the "truncated / malformed
+    // input accepted" class taken to its limit: a file the header itself
+    // describes as incomplete killed the process instead of being reported.
+    //
+    // The binary path already required all three (`nx_field.is_some() && ...`);
+    // only the ASCII path decided on one.
+    let has_normals = ["normal_x", "nx"]
+        .iter()
+        .any(|n| fields.iter().any(|f| f == n))
+        && ["normal_y", "ny"]
+            .iter()
+            .any(|n| fields.iter().any(|f| f == n))
+        && ["normal_z", "nz"]
+            .iter()
+            .any(|n| fields.iter().any(|f| f == n));
     let has_colors = fields.contains(&"rgb".to_string())
         || fields.contains(&"rgba".to_string())
         || (fields.contains(&"r".to_string())
@@ -214,19 +291,24 @@ where
         colors = Some(Vec::new());
     }
 
-    // Get field indices
-    let x_idx = fields.iter().position(|f| f == "x").unwrap_or(0);
-    let y_idx = fields.iter().position(|f| f == "y").unwrap_or(1);
-    let z_idx = fields.iter().position(|f| f == "z").unwrap_or(2);
+    // Get field indices. `parse_header` has already rejected a header without
+    // x/y/z, so the coordinate indices are resolved here as `Some`, never
+    // guessed from a positional fallback.
+    let x_idx = fields.iter().position(|f| f == "x").map(|i| column_of[i]);
+    let y_idx = fields.iter().position(|f| f == "y").map(|i| column_of[i]);
+    let z_idx = fields.iter().position(|f| f == "z").map(|i| column_of[i]);
 
-    let nx_idx = fields.iter().position(|f| f == "normal_x" || f == "nx");
-    let ny_idx = fields.iter().position(|f| f == "normal_y" || f == "ny");
-    let nz_idx = fields.iter().position(|f| f == "normal_z" || f == "nz");
+    let col = |pred: &dyn Fn(&str) -> bool| fields.iter().position(|f| pred(f));
+    let nx_idx = col(&|f| f == "normal_x" || f == "nx").map(|i| column_of[i]);
+    let ny_idx = col(&|f| f == "normal_y" || f == "ny").map(|i| column_of[i]);
+    let nz_idx = col(&|f| f == "normal_z" || f == "nz").map(|i| column_of[i]);
 
-    let rgb_idx = fields.iter().position(|f| f == "rgb" || f == "rgba");
-    let r_idx = fields.iter().position(|f| f == "r");
-    let g_idx = fields.iter().position(|f| f == "g");
-    let b_idx = fields.iter().position(|f| f == "b");
+    // Colour fields keep their *field* index too: the declared TYPE is per
+    // field, the value is per column.
+    let rgb_field = col(&|f| f == "rgb" || f == "rgba");
+    let r_field = col(&|f| f == "r");
+    let g_field = col(&|f| f == "g");
+    let b_field = col(&|f| f == "b");
 
     for line in lines {
         let line = line?;
@@ -240,8 +322,9 @@ where
         // (0, 0, 0): a malformed row became *plausible data*, which is the worst
         // possible outcome - a caller cannot tell it from a real scan. A column
         // that does not parse is an error.
-        let values: Vec<f32> = line
-            .split_whitespace()
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let values: Vec<f32> = tokens
+            .iter()
             .map(|s| {
                 s.parse::<f32>().map_err(|_| {
                     Error::ParseError(format!(
@@ -251,14 +334,36 @@ where
             })
             .collect::<Result<Vec<_>>>()?;
 
-        if values.len() < 3 {
-            continue;
+        // A row is one record, and the header says how many columns a record
+        // has. A short row used to be handled two different wrong ways: one
+        // (`values.len() < 3 => continue`) dropped the row on the floor, so a
+        // three-row body with a two-column middle line quietly parsed as a
+        // two-point cloud; the other (`values.get(i).unwrap_or(0.0)`) padded it
+        // out, so a truncated 9-column row reported as a ZERO NORMAL and a
+        // BLACK COLOUR - a fabricated value that is exactly what a
+        // normal-estimation consumer treats as valid input. Neither is
+        // recoverable, so say so.
+        let expected = total_columns;
+        if values.len() < expected {
+            return Err(Error::ParseError(format!(
+                "PCD ascii: row {} has {} column(s) but the header declares {} FIELDS \
+                 ({:?}, COUNT {:?}): {line:?}",
+                points.len(),
+                values.len(),
+                expected,
+                fields,
+                counts
+            )));
         }
 
-        // Read point
-        let x = values.get(x_idx).copied().unwrap_or(0.0);
-        let y = values.get(y_idx).copied().unwrap_or(0.0);
-        let z = values.get(z_idx).copied().unwrap_or(0.0);
+        // Read point. `parse_header` rejected a header without x/y/z and the
+        // row check above has already ruled out a short row, so every index
+        // below is in range.
+        let (x, y, z) = (
+            values[x_idx.expect("x checked by parse_header")],
+            values[y_idx.expect("y checked by parse_header")],
+            values[z_idx.expect("z checked by parse_header")],
+        );
         // `f32::from_str` accepts "NaN", "inf", "infinity" and "1e40" (which
         // overflows to infinity), so a single bad coordinate used to reach the
         // cloud as a point at infinity and poison every bound computed from it.
@@ -267,34 +372,70 @@ where
 
         // Read normals
         if let Some(ref mut n) = normals {
-            let nx = nx_idx.and_then(|i| values.get(i)).copied().unwrap_or(0.0);
-            let ny = ny_idx.and_then(|i| values.get(i)).copied().unwrap_or(0.0);
-            let nz = nz_idx.and_then(|i| values.get(i)).copied().unwrap_or(0.0);
+            let (nx, ny, nz) = (
+                values[nx_idx.expect("normals are only read when all three exist")],
+                values[ny_idx.expect("normals are only read when all three exist")],
+                values[nz_idx.expect("normals are only read when all three exist")],
+            );
             n.push(Vector3::new(nx, ny, nz));
         }
 
         // Read colors
         if let Some(ref mut c) = colors {
-            if let Some(idx) = rgb_idx {
-                // Packed RGB/RGBA: the float is a bit-reinterpreted u32, not a numeric value
-                let float_value = values.get(idx).copied().unwrap_or(0.0);
-                let packed: u32 = float_value.to_bits();
+            if let Some(field) = rgb_field {
+                // Packed RGB/RGBA. Declared `TYPE F` (PCL's convention) the
+                // token is a float whose *bits* are the u32; declared `U`/`I`
+                // the token is the integer itself. Parsing everything as f32
+                // and taking `to_bits()` turned `TYPE U` pure red `16711680`
+                // into (0.498, 0, 0), and an f32 parse would also round away
+                // the low bits of any value above 2^24 (rgba with alpha).
+                let token = tokens[column_of[field]];
+                let packed: u32 = match types.get(field).copied() {
+                    Some('U') | Some('I') => {
+                        token.parse::<i64>().map(|v| v as u32).map_err(|_| {
+                            Error::ParseError(format!(
+                                "PCD ascii: packed colour {token:?} is not an integer: {line:?}"
+                            ))
+                        })?
+                    }
+                    _ => values[column_of[field]].to_bits(),
+                };
                 let r = ((packed >> 16) & 0xFF) as f32 / 255.0;
                 let g = ((packed >> 8) & 0xFF) as f32 / 255.0;
                 let b = (packed & 0xFF) as f32 / 255.0;
                 c.push(Point3::new(r, g, b));
-            } else if let (Some(ri), Some(gi), Some(bi)) = (r_idx, g_idx, b_idx) {
-                // Separate R, G, B fields
-                let r = values.get(ri).copied().unwrap_or(0.0);
-                let g = values.get(gi).copied().unwrap_or(0.0);
-                let b = values.get(bi).copied().unwrap_or(0.0);
-
-                // Assume 0-255 range if values are large
-                let r_norm = if r > 1.0 { r / 255.0 } else { r };
-                let g_norm = if g > 1.0 { g / 255.0 } else { g };
-                let b_norm = if b > 1.0 { b / 255.0 } else { b };
-
-                c.push(Point3::new(r_norm, g_norm, b_norm));
+            } else if let (Some(ri), Some(gi), Some(bi)) = (r_field, g_field, b_field) {
+                // Normalise by the *declared* (TYPE, SIZE) pair, not by
+                // guessing from the value.
+                //
+                // `if v > 1.0 { v / 255.0 } else { v }` cannot tell a byte from an
+                // already-normalised float: the legitimate byte value `1` is a
+                // near-black `1/255`, but it is also what a normalised `1.0`
+                // looks like, so a near-black red vertex came back pure white -
+                // a factor of 255, on the most common first colour in the
+                // spectrum.
+                //
+                // Measured on `FIELDS x y z r g b`, `SIZE 4 4 4 1 1 1`,
+                // `TYPE F F F U U U`, body row `0 0 0 1 128 255`:
+                //     before -> (1.000000, 0.501961, 1.000000)   <- r is 255x too big
+                //     after  -> (0.003922, 0.501961, 1.000000)
+                // and on the float-declared equivalent the value is untouched.
+                // This is the same fix `ply.rs` already carries for the same
+                // defect, and its comment there explains why byte 0 is ambiguous
+                // but harmless.
+                let norm = |idx: usize| -> f32 {
+                    let is_integer = types
+                        .get(idx)
+                        .copied()
+                        .is_some_and(|t| matches!(t, 'U' | 'I'));
+                    let v = values[column_of[idx]];
+                    if is_integer {
+                        v / 255.0
+                    } else {
+                        v
+                    }
+                };
+                c.push(Point3::new(norm(ri), norm(gi), norm(bi)));
             }
         }
 
@@ -303,9 +444,21 @@ where
         }
     }
 
+    // Every accepted row pushed to all three vectors, so - unlike the binary
+    // path, where a field can decode to nothing - they are the same length as
+    // `points`. Guard anyway: a `Some` whose length disagrees with the point
+    // count is a landmine for the first `colors[i]` in a consumer.
     let mut cloud = PointCloud::new(points);
-    cloud.normals = normals;
-    cloud.colors = colors;
+    if let Some(c) = colors {
+        if c.len() == cloud.len() {
+            cloud.colors = Some(c);
+        }
+    }
+    if let Some(n) = normals {
+        if n.len() == cloud.len() {
+            cloud.normals = Some(n);
+        }
+    }
 
     Ok(cloud)
 }
@@ -396,28 +549,20 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
         let base = i * stride;
         let point_data = &data[base..base + stride];
 
-        // Read x, y, z
-        let x = read_field_as_f32(
-            point_data,
-            &field_offsets,
-            &header.sizes,
-            &header.types,
-            x_field.unwrap_or(0),
-        );
-        let y = read_field_as_f32(
-            point_data,
-            &field_offsets,
-            &header.sizes,
-            &header.types,
-            y_field.unwrap_or(1),
-        );
-        let z = read_field_as_f32(
-            point_data,
-            &field_offsets,
-            &header.sizes,
-            &header.types,
-            z_field.unwrap_or(2),
-        );
+        // Read x, y, z. `parse_header` has already established that all three
+        // exist, so the indices are known - they are not a positional guess.
+        let read = |idx: usize| {
+            read_field_as_f32(
+                point_data,
+                &field_offsets,
+                &header.sizes,
+                &header.types,
+                idx,
+            )
+        };
+        let x = read(x_field.expect("x/y/z checked by parse_header"))?;
+        let y = read(y_field.expect("x/y/z checked by parse_header"))?;
+        let z = read(z_field.expect("x/y/z checked by parse_header"))?;
         // A PCD body is raw bytes, so a NaN or infinity is not a parse error -
         // `read_field_as_f32` decodes the bit pattern and hands back a
         // perfectly ordinary `f32`. Nothing downstream can tell it apart from
@@ -429,27 +574,9 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
 
         // Read normals
         if let Some(ref mut norms) = normals {
-            let nx = read_field_as_f32(
-                point_data,
-                &field_offsets,
-                &header.sizes,
-                &header.types,
-                nx_field.unwrap(),
-            );
-            let ny = read_field_as_f32(
-                point_data,
-                &field_offsets,
-                &header.sizes,
-                &header.types,
-                ny_field.unwrap(),
-            );
-            let nz = read_field_as_f32(
-                point_data,
-                &field_offsets,
-                &header.sizes,
-                &header.types,
-                nz_field.unwrap(),
-            );
+            let nx = read(nx_field.expect("normals are only read when all three exist"))?;
+            let ny = read(ny_field.expect("normals are only read when all three exist"))?;
+            let nz = read(nz_field.expect("normals are only read when all three exist"))?;
             norms.push(Vector3::new(nx, ny, nz));
         }
 
@@ -468,25 +595,54 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
                     let b = (packed & 0xFF) as f32 / 255.0;
                     cols.push(Point3::new(r, g, b));
                 }
+                // A packed `rgb` field of any other declared SIZE is not
+                // decodable, but it is not fatal either: the point records and
+                // the geometry are fine, so the colour is simply absent (and
+                // the length check below drops the partially filled vector
+                // instead of publishing it).
             } else if let (Some(ri), Some(gi), Some(bi)) = (r_field, g_field, b_field) {
-                let r =
-                    read_field_as_f32(point_data, &field_offsets, &header.sizes, &header.types, ri);
-                let g =
-                    read_field_as_f32(point_data, &field_offsets, &header.sizes, &header.types, gi);
-                let b =
-                    read_field_as_f32(point_data, &field_offsets, &header.sizes, &header.types, bi);
-                // Normalize if in 0-255 range
-                let r_norm = if r > 1.0 { r / 255.0 } else { r };
-                let g_norm = if g > 1.0 { g / 255.0 } else { g };
-                let b_norm = if b > 1.0 { b / 255.0 } else { b };
+                let r = read(ri)?;
+                let g = read(gi)?;
+                let b = read(bi)?;
+                // Same declared-type normalisation as the ASCII path above, for
+                // the same reason: a `U1` byte value of `1` is `1/255`, not white.
+                // Measured on `TYPE F F F U U U` / `SIZE 4 4 4 1 1 1` with an
+                // `(1, 128, 255)` body: before -> (1.0, 0.501961, 1.0),
+                // after -> (0.003922, 0.501961, 1.0).
+                let is_integer = |idx: usize| {
+                    header
+                        .types
+                        .get(idx)
+                        .copied()
+                        .is_some_and(|t| matches!(t, 'U' | 'I'))
+                };
+                let r_norm = if is_integer(ri) { r / 255.0 } else { r };
+                let g_norm = if is_integer(gi) { g / 255.0 } else { g };
+                let b_norm = if is_integer(bi) { b / 255.0 } else { b };
                 cols.push(Point3::new(r_norm, g_norm, b_norm));
             }
         }
     }
 
+    // A per-point attribute vector is only meaningful if it has one entry per
+    // point. The loops above are not guaranteed to deliver that: the packed
+    // `rgb` branch is skipped whenever the declared SIZE is not 4, so
+    // `FIELDS x y z rgb / SIZE 4 4 4 1` returned Ok with 2 points and
+    // `colors = Some([])` - and every consumer that indexes `colors[i]`, this
+    // file's own `write_pcd` included, then panics on it. An attribute that
+    // does not cover the cloud is dropped rather than published, exactly as
+    // read_ply.rs does.
     let mut cloud = PointCloud::new(points);
-    cloud.normals = normals;
-    cloud.colors = colors;
+    if let Some(c) = colors {
+        if c.len() == cloud.len() {
+            cloud.colors = Some(c);
+        }
+    }
+    if let Some(n) = normals {
+        if n.len() == cloud.len() {
+            cloud.normals = Some(n);
+        }
+    }
 
     Ok(cloud)
 }
@@ -515,12 +671,19 @@ fn parse_pcd_binary_compressed<R: Read>(mut reader: R, header: &PcdHeader) -> Re
     // 4 GiB allocation before the read that would have failed on the very next
     // byte. The plain-binary path's 8 GiB cap never covered this buffer. LZF
     // cannot do better than ~1:1 on incompressible input, so the decompressed
-    // payload is the ceiling on what a well-formed file can legitimately carry,
-    // and anything much above it is a header lying about the payload.
+    // payload bounds what a well-formed file can legitimately carry, and
+    // anything much above it is a header lying about the payload.
+    //
+    // "Much above", not "above": LZF *grows* incompressible input by one
+    // control byte per 32-byte literal run, and this crate's own writer emits
+    // that. Rejecting `compressed > uncompressed` refused 1000 random points
+    // written by `write_pcd_binary_compressed` (12299 compressed bytes for
+    // 12000). The bound is LZF's worst case plus slack.
     const MAX_PCD_COMPRESSED_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8 GiB
+    let lzf_worst_case = uncompressed_size + uncompressed_size / 32 + 16;
     if compressed_size > MAX_PCD_COMPRESSED_BYTES
         || uncompressed_size > MAX_PCD_COMPRESSED_BYTES
-        || compressed_size > uncompressed_size
+        || compressed_size > lzf_worst_case
     {
         return Err(Error::ParseError(format!(
             "PCD binary_compressed: refusing to read {compressed_size} compressed bytes \
@@ -790,9 +953,16 @@ fn lzf_compress(input: &[u8]) -> Vec<u8> {
 /// The header is ASCII, followed by two u32 LE values (compressed_size,
 /// uncompressed_size), then the LZF-compressed point data.
 pub fn write_pcd_binary_compressed<W: Write>(writer: &mut W, cloud: &PointCloud) -> Result<()> {
+    let attrs = covered_attributes(cloud);
+    let (normals, colors) = (attrs.normals, attrs.colors);
     let num_points = cloud.len();
 
-    write_pcd_header(writer, cloud, "binary_compressed")?;
+    write_pcd_header(
+        writer,
+        &AttributeCounts::new(normals.is_some(), colors.is_some()),
+        num_points,
+        "binary_compressed",
+    )?;
 
     // Build the uncompressed payload in field-major order (all values of each
     // field contiguous), matching PCL's binary_compressed layout.
@@ -807,7 +977,7 @@ pub fn write_pcd_binary_compressed<W: Write>(writer: &mut W, cloud: &PointCloud)
         raw_data.extend_from_slice(&p.z.to_le_bytes());
     }
 
-    if let Some(ref normals) = cloud.normals {
+    if let Some(normals) = normals {
         for axis in 0..3 {
             for n in normals.iter() {
                 let v = [n.x, n.y, n.z][axis];
@@ -816,15 +986,10 @@ pub fn write_pcd_binary_compressed<W: Write>(writer: &mut W, cloud: &PointCloud)
         }
     }
 
-    if let Some(ref colors) = cloud.colors {
+    if let Some(colors) = colors {
         for c in colors {
-            let r = (c.x.clamp(0.0, 1.0) * 255.0) as u32;
-            let g = (c.y.clamp(0.0, 1.0) * 255.0) as u32;
-            let b = (c.z.clamp(0.0, 1.0) * 255.0) as u32;
-            let packed: u32 = (r << 16) | (g << 8) | b;
             // rgb is stored as a float whose bits represent the packed u32
-            let float_bits = f32::from_bits(packed);
-            raw_data.extend_from_slice(&float_bits.to_le_bytes());
+            raw_data.extend_from_slice(&f32::from_bits(packed_rgb_bits(*c)).to_le_bytes());
         }
     }
 
@@ -855,24 +1020,31 @@ fn compute_field_offsets(header: &PcdHeader) -> Vec<usize> {
 }
 
 /// Read a single field value from the point record and return as f32.
+///
+/// A `(TYPE, SIZE)` pair outside the nine decodable combinations is an error.
+/// It used to fall through a `_ => 0.0` catch-all, so `SIZE 16 4 4` (x declared
+/// as a 16-byte float) decoded x as `0.0` while y and z decoded normally: the
+/// point looked like real data, just sitting at the origin on the x axis, and
+/// nothing downstream could tell. Both operands come from the file, so the
+/// unsupported combination is named in the error rather than guessed at.
 fn read_field_as_f32(
     point_data: &[u8],
     offsets: &[usize],
     sizes: &[usize],
     types: &[char],
     field_idx: usize,
-) -> f32 {
+) -> Result<f32> {
     let offset = offsets.get(field_idx).copied().unwrap_or(0);
     let size = sizes.get(field_idx).copied().unwrap_or(4);
     let typ = types.get(field_idx).copied().unwrap_or('F');
 
     if offset + size > point_data.len() {
-        return 0.0;
+        return Ok(0.0);
     }
 
     let bytes = &point_data[offset..offset + size];
 
-    match (typ, size) {
+    Ok(match (typ, size) {
         ('F', 4) => {
             let arr: [u8; 4] = bytes.try_into().unwrap_or([0; 4]);
             f32::from_le_bytes(arr)
@@ -907,15 +1079,45 @@ fn read_field_as_f32(
             let arr: [u8; 8] = bytes.try_into().unwrap_or([0; 8]);
             i64::from_le_bytes(arr) as f32
         }
-        _ => 0.0,
+        _ => {
+            return Err(Error::ParseError(format!(
+                "PCD binary: unsupported field #{field_idx} TYPE '{typ}' SIZE {size} \
+                 (supported: F4, F8, U1, U2, U4, U8, I1, I2, I4, I8)"
+            )));
+        }
+    })
+}
+
+/// Which optional per-point attributes a PCD body will actually carry.
+///
+/// The writers pass the *resolved* flags from [`covered_attributes`], not
+/// `cloud.colors.is_some()`, so the header can never advertise an `rgb` or
+/// `normal_*` field the body does not follow with the matching number of values.
+struct AttributeCounts {
+    has_normals: bool,
+    has_colors: bool,
+}
+
+impl AttributeCounts {
+    fn new(has_normals: bool, has_colors: bool) -> Self {
+        Self {
+            has_normals,
+            has_colors,
+        }
     }
 }
 
 /// Write a PCD header to the writer. Returns the number of fields written.
-fn write_pcd_header<W: Write>(writer: &mut W, cloud: &PointCloud, data_format: &str) -> Result<()> {
-    let num_points = cloud.len();
-    let has_normals = cloud.normals.is_some();
-    let has_colors = cloud.colors.is_some();
+fn write_pcd_header<W: Write>(
+    writer: &mut W,
+    attrs: &AttributeCounts,
+    num_points: usize,
+    data_format: &str,
+) -> Result<()> {
+    let AttributeCounts {
+        has_normals,
+        has_colors,
+    } = *attrs;
 
     writeln!(writer, "# .PCD v0.7 - Point Cloud Data file format")?;
     writeln!(writer, "VERSION 0.7")?;
@@ -969,33 +1171,73 @@ fn write_pcd_header<W: Write>(writer: &mut W, cloud: &PointCloud, data_format: &
     Ok(())
 }
 
+/// Pack a colour triple the way a PCD `rgb` field stores it: a u32 whose bit
+/// pattern is a `f32`.
+fn packed_rgb_bits(c: Point3<f32>) -> u32 {
+    let r = (c.x.clamp(0.0, 1.0) * 255.0) as u32;
+    let g = (c.y.clamp(0.0, 1.0) * 255.0) as u32;
+    let b = (c.z.clamp(0.0, 1.0) * 255.0) as u32;
+    (r << 16) | (g << 8) | b
+}
+
+/// The per-point attributes of a cloud that actually cover every point.
+struct CoveredAttributes<'a> {
+    normals: Option<&'a [Vector3<f32>]>,
+    colors: Option<&'a [Point3<f32>]>,
+}
+
+/// A `PointCloud` can hold a `normals`/`colors` vector shorter than its
+/// `points`: `PointCloud::with_colors` checks the length, but the fields are
+/// `pub` and any code can assign them directly. The writers index them as
+/// `normals[i]` / `colors[i]`, so such a cloud used to panic mid-write, after
+/// the header had already gone out to the caller's `Write` - and the reader was
+/// the one that produced such a cloud, so the round trip panicked on its own
+/// output. A short attribute vector is treated as "this cloud has no normals"
+/// (or no colours), and the points are written without it.
+fn covered_attributes(cloud: &PointCloud) -> CoveredAttributes<'_> {
+    let n = cloud
+        .normals
+        .as_deref()
+        .filter(|n| n.len() == cloud.points.len());
+    let c = cloud
+        .colors
+        .as_deref()
+        .filter(|c| c.len() == cloud.points.len());
+    CoveredAttributes {
+        normals: n,
+        colors: c,
+    }
+}
+
 /// Write point cloud to PCD format (ASCII)
 pub fn write_pcd<W: Write>(writer: &mut W, cloud: &PointCloud) -> Result<()> {
+    let attrs = covered_attributes(cloud);
+    let (normals, colors) = (attrs.normals, attrs.colors);
     let num_points = cloud.len();
 
-    write_pcd_header(writer, cloud, "ascii")?;
+    write_pcd_header(
+        writer,
+        &AttributeCounts::new(normals.is_some(), colors.is_some()),
+        num_points,
+        "ascii",
+    )?;
 
     // Write data
     for i in 0..num_points {
         let p = cloud.points[i];
         write!(writer, "{} {} {}", p.x, p.y, p.z)?;
 
-        if let Some(ref normals) = cloud.normals {
+        if let Some(normals) = normals {
             let n = normals[i];
             write!(writer, " {} {} {}", n.x, n.y, n.z)?;
         }
 
-        if let Some(ref colors) = cloud.colors {
+        if let Some(colors) = colors {
             let c = colors[i];
-            let r = (c.x.clamp(0.0, 1.0) * 255.0) as u32;
-            let g = (c.y.clamp(0.0, 1.0) * 255.0) as u32;
-            let b = (c.z.clamp(0.0, 1.0) * 255.0) as u32;
-            let packed: u32 = (r << 16) | (g << 8) | b;
             // Match PCL semantics: rgb holds a float whose bit pattern is the
             // packed u32. Write the reinterpreted float so readers that decode
             // via f32::to_bits recover the original colors.
-            let float_bits = f32::from_bits(packed);
-            write!(writer, " {}", float_bits)?;
+            write!(writer, " {}", f32::from_bits(packed_rgb_bits(c)))?;
         }
 
         writeln!(writer)?;
@@ -1010,9 +1252,16 @@ pub fn write_pcd<W: Write>(writer: &mut W, cloud: &PointCloud) -> Result<()> {
 /// All fields are written as f32 (4 bytes each). Colors are packed as a u32
 /// stored in the same 4-byte slot.
 pub fn write_pcd_binary<W: Write>(writer: &mut W, cloud: &PointCloud) -> Result<()> {
+    let attrs = covered_attributes(cloud);
+    let (normals, colors) = (attrs.normals, attrs.colors);
     let num_points = cloud.len();
 
-    write_pcd_header(writer, cloud, "binary")?;
+    write_pcd_header(
+        writer,
+        &AttributeCounts::new(normals.is_some(), colors.is_some()),
+        num_points,
+        "binary",
+    )?;
 
     // Write binary data
     for i in 0..num_points {
@@ -1021,22 +1270,16 @@ pub fn write_pcd_binary<W: Write>(writer: &mut W, cloud: &PointCloud) -> Result<
         writer.write_all(&p.y.to_le_bytes())?;
         writer.write_all(&p.z.to_le_bytes())?;
 
-        if let Some(ref normals) = cloud.normals {
+        if let Some(normals) = normals {
             let n = normals[i];
             writer.write_all(&n.x.to_le_bytes())?;
             writer.write_all(&n.y.to_le_bytes())?;
             writer.write_all(&n.z.to_le_bytes())?;
         }
 
-        if let Some(ref colors) = cloud.colors {
-            let c = colors[i];
-            let r = (c.x.clamp(0.0, 1.0) * 255.0) as u32;
-            let g = (c.y.clamp(0.0, 1.0) * 255.0) as u32;
-            let b = (c.z.clamp(0.0, 1.0) * 255.0) as u32;
-            let packed: u32 = (r << 16) | (g << 8) | b;
+        if let Some(colors) = colors {
             // In binary PCD, rgb is stored as a float whose bits represent the packed u32
-            let float_bits = f32::from_bits(packed);
-            writer.write_all(&float_bits.to_le_bytes())?;
+            writer.write_all(&f32::from_bits(packed_rgb_bits(colors[i])).to_le_bytes())?;
         }
     }
 

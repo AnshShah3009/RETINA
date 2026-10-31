@@ -42,12 +42,14 @@ pub struct GlobalRegistrationResult {
 pub struct GlobalRegistrationEstimator<'a> {
     source: &'a PointCloud,
     target: &'a PointCloud,
+    /// Correspondences per hypothesis (Open3D's `ransac_n`, at least 3).
+    sample_size: usize,
 }
 
 impl<'a> RobustModel<(usize, usize, f32)> for GlobalRegistrationEstimator<'a> {
     type Model = Matrix4<f32>;
     fn min_sample_size(&self) -> usize {
-        3
+        self.sample_size
     }
     fn estimate(&self, data: &[&(usize, usize, f32)]) -> Option<Self::Model> {
         let correspondences: Vec<(usize, usize, f32)> = data.iter().map(|&&c| c).collect();
@@ -91,11 +93,14 @@ pub fn registration_ransac_based_on_feature_matching(
                     min_idx = j;
                 }
             }
-            if min_dist < max_correspondence_distance {
-                Some((i, min_idx, min_dist))
-            } else {
-                None
-            }
+            // Every source feature gets its nearest target feature, as in
+            // Open3D. The match used to be gated by `max_correspondence_
+            // distance` - a *metric* distance in the point cloud's units,
+            // applied to a distance between 33-D FPFH histograms (which sum
+            // to ~100 per sub-histogram). The two scales are unrelated, so the
+            // gate kept or dropped matches arbitrarily. Geometric consistency
+            // is RANSAC's job, using that distance as its inlier threshold.
+            (min_dist.is_finite()).then_some((i, min_idx, min_dist))
         })
         .collect();
 
@@ -114,7 +119,12 @@ pub fn registration_ransac_based_on_feature_matching(
         confidence: 0.99,
     };
 
-    let estimator = GlobalRegistrationEstimator { source, target };
+    let estimator = GlobalRegistrationEstimator {
+        source,
+        target,
+        // `ransac_n` was accepted and then ignored (always 3).
+        sample_size: ransac_n.max(3),
+    };
     let ransac = Ransac::new(config);
     let res = ransac.run(&estimator, &top_correspondences);
 
@@ -501,48 +511,40 @@ fn evaluate_registration(
     let mut inlier_count = 0;
     let mut total_error = 0.0;
 
-    for point in &source.points {
-        let transformed = transformation.transform_point(point);
-        if let Some((_, _, dist)) = target_nn.nearest(&transformed) {
-            if dist.sqrt() < max_correspondence_distance {
-                inlier_count += 1;
-                total_error += dist;
-            }
-        }
+    if source.points.is_empty() {
+        // A registration that was never attempted, so it is not a perfect one.
+        return (0.0, f32::INFINITY);
     }
 
-    if source.points.is_empty() {
-        return (0.0, 0.0);
+    for point in &source.points {
+        let transformed = transformation.transform_point(point);
+        if let Some((_, _, dist_sq)) = target_nn.nearest(&transformed) {
+            if dist_sq.sqrt() < max_correspondence_distance {
+                inlier_count += 1;
+                // `dist_sq` is already the SQUARED Euclidean distance. Summing it
+                // and taking one sqrt at the end gives sqrt(mean(d^4)), not an
+                // RMSE - which is sqrt(mean(d^2)).
+                //
+                // Verified: 90 inliers at distance 1e-4 and 10 at 1e-2 reported
+                // inlier_rmse 1.0045e-4 where the true RMSE is 3.302e-3,
+                // understated 33x. The error scales with the *spread* of the
+                // inlier distances, so it is invisible when they are all equal -
+                // which is why the uniform-distance case looked correct.
+                total_error += dist_sq;
+            }
+        }
     }
 
     let fitness = inlier_count as f32 / source.points.len() as f32;
     let rmse = if inlier_count > 0 {
         (total_error / inlier_count as f32).sqrt()
     } else {
-        0.0
+        // Zero inliers is zero *support*, not zero error. Reporting 0.0 here is a
+        // perfect score for a registration that matched nothing.
+        f32::INFINITY
     };
 
     (fitness, rmse)
-}
-
-/// Random sample without replacement
-#[allow(dead_code)]
-fn random_sample(n: usize, max: usize) -> Vec<usize> {
-    use std::collections::HashSet;
-    let mut rng = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    let mut indices = HashSet::new();
-    while indices.len() < n && indices.len() < max {
-        // Simple LCG random number generator
-        rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
-        let idx = (rng % max as u64) as usize;
-        indices.insert(idx);
-    }
-
-    indices.into_iter().collect()
 }
 
 #[cfg(test)]

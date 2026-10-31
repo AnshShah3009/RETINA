@@ -23,7 +23,11 @@ const DEVICE_REGION_OFFSET: usize = HEADER_SIZE; // 64
 const SLOT_REGION_OFFSET: usize = DEVICE_REGION_OFFSET + MAX_DEVICES * DEVICE_STATE_SIZE; // 2112
 
 const SHM_MAGIC: u32 = 0x52455449; // "RETI"
-const SHM_VERSION: u32 = 3;
+/// Bumped to 4 when `ProcessSlot` gained its per-device `load_count` array,
+/// and to 5 when it gained `owner_token`: the slot layout changed, so a
+/// region written by an older process must be re-initialized instead of being
+/// reinterpreted.
+const SHM_VERSION: u32 = 5;
 
 // --- Slot states ---
 
@@ -93,10 +97,20 @@ struct ProcessSlot {
     heartbeat_ns: AtomicU64,
     start_time_ms: AtomicU64,
     device_mask: AtomicU64,
+    /// Random per-process token of the owner (see [`process_token`]). A slot
+    /// is ours only if both `pid` and `owner_token` match: the PID alone is
+    /// not unique across PID namespaces sharing `/dev/shm` (every container
+    /// has a PID 1) or over time (PID reuse).
+    owner_token: AtomicU64,
     memory_budget_mb: [AtomicU32; MAX_DEVICES],
     compute_budget_pct: [AtomicU32; MAX_DEVICES],
     affinity_group: AtomicU32,
-    _pad: [u8; 68],
+    /// Per-device load published by this process via
+    /// [`LoadCoordinator::update_load`]. Kept separate from
+    /// `compute_budget_pct` (which `reserve_device` owns) so that publishing a
+    /// load cannot overwrite a compute budget and vice versa.
+    load_count: [AtomicU32; MAX_DEVICES],
+    _pad: [u8; 4],
 }
 
 // Compile-time size checks
@@ -113,21 +127,143 @@ const _: () = assert!(SLOT_REGION_OFFSET % 64 == 0);
 const _: () = assert!(DEVICE_STATE_SIZE % 64 == 0);
 const _: () = assert!(PROCESS_SLOT_SIZE % 64 == 0);
 
+/// A shared-memory mapping, accessed only through a base pointer that
+/// carries write provenance.
+///
+/// # Safety invariants
+///
+/// * `base` is taken from [`memmap2::MmapMut::as_mut_ptr`] exactly once, at
+///   construction, and every pointer into the region is derived from it. The
+///   old helpers derived them from `as_ptr()` - a shared `&[u8]` borrow - and
+///   then wrote through the resulting atomics, which is undefined behaviour
+///   under Stacked Borrows (the shared borrow grants no write permission for
+///   the non-`UnsafeCell` bytes it covers), atomic or not.
+/// * After construction the bytes are never accessed through the `MmapMut`'s
+///   `Deref`/`DerefMut` again; `_mmap` only keeps the mapping alive. Moving
+///   the `MmapMut` does not move the mapped pages, so `base` stays valid for
+///   `len` bytes as long as `self` lives.
+/// * All concurrent access goes through the `Atomic*` fields of the
+///   `repr(C)` views ([`ShmHeaderV3`], [`DeviceState`], [`ProcessSlot`]). The
+///   only non-atomic access is [`ShmMap::zero`], done while initializing under
+///   the region lock, before the header is published.
+/// * `base` is page-aligned (checked to be 64-byte aligned in `new`), and
+///   every view offset is a multiple of 64 (const-asserted above), so the
+///   `align(64)` views are aligned.
+struct ShmMap {
+    _mmap: memmap2::MmapMut,
+    base: std::ptr::NonNull<u8>,
+    len: usize,
+}
+
+// SAFETY: `ShmMap` is a handle to a process-shared mapping whose contents are
+// only accessed through atomics (see the invariants above); the mapping itself
+// (`MmapMut`) is `Send + Sync`. `NonNull` is what suppresses the auto traits.
+unsafe impl Send for ShmMap {}
+unsafe impl Sync for ShmMap {}
+
+impl ShmMap {
+    fn new(mut mmap: memmap2::MmapMut) -> io::Result<Self> {
+        let len = mmap.len();
+        if len < SHM_TOTAL_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Shared memory too small: {} < {}", len, SHM_TOTAL_SIZE),
+            ));
+        }
+        let base = std::ptr::NonNull::new(mmap.as_mut_ptr())
+            .ok_or_else(|| io::Error::other("Shared memory mapped at null"))?;
+        if !(base.as_ptr() as usize).is_multiple_of(64) {
+            return Err(io::Error::other(
+                "Shared memory base is not 64-byte aligned",
+            ));
+        }
+        Ok(Self {
+            _mmap: mmap,
+            base,
+            len,
+        })
+    }
+
+    /// Zero the whole region.
+    ///
+    /// # Safety
+    ///
+    /// Only while initializing: the caller holds the region lock and the
+    /// header has not been published, so no one else accesses the bytes.
+    unsafe fn zero(&self) {
+        std::ptr::write_bytes(self.base.as_ptr(), 0, self.len);
+    }
+
+    /// A shared view of the `T` at `offset`.
+    ///
+    /// # Safety
+    ///
+    /// `T` must be one of the `repr(C)` layouts above (atomics plus padding
+    /// that is never mutated after publication), `offset + size_of::<T>()`
+    /// must be within `len`, and `offset` must be a multiple of 64.
+    unsafe fn view<T>(&self, offset: usize) -> &T {
+        debug_assert!(offset + std::mem::size_of::<T>() <= self.len);
+        debug_assert_eq!(offset % std::mem::align_of::<T>(), 0);
+        &*(self.base.as_ptr().add(offset) as *const T)
+    }
+}
+
+/// `counter -= amount`, saturating at 0 instead of wrapping.
+///
+/// A device's `used_memory_mb` can drift below a slot's budget (e.g. a region
+/// re-initialized under a live process); a wrapping subtraction then leaves it
+/// near `u32::MAX` and the device looks full forever.
+fn saturating_sub_atomic(counter: &AtomicU32, amount: u32) {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        match counter.compare_exchange_weak(
+            current,
+            current.saturating_sub(amount),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 /// Cross-process coordinator using POSIX shared memory.
 ///
 /// Provides device reservation with memory budget enforcement, affinity group
 /// scheduling, and automatic stale-process reaping via background heartbeats.
 ///
 /// `Send`/`Sync` are derived automatically: every field is already thread-safe
-/// (`memmap2::MmapMut` is `Send + Sync`, and the remaining fields are `usize`,
+/// (`ShmMap` is `Send + Sync` by its documented invariants, `File` is too, and
+/// the remaining fields are `usize`,
 /// `u32`, `PathBuf`, `Arc<AtomicU32>` and a `Mutex<Option<JoinHandle<()>>>`).
 pub struct ShmCoordinator {
-    mmap: memmap2::MmapMut,
+    mmap: ShmMap,
+    /// The open region file. Kept for the `flock` that `Drop` takes and for
+    /// the heartbeat thread's mapping (re-opening the path could reach a
+    /// different, newer region).
+    file: std::fs::File,
     slot_index: usize,
     pid: u32,
     path: std::path::PathBuf,
     heartbeat_stop: Arc<AtomicU32>,
     heartbeat_thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// A random, non-zero 64-bit token identifying this process for slot
+/// ownership, fixed for the process lifetime.
+///
+/// Seeded from `RandomState` (OS randomness) mixed with the PID and clocks.
+fn process_token() -> u64 {
+    static TOKEN: OnceLock<u64> = OnceLock::new();
+    *TOKEN.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(std::process::id());
+        h.write_u64(ShmCoordinator::monotonic_ns());
+        h.write_u64(ShmCoordinator::current_timestamp_ms());
+        h.finish().max(1)
+    })
 }
 
 /// Per-process reference counts keyed by `(shm path, slot_index)`.
@@ -141,6 +277,65 @@ fn slot_refcounts() -> &'static Mutex<HashMap<(std::path::PathBuf, usize), Arc<A
     REFS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Exclusive advisory `flock` on the region file, released on drop.
+///
+/// Serializes every change to whether the region file is live: header
+/// initialization and refcount increment in `new`, refcount decrement and
+/// unlink in `Drop`.
+struct RegionLock<'a> {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    file: &'a std::fs::File,
+}
+
+impl<'a> RegionLock<'a> {
+    fn acquire(file: &'a std::fs::File) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: `flock` on a valid, open file descriptor we own.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for RegionLock<'_> {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: as in `acquire`.
+            unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+/// Whether `path` still names the file `file` has open (same device and
+/// inode). `false` once the path has been unlinked or replaced.
+fn path_names_file(file: &std::fs::File, path: &std::path::Path) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let open = file.metadata()?;
+        match std::fs::metadata(path) {
+            Ok(on_disk) => Ok(on_disk.dev() == open.dev() && on_disk.ino() == open.ino()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        Ok(true)
+    }
+}
+
+/// How often `new` re-opens the region file after finding that the file it
+/// opened was unlinked (by the last detaching process) before it got the lock.
+const MAX_ATTACH_ATTEMPTS: usize = 64;
+
 impl ShmCoordinator {
     /// Create or attach to a shared memory region.
     ///
@@ -150,6 +345,20 @@ impl ShmCoordinator {
         let size = size.max(SHM_TOTAL_SIZE);
         let path = Self::get_shm_path(name);
 
+        for _ in 0..MAX_ATTACH_ATTEMPTS {
+            if let Some(coord) = Self::try_attach(&path, size)? {
+                return Ok(coord);
+            }
+        }
+        Err(io::Error::other(format!(
+            "Shared memory region {} kept being unlinked while attaching",
+            path.display()
+        )))
+    }
+
+    /// One attach attempt. `Ok(None)` means the opened file was unlinked by a
+    /// detaching process before we got the lock: the caller re-opens the path.
+    fn try_attach(path: &std::path::Path, size: usize) -> io::Result<Option<Self>> {
         // Open (or create) WITHOUT truncating: another process may already
         // hold a live mapping of this region. Initialization is serialized
         // with an advisory flock so concurrent starters re-validate the
@@ -158,59 +367,45 @@ impl ShmCoordinator {
             .read(true)
             .write(true)
             .create(true)
-            .open(&path)?;
+            .truncate(false)
+            .open(path)?;
 
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            // Block until any concurrent initializer releases the lock.
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if rc != 0 {
-                return Err(io::Error::last_os_error());
-            }
+        #[cfg(test)]
+        test_hooks::run_after_open();
+
+        // Block until any concurrent initializer or detacher releases the lock.
+        let lock = RegionLock::acquire(&file)?;
+
+        // Between our `open` and the lock, the last attached process may have
+        // dropped the refcount to 0 and unlinked the file. Attaching to that
+        // orphaned inode would leave us on a region nobody else can find
+        // while the next starter creates a fresh one at the same path - two
+        // regions handing out the same VRAM. Re-open instead.
+        if !path_names_file(&file, path)? {
+            return Ok(None);
         }
 
-        let needs_init = {
-            let meta = file.metadata()?;
-            if meta.len() < SHM_TOTAL_SIZE as u64 {
-                true
-            } else {
-                let probe = unsafe { memmap2::MmapOptions::new().map(&file)? };
-                if probe.len() >= HEADER_SIZE {
-                    let hdr = unsafe { &*(probe.as_ptr() as *const ShmHeaderV3) };
-                    let magic = hdr.magic.load(Ordering::Relaxed);
-                    let version = hdr.version.load(Ordering::Relaxed);
-                    magic != SHM_MAGIC || version != SHM_VERSION
-                } else {
-                    true
-                }
-            }
-        };
-
-        if needs_init {
+        let too_small = file.metadata()?.len() < SHM_TOTAL_SIZE as u64;
+        if too_small {
             file.set_len(size as u64)?;
         }
 
-        let mut mmap = unsafe { memmap2::MmapOptions::new().map_mut(&file)? };
+        // SAFETY: the file is a regular file we keep open; other processes
+        // only touch the mapping through atomics (see `ShmMap`).
+        let mmap = ShmMap::new(unsafe { memmap2::MmapOptions::new().map_mut(&file)? })?;
 
-        if mmap.len() < SHM_TOTAL_SIZE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Shared memory too small: {} < {}",
-                    mmap.len(),
-                    SHM_TOTAL_SIZE
-                ),
-            ));
-        }
+        let needs_init = too_small || {
+            let hdr = Self::header_ptr(&mmap);
+            hdr.magic.load(Ordering::Relaxed) != SHM_MAGIC
+                || hdr.version.load(Ordering::Relaxed) != SHM_VERSION
+        };
 
         if needs_init {
             // Zero and publish the header WHILE STILL HOLDING the init lock, so
             // a concurrent starter cannot observe magic == 0 and re-initialize
             // the region underneath us.
-            for byte in mmap.iter_mut() {
-                *byte = 0;
-            }
+            // SAFETY: we hold the region lock and the header is unpublished.
+            unsafe { mmap.zero() };
             let header = Self::header_ptr(&mmap);
             header.magic.store(SHM_MAGIC, Ordering::Release);
             header.version.store(SHM_VERSION, Ordering::Release);
@@ -222,85 +417,68 @@ impl ShmCoordinator {
             header.refcount.store(0, Ordering::Release);
         }
 
-        // The header is now valid (either freshly published or validated), so
-        // the init lock can be released.
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        }
-
         let pid = std::process::id();
-        let slot_index = Self::acquire_slot(&mmap, pid)?;
+        let slot_index = Self::acquire_slot(&mmap, pid, process_token())?;
+
+        // Increment the region refcount BEFORE releasing the lock: `Drop`
+        // decrements and unlinks under the same lock, so it can never see a
+        // count that misses us (it used to, when this ran after unlocking).
+        Self::header_ptr(&mmap)
+            .refcount
+            .fetch_add(1, Ordering::AcqRel);
+        drop(lock);
 
         // Register this coordinator against its slot's per-process refcount.
         {
             let mut refs = slot_refcounts().lock().unwrap_or_else(|e| e.into_inner());
-            refs.entry((path.clone(), slot_index))
+            refs.entry((path.to_path_buf(), slot_index))
                 .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
                 .fetch_add(1, Ordering::SeqCst);
         }
 
-        // Increment refcount atomically — protects against premature
-        // file deletion in Drop when multiple processes attach concurrently
-        Self::header_ptr(&mmap)
-            .refcount
-            .fetch_add(1, Ordering::Release);
-
-        Ok(Self {
+        Ok(Some(Self {
             mmap,
+            file,
             slot_index,
             pid,
-            path,
+            path: path.to_path_buf(),
             heartbeat_stop: Arc::new(AtomicU32::new(0)),
             heartbeat_thread: std::sync::Mutex::new(None),
-        })
+        }))
     }
 
     // --- Pointer helpers ---
 
-    /// The mapped base address must be 64-byte aligned so the `align(64)` region
-    /// casts below are valid; combined with the 64-multiple offsets/strides checked
-    /// by the const asserts above.
-    fn header_ptr(mmap: &memmap2::MmapMut) -> &ShmHeaderV3 {
-        debug_assert_eq!(
-            mmap.as_ptr() as usize % 64,
-            0,
-            "shared-memory base must be 64-byte aligned"
-        );
-        unsafe { &*(mmap.as_ptr() as *const ShmHeaderV3) }
+    /// Views into the region, all derived from [`ShmMap`]'s write-provenance
+    /// base pointer (see its safety invariants).
+    fn header_ptr(mmap: &ShmMap) -> &ShmHeaderV3 {
+        // SAFETY: offset 0, HEADER_SIZE <= SHM_TOTAL_SIZE <= len (checked in
+        // `ShmMap::new`).
+        unsafe { mmap.view(0) }
     }
 
-    fn device_ptr(mmap: &memmap2::MmapMut, idx: usize) -> Option<&DeviceState> {
+    fn device_ptr(mmap: &ShmMap, idx: usize) -> Option<&DeviceState> {
         if idx >= MAX_DEVICES {
             return None;
         }
         let offset = DEVICE_REGION_OFFSET + idx * DEVICE_STATE_SIZE;
-        if offset + DEVICE_STATE_SIZE > mmap.len() {
+        if offset + DEVICE_STATE_SIZE > mmap.len {
             return None;
         }
-        debug_assert_eq!(
-            mmap.as_ptr() as usize % 64,
-            0,
-            "shared-memory base must be 64-byte aligned"
-        );
-        Some(unsafe { &*(mmap.as_ptr().add(offset) as *const DeviceState) })
+        // SAFETY: in bounds (checked above), 64-aligned (const asserts).
+        Some(unsafe { mmap.view(offset) })
     }
 
-    fn slot_ptr(mmap: &memmap2::MmapMut, idx: usize) -> Option<&ProcessSlot> {
+    fn slot_ptr(mmap: &ShmMap, idx: usize) -> Option<&ProcessSlot> {
         if idx >= MAX_SLOTS {
             return None;
         }
         let offset = SLOT_REGION_OFFSET + idx * PROCESS_SLOT_SIZE;
-        if offset + PROCESS_SLOT_SIZE > mmap.len() {
+        if offset + PROCESS_SLOT_SIZE > mmap.len {
             return None;
         }
-        debug_assert_eq!(
-            mmap.as_ptr() as usize % 64,
-            0,
-            "shared-memory base must be 64-byte aligned"
-        );
-        Some(unsafe { &*(mmap.as_ptr().add(offset) as *const ProcessSlot) })
+        // SAFETY: in bounds (checked above), 64-aligned (const asserts).
+        Some(unsafe { mmap.view(offset) })
     }
 
     fn my_slot(&self) -> &ProcessSlot {
@@ -322,7 +500,11 @@ impl ShmCoordinator {
     }
 
     fn bump_epoch(&self) {
-        let header = Self::header_ptr(&self.mmap);
+        Self::bump_epoch_in(&self.mmap);
+    }
+
+    fn bump_epoch_in(mmap: &ShmMap) {
+        let header = Self::header_ptr(mmap);
         header.epoch.fetch_add(1, Ordering::Release);
         Self::wake_all_on_address(&header.epoch);
     }
@@ -354,16 +536,22 @@ impl ShmCoordinator {
 
     // --- Slot acquisition (lock-free CAS state machine) ---
 
-    fn acquire_slot(mmap: &memmap2::MmapMut, pid: u32) -> io::Result<usize> {
+    fn acquire_slot(mmap: &ShmMap, pid: u32, token: u64) -> io::Result<usize> {
         let now_ns = ShmCoordinator::monotonic_ns();
         let now_ms = Self::current_timestamp_ms();
 
-        // First pass: check if we already own a slot (process restart with same PID)
+        // First pass: share the slot another coordinator of THIS process
+        // already holds. Ownership is (pid, token), never the PID alone: a
+        // slot with our PID but another token belongs to a process in another
+        // PID namespace, or to a dead process whose PID we inherited.
         for i in 0..MAX_SLOTS {
             let slot =
                 Self::slot_ptr(mmap, i).ok_or_else(|| io::Error::other("Invalid slot offset"))?;
             let state = slot.state.load(Ordering::Acquire);
-            if state == SLOT_ACTIVE && slot.pid.load(Ordering::Relaxed) == pid {
+            if state == SLOT_ACTIVE
+                && slot.pid.load(Ordering::Relaxed) == pid
+                && slot.owner_token.load(Ordering::Relaxed) == token
+            {
                 // Refresh heartbeat
                 slot.heartbeat_ns.store(now_ns, Ordering::Release);
                 return Ok(i);
@@ -390,12 +578,14 @@ impl ShmCoordinator {
                 slot.generation
                     .store(gen.wrapping_add(1), Ordering::Relaxed);
                 slot.pid.store(pid, Ordering::Relaxed);
+                slot.owner_token.store(token, Ordering::Relaxed);
                 slot.heartbeat_ns.store(now_ns, Ordering::Relaxed);
                 slot.start_time_ms.store(now_ms, Ordering::Relaxed);
                 slot.device_mask.store(0, Ordering::Relaxed);
                 for j in 0..MAX_DEVICES {
                     slot.memory_budget_mb[j].store(0, Ordering::Relaxed);
                     slot.compute_budget_pct[j].store(0, Ordering::Relaxed);
+                    slot.load_count[j].store(0, Ordering::Relaxed);
                 }
                 slot.affinity_group.store(0, Ordering::Relaxed);
 
@@ -441,7 +631,22 @@ impl ShmCoordinator {
         // CAS loop for memory reservation
         loop {
             let current = dev.used_memory_mb.load(Ordering::Acquire);
-            if current + memory_mb > total {
+            // `current + memory_mb` must not be computed in `u32`: a caller
+            // passing a size near `u32::MAX` used to overflow (panicking in
+            // debug, wrapping in release and letting the reservation through).
+            let requested = match current.checked_add(memory_mb) {
+                Some(sum) => sum,
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::OutOfMemory,
+                        format!(
+                            "Device {} over budget: used={}MB + requested={}MB overflows",
+                            device_idx, current, memory_mb
+                        ),
+                    ))
+                }
+            };
+            if requested > total {
                 return Err(io::Error::new(
                     io::ErrorKind::OutOfMemory,
                     format!(
@@ -452,12 +657,7 @@ impl ShmCoordinator {
             }
             if dev
                 .used_memory_mb
-                .compare_exchange(
-                    current,
-                    current + memory_mb,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange(current, requested, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 break;
@@ -494,18 +694,13 @@ impl ShmCoordinator {
         // if another thread in the same process calls reserve_device() between
         // the load and store(0), the newly-added budget would be silently lost.
         let budget = slot.memory_budget_mb[idx].swap(0, Ordering::AcqRel);
-        if budget == 0 {
-            return Ok(()); // nothing to release
-        }
 
         // Subtract our budget from the device's used total
         // (saturating to guard against wrapping arithmetic if budget accounting
         // has already drifted due to a prior race)
-        dev.used_memory_mb
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                Some(used.saturating_sub(budget))
-            })
-            .ok();
+        if budget > 0 {
+            saturating_sub_atomic(&dev.used_memory_mb, budget);
+        }
 
         // Clear owner bit
         let bit = Self::slot_bit(self.slot_index);
@@ -764,73 +959,85 @@ impl ShmCoordinator {
     /// Releases their device reservations atomically.
     pub fn reap_dead(&self) {
         let now = ShmCoordinator::monotonic_ns();
-
         for i in 0..MAX_SLOTS {
-            if i == self.slot_index {
-                continue;
+            if i != self.slot_index {
+                Self::try_reap_slot(&self.mmap, i, now);
             }
-            let Some(slot) = Self::slot_ptr(&self.mmap, i) else {
-                continue;
-            };
+        }
+    }
 
-            let state = slot.state.load(Ordering::Acquire);
-            if state != SLOT_ACTIVE {
-                continue;
-            }
+    /// Reap slot `i` if it is ACTIVE, stale (no heartbeat, or one older than
+    /// `STALE_THRESHOLD_NS`) and its process is dead: release its device
+    /// reservations, clear it and mark it EMPTY. Shared by [`reap_dead`] and
+    /// the heartbeat thread so the two cannot drift apart again (the thread's
+    /// copy also wrapped `used_memory_mb`).
+    ///
+    /// [`reap_dead`]: Self::reap_dead
+    fn try_reap_slot(mmap: &ShmMap, i: usize, now: u64) -> bool {
+        let Some(slot) = Self::slot_ptr(mmap, i) else {
+            return false;
+        };
 
-            let hb = slot.heartbeat_ns.load(Ordering::Acquire);
-            // A slot is stale if:
-            //   - heartbeat was never sent (hb == 0), OR
-            //   - heartbeat is older than STALE_THRESHOLD_NS
-            // A slot is fresh (skip it) only if hb > 0 and recent.
-            let is_fresh = hb > 0 && now >= hb && (now - hb) < STALE_THRESHOLD_NS;
-            if is_fresh {
-                continue;
-            }
+        if slot.state.load(Ordering::Acquire) != SLOT_ACTIVE {
+            return false;
+        }
 
-            let slot_pid = slot.pid.load(Ordering::Relaxed);
-            if Self::is_process_alive(slot_pid) {
-                continue;
-            }
+        let hb = slot.heartbeat_ns.load(Ordering::Acquire);
+        // A slot is stale if:
+        //   - heartbeat was never sent (hb == 0), OR
+        //   - heartbeat is older than STALE_THRESHOLD_NS
+        // A slot is fresh (skip it) only if hb > 0 and recent.
+        let is_fresh = hb > 0 && now >= hb && (now - hb) < STALE_THRESHOLD_NS;
+        if is_fresh {
+            return false;
+        }
 
-            // CAS ACTIVE -> RELEASING (single winner)
-            if slot
-                .state
-                .compare_exchange(
-                    SLOT_ACTIVE,
-                    SLOT_RELEASING,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                )
-                .is_err()
-            {
-                continue;
-            }
+        if Self::is_process_alive(slot.pid.load(Ordering::Relaxed)) {
+            return false;
+        }
 
-            // Release all device reservations for this slot
-            for d in 0..MAX_DEVICES {
-                let budget = slot.memory_budget_mb[d].swap(0, Ordering::AcqRel);
-                if budget > 0 {
-                    if let Some(dev) = Self::device_ptr(&self.mmap, d) {
-                        dev.used_memory_mb.fetch_sub(budget, Ordering::AcqRel);
-                        let bit = Self::slot_bit(i);
-                        dev.owner_mask.fetch_and(!bit, Ordering::AcqRel);
-                    }
-                    slot.compute_budget_pct[d].store(0, Ordering::Release);
+        // CAS ACTIVE -> RELEASING (single winner)
+        if slot
+            .state
+            .compare_exchange(
+                SLOT_ACTIVE,
+                SLOT_RELEASING,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            return false;
+        }
+
+        // Release all device reservations for this slot. Saturating, like
+        // `release_device`: a wrapping `fetch_sub` on drifted accounting left
+        // `used_memory_mb` near u32::MAX and the device full forever.
+        for d in 0..MAX_DEVICES {
+            let budget = slot.memory_budget_mb[d].swap(0, Ordering::AcqRel);
+            if budget > 0 {
+                if let Some(dev) = Self::device_ptr(mmap, d) {
+                    saturating_sub_atomic(&dev.used_memory_mb, budget);
+                    dev.owner_mask
+                        .fetch_and(!Self::slot_bit(i), Ordering::AcqRel);
                 }
             }
-
-            // Zero the slot
-            slot.pid.store(0, Ordering::Relaxed);
-            slot.device_mask.store(0, Ordering::Relaxed);
-            slot.heartbeat_ns.store(0, Ordering::Relaxed);
-            slot.start_time_ms.store(0, Ordering::Relaxed);
-            slot.affinity_group.store(0, Ordering::Relaxed);
-
-            // RELEASING -> EMPTY
-            slot.state.store(SLOT_EMPTY, Ordering::Release);
-            self.bump_epoch();
+            slot.compute_budget_pct[d].store(0, Ordering::Release);
+            slot.load_count[d].store(0, Ordering::Release);
         }
+
+        // Zero the slot
+        slot.pid.store(0, Ordering::Relaxed);
+        slot.owner_token.store(0, Ordering::Relaxed);
+        slot.device_mask.store(0, Ordering::Relaxed);
+        slot.heartbeat_ns.store(0, Ordering::Relaxed);
+        slot.start_time_ms.store(0, Ordering::Relaxed);
+        slot.affinity_group.store(0, Ordering::Relaxed);
+
+        // RELEASING -> EMPTY, and wake waiters blocked on VRAM availability.
+        slot.state.store(SLOT_EMPTY, Ordering::Release);
+        Self::bump_epoch_in(mmap);
+        true
     }
 
     /// Start a background thread that sends heartbeats every `interval` and reaps dead slots.
@@ -845,25 +1052,23 @@ impl ShmCoordinator {
         // must not see a stale stop==1 on its first loop check.
         self.heartbeat_stop.store(0, Ordering::Release);
         let stop = self.heartbeat_stop.clone();
-        // We need to access the mmap from the thread. Since ShmCoordinator is !Clone,
-        // we re-open the same shm file from the thread using the path + slot_index.
-        let path = self.path.clone();
+        // The thread maps its own view of OUR region file (a clone of the fd,
+        // not a re-open of the path, which could reach a newer region).
+        let file = self.file.try_clone().ok();
         let slot_index = self.slot_index;
         let pid = self.pid;
 
         let thread_handle = std::thread::Builder::new()
             .name("shm-heartbeat".into())
             .spawn(move || {
-                // Re-open the mmap (read-write) for heartbeat writes
-                let file = match std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&path)
-                {
-                    Ok(f) => f,
-                    Err(_) => return,
+                // Map our own region file (read-write) for heartbeat writes.
+                let Some(file) = file else {
+                    return;
                 };
-                let mmap = match unsafe { memmap2::MmapOptions::new().map_mut(&file) } {
+                // SAFETY: as in `try_attach`.
+                let mmap = match unsafe { memmap2::MmapOptions::new().map_mut(&file) }
+                    .and_then(ShmMap::new)
+                {
                     Ok(m) => m,
                     Err(_) => return,
                 };
@@ -879,6 +1084,7 @@ impl ShmCoordinator {
                     if let Some(slot) = Self::slot_ptr(&mmap, slot_index) {
                         // Only write if slot still belongs to us
                         if slot.pid.load(Ordering::Relaxed) == pid
+                            && slot.owner_token.load(Ordering::Relaxed) == process_token()
                             && slot.state.load(Ordering::Acquire) == SLOT_ACTIVE
                         {
                             slot.heartbeat_ns
@@ -889,60 +1095,9 @@ impl ShmCoordinator {
                     // Reap dead slots
                     let now = ShmCoordinator::monotonic_ns();
                     for i in 0..MAX_SLOTS {
-                        if i == slot_index {
-                            continue;
+                        if i != slot_index {
+                            Self::try_reap_slot(&mmap, i, now);
                         }
-                        let Some(slot) = Self::slot_ptr(&mmap, i) else {
-                            continue;
-                        };
-                        let state = slot.state.load(Ordering::Acquire);
-                        if state != SLOT_ACTIVE {
-                            continue;
-                        }
-                        let hb = slot.heartbeat_ns.load(Ordering::Acquire);
-                        let is_fresh = hb > 0 && now >= hb && (now - hb) < STALE_THRESHOLD_NS;
-                        if is_fresh {
-                            continue;
-                        }
-                        let slot_pid = slot.pid.load(Ordering::Relaxed);
-                        if Self::is_process_alive(slot_pid) {
-                            continue;
-                        }
-                        if slot
-                            .state
-                            .compare_exchange(
-                                SLOT_ACTIVE,
-                                SLOT_RELEASING,
-                                Ordering::AcqRel,
-                                Ordering::Relaxed,
-                            )
-                            .is_err()
-                        {
-                            continue;
-                        }
-                        for d in 0..MAX_DEVICES {
-                            let budget = slot.memory_budget_mb[d].load(Ordering::Acquire);
-                            if budget > 0 {
-                                if let Some(dev) = Self::device_ptr(&mmap, d) {
-                                    dev.used_memory_mb.fetch_sub(budget, Ordering::AcqRel);
-                                    dev.owner_mask
-                                        .fetch_and(!Self::slot_bit(i), Ordering::AcqRel);
-                                }
-                                slot.memory_budget_mb[d].store(0, Ordering::Release);
-                                slot.compute_budget_pct[d].store(0, Ordering::Release);
-                            }
-                        }
-                        slot.pid.store(0, Ordering::Relaxed);
-                        slot.device_mask.store(0, Ordering::Relaxed);
-                        slot.heartbeat_ns.store(0, Ordering::Relaxed);
-                        slot.start_time_ms.store(0, Ordering::Relaxed);
-                        slot.affinity_group.store(0, Ordering::Relaxed);
-                        slot.state.store(SLOT_EMPTY, Ordering::Release);
-                        // Bump epoch to wake waiters blocked on VRAM availability
-                        // (matching reap_dead() behavior)
-                        let header = ShmCoordinator::header_ptr(&mmap);
-                        header.epoch.fetch_add(1, Ordering::Release);
-                        ShmCoordinator::wake_all_on_address(&header.epoch);
                     }
                 }
             })
@@ -1055,24 +1210,27 @@ impl ShmCoordinator {
 
 impl LoadCoordinator for ShmCoordinator {
     fn update_load(&self, device_load: &HashMap<DeviceId, usize>) -> io::Result<()> {
-        if device_load.is_empty() {
-            return Ok(());
-        }
-
-        // Store primary device load in the slot for backward-compatible global load queries
         let slot = self.my_slot();
-        let total_load: usize = device_load.values().sum();
-        let primary_device = device_load
-            .iter()
-            .max_by_key(|(_, &load)| load)
-            .map(|(id, _)| id.0)
-            .unwrap_or(0);
 
-        // We reuse compute_budget_pct[0] for legacy load tracking (atomic, no lock needed)
-        slot.compute_budget_pct[0].store(total_load as u32, Ordering::Release);
-        // Store primary device in device_mask's lowest bits conceptually
-        // but we track it separately for queries
-        let _ = primary_device; // tracked via device_mask already
+        // Publish the caller's map verbatim, device by device. The previous
+        // implementation collapsed it to a single total, stored that total in
+        // `compute_budget_pct[0]` (a field `reserve_device` also owns) and
+        // reported the whole sum against `DeviceId(0)` - so a load published
+        // for devices 3 and 5 came back as `{0: 9}`, inventing a device 0
+        // entry and losing the real per-device breakdown that
+        // `FileCoordinator` (the other `LoadCoordinator`) preserves.
+        //
+        // Devices absent from the map are cleared, so a process that becomes
+        // idle stops contributing the load it reported earlier. An empty map
+        // is a valid publish ("no load anywhere") and must not be ignored.
+        for d in 0..MAX_DEVICES {
+            let count = device_load
+                .get(&DeviceId(d as u32))
+                .copied()
+                .unwrap_or(0)
+                .min(u32::MAX as usize) as u32;
+            slot.load_count[d].store(count, Ordering::Release);
+        }
 
         self.send_heartbeat()?;
         Ok(())
@@ -1105,22 +1263,14 @@ impl LoadCoordinator for ShmCoordinator {
                 }
             }
 
-            // Aggregate load from device reservations
-            let mask = slot.device_mask.load(Ordering::Acquire);
+            // Sum every process's published per-device load. This is the same
+            // reduction `FileCoordinator::get_global_load` performs over its
+            // per-process files.
             for d in 0..MAX_DEVICES {
-                if mask & (1u64 << d) != 0 {
-                    let budget = slot.memory_budget_mb[d].load(Ordering::Acquire);
-                    if budget > 0 {
-                        *aggregate.entry(DeviceId(d as u32)).or_insert(0) += 1;
-                    }
+                let count = slot.load_count[d].load(Ordering::Acquire) as usize;
+                if count > 0 {
+                    *aggregate.entry(DeviceId(d as u32)).or_insert(0) += count;
                 }
-            }
-
-            // Also count legacy load
-            let legacy_load = slot.compute_budget_pct[0].load(Ordering::Acquire);
-            if legacy_load > 0 && mask == 0 {
-                // No device reservations but has legacy load data
-                *aggregate.entry(DeviceId(0)).or_insert(0) += legacy_load as usize;
             }
         }
 
@@ -1146,9 +1296,13 @@ impl LoadCoordinator for ShmCoordinator {
             .is_ok()
         {
             slot.pid.store(0, Ordering::Relaxed);
+            slot.owner_token.store(0, Ordering::Relaxed);
             slot.device_mask.store(0, Ordering::Relaxed);
             slot.heartbeat_ns.store(0, Ordering::Relaxed);
             slot.affinity_group.store(0, Ordering::Relaxed);
+            for d in 0..MAX_DEVICES {
+                slot.load_count[d].store(0, Ordering::Release);
+            }
             slot.state.store(SLOT_EMPTY, Ordering::Release);
         }
     }
@@ -1224,10 +1378,45 @@ impl Drop for ShmCoordinator {
             self.cleanup();
         }
 
-        // Atomically decrement refcount; only the last process removes the file
+        // Decrement the region refcount and, if we were last, unlink the file -
+        // both under the lock `new` holds while it validates the file and
+        // increments. Without it a starter could open the path, then we drop
+        // 1 -> 0 and unlink, and the starter would attach to the orphaned
+        // inode while the next one created a fresh region. If locking fails
+        // we still decrement but leave the file in place (a stale file is
+        // re-validated by the next starter; an unlinked live one is not).
+        let lock = RegionLock::acquire(&self.file);
         let header = Self::header_ptr(&self.mmap);
-        if header.refcount.fetch_sub(1, Ordering::AcqRel) == 1 {
+        if header.refcount.fetch_sub(1, Ordering::AcqRel) == 1
+            && lock.is_ok()
+            && path_names_file(&self.file, &self.path).unwrap_or(false)
+        {
             let _ = std::fs::remove_file(&self.path);
+        }
+        drop(lock);
+    }
+}
+
+/// Deterministic interleaving hooks for the attach/detach race tests.
+#[cfg(test)]
+mod test_hooks {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static AFTER_OPEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` once, inside the next `ShmCoordinator::new` on this thread,
+    /// after it has opened the region file but before it takes the flock.
+    pub(super) fn set_after_open(f: impl FnOnce() + 'static) {
+        AFTER_OPEN.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(super) fn run_after_open() {
+        if let Some(f) = AFTER_OPEN.with(|h| h.borrow_mut().take()) {
+            f();
         }
     }
 }
@@ -1238,6 +1427,142 @@ mod tests {
 
     fn unique_name(suffix: &str) -> String {
         format!("test_shm_v2_{}_{}", std::process::id(), suffix)
+    }
+
+    /// Plant a dead slot holding a 512 MB budget on device 0 while the device
+    /// only accounts 100 MB (accounting drift), as a reaper would find it.
+    fn plant_dead_slot_with_drift(coord: &ShmCoordinator) -> usize {
+        coord.init_device(0, 4096).unwrap();
+        let idx = (coord.slot_index + 1) % MAX_SLOTS;
+        let slot = ShmCoordinator::slot_ptr(&coord.mmap, idx).unwrap();
+        slot.pid.store(u32::MAX - 1, Ordering::Release); // never a live PID
+        slot.heartbeat_ns.store(0, Ordering::Release); // never heartbeated
+        slot.memory_budget_mb[0].store(512, Ordering::Release);
+        slot.device_mask.store(1, Ordering::Release);
+        slot.state.store(SLOT_ACTIVE, Ordering::Release);
+        ShmCoordinator::device_ptr(&coord.mmap, 0)
+            .unwrap()
+            .used_memory_mb
+            .store(100, Ordering::Release);
+        idx
+    }
+
+    #[test]
+    fn test_reap_dead_saturates_drifted_accounting() {
+        let name = unique_name("reap_saturate");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        let idx = plant_dead_slot_with_drift(&coord);
+        coord.reap_dead();
+        let slot = ShmCoordinator::slot_ptr(&coord.mmap, idx).unwrap();
+        assert_eq!(slot.state.load(Ordering::Acquire), SLOT_EMPTY);
+        assert_eq!(
+            coord.device_memory_usage()[0].1,
+            0,
+            "used_memory_mb wrapped instead of saturating at 0"
+        );
+    }
+
+    #[test]
+    fn test_heartbeat_reaper_saturates_drifted_accounting() {
+        let name = unique_name("hb_reap_saturate");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        let idx = plant_dead_slot_with_drift(&coord);
+        coord.start_heartbeat_thread(Duration::from_millis(10));
+        let slot = ShmCoordinator::slot_ptr(&coord.mmap, idx).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while slot.state.load(Ordering::Acquire) != SLOT_EMPTY {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "heartbeat thread never reaped"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        coord.stop_heartbeat();
+        assert_eq!(
+            coord.device_memory_usage()[0].1,
+            0,
+            "used_memory_mb wrapped instead of saturating at 0"
+        );
+    }
+
+    #[test]
+    fn test_active_slot_with_our_pid_but_foreign_owner_is_not_adopted() {
+        // Containers sharing /dev/shm each have a PID 1, and PIDs get
+        // recycled: an ACTIVE slot whose pid equals ours can belong to a
+        // different, live process. Adopting it would share (and on drop,
+        // release) that process's reservations.
+        let name = unique_name("foreign_same_pid");
+        let x = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        x.init_device(0, 4096).unwrap();
+        // Keep `x` attached (so the region survives) but out of the way.
+        x.my_slot().pid.store(u32::MAX - 2, Ordering::Release);
+
+        // A slot written by a foreign process that happens to have our PID.
+        let f = (x.slot_index + 1) % MAX_SLOTS;
+        let foreign = ShmCoordinator::slot_ptr(&x.mmap, f).unwrap();
+        foreign.pid.store(std::process::id(), Ordering::Release);
+        foreign
+            .heartbeat_ns
+            .store(ShmCoordinator::monotonic_ns(), Ordering::Release);
+        foreign.memory_budget_mb[0].store(1024, Ordering::Release);
+        foreign.state.store(SLOT_ACTIVE, Ordering::Release);
+        ShmCoordinator::device_ptr(&x.mmap, 0)
+            .unwrap()
+            .used_memory_mb
+            .store(1024, Ordering::Release);
+
+        let y = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        assert_ne!(
+            y.slot_index, f,
+            "adopted a foreign process's slot by PID alone"
+        );
+        drop(y);
+        assert_eq!(
+            foreign.state.load(Ordering::Acquire),
+            SLOT_ACTIVE,
+            "dropping our coordinator released the foreign slot"
+        );
+        assert_eq!(
+            x.device_memory_usage()[0].1,
+            1024,
+            "the foreign slot's reservation was released"
+        );
+
+        foreign.state.store(SLOT_EMPTY, Ordering::Release);
+        x.my_slot().pid.store(std::process::id(), Ordering::Release);
+    }
+
+    #[test]
+    fn test_drop_racing_attach_does_not_split_the_region() {
+        // Interleaving: B opens the region file while A is attached; A then
+        // drops (refcount 1 -> 0, unlink) before B takes the lock. Without
+        // locking in Drop and an inode re-check in `new`, B attaches to the
+        // orphaned inode while C creates a fresh file at the path, and the two
+        // hand out the same VRAM independently.
+        let name = unique_name("drop_attach_race");
+        let a = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        test_hooks::set_after_open(move || drop(a));
+        let b = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        let c = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+
+        assert!(
+            b.path.exists(),
+            "B's region file was unlinked under it (B is on an orphaned inode)"
+        );
+        b.init_device(0, 1024).unwrap();
+        b.reserve_device(0, 1024, 0).unwrap();
+        assert_eq!(
+            c.device_memory_usage(),
+            vec![(0, 1024, 1024)],
+            "B and C are attached to different regions"
+        );
+        assert!(
+            c.reserve_device(0, 1, 0).is_err(),
+            "C over-committed a device B had filled"
+        );
+        drop(c);
+        drop(b);
+        assert!(!ShmCoordinator::get_shm_path(&name).exists());
     }
 
     #[test]
@@ -1641,5 +1966,165 @@ mod tests {
 
         drop(coord2);
         drop(coord1);
+    }
+
+    #[test]
+    fn test_update_load_keeps_the_per_device_breakdown() {
+        // The coordinator must publish the per-device load map it was given.
+        // Previously everything was collapsed into one total and reported
+        // against DeviceId(0), so devices 3 and 5 disappeared from the
+        // aggregate and the entire load was attributed to device 0.
+        let name = unique_name("per_device_load");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+
+        let mut load = HashMap::new();
+        load.insert(DeviceId(3), 7usize);
+        load.insert(DeviceId(5), 2usize);
+        coord.update_load(&load).unwrap();
+
+        let global = coord.get_global_load().unwrap();
+        assert_eq!(
+            global.get(&DeviceId(3)),
+            Some(&7),
+            "load of device 3 lost: {global:?}"
+        );
+        assert_eq!(
+            global.get(&DeviceId(5)),
+            Some(&2),
+            "load of device 5 lost: {global:?}"
+        );
+        assert_eq!(
+            global.get(&DeviceId(0)),
+            None,
+            "no load was published for device 0: {global:?}"
+        );
+        assert_eq!(global.values().sum::<usize>(), 9);
+
+        // Control: the well-formed single-device case still works, and a
+        // later publish replaces (not accumulates) the previous map.
+        let mut single = HashMap::new();
+        single.insert(DeviceId(3), 1usize);
+        coord.update_load(&single).unwrap();
+        let global = coord.get_global_load().unwrap();
+        assert_eq!(
+            global.len(),
+            1,
+            "stale per-device load was not cleared: {global:?}"
+        );
+        assert_eq!(global.get(&DeviceId(3)), Some(&1));
+
+        // Control: an idle process publishes an empty map and must not keep
+        // reporting its previous load.
+        coord.update_load(&HashMap::new()).unwrap();
+        assert!(
+            coord.get_global_load().unwrap().is_empty(),
+            "empty load map must clear the published load"
+        );
+    }
+
+    #[test]
+    fn test_update_load_does_not_clobber_the_compute_budget() {
+        // `update_load` and `reserve_device` must not share storage: they did
+        // (both wrote `compute_budget_pct[0]`), so publishing a load of 9
+        // replaced a compute budget of 40 with 9, and `get_global_load`
+        // reported compute percentages as load.
+        let name = unique_name("no_clobber");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        coord.init_device(0, 2048).unwrap();
+        coord.reserve_device(0, 256, 40).unwrap();
+        assert_eq!(
+            coord.my_slot().compute_budget_pct[0].load(Ordering::Acquire),
+            40
+        );
+
+        let mut load = HashMap::new();
+        load.insert(DeviceId(7), 9usize);
+        coord.update_load(&load).unwrap();
+
+        assert_eq!(
+            coord.my_slot().compute_budget_pct[0].load(Ordering::Acquire),
+            40,
+            "update_load overwrote the compute budget of device 0"
+        );
+        // Control: the reservation itself is untouched.
+        assert_eq!(coord.device_memory_usage()[0].1, 256);
+        assert_eq!(coord.get_global_load().unwrap().get(&DeviceId(7)), Some(&9));
+
+        coord.release_device(0).unwrap();
+        assert_eq!(
+            coord.my_slot().compute_budget_pct[0].load(Ordering::Acquire),
+            0
+        );
+    }
+
+    #[test]
+    fn test_release_device_clears_a_zero_memory_reservation() {
+        // A reservation with `memory_mb == 0` (e.g. a caller claiming only a
+        // compute share) used to make `release_device` return early, leaving
+        // the slot's compute budget and its device bit set forever - every
+        // other process then saw this slot as a peer on that device.
+        let name = unique_name("zero_mb_release");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        coord.init_device(0, 2048).unwrap();
+
+        coord.reserve_device(0, 0, 30).unwrap();
+        let slot = coord.my_slot();
+        assert_eq!(slot.compute_budget_pct[0].load(Ordering::Acquire), 30);
+        assert_ne!(slot.device_mask.load(Ordering::Acquire) & 1, 0);
+
+        coord.release_device(0).unwrap();
+
+        assert_eq!(
+            slot.compute_budget_pct[0].load(Ordering::Acquire),
+            0,
+            "compute budget survived release_device"
+        );
+        assert_eq!(
+            slot.device_mask.load(Ordering::Acquire) & 1,
+            0,
+            "slot still advertises device 0 after releasing it"
+        );
+        let dev = ShmCoordinator::device_ptr(&coord.mmap, 0).unwrap();
+        assert_eq!(
+            dev.owner_mask.load(Ordering::Acquire) & ShmCoordinator::slot_bit(coord.slot_index),
+            0,
+            "owner bit survived release_device"
+        );
+
+        // Control: a normal reservation still releases its memory.
+        coord.reserve_device(0, 512, 10).unwrap();
+        assert_eq!(coord.device_memory_usage()[0].1, 512);
+        coord.release_device(0).unwrap();
+        assert_eq!(coord.device_memory_usage()[0].1, 0);
+        assert_eq!(slot.compute_budget_pct[0].load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_reserve_device_rejects_an_overflowing_request() {
+        // `current + memory_mb > total` overflowed on a caller-supplied size:
+        // debug builds panicked (this test would abort), release builds wrapped
+        // around and let the request through, over-committing the device.
+        let name = unique_name("reserve_overflow");
+        let coord = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        coord.init_device(0, 2048).unwrap();
+        coord.reserve_device(0, 1024, 0).unwrap();
+
+        let res = coord.reserve_device(0, u32::MAX, 0);
+        assert!(
+            res.is_err(),
+            "u32::MAX on a 2048MB device must be rejected, not overflow"
+        );
+        assert_eq!(res.unwrap_err().kind(), io::ErrorKind::OutOfMemory);
+        assert_eq!(
+            coord.device_memory_usage()[0].1,
+            1024,
+            "a rejected request must not change the accounting"
+        );
+
+        // Control: a request that exactly fits is still accepted.
+        coord.reserve_device(0, 1024, 0).unwrap();
+        assert_eq!(coord.device_memory_usage()[0].1, 2048);
+        coord.release_device(0).unwrap();
+        assert_eq!(coord.device_memory_usage()[0].1, 0);
     }
 }

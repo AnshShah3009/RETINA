@@ -549,7 +549,7 @@ fn tum_associate_large_input_terminates() {
 /// "every candidate pair at most `max_dt` apart" without mentioning the
 /// finiteness filter.
 #[test]
-fn tum_associate_finite_timestamps_with_infinite_tolerance_never_match() {
+fn tum_associate_finite_timestamps_with_infinite_tolerance_match() {
     let a: Vec<_> = (0..50)
         .map(|i| tum::IndexEntry {
             timestamp: i as f64,
@@ -562,13 +562,49 @@ fn tum_associate_finite_timestamps_with_infinite_tolerance_never_match() {
             filename: format!("b{i}"),
         })
         .collect();
+
+    // `max_dt = +inf` means every pair is a candidate, so 50 stamps on each side
+    // must produce a full one-to-one pairing.
+    //
+    // This test asserted the opposite, and its failure message said so verbatim:
+    // "KNOWN BUG: `tum::associate` (50 x 50, max_dt=inf) returned 50 matches; the
+    // `diff.is_finite()` filter makes the effective tolerance 0, so the documented
+    // 'every pair within max_dt' rule does not hold". So it pinned the bug as
+    // expected behaviour, under a name (`..._never_match`) that read as a
+    // specification rather than a bug report.
+    //
+    // The cause was a guard shared by NaN and infinity: `if !max_dt.is_finite()`
+    // rejects both, so an infinite tolerance silently produced an *empty*
+    // association rather than a maximal one. Now only NaN and a negative
+    // tolerance are rejected.
     let matches = tum::associate(&a, &b, f64::INFINITY);
-    assert!(
-        matches.is_empty(),
-        "KNOWN BUG: tum::associate(50 x 50, max_dt=inf) returned {} matches; \
-         the `diff.is_finite()` filter makes the effective tolerance 0, so the documented \
-         'every pair within max_dt' rule does not hold",
+    assert_eq!(
+        matches.len(),
+        50,
+        "an infinite tolerance admits every pair, so 50 entries on each side must \
+         produce a full pairing; got {} matches",
         matches.len()
+    );
+
+    // Control: a negative tolerance still yields nothing, so the 50 above come
+    // from the infinity being honoured rather than from the tolerance being
+    // ignored altogether.
+    //
+    // I tried twice to make a *finite* tolerance shrink the result and both were
+    // wrong: `1.0` does not bound anything (the stamps are consecutive integers,
+    // so every adjacent pair qualifies) and neither does `0.5` (each `a[i]`/`b[i]`
+    // pair is at difference 0, which is inside any positive tolerance, and the
+    // greedy takes all 50). No positive tolerance excludes a zero-difference
+    // pair, so a shrinking control has to come from the negative side.
+    assert!(
+        tum::associate(&a, &b, -1.0).is_empty(),
+        "a negative tolerance is meaningless and must yield nothing"
+    );
+
+    // And NaN, which genuinely cannot be compared, still yields nothing.
+    assert!(
+        tum::associate(&a, &b, f64::NAN).is_empty(),
+        "NaN is not a tolerance"
     );
 }
 

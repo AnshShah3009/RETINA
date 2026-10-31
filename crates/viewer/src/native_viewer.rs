@@ -38,8 +38,14 @@ impl ColorMode {
 
     fn rgb(self, z: f32, min: f32, max: f32) -> [f32; 3] {
         match self {
-            ColorMode::Flat => [0.35, 0.75, 1.0],
-            ColorMode::PerPoint | ColorMode::Height => {
+            ColorMode::Flat => [0.55, 0.55, 0.58],
+            // "Per point" meant "use the cloud's own colours, or the height ramp
+            // if it has none" - which made it identical to `Height`, so a cloud
+            // with no colours showed the ramp while the mode claimed to be
+            // showing per-point data. A neutral grey says "no colour was given",
+            // which is what is actually true.
+            ColorMode::PerPoint => [0.72, 0.74, 0.78],
+            ColorMode::Height => {
                 let t = if (max - min).abs() < 1e-9 {
                     0.5
                 } else {
@@ -95,6 +101,13 @@ pub struct NativeViewer {
     /// Point of interest. Fixed at the origin rather than fitted per cloud, so
     /// the camera does not jump every time a cloud is added.
     target: [f32; 3],
+    /// The part of the current drag that has already been applied to the camera.
+    ///
+    /// `pointer.total_drag_delta()` measures from the press, but the camera is
+    /// turned by a per-frame increment, so the increment is the difference
+    /// between this and the total. Reset to zero whenever no drag is in
+    /// progress.
+    drag_applied: egui::Vec2,
 }
 
 impl NativeViewer {
@@ -120,6 +133,7 @@ impl NativeViewer {
             camera_pitch: 25.0,
             camera_dist: 2.5,
             target: [0.45, 0.45, 0.45],
+            drag_applied: egui::Vec2::ZERO,
         }
     }
 
@@ -223,6 +237,14 @@ impl NativeViewer {
     ///
     /// Right-handed, and the camera looks down its own -z, which is the
     /// convention the shader assumes when it takes depth as `-eye.z`.
+    /// Vertical field of view, as the tangent of the half-angle.
+    ///
+    /// 0.5 frames the demo cube at roughly 0.72 of the half-viewport at the
+    /// default orbit distance, leaving margin on every side. Chosen by measuring
+    /// the projected corners rather than by picking a familiar 45 degrees: with
+    /// a scale of 1.0 the same cube overflows the frame at the default distance.
+    const FOV_SCALE: f32 = 0.5;
+
     fn look_at(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
         // Forward runs from the eye toward the target; `s` (right) is
         // `forward x up`, not `up x forward`. The two differ in sign, and the
@@ -249,22 +271,28 @@ impl NativeViewer {
         let s = normalize3(s);
         let u = cross3(s, f);
 
-        // Rows 0..=2 are the camera axes, with z pointing *backwards* so that a
-        // point in front of the camera has negative z - which is what the shader
-        // reads as depth.
-        let r = [
-            [s[0], s[1], s[2]],
-            [u[0], u[1], u[2]],
-            [-f[0], -f[1], -f[2]],
-        ];
-        let t = [-dot3(s, eye), -dot3(u, eye), dot3(f, eye)];
-
+        // Rows 0..=2 are the camera axes, scaled so that a field of view of
+        // `FOV_SCALE` radians spans the viewport. Row 2 keeps z pointing
+        // *backwards* so a point in front of the camera has negative z.
+        //
+        // The last row is the perspective term. In this row-vector convention the
+        // shader computes `eye = world @ m` element-wise, so `eye.w` is the dot
+        // of the world position with row 3 - and it must equal the *depth*, or
+        // nothing scales with distance.
+        //
+        // It used to be `[0, 0, 0, 1]`, which makes `eye.w` exactly 1 for every
+        // point: an affine view with no perspective divide. The result was that
+        // **scrolling did not change the size of anything** - the camera dollied
+        // without the cube ever getting smaller or bigger, and only the sprite
+        // size changed. That was the visible symptom of a missing projection, and
+        // it is what made the demo look wrong at every zoom level.
+        let k = 1.0 / Self::FOV_SCALE;
         let mut m = [[0.0f32; 4]; 4];
-        for i in 0..3 {
-            m[i][..3].copy_from_slice(&r[i]);
-            m[i][3] = t[i];
-        }
-        m[3] = [0.0, 0.0, 0.0, 1.0];
+        m[0] = [s[0] * k, s[1] * k, s[2] * k, -dot3(s, eye) * k];
+        m[1] = [u[0] * k, u[1] * k, u[2] * k, -dot3(u, eye) * k];
+        m[2] = [-f[0] * k, -f[1] * k, -f[2] * k, dot3(f, eye) * k];
+        // w = dot(f, p) - dot(f, eye) = the depth of p in front of the camera.
+        m[3] = [f[0], f[1], f[2], -dot3(f, eye)];
         m
     }
 
@@ -295,10 +323,26 @@ impl NativeViewer {
             // a `CentralPanel` never captures it - so `drag_delta()` was always
             // zero and the orbit was dead even though the pointer was genuinely
             // being dragged. `pointer.total_drag_delta()` is the position since
-            // the press, which is what the orbit wants.
-            let delta = ctx
-                .input(|i| i.pointer.total_drag_delta())
-                .unwrap_or(egui::Vec2::ZERO);
+            // the press, which is what the orbit wants - but *as the position*,
+            // not as an increment: feeding it to `camera_yaw` directly
+            // re-applied the whole gesture every frame, so a gesture orbited
+            // once per frame it was drawn over. Measured with a 30 px drag at
+            // distance 2.5: one 30 px frame gave yaw 9.375 degrees, the same
+            // 30 px arriving as three 10 px frames gave 18.75 (1 + 2 + 3 = 6
+            // increments of 10 px is 2x one of 30 px) - a slow drag spins the
+            // camera and a fast one does not.
+            let drag_now = ctx.input(|i| i.pointer.total_drag_delta());
+            let delta = match drag_now {
+                Some(total) => {
+                    let step = total - self.drag_applied;
+                    self.drag_applied = total;
+                    step
+                }
+                None => {
+                    self.drag_applied = egui::Vec2::ZERO;
+                    egui::Vec2::ZERO
+                }
+            };
             if delta.x != 0.0 {
                 // Scaled by distance so a drag moves the scene by about the same
                 // number of pixels whether the camera is near or far.
@@ -356,41 +400,180 @@ impl NativeViewer {
     /// occlude, so a cube of them looks like fog. This adds the twelve edges and
     /// a height ramp, so the shape is legible and it is obvious whether the
     /// camera, the colours and the depth scaling are all working.
+    /// Load an image as a point cloud: luminance becomes depth, colour is kept.
+    ///
+    /// This is the most demanding thing the renderer can be asked to draw, and
+    /// it is the fastest way to see whether the projection is right. A wireframe
+    /// cube is symmetric enough to hide a mirrored axis or a wrong scale; a
+    /// photograph is not - the moment the face is inside out or the image is
+    /// squashed, it is obvious.
+    ///
+    /// Brightness is used for depth rather than a depth map, which is a
+    /// deliberate simplification: it gives a smooth, well-distributed surface
+    /// from any photograph without needing per-pixel depth, and it is enough to
+    /// exercise the projection. Points are laid out in the camera's own frame -
+    /// x and y across the image, z away from it - and scaled by `size`, so the
+    /// whole thing is one `look_at` away from being framed.
+    pub fn from_image(path: &std::path::Path, size: f32) -> Result<PointCloud, String> {
+        let img = image::open(path)
+            .map_err(|e| format!("cannot open {}: {e}", path.display()))?
+            .to_rgb8();
+        let (w, h) = img.dimensions();
+
+        // A dense grid aliases badly when points are 1-2 px apart at any real
+        // zoom, and costs a lot of fill rate. One point every `step` pixels is
+        // enough to resolve the image at the sizes this viewer shows.
+        let step = ((w * h) as f64 / 120_000.0).sqrt().max(1.0) as u32;
+
+        let mut pc = PointCloud::default();
+        let mut colors: Vec<nalgebra::Point3<f32>> = Vec::new();
+        let aspect = w as f32 / h as f32;
+
+        let mut y = 0u32;
+        while y < h {
+            let mut x = 0u32;
+            while x < w {
+                let p = img.get_pixel(x, y);
+                let luma =
+                    (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0;
+                pc.points.push(nalgebra::Point3::new(
+                    (x as f32 / w as f32 - 0.5) * aspect * size,
+                    (0.5 - y as f32 / h as f32) * size,
+                    luma * size * 0.35,
+                ));
+                colors.push(nalgebra::Point3::new(
+                    p[0] as f32 / 255.0,
+                    p[1] as f32 / 255.0,
+                    p[2] as f32 / 255.0,
+                ));
+                x += step;
+            }
+            y += step;
+        }
+        pc.colors = Some(colors);
+        Ok(pc)
+    }
+
+    /// Point the camera at the centre of the loaded clouds and pull back far
+    /// enough to fit them.
+    ///
+    /// A photograph loaded at `size = 1.6` spans about 1.1 units wide, but the
+    /// demo cube's camera sits 2.5 away from a *fixed* target. A wide, flat
+    /// cloud therefore lands off-centre or edge-on, which is what the first
+    /// `--image` run showed. Fitting the camera to the data is the only version
+    /// of this that works for an arbitrary cloud.
+    ///
+    /// Non-finite coordinates are skipped, as they are in `z_range`. An
+    /// infinite one used to make `hi` infinite, so the radius - and with it
+    /// `camera_dist` - was infinite and every entry of the view matrix became
+    /// NaN: a blank canvas with no message anywhere, which is the failure mode
+    /// this file is written around. `PointCloud::points` is a plain public
+    /// `Vec`, so a caller can hand one over.
+    pub fn frame_bounds(&mut self) {
+        // Real infinities, not `f32::MAX`/`f32::MIN`: the constants are the
+        // largest finite values, so a running min/max seeded with them silently
+        // ignores a coordinate at `-inf` (or `+inf`), and `hi - lo` then has a
+        // wrong width rather than an obviously infinite one.
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        let mut any = false;
+        for (pc, _) in &self.clouds {
+            for p in &pc.points {
+                if !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()) {
+                    continue;
+                }
+                any = true;
+                for (i, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    lo[i] = lo[i].min(v);
+                    hi[i] = hi[i].max(v);
+                }
+            }
+        }
+        if !any {
+            return;
+        }
+        self.target = [
+            (lo[0] + hi[0]) * 0.5,
+            (lo[1] + hi[1]) * 0.5,
+            (lo[2] + hi[2]) * 0.5,
+        ];
+        // The largest half-extent, times a margin. `FOV_SCALE` is the tangent of
+        // the half-angle, so the distance that fits a half-extent `r` is
+        // `r / FOV_SCALE` - the margin then leaves room for the frame.
+        let radius = ((hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2])) * 0.5;
+        self.camera_dist = (radius / Self::FOV_SCALE * 1.35).max(0.05);
+    }
+
     pub fn demo_cloud() -> PointCloud {
-        let mut pc = Self::mock_cloud();
-        let mut rng_state = 0x9E3779B97F4A7C15u64;
-        let mut next = || {
-            rng_state ^= rng_state << 13;
-            rng_state ^= rng_state >> 7;
-            rng_state ^= rng_state << 17;
-            rng_state
-        };
-        // The twelve edges of the cube, so its shape is legible: points do not
-        // occlude one another, so a solid lattice alone reads as fog.
+        // A striped cube.
+        //
+        // The scene went through three versions, each because it was reported as
+        // unreadable:
+        //
+        // 1. A 10x10x10 solid, the box edges, and 4,000 random points. Reported
+        //    as "something blue and green, I don't understand what I'm looking
+        //    at" - the random points were noise hiding the object behind them.
+        // 2. A wireframe box plus a ground grid. Better, but a plain wireframe
+        //    cube at any angle has no texture, so nothing distinguishes a face
+        //    from an edge or shows how big it is. Reported as "didn't look
+        //    right ... should lie within the camera frame".
+        // 3. This: alternating light/dark bands along two axes.
+        //
+        // The stripes do the job a solid cannot. Points do not occlude, so a
+        // solid surface cannot show depth at all - but banding does: the band
+        // spacing is a known physical distance on the face, so foreshortening is
+        // directly visible. A striped cube also makes the camera obvious, since
+        // you can see how far round it has rotated.
         const S: f32 = 0.9;
-        for i in 0..=40 {
-            let t = i as f32 / 40.0 * S;
-            pc.points.push(nalgebra::Point3::new(t, 0.0, 0.0));
-            pc.points.push(nalgebra::Point3::new(t, S, 0.0));
-            pc.points.push(nalgebra::Point3::new(t, 0.0, S));
-            pc.points.push(nalgebra::Point3::new(t, S, S));
-            pc.points.push(nalgebra::Point3::new(0.0, t, 0.0));
-            pc.points.push(nalgebra::Point3::new(S, t, 0.0));
-            pc.points.push(nalgebra::Point3::new(0.0, t, S));
-            pc.points.push(nalgebra::Point3::new(S, t, S));
-            pc.points.push(nalgebra::Point3::new(0.0, 0.0, t));
-            pc.points.push(nalgebra::Point3::new(S, 0.0, t));
-            pc.points.push(nalgebra::Point3::new(0.0, S, t));
-            pc.points.push(nalgebra::Point3::new(S, S, t));
+        let bands = 6;
+        let steps = 90;
+        let mut pc = PointCloud::default();
+
+        let mut push = |x: f32, y: f32, z: f32| {
+            pc.points.push(nalgebra::Point3::new(x, y, z));
+        };
+
+        // The three faces the default camera can see, sampled as grids so the
+        // banding reads as a surface rather than as loose dots.
+        for face in 0..3 {
+            for i in 0..=steps {
+                for j in 0..=steps {
+                    let a = i as f32 / steps as f32;
+                    let b = j as f32 / steps as f32;
+                    // Only draw bands, not a solid: a solid grid of points reads
+                    // as fog because nothing occludes anything behind it.
+                    let along = if face == 0 {
+                        a
+                    } else if face == 1 {
+                        b
+                    } else {
+                        a
+                    };
+                    let band = (along * bands as f32).floor() as i32;
+                    let cross_band = (if face == 0 { b } else { a } * bands as f32).floor() as i32;
+                    if band % 2 != 0 && cross_band % 2 != 0 {
+                        continue;
+                    }
+                    // The three faces turned towards the default camera, which
+                    // sits at +x, +y, +z. The first version drew x=0, y=0 and
+                    // z=0 - the three *back* faces.
+                    match face {
+                        0 => push(S, a * S, b * S),
+                        1 => push(a * S, S, b * S),
+                        _ => push(a * S, b * S, S),
+                    }
+                }
+            }
         }
 
-        // A sparse shell so depth ordering is visible when orbiting.
-        for _ in 0..4000 {
-            pc.points.push(nalgebra::Point3::new(
-                (next() % 1000) as f32 / 1000.0 * 0.9,
-                (next() % 1000) as f32 / 1000.0 * 0.9,
-                (next() % 1000) as f32 / 1000.0 * 0.9,
-            ));
+        // The ground grid, which is what makes "up" unambiguous.
+        let g = 7;
+        for i in 0..=g {
+            let t = i as f32 / g as f32 * S;
+            for j in 0..=g {
+                push(t, -0.12, j as f32 / g as f32 * S);
+                push(j as f32 / g as f32 * S, -0.12, t);
+            }
         }
         pc
     }
@@ -633,22 +816,49 @@ fn normalize3(v: [f32; 3]) -> [f32; 3] {
 }
 
 /// Launcher function
+/// Open the viewer, optionally loading an image instead of the demo cube.
+///
+/// `--image <path>` loads a photograph as a point cloud: luminance becomes
+/// depth, colour is preserved. That is a much better check of the renderer than
+/// a synthetic cube - a wireframe cube is symmetric enough that a mirrored axis
+/// or a wrong scale still looks plausible, while a face is not.
 pub fn run_native_viewer() -> Result<(), eframe::Error> {
+    // `--image <path>`, or `--demo` for the synthetic cube.
+    let args: Vec<String> = std::env::args().collect();
+    let image_path = args
+        .windows(2)
+        .find(|w| w[0] == "--image" || w[0] == "-i")
+        .map(|w| std::path::PathBuf::from(&w[1]));
+
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([800.0, 600.0]),
+        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([1000.0, 800.0]),
         ..Default::default()
     };
 
     eframe::run_native(
         "Rust CV Viewer",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             let mut viewer = NativeViewer::new(cc);
 
-            // Load a cloud up front. A viewer that opens empty reads as broken: there
-            // is nothing to tell a working renderer from a dead one until the user
-            // finds and presses a button. The demo's whole job is to show a cloud.
-            viewer.add_point_cloud(NativeViewer::demo_cloud());
+            match image_path {
+                Some(ref path) => match NativeViewer::from_image(path, 1.6) {
+                    Ok(pc) => {
+                        let n = pc.points.len();
+                        viewer.add_point_cloud(pc);
+                        // Frame the loaded cloud: a photograph is flat and wide, so
+                        // the demo cube's camera - aimed at a point - would show it
+                        // edge-on or off-centre.
+                        viewer.frame_bounds();
+                        eprintln!("viewer: loaded {} points from {}", n, path.display());
+                    }
+                    Err(e) => {
+                        eprintln!("viewer: {e}");
+                        viewer.add_point_cloud(NativeViewer::demo_cloud());
+                    }
+                },
+                None => viewer.add_point_cloud(NativeViewer::demo_cloud()),
+            }
 
             Ok(Box::new(viewer))
         }),
@@ -713,6 +923,435 @@ mod tests {
         }
     }
 
+    /// The pipeline draws real pixels into a real framebuffer.
+    ///
+    /// Every other viewer test checks values in isolation - a camera matrix, a
+    /// vertex count - and all of them passed while the window showed nothing. Four
+    /// separate bugs lived exactly in that gap: the pipeline, the vertex layout, the
+    /// bind group and the camera can each be individually correct and the frame can
+    /// still come out empty.
+    ///
+    /// This renders the demo scene into an offscreen texture and reads it back. It is
+    /// the one check that cannot distinguish "compiled and drew something" from
+    /// "compiled and produced nothing", which is the distinction every previous
+    /// viewer bug turned on.
+    ///
+    /// Skips when no GPU adapter is available.
+    #[test]
+    fn the_pipeline_actually_draws_pixels() {
+        use eframe::wgpu::util::DeviceExt;
+
+        let instance = eframe::wgpu::Instance::new(&eframe::wgpu::InstanceDescriptor::default());
+        let adapter = pollster::block_on(instance.request_adapter(
+            &eframe::wgpu::RequestAdapterOptions {
+                power_preference: eframe::wgpu::PowerPreference::None,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            },
+        ));
+        // A GPU-less runner has no adapter at all; that is a skip, not a failure.
+        let Ok(adapter) = adapter else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        // wgpu validation errors are silently dropped by default, which is how a
+        // shader/host binding mismatch can look exactly like "the GPU drew nothing".
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&eframe::wgpu::DeviceDescriptor {
+                label: None,
+                required_features: eframe::wgpu::Features::empty(),
+                required_limits: eframe::wgpu::Limits::downlevel_defaults(),
+                memory_hints: eframe::wgpu::MemoryHints::Performance,
+                trace: eframe::wgpu::Trace::Off,
+                experimental_features: Default::default(),
+            }))
+            .expect("a device from a supported adapter");
+        let format = eframe::wgpu::TextureFormat::Rgba8Unorm;
+
+        let width = 320u32;
+        let height = 240u32;
+        let texture = device.create_texture(&eframe::wgpu::TextureDescriptor {
+            label: Some("readback target"),
+            size: eframe::wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: eframe::wgpu::TextureDimension::D2,
+            format,
+            usage: eframe::wgpu::TextureUsages::RENDER_ATTACHMENT
+                | eframe::wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&eframe::wgpu::TextureViewDescriptor::default());
+
+        // A handful of points on a plane in front of an identity-ish camera.
+        // 3 position + 3 colour + 1 has_color = 7 floats, matching the shader's
+        // `Vertex` and the 28-byte stride.
+        // The real demo scene, not a synthetic diagonal. A diagonal from
+        // (0,0,0) to (0.9,0.9,0.9) passes close to the camera and projects to a
+        // thin sliver, which made the lit count tiny and the assertion
+        // meaningless - it was measuring the test's own geometry, not the
+        // pipeline.
+        // `PC_IMAGE` renders that file instead of the demo cube, so the same
+        // harness that checks the pipeline can also show what it is drawing.
+        let cloud = match std::env::var("PC_IMAGE") {
+            Ok(path) => NativeViewer::from_image(std::path::Path::new(&path), 1.6)
+                .unwrap_or_else(|e| panic!("cannot load {path}: {e}")),
+            Err(_) => NativeViewer::demo_cloud(),
+        };
+        if std::env::var("PC_IMAGE").is_ok() {
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for p in &cloud.points {
+                for (i, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    lo[i] = lo[i].min(v);
+                    hi[i] = hi[i].max(v);
+                }
+            }
+            eprintln!(
+                "cloud {} points, x {:.3}..{:.3} y {:.3}..{:.3} z {:.3}..{:.3}",
+                cloud.points.len(),
+                lo[0],
+                hi[0],
+                lo[1],
+                hi[1],
+                lo[2],
+                hi[2]
+            );
+            eprintln!("colors present: {}", cloud.colors.is_some());
+            for (name, yaw, pitch) in [("yaw90", 90.0f32, 0.0f32)] {
+                let mut v = headless_viewer();
+                v.target = [0.0, 0.0, 0.28];
+                v.camera_yaw = yaw;
+                v.camera_pitch = pitch;
+                v.camera_dist = 2.4;
+                let m = v.view_matrix();
+                let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) =
+                    (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                let (mut lo_w, mut hi_w) = (f32::MAX, f32::MIN);
+                for p in cloud.points.iter().step_by(37) {
+                    let w4 = [p.x, p.y, p.z, 1.0];
+                    let mut e = [0.0f32; 4];
+                    for (row, val) in e.iter_mut().enumerate() {
+                        *val = (0..4).map(|c| m[row][c] * w4[c]).sum();
+                    }
+                    lo_w = lo_w.min(e[3]);
+                    hi_w = hi_w.max(e[3]);
+                    if e[3] <= 0.0 {
+                        continue;
+                    }
+                    let nx = e[0] / e[3];
+                    let ny = e[1] / e[3];
+                    lo_x = lo_x.min(nx);
+                    hi_x = hi_x.max(nx);
+                    lo_y = lo_y.min(ny);
+                    hi_y = hi_y.max(ny);
+                }
+                println!(
+                    "{name}: w {:.2}..{:.2} ndc x {:.2}..{:.2} ndc y {:.2}..{:.2}",
+                    lo_w, hi_w, lo_x, hi_x, lo_y, hi_y
+                );
+            }
+        }
+        let cap: usize = std::env::var("PC_CAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(usize::MAX);
+        let verts: Vec<[f32; 7]> = cloud
+            .points
+            .iter()
+            .take(cap)
+            .enumerate()
+            .map(|(i, p)| {
+                let c = cloud
+                    .colors
+                    .as_ref()
+                    .and_then(|cs| cs.get(i))
+                    .map(|c| [c.x, c.y, c.z])
+                    .unwrap_or([0.72, 0.74, 0.78]);
+                let c = if std::env::var("PC_NOCOLOR").is_ok() {
+                    [0.72, 0.74, 0.78]
+                } else {
+                    c
+                };
+                [p.x, p.y, p.z, c[0], c[1], c[2], 0.0]
+            })
+            .collect();
+        let vbuf = device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&verts),
+            usage: eframe::wgpu::BufferUsages::VERTEX,
+        });
+
+        // The camera the viewer actually uses, not an identity matrix. An identity
+        // view hides a transposed multiply completely, because M and M-transpose are
+        // the same when M is the identity - which is exactly why the shader's
+        // matrix bug survived until this test existed.
+        let mut viewer = headless_viewer();
+        if std::env::var("PC_IMAGE").is_ok() {
+            // Look at the image square-on. The image lies in the **xy** plane,
+            // so the camera has to be on +z: at yaw 0 the eye is on +x and the
+            // whole image collapses into a line - a flat olive slab, which is
+            // exactly what the first dump showed.
+        } else {
+            viewer.target = [0.45, 0.45, 0.45];
+            viewer.camera_yaw = 45.0;
+            viewer.camera_pitch = 25.0;
+        }
+        let camera = viewer.view_matrix();
+
+        let mut uniform = [0.0f32; 20];
+        for r in 0..4 {
+            uniform[r * 4..r * 4 + 4].copy_from_slice(&camera[r]);
+        }
+        // The real canvas size, not (1, 1). Passing NDC half-extents here is
+        // what made the sprite radius 192 px instead of 4; a test that hardcoded
+        // 1.0 could not have caught it.
+        uniform[16] = width as f32;
+        uniform[17] = height as f32;
+        uniform[18] = 4.0;
+        uniform[19] = 0.0;
+
+        let ubuf = device.create_buffer_init(&eframe::wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&uniform),
+            usage: eframe::wgpu::BufferUsages::UNIFORM,
+        });
+
+        let bgl = device.create_bind_group_layout(&eframe::wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[eframe::wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: eframe::wgpu::ShaderStages::VERTEX,
+                ty: eframe::wgpu::BindingType::Buffer {
+                    ty: eframe::wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let pl = device.create_pipeline_layout(&eframe::wgpu::PipelineLayoutDescriptor {
+            label: None,
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        });
+        // Rebuild the pipeline with the explicit layout, since it needs a bind group.
+        let pipeline = device.create_render_pipeline(&eframe::wgpu::RenderPipelineDescriptor {
+            label: Some("readback pipeline 2"),
+            layout: Some(&pl),
+            vertex: eframe::wgpu::VertexState {
+                module: &device.create_shader_module(eframe::wgpu::ShaderModuleDescriptor {
+                    label: Some("sh"),
+                    source: eframe::wgpu::ShaderSource::Wgsl(
+                        include_str!("native_viewer/point_cloud.wgsl").into(),
+                    ),
+                }),
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                // The shipping layout, not a copy of it. `render::vertex_layout`
+                // is the single source of truth for the stride, the attribute
+                // offsets and the step mode, so a regression there shows up here
+                // as pixels: stepping the buffer per vertex instead of per
+                // instance leaves this demo scene with 62 lit pixels of 76,800
+                // (measured) against the 20,664 it draws with the correct mode,
+                // and the assertion below fails.
+                buffers: &[super::render::vertex_layout()],
+            },
+            primitive: eframe::wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: eframe::wgpu::MultisampleState::default(),
+            fragment: Some(eframe::wgpu::FragmentState {
+                module: &device.create_shader_module(eframe::wgpu::ShaderModuleDescriptor {
+                    label: Some("sh"),
+                    source: eframe::wgpu::ShaderSource::Wgsl(
+                        include_str!("native_viewer/point_cloud.wgsl").into(),
+                    ),
+                }),
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(eframe::wgpu::ColorTargetState {
+                    format,
+                    blend: Some(eframe::wgpu::BlendState::REPLACE),
+                    write_mask: eframe::wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        });
+
+        let bg = device.create_bind_group(&eframe::wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &bgl,
+            entries: &[eframe::wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ubuf.as_entire_binding(),
+            }],
+        });
+
+        let mut enc =
+            device.create_command_encoder(&eframe::wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_render_pass(&eframe::wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(eframe::wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: eframe::wgpu::Operations {
+                        load: eframe::wgpu::LoadOp::Clear(eframe::wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
+                        store: eframe::wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.draw(0..6, 0..verts.len() as u32);
+        }
+
+        let bytes_per_row = width * 4;
+        let padded = bytes_per_row.div_ceil(256) * 256;
+        let out = device.create_buffer(&eframe::wgpu::BufferDescriptor {
+            label: None,
+            size: (padded * height) as u64,
+            usage: eframe::wgpu::BufferUsages::COPY_DST | eframe::wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        enc.copy_texture_to_buffer(
+            eframe::wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: eframe::wgpu::Origin3d::ZERO,
+                aspect: eframe::wgpu::TextureAspect::All,
+            },
+            eframe::wgpu::TexelCopyBufferInfo {
+                buffer: &out,
+                layout: eframe::wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            eframe::wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([enc.finish()]);
+
+        let slice = out.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(eframe::wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(eframe::wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("polling the device should not fail");
+        rx.recv()
+            .expect("the map callback should fire")
+            .expect("readback");
+
+        let data = slice.get_mapped_range();
+        let mut lit = 0u32;
+        for y in 0..height {
+            for x in 0..width {
+                let i = (y * padded + x * 4) as usize;
+                let px = &data[i..i + 4];
+                if px[0] > 8 || px[1] > 8 || px[2] > 8 {
+                    lit += 1;
+                }
+            }
+        }
+        // Dump the frame so it can be looked at rather than described. A
+        // wireframe cube was being judged from a paragraph of numbers; the
+        // renderer was wrong four times in a row and none of it showed up in a
+        // test.
+        if let Ok(path) = std::env::var("PC_DUMP") {
+            let mut raw = Vec::with_capacity((width * height * 3) as usize);
+            for y in 0..height {
+                for x in 0..width {
+                    let i = (y * padded + x * 4) as usize;
+                    raw.extend_from_slice(&data[i..i + 3]);
+                }
+            }
+            let _ = std::fs::write(path, raw);
+        }
+        drop(data);
+        out.unmap();
+
+        // The striped cube renders 76,315 lit pixels of a 320x240 frame. The
+        // threshold is well below that and deliberately not just above zero:
+        //
+        // - At `> 0` the test is worthless. An earlier shader rendered 2,678
+        //   pixels while still being wrong, so "something was drawn" passes on a
+        //   broken pipeline.
+        // - A cutoff calibrated high enough to catch the transpose (say 5,000)
+        //   is fragile: it encodes one scene's exact coverage and would fail on
+        //   any change to the demo cloud or the camera.
+        //
+        // So this asserts the property that was entirely absent when the
+        // pipeline drew nothing - that the frame contains the scene - and the
+        // transposition is covered separately by the eye-space test, which
+        // checks the matrix rather than its rasterised consequences.
+        //
+        // Verified: collapsing every sprite to a degenerate point renders 0 and
+        // this fails.
+        eprintln!("verts {} lit {lit}", verts.len());
+        assert!(
+            lit > 1_000,
+            "the point-cloud pipeline rendered only {lit} lit pixels of \
+             {width}x{height}. A shader that compiles, a pipeline that builds and \
+             a buffer that uploads can all be true of an empty framebuffer; only \
+             reading the pixels back tells the two apart."
+        );
+    }
+
+    /// A point radius in pixels converts to NDC by dividing by half the
+    /// viewport width, and nothing else.
+    ///
+    /// NDC spans -1..1 across the viewport, so it *is* the screen: a radius of
+    /// `R` pixels covers `R / (width / 2)` NDC at every depth. Two earlier
+    /// versions of this line got the units wrong in opposite directions - one
+    /// produced sub-pixel sprites, the next produced 192 px discs that filled
+    /// the frame - so the conversion is pinned here rather than only observed in
+    /// a rendered frame.
+    #[test]
+    fn a_point_radius_in_pixels_is_constant_on_screen() {
+        let width = 320.0f32;
+        let height = 240.0f32;
+        let radius_px = 4.0f32;
+        let radius_ndc = radius_px / (width * 0.5);
+        assert!(
+            (radius_ndc - 0.025).abs() < 1e-6,
+            "4 px on a 320 px canvas is 0.025 NDC, got {radius_ndc}"
+        );
+        // Round-tripping back to pixels must give the requested radius.
+        assert!((radius_ndc * width * 0.5 - radius_px).abs() < 1e-6);
+        // Each axis uses its own extent, so a non-square canvas keeps sprites
+        // circular in pixels rather than stretched by the aspect ratio.
+        let radius_ndc_y = radius_px / (height * 0.5);
+        assert!(
+            (radius_ndc_y * height * 0.5 - radius_px).abs() < 1e-6,
+            "the y axis must convert back to the same pixel radius"
+        );
+    }
+
     /// The demo scene must exist and be big enough to look at.
     ///
     /// The window used to open empty, with nothing drawn and no error - which
@@ -721,9 +1360,21 @@ mod tests {
     #[test]
     fn the_demo_cloud_has_points_and_something_to_see() {
         let pc = NativeViewer::demo_cloud();
+        // The striped faces are sampled as grids so the banding reads as a
+        // surface, which needs a few thousand points. A previous 5,000-point
+        // scene was unreadable because it was *random*, not because it was
+        // sparse - density is not the same as noise.
+        //
+        // The upper bound is the one that matters: too many points and the
+        // sprite fill rate collapses and the scene turns into a solid blob.
         assert!(
-            pc.points.len() > 1000,
-            "the demo cloud is only {} points",
+            pc.points.len() > 5_000,
+            "the demo cloud has only {} points, too sparse to read as a shape",
+            pc.points.len()
+        );
+        assert!(
+            pc.points.len() < 60_000,
+            "the demo cloud has {} points, which will saturate into a blob",
             pc.points.len()
         );
         // It must span a real volume, or the camera has nothing to orbit around.
@@ -760,8 +1411,15 @@ mod tests {
         assert!(pc.colors.is_none());
 
         let colors = colors_for(&pc, ColorMode::PerPoint);
+        // A colour per point, so the cloud still draws...
         assert_eq!(colors.len(), pc.points.len());
-        assert_ne!(colors[0], colors[1], "a z-ramp must vary with z");
+        // ...but not a height ramp. This test used to require the opposite, and
+        // that requirement is why the viewer showed a blue-green ramp while its
+        // colour mode read "per point".
+        assert_eq!(
+            colors[0], colors[1],
+            "with no colours given, PerPoint must be flat, not a z-ramp"
+        );
     }
 
     /// An existing colour array is passed through untouched.
@@ -786,10 +1444,29 @@ mod tests {
         assert_eq!(flat[0], flat[2], "flat mode must not vary with z");
 
         let height = colors_for(&pc, ColorMode::Height);
-        assert_ne!(height[0], height[2]);
-        // PerPoint on an uncolored cloud is the ramp, so it must match Height.
+        assert_ne!(height[0], height[2], "the height ramp must vary with z");
+
+        // `PerPoint` on a cloud with no colours must NOT be the height ramp.
+        //
+        // It used to be, and the test asserted exactly that - which is how a
+        // viewer showing a blue-green height ramp while its colour mode read
+        // "per point" survived. A mode that claims to show the cloud's own data
+        // and silently shows a different thing is worse than one that shows
+        // nothing: the ramp looks like data. Neutral grey says "no colour was
+        // given", which is what is true.
         let per_point = colors_for(&pc, ColorMode::PerPoint);
-        assert_eq!(per_point[1], height[1]);
+        assert_ne!(
+            per_point[1], height[1],
+            "PerPoint must not silently fall back to the height ramp"
+        );
+        assert_eq!(
+            per_point[0], per_point[2],
+            "PerPoint must not vary with z when no colours were given"
+        );
+
+        // All three modes must be distinguishable from each other.
+        assert_ne!(flat[1], height[1]);
+        assert_ne!(flat[1], per_point[1]);
     }
 
     #[test]
@@ -837,8 +1514,14 @@ mod tests {
         for (row, e) in ex.iter_mut().enumerate() {
             *e = (0..4).map(|col| m[row][col] * x[col]).sum();
         }
+        // The eye maps to the origin in x/y, and its w is the depth - which is
+        // 0 at the camera itself, since nothing is in front of it.
         approx([ex[0], ex[1], ex[2]], [0.0, 0.0, 0.0]);
-        assert!((ex[3] - 1.0).abs() < 1e-5);
+        assert!(
+            ex[3].abs() < 1e-5,
+            "the eye should have w = 0, got {}",
+            ex[3]
+        );
 
         let t = [0.0, 0.0, 0.0, 1.0];
         let mut et = [0.0; 4];
@@ -846,19 +1529,35 @@ mod tests {
             *e = (0..4).map(|col| m[row][col] * t[col]).sum();
         }
         approx([et[0], et[1], 0.0], [0.0, 0.0, 0.0]);
-        assert!((et[2] + 5.0).abs() < 1e-5, "target z was {}", et[2]);
+        let k = 1.0 / NativeViewer::FOV_SCALE;
+        assert!((et[2] + 5.0 * k).abs() < 1e-4, "target z was {}", et[2]);
+        // w is the depth: 5 units in front of a camera 5 units away.
+        assert!(
+            (et[3] - 5.0).abs() < 1e-5,
+            "target w (depth) was {}, expected 5",
+            et[3]
+        );
     }
 
-    /// The basis is orthonormal and right-handed, and the matrix is a rotation
-    /// plus translation rather than a projection: no perspective divide.
+    /// The basis is right-handed and scaled by the field of view.
+    ///
+    /// It is deliberately **not** asserted to be orthonormal: the rows carry
+    /// `1 / FOV_SCALE`, and `w` is the depth rather than 1. The old version of
+    /// this test asserted unit axis lengths and `w == 1`, which is what an
+    /// affine view matrix gives - and it is precisely why the missing
+    /// perspective was invisible to it.
     #[test]
     fn look_at_is_row_major_right_handed_and_affine() {
         let m = NativeViewer::look_at([2.0, 1.0, 3.0], [0.0, 0.5, -1.0], [0.0, 1.0, 0.0]);
 
         // Rows 0..=2 of the 3x3 part are the camera axes x, y, z.
+        let k = 1.0 / NativeViewer::FOV_SCALE;
         for i in 0..3 {
             let len = (m[i][0].powi(2) + m[i][1].powi(2) + m[i][2].powi(2)).sqrt();
-            assert!((len - 1.0).abs() < 1e-5, "axis {i} has length {len}");
+            assert!(
+                (len - k).abs() < 1e-5,
+                "axis {i} has length {len}, expected {k}"
+            );
             for j in 0..3 {
                 if i != j {
                     let d = m[i][0] * m[j][0] + m[i][1] * m[j][1] + m[i][2] * m[j][2];
@@ -866,16 +1565,35 @@ mod tests {
                 }
             }
         }
-        // Right-handed: x cross y = z.
+        // Right-handed: x cross y = z. Each row carries the same `1/FOV_SCALE`
+        // factor, so the cross product of two of them is that factor squared -
+        // dividing it out is what makes this a check on handedness rather than
+        // on the scale.
         let x = [m[0][0], m[0][1], m[0][2]];
         let y = [m[1][0], m[1][1], m[1][2]];
         let c = cross3(x, y);
-        approx(c, [m[2][0], m[2][1], m[2][2]]);
+        let k2 = k * k;
+        approx(
+            [c[0] / k2, c[1] / k2, c[2] / k2],
+            [m[2][0] / k, m[2][1] / k, m[2][2] / k],
+        );
 
-        // Affine: w stays 1 for any point.
-        let p = [7.0, -3.0, 2.0, 1.0];
-        let w: f32 = (0..4).map(|r| m[3][r] * p[r]).sum();
-        assert!((w - 1.0).abs() < 1e-5, "matrix is not affine: w = {w}");
+        // `w` is the depth in front of the camera, not a constant 1.
+        //
+        // This is the property the missing perspective broke: with an affine
+        // last row, `w` was 1 for every point, so nothing scaled with distance
+        // and the wheel dollied the camera without the scene changing size.
+        let eye_pos = [2.0, 1.0, 3.0];
+        let forward = normalize3(sub3([0.0, 0.5, -1.0], eye_pos));
+        for p in [[7.0, -3.0, 2.0, 1.0], [0.0, 0.5, -1.0, 1.0]] {
+            let w: f32 = (0..4).map(|r| m[3][r] * p[r]).sum();
+            let want =
+                p[0] * forward[0] + p[1] * forward[1] + p[2] * forward[2] - dot3(forward, eye_pos);
+            assert!(
+                (w - want).abs() < 1e-4,
+                "w should be the depth {want}, got {w}"
+            );
+        }
     }
 
     /// Degenerate input must not produce NaNs.
@@ -906,6 +1624,7 @@ mod tests {
             camera_pitch: 0.0,
             camera_dist: 2.5,
             target: [0.0, 0.0, 0.0],
+            drag_applied: egui::Vec2::ZERO,
         }
     }
 
@@ -1124,6 +1843,170 @@ mod tests {
         assert!(viewer.camera_dist >= 0.02);
     }
 
+    /// Orbit with a press followed by `frames` moves of `dx_per_frame` pixels.
+    fn viewer_after_drag(dx_per_frame: f32, frames: usize) -> NativeViewer {
+        let ctx = egui::Context::default();
+        let canvas = canvas_rect(&ctx);
+        let screen = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(800.0, 800.0),
+        ));
+        let from = canvas.center();
+        let mut viewer = headless_viewer();
+
+        let press = egui::RawInput {
+            screen_rect: screen,
+            events: vec![
+                egui::Event::PointerMoved(from),
+                egui::Event::PointerButton {
+                    pos: from,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = ctx.run(press, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let (_, response) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 420.0),
+                    egui::Sense::click_and_drag(),
+                );
+                viewer.handle_camera(&response, ctx);
+            });
+        });
+
+        for frame in 1..=frames {
+            let pos = from + egui::vec2(dx_per_frame * frame as f32, 0.0);
+            let input = egui::RawInput {
+                screen_rect: screen,
+                events: vec![egui::Event::PointerMoved(pos)],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let (_, response) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 420.0),
+                        egui::Sense::click_and_drag(),
+                    );
+                    viewer.handle_camera(&response, ctx);
+                });
+            });
+        }
+        viewer
+    }
+
+    /// The orbit follows how far the pointer travelled, not the frame rate.
+    ///
+    /// The camera is turned by a *per-frame* increment, so the increment has to
+    /// be the pointer's movement since the previous frame. `total_drag_delta()`
+    /// is the movement since the mouse went **down**: applied as an increment it
+    /// re-applies the whole gesture every frame, so one drag of 30 px orbits by
+    /// 1 + 2 + 3 = 6 times as much when it arrives in three 10 px frames as when
+    /// it arrives in one 30 px frame, and a slow drag spins the camera.
+    #[test]
+    fn the_orbit_follows_pointer_travel_not_the_frame_count() {
+        let one_frame = viewer_after_drag(30.0, 1).camera_yaw;
+        let three_frames = viewer_after_drag(10.0, 3).camera_yaw;
+        eprintln!("30 px in one frame -> yaw {one_frame}; 10 px in three -> {three_frames}");
+        assert!(
+            (one_frame - three_frames).abs() < 1e-4,
+            "the same 30 px of pointer travel must orbit the same amount \
+             however many frames it arrives in: 30 px in one frame gave yaw \
+             {one_frame}, 10 px in three frames gave {three_frames}"
+        );
+        let mut viewer = viewer_after_drag(30.0, 1);
+        viewer.camera_dist = 2.5;
+        assert!(
+            (one_frame - 9.375).abs() < 1e-3,
+            "30 px of drag at distance 2.5 is 30 * 0.5 * 2.5 / 4 = 9.375 degrees, \
+             got {one_frame}"
+        );
+    }
+
+    /// Framing the camera must survive any cloud, including one whose
+    /// coordinates are not finite.
+    ///
+    /// `PointCloud::points` is a public `Vec`, so a caller can hand the viewer a
+    /// cloud containing an infinity or a NaN. Seeded running bounds of
+    /// `f32::MAX`/`f32::MIN` let an infinite coordinate through, which made the
+    /// fitted radius - and `camera_dist` - infinite, and every entry of the view
+    /// matrix NaN: a blank canvas with no error shown anywhere.
+    #[test]
+    fn frame_bounds_survives_non_finite_points() {
+        let mut viewer = headless_viewer();
+        let mut cloud = PointCloud::default();
+        for x in [0.0f32, 1.0] {
+            for y in [0.0f32, 1.0] {
+                for z in [0.0f32, 1.0] {
+                    cloud.points.push(nalgebra::Point3::new(x, y, z));
+                }
+            }
+        }
+        cloud
+            .points
+            .push(nalgebra::Point3::new(f32::INFINITY, 0.0, 0.0));
+        cloud
+            .points
+            .push(nalgebra::Point3::new(f32::NAN, f32::NAN, f32::NAN));
+        viewer.clouds.push((Arc::new(cloud), usize::MAX));
+
+        viewer.frame_bounds();
+
+        assert_eq!(
+            viewer.target,
+            [0.5, 0.5, 0.5],
+            "the target is the centre of the finite points"
+        );
+        assert!(
+            viewer.camera_dist.is_finite() && viewer.camera_dist > 0.0,
+            "camera_dist must stay finite and positive, got {}",
+            viewer.camera_dist
+        );
+        for row in viewer.view_matrix() {
+            for v in row {
+                assert!(
+                    v.is_finite(),
+                    "the view matrix went non-finite: {:?}",
+                    viewer.view_matrix()
+                );
+            }
+        }
+
+        // Control: a cloud with no finite point at all is not data, so the
+        // camera must not move (and must not become infinite either).
+        let mut viewer = headless_viewer();
+        let mut junk = PointCloud::default();
+        junk.points.push(nalgebra::Point3::new(f32::NAN, 0.0, 0.0));
+        viewer.clouds.push((Arc::new(junk), usize::MAX));
+        let before = (viewer.target, viewer.camera_dist);
+        viewer.frame_bounds();
+        assert_eq!(
+            (viewer.target, viewer.camera_dist),
+            before,
+            "an all-non-finite cloud must leave the camera alone"
+        );
+
+        // Control: a finite cloud is still framed - centre plus a margin.
+        let mut viewer = headless_viewer();
+        let mut cube = PointCloud::default();
+        for x in [0.0f32, 2.0] {
+            for y in [0.0f32, 3.0] {
+                cube.points.push(nalgebra::Point3::new(x, y, -1.0));
+            }
+        }
+        viewer.clouds.push((Arc::new(cube), usize::MAX));
+        viewer.frame_bounds();
+        assert_eq!(viewer.target, [1.0, 1.5, -1.0]);
+        // Half-extents 1.0, 1.5, 0.0 -> the largest is 1.5, framed at 1.35x.
+        assert!(
+            (viewer.camera_dist - 1.5 / 0.5 * 1.35).abs() < 1e-5,
+            "camera_dist should frame the 1.5 half-extent, got {}",
+            viewer.camera_dist
+        );
+    }
+
     /// Where the canvas lands, for tests that need a point inside it.
     fn canvas_rect(ctx: &egui::Context) -> egui::Rect {
         let input = egui::RawInput {
@@ -1176,5 +2059,62 @@ mod tests {
                 assert!(v.is_finite());
             }
         }
+    }
+    /// The projection must be isotropic in **pixels**, not in NDC.
+    ///
+    /// `#[ignore]`d deliberately: this documents a real, measured gap that cannot be
+    /// closed without a rendering change, and asserting it would fail CI. Left
+    /// ignored rather than deleted so the property is not lost, and rather than
+    /// "fixed" blind.
+    ///
+    /// Both camera axes are scaled by the same `1 / FOV_SCALE` in `look_at`, and the
+    /// shader computes `clip = (eye.x + offset_x, eye.y + offset_y, z, eye.w)` with
+    /// **no aspect term**. NDC spans -1..1 across each axis independently, so equal
+    /// camera-space extents land on `W/2` and `H/2` pixels respectively - i.e. a
+    /// sphere of points renders as an ellipse whose axis ratio is the window's.
+    ///
+    /// The sprite path does it correctly: the offsets use `half_width` and
+    /// `half_height` separately, so a marker disc stays circular. Discs circular
+    /// while their layout is stretched is the inconsistency that shows only one of
+    /// the two can be right.
+    ///
+    /// Not fixed here because the correction belongs to the *pair* - either the
+    /// viewport must be threaded into `look_at`, or the shader must scale x by
+    /// `height / width` - and neither can be verified without driving the GUI, which
+    /// CI cannot do. The shader's viewport uniform has already been misread once: an
+    /// earlier attempt divided by it believing it held pixel dimensions when it
+    /// carried the NDC half-extent `(1, 1)`. Guessing a second time would be the
+    /// same mistake with the same absence of evidence.
+    #[test]
+    #[ignore = "documents an aspect-ratio gap; the fix needs a rendering change that cannot be verified in CI"]
+    fn the_projection_is_isotropic_in_pixels_across_a_non_square_viewport() {
+        // Camera 10 units along +z looking at the origin, so `forward` is -z.
+        let m = NativeViewer::look_at([0.0, 0.0, 10.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+
+        // Row-vector convention: `eye = world @ m`, then divide by `eye.w`.
+        let project = |p: [f32; 4]| -> [f32; 2] {
+            let mut eye = [0.0f32; 4];
+            for r in 0..4 {
+                eye[r] = (0..4).map(|c| m[c][r] * p[c]).sum();
+            }
+            [eye[0] / eye[3], eye[1] / eye[3]]
+        };
+
+        // The same camera-space offset along x and along y, at the same depth.
+        let ndc_x = project([1.0, 0.0, 0.0, 1.0])[0];
+        let ndc_y = project([0.0, 1.0, 0.0, 1.0])[1];
+
+        // Into pixels for a 2:1 viewport.
+        let (w, h) = (800.0f32, 400.0f32);
+        let px_x = ndc_x * w / 2.0;
+        let px_y = ndc_y * h / 2.0;
+
+        assert!(
+            (px_x - px_y).abs() < 1e-3,
+            "equal camera-space extents must cover equal pixel extents; got {px_x:.3} px \
+             along x and {px_y:.3} px along y for an {w:.0}x{h:.0} viewport, a ratio of \
+             {:.3} - the aspect ratio. The projection carries no aspect term.",
+            px_x / px_y
+        );
     }
 }

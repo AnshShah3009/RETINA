@@ -22,10 +22,15 @@ Given a backend type and workload hint:
 
 1. Collects global load from coordinator (200ms cache).
 2. Filters groups by: backend match, device health.
+   - **Default / Latency / Throughput / PowerSave / Require**: exact backend match
+     (a WebGPU request is not satisfied by Vulkan, and vice versa).
+   - **Prefer**: a GPU preference accepts any GPU group; CPU preference is exact.
 3. Skips low-priority groups for `Latency` hints.
 4. Selects: highest priority first, then lowest total device load.
 
 Total device load = local group load + remote process load (from coordinator).
+Callers that want "any accelerator" use `Prefer` or `best_gpu_or_cpu*` (which
+tries WebGPU then Vulkan explicitly).
 
 ### GPU scheduling (wait for VRAM, then CPU fallback)
 

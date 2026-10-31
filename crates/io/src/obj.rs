@@ -197,7 +197,7 @@ impl ObjMesh {
                     .map(|p| {
                         let idx_str = p.split('/').next().unwrap_or(p);
                         let i = idx_str
-                            .parse::<usize>()
+                            .parse::<i128>()
                             .map_err(|_| Error::ParseError(format!("Invalid face index: {}", p)))?;
                         if i == 0 {
                             return Err(Error::ParseError(format!(
@@ -205,16 +205,37 @@ impl ObjMesh {
                                 p
                             )));
                         }
-                        let idx = i - 1; // OBJ uses 1-based indexing
-                                         // Bound-check against the vertices read *so far*.
-                                         // Nothing else does: `ObjMesh` and `TriangleMesh` both
-                                         // store faces as `usize`, so a file-controlled index
-                                         // that addresses no vertex survives into a mesh whose
-                                         // every consumer indexes `vertices[face[k]]` - ICP,
-                                         // normals, rasterisation - and panics or reads
-                                         // unrelated memory. That includes a *forward*
-                                         // reference, which OBJ does not allow, and an index
-                                         // near `usize::MAX`.
+                        // OBJ indices are 1-based, and a *negative* index is
+                        // relative to the end of the vertex list read so far
+                        // (`-1` is the latest vertex). Streaming exporters
+                        // write `f -3 -2 -1`; it used to be rejected as an
+                        // invalid index.
+                        let idx = if i > 0 {
+                            usize::try_from(i - 1).unwrap_or(usize::MAX)
+                        } else {
+                            match usize::try_from(i.unsigned_abs())
+                                .ok()
+                                .and_then(|back| mesh.vertices.len().checked_sub(back))
+                            {
+                                Some(idx) => idx,
+                                None => {
+                                    return Err(Error::ParseError(format!(
+                                        "OBJ relative face index {i} reaches before the first \
+                                         vertex: only {} read so far (in: {line:?})",
+                                        mesh.vertices.len()
+                                    )))
+                                }
+                            }
+                        };
+                        // Bound-check against the vertices read *so far*.
+                        // Nothing else does: `ObjMesh` and `TriangleMesh` both
+                        // store faces as `usize`, so a file-controlled index
+                        // that addresses no vertex survives into a mesh whose
+                        // every consumer indexes `vertices[face[k]]` - ICP,
+                        // normals, rasterisation - and panics or reads
+                        // unrelated memory. That includes a *forward*
+                        // reference, which OBJ does not allow, and an index
+                        // near `usize::MAX`.
                         if idx >= mesh.vertices.len() {
                             return Err(Error::ParseError(format!(
                                 "OBJ face index {i} is out of range: only {} vertex/vertices \

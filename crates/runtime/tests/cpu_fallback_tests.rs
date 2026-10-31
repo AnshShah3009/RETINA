@@ -31,7 +31,7 @@ fn test_runtime_runner_device_id() {
 #[test]
 fn test_best_runner_available() {
     // best_runner should return some runner
-    let runner = best_runner();
+    let runner = best_runner().map(|(r, _)| r);
     assert!(runner.is_ok());
 }
 

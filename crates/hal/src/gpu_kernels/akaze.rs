@@ -288,7 +288,12 @@ pub fn akaze_contrast_k(ctx: &GpuContext, input: &Tensor<f32, GpuStorage<f32>>) 
     ))?;
 
     // Find 70th percentile
+    // The shader only bins nonzero gradients; an image with none has no
+    // contrast to estimate, and OpenCV falls back to 0.03 there too.
     let total_elements = hist.iter().sum::<u32>();
+    if total_elements == 0 {
+        return Ok(0.03);
+    }
     let target = (total_elements as f32 * 0.7) as u32;
     let mut sum = 0u32;
     for (i, &count) in hist.iter().enumerate() {

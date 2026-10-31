@@ -59,7 +59,25 @@ impl TriangleMesh {
 
                 let cross = e1.cross(&e2);
                 let norm = cross.norm();
-                if norm > 1e-9 {
+                // `cross` is the *unnormalised* normal, so `norm` is the
+                // triangle area and scales as L^2 - the square of the edge
+                // length. `norm > 1e-9` was therefore not a test for "this
+                // triangle has area", it was a test for "its edge is longer than
+                // about 3e-5", and the length it rejected moved with the world
+                // units the mesh happened to be stored in.
+                //
+                // Measured on a right triangle with legs `s` (so
+                // `|cross| = s^2`): s = 1 gives a unit normal, s = 1e-3 gives
+                // |cross| = 1e-6 > 1e-9 and is normalised, s = 1e-5 gives
+                // |cross| = 1e-10 < 1e-9 and the function returned the raw
+                // `[[0, 0, 1e-10]]` - a "normal" of length 1e-10 that no
+                // lighting or back-face test can use. A millimetre-unit
+                // reconstruction is exactly that mesh.
+                //
+                // `norm > 0.0` is the correct test: a non-zero cross product is
+                // already a direction, however short. It refuses exactly the
+                // zero-area case, where `norm` is exactly 0.0.
+                if norm > 0.0 {
                     cross / norm
                 } else {
                     Vector3::zeros()
@@ -80,10 +98,14 @@ impl TriangleMesh {
             }
         }
 
-        // Normalize
+        // Normalize. Same reasoning as `compute_face_normals`: the accumulated
+        // vector is a sum of unit face normals, so its length is a *count*, not
+        // an area - but the old `> 1e-9` still rejected a legitimate result
+        // whenever that count happened to be small, and still meant nothing
+        // geometric. `> 0.0` refuses only a genuinely zero sum.
         for normal in vertex_normals.iter_mut() {
             let norm = normal.norm();
-            if norm > 1e-9 {
+            if norm > 0.0 {
                 *normal /= norm;
             }
         }

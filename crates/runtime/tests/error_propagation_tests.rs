@@ -44,13 +44,49 @@ fn test_result_chaining() {
 
 #[test]
 fn test_device_not_found_error() {
-    // Getting a non-existent device should error
+    // Getting a non-existent device should report absence.
     use cv_runtime::device_registry::registry;
 
-    if let Ok(reg) = registry() {
-        // Default CPU should exist
-        let _ = reg.default_cpu();
-    }
+    // This test previously could not fail: it bound `default_cpu()` to `_` and
+    // asserted nothing at all, so it passed whether or not the registry worked.
+    // A test named for an error path that never checks the error path is worse
+    // than no test - it reads as coverage in any report counting tests.
+    let reg = registry().expect("the device registry should initialise");
+
+    // Control: the default CPU device must exist and be the one the registry
+    // nominates. Without this the absence check below could pass vacuously if
+    // the registry were simply empty.
+    let cpu = reg.default_cpu();
+    assert!(
+        reg.get_device(cpu.id()).is_some(),
+        "control: the default CPU device {:?} should be retrievable by id",
+        cpu.id()
+    );
+
+    // A device id that cannot exist: the registry only ever holds ids it was
+    // given, so one far outside any real allocation must be absent. Derived from
+    // what is actually registered rather than hardcoded, so this cannot become a
+    // false assertion if ids are renumbered.
+    let max_id = reg
+        .all_devices()
+        .iter()
+        .map(|d| d.id().0)
+        .max()
+        .unwrap_or(0);
+    let absent = DeviceId(max_id + 1000);
+
+    assert!(
+        reg.get_device(absent).is_none(),
+        "looking up {absent:?} returned a device, but the highest id in use is \
+         {max_id} - so that device cannot exist"
+    );
+
+    // And the same through the group's own lookup, which is the path a caller
+    // would actually take.
+    assert!(
+        !reg.all_devices().iter().any(|d| d.id() == absent),
+        "{absent:?} unexpectedly appears in all_devices()"
+    );
 }
 
 #[test]

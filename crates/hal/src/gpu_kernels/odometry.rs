@@ -329,7 +329,8 @@ pub fn compute_odometry(
                 let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
                 pass.set_pipeline(&reduce_pipeline);
                 pass.set_bind_group(0, &reduce_bg, &[]);
-                pass.dispatch_workgroups(workgroups, 1, 1);
+                let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(workgroups);
+                pass.dispatch_workgroups(wg_x, wg_y, wg_z);
             }
             ctx.submit(enc);
 
@@ -522,7 +523,8 @@ pub fn compute_odometry(
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(&reduce_pipeline);
             pass.set_bind_group(0, &reduce_bg, &[]);
-            pass.dispatch_workgroups(workgroups, 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(workgroups);
+            pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         ctx.submit(enc);
 

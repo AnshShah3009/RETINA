@@ -168,7 +168,9 @@ fn test_odometry_gpu_cpu_parity() {
     );
 
     // --- CPU path (via best_runner which will use CPU fallback) ---
-    let runner = cv_runtime::best_runner().expect("should get a runner");
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .expect("should get a runner");
     let cpu_result = compute_rgbd_odometry_ctx(
         &source_depth,
         &target_depth,

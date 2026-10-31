@@ -6,10 +6,33 @@
 use nalgebra::{Point3, Vector3};
 
 /// Axis-aligned bounding box.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aabb {
     pub min: Point3<f32>,
     pub max: Point3<f32>,
+    /// `false` until a point or another non-empty Aabb is merged in.
+    ///
+    /// This field exists because the obvious sentinel - `min = f32::MAX`,
+    /// `max = f32::MIN` - cannot express "empty". `f32::MIN` is the most
+    /// *negative* finite f32, so `max` could never rise above it, and an Aabb
+    /// that never received a point reported
+    ///
+    /// ```text
+    /// min = (3.403e38, 3.403e38, 3.403e38)
+    /// max = (-3.403e38, -3.403e38, -3.403e38)
+    /// ```
+    ///
+    /// with min greater than max on every axis. Two consequences, both measured:
+    /// `Aabb::from_points(&[])` returned exactly that, and `longest_axis()`
+    /// computed `max - min = -6.8e38`, which **overflows to -inf** in f32, so
+    /// both `d.x > d.y` and `d.y > d.z` were false and it returned axis 2 for
+    /// every input. In `build_recursive` that means a degenerate face - one with
+    /// a repeated index, so all three of its vertices coincide - silently
+    /// determines the split axis of the whole tree.
+    ///
+    /// Emptiness is now tracked explicitly, so an empty Aabb can be recognised
+    /// instead of being inferred from a corrupt range.
+    pub is_empty: bool,
 }
 
 impl Aabb {
@@ -17,6 +40,7 @@ impl Aabb {
         Self {
             min: Point3::new(f32::MAX, f32::MAX, f32::MAX),
             max: Point3::new(f32::MIN, f32::MIN, f32::MIN),
+            is_empty: true,
         }
     }
 
@@ -29,6 +53,7 @@ impl Aabb {
     }
 
     pub fn expand_point(&mut self, p: &Point3<f32>) {
+        self.is_empty = false;
         self.min.x = self.min.x.min(p.x);
         self.min.y = self.min.y.min(p.y);
         self.min.z = self.min.z.min(p.z);
@@ -38,7 +63,18 @@ impl Aabb {
     }
 
     pub fn merge(&self, other: &Aabb) -> Aabb {
+        // Merging an empty Aabb must leave the other untouched. Without this the
+        // sentinel values participated in the min/max, so merging two empties
+        // produced a third that still looked empty but could no longer be told
+        // apart from a real degenerate box.
+        if other.is_empty {
+            return self.clone();
+        }
+        if self.is_empty {
+            return other.clone();
+        }
         Aabb {
+            is_empty: false,
             min: Point3::new(
                 self.min.x.min(other.min.x),
                 self.min.y.min(other.min.y),
@@ -52,6 +88,10 @@ impl Aabb {
         }
     }
 
+    /// Midpoint of the box.
+    ///
+    /// An empty Aabb has no midpoint; the sentinel bounds would overflow here
+    /// too, so callers that can receive one must check [`Aabb::is_empty`] first.
     pub fn centroid(&self) -> Point3<f32> {
         Point3::new(
             (self.min.x + self.max.x) * 0.5,
@@ -62,6 +102,18 @@ impl Aabb {
 
     /// Slab-based ray-AABB intersection. Returns true if ray hits the box.
     pub fn intersect_ray(&self, origin: &Point3<f32>, inv_dir: &Vector3<f32>) -> bool {
+        // An empty box contains nothing, so no ray hits it.
+        //
+        // Measured before this guard: `intersect_ray` returned `true` for an
+        // empty Aabb from *every* origin and direction. The sentinel bounds make
+        // `max - min` overflow to -inf, so `tmin` and `tmax` both became
+        // non-finite and the final `tmax >= tmin.max(0.0)` comparison was
+        // decided by NaN ordering rather than by geometry. In a BVH traversal
+        // that is a subtree reported as hit for rays that pass nowhere near it,
+        // so the traversal descends into boxes it should have culled.
+        if self.is_empty {
+            return false;
+        }
         let t1 = (self.min.x - origin.x) * inv_dir.x;
         let t2 = (self.max.x - origin.x) * inv_dir.x;
         let t3 = (self.min.y - origin.y) * inv_dir.y;
@@ -76,6 +128,13 @@ impl Aabb {
     }
 
     fn longest_axis(&self) -> usize {
+        // An empty Aabb has no extent. Returning a fixed axis rather than
+        // subtracting the sentinel pair, which overflows to -inf and makes every
+        // comparison below false - that picked axis 2 for every input, including
+        // meshes whose geometry lies entirely in x.
+        if self.is_empty {
+            return 0;
+        }
         let d = self.max - self.min;
         if d.x > d.y && d.x > d.z {
             0
@@ -268,6 +327,13 @@ impl Bvh {
     }
 }
 
+/// Angular tolerance for "this ray is parallel to this triangle", as a
+/// dimensionless bound on `|cos(angle between ray and triangle normal)|`.
+///
+/// Chosen to match the absolute constant this test used to be, so the fix
+/// changes *scale* behaviour only and leaves the angular sharpness alone.
+const PARALLEL_EPS: f32 = 1e-9;
+
 /// Möller-Trumbore ray-triangle intersection.
 fn moller_trumbore(
     origin: &Point3<f32>,
@@ -280,7 +346,21 @@ fn moller_trumbore(
     let e2 = v2 - v0;
     let h = dir.cross(&e2);
     let a = e1.dot(&h);
-    if a.abs() < 1e-9 {
+    // `a` is twice the projected triangle area, so for a genuine hit it scales
+    // as L^2 - the *square* of the edge length. Comparing it against a fixed
+    // constant is therefore not an angular test, it is a size test, and the
+    // size it rejects moves with the world units the mesh happens to be stored
+    // in. Measured: an equilateral triangle of edge 1 hit dead-on gives
+    // |a| = 0.866; of edge 1e-3, |a| = 8.66e-7, below the 1e-6 threshold used
+    // to be in `raycasting::ray_triangle_intersection`; of edge 1e-5,
+    // |a| = 8.66e-11, below this function's own 1e-9. A metre-unit mesh of
+    // 1 mm triangles - exactly what a surface reconstruction emits - was
+    // rejected as "parallel to triangle".
+    //
+    // Normalising by |e1||e2| turns it back into what it was meant to be: a
+    // dimensionless bound on the angle between the ray and the normal.
+    let denom = e1.norm() * e2.norm();
+    if denom == 0.0 || a.abs() < PARALLEL_EPS * denom {
         return None;
     }
     let f = 1.0 / a;

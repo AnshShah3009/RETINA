@@ -12,6 +12,12 @@ wgpu = { workspace = true }
 egui-wgpu = "0.33.3"
 epaint = "0.33.3"
 bytemuck = { workspace = true }
+image = { workspace = true }
 
 [features]
 default = []
+
+[dev-dependencies]
+# The readback test drives the pipeline directly and needs to block on the
+# async wgpu calls.
+pollster = "0.4"

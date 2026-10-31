@@ -225,27 +225,16 @@ pub fn project_points_with_jacobian(
     })
 }
 
-/// Convert rotation matrix to Rodrigues axis-angle representation
+/// Convert rotation matrix to Rodrigues axis-angle representation.
+///
+/// Goes through a unit quaternion (Shepperd's method), which is stable over
+/// the whole range. The direct formula `theta / (2 sin theta) * (R - R^T)^vee`
+/// divides by `sin theta`, and near `theta = pi` both factors vanish, so the
+/// axis came out as noise: the rotation Jacobian built from it was off by
+/// 2.1e8 at theta = pi (axis (1, 2, 3)) and 5.3e5 at pi - 1e-7.
 fn rotation_matrix_to_rodrigues(r: &Matrix3<f64>) -> Vector3<f64> {
-    // Use Rodrigues formula: θ = arccos((trace(R) - 1) / 2)
-    let trace = r[(0, 0)] + r[(1, 1)] + r[(2, 2)];
-    let theta = ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos();
-
-    if theta.abs() < 1e-6 {
-        // Small angle approximation
-        Vector3::new(
-            (r[(2, 1)] - r[(1, 2)]) / 2.0,
-            (r[(0, 2)] - r[(2, 0)]) / 2.0,
-            (r[(1, 0)] - r[(0, 1)]) / 2.0,
-        )
-    } else {
-        let k = theta / (2.0 * theta.sin());
-        Vector3::new(
-            k * (r[(2, 1)] - r[(1, 2)]),
-            k * (r[(0, 2)] - r[(2, 0)]),
-            k * (r[(1, 0)] - r[(0, 1)]),
-        )
-    }
+    let rotation = nalgebra::Rotation3::from_matrix_unchecked(*r);
+    nalgebra::UnitQuaternion::from_rotation_matrix(&rotation).scaled_axis()
 }
 
 /// Convert Rodrigues axis-angle to rotation matrix
@@ -302,29 +291,32 @@ pub fn compute_projection_jacobians(
     jac_intr: &mut DMatrix<f64>,
     jac_dist: &mut DMatrix<f64>,
 ) -> cv_core::Result<()> {
-    // Use numerical differentiation for now (can optimize to analytical later)
+    // Numerical differentiation. Rotation columns are central differences
+    // with *both* sides rebuilt from `rvec`, so the derivative is of one
+    // consistent parametrisation; the forward difference used to compare
+    // `rodrigues(rvec + eps)` against `extrinsics.rotation` directly, which is
+    // only the same rotation when `rvec` reproduces it exactly.
     let eps = 1e-7;
     let row = 2 * point_idx;
 
-    // Jacobian w.r.t. rotation (3 parameters)
+    let project_with = |rotation: &Matrix3<f64>| {
+        let p_cam = rotation * p_obj.coords + extrinsics.translation;
+        let (xd, yd) = distortion.apply(p_cam[0] / p_cam[2], p_cam[1] / p_cam[2]);
+        (
+            intrinsics.fx * xd + intrinsics.cx,
+            intrinsics.fy * yd + intrinsics.cy,
+        )
+    };
+    let h = 1e-6;
     for k in 0..3 {
-        let mut rvec_pert = *rvec;
-        rvec_pert[k] += eps;
-        let r_pert = rodrigues_to_rotation_matrix(&rvec_pert);
-        let ext_pert = Pose::new(r_pert, extrinsics.translation);
-
-        let p_cam_pert = ext_pert.rotation * p_obj.coords + ext_pert.translation;
-        let x_pert = p_cam_pert[0] / p_cam_pert[2];
-        let y_pert = p_cam_pert[1] / p_cam_pert[2];
-        let (xd_pert, yd_pert) = distortion.apply(x_pert, y_pert);
-        let u_pert = intrinsics.fx * xd_pert + intrinsics.cx;
-        let v_pert = intrinsics.fy * yd_pert + intrinsics.cy;
-
-        let u = intrinsics.fx * xd + intrinsics.cx;
-        let v = intrinsics.fy * yd + intrinsics.cy;
-
-        jac_rot[(row, k)] = (u_pert - u) / eps;
-        jac_rot[(row + 1, k)] = (v_pert - v) / eps;
+        let mut plus = *rvec;
+        let mut minus = *rvec;
+        plus[k] += h;
+        minus[k] -= h;
+        let (up, vp) = project_with(&rodrigues_to_rotation_matrix(&plus));
+        let (um, vm) = project_with(&rodrigues_to_rotation_matrix(&minus));
+        jac_rot[(row, k)] = (up - um) / (2.0 * h);
+        jac_rot[(row + 1, k)] = (vp - vm) / (2.0 * h);
     }
 
     // Jacobian w.r.t. translation (3 parameters)

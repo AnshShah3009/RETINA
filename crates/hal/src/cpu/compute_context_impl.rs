@@ -40,26 +40,36 @@ impl ComputeContext for CpuBackend {
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-        dst.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-            for x in 0..w {
-                let mut sum = T::ZERO;
-                for ky in 0..kh {
-                    for kx in 0..kw {
-                        let src_y = y as isize + ky as isize - (kh / 2) as isize;
-                        let src_x = x as isize + kx as isize - (kw / 2) as isize;
-                        let val = match border::map_border_coord(src_x, src_y, w, h, &border_mode) {
-                            Some((ix, iy)) => src[iy * w + ix],
-                            None => match border_mode {
-                                BorderMode::Constant(v) => v,
-                                _ => T::ZERO,
-                            },
-                        };
-                        sum += val * k_data[ky * kw + kx];
+        // CHW: each channel plane is convolved on its own. Rows were indexed
+        // across all `c * h` of them while the border was mapped against `h`,
+        // so every row of planes 1.. was folded back into plane 0: a 1x1
+        // identity kernel on a 3-plane 2x2 image returned plane 0's rows in
+        // planes 1 and 2.
+        dst.par_chunks_mut(w)
+            .enumerate()
+            .for_each(|(row_idx, row)| {
+                let (plane, y) = (row_idx / h, row_idx % h);
+                let src = &src[plane * h * w..(plane + 1) * h * w];
+                for x in 0..w {
+                    let mut sum = T::ZERO;
+                    for ky in 0..kh {
+                        for kx in 0..kw {
+                            let src_y = y as isize + ky as isize - (kh / 2) as isize;
+                            let src_x = x as isize + kx as isize - (kw / 2) as isize;
+                            let val =
+                                match border::map_border_coord(src_x, src_y, w, h, &border_mode) {
+                                    Some((ix, iy)) => src[iy * w + ix],
+                                    None => match border_mode {
+                                        BorderMode::Constant(v) => v,
+                                        _ => T::ZERO,
+                                    },
+                                };
+                            sum += val * k_data[ky * kw + kx];
+                        }
                     }
+                    row[x] = sum;
                 }
-                row[x] = sum;
-            }
-        });
+            });
 
         Ok(Tensor {
             storage: output_storage,
@@ -160,128 +170,39 @@ impl ComputeContext for CpuBackend {
         low_threshold: T,
         high_threshold: T,
     ) -> Result<Tensor<T, S>> {
+        // `cv::Canny` on an 8-bit image (see `cpu::canny_opencv`): the input is
+        // rounded and saturated to 0..=255. No pre-blur, 3x3 Sobel, L1
+        // magnitude. The GPU backend runs the same integer algorithm.
         let (h, w) = input.shape.hw();
-        if h < 3 || w < 3 {
+        if input.shape.channels != 1 {
             return Err(crate::Error::InvalidInput(
-                "Canny requires image at least 3x3".into(),
+                "Canny requires a single-channel image".into(),
             ));
         }
-
-        // Step 1: Gaussian blur (sigma=1.4, ksize=5)
-        let blurred = self.gaussian_blur(input, T::from_f32(1.4), 5)?;
-
-        // Step 2: Sobel gradients
-        let (gx_tensor, gy_tensor) = self.sobel(&blurred, 1, 1, 3)?;
-        let gx = gx_tensor
+        let src = input
             .storage
             .as_slice()
-            .ok_or_else(|| crate::Error::MemoryError("Gx not on CPU".into()))?;
-        let gy = gy_tensor
-            .storage
-            .as_slice()
-            .ok_or_else(|| crate::Error::MemoryError("Gy not on CPU".into()))?;
+            .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
+        let px: Vec<u8> = src
+            .iter()
+            .map(|v| crate::cpu::canny_opencv::quantize_u8(Float::to_f32(*v)))
+            .collect();
+        let mask = crate::cpu::canny_opencv::canny_u8(
+            &px,
+            w,
+            h,
+            low_threshold.to_f32() as f64,
+            high_threshold.to_f32() as f64,
+            false,
+        );
 
-        // Step 3: Compute magnitude and direction
         let len = h * w;
-        let mut magnitude = vec![T::ZERO; len];
-        let mut direction = vec![0u8; len]; // 0=horiz, 1=diag45, 2=vert, 3=diag135
-
-        for i in 0..len {
-            let mx = gx[i].to_f32();
-            let my = gy[i].to_f32();
-            magnitude[i] = T::from_f32((mx * mx + my * my).sqrt());
-
-            // Quantize angle to 4 directions
-            let angle = my.atan2(mx).to_degrees();
-            let angle = if angle < 0.0 { angle + 180.0 } else { angle };
-            direction[i] = if !(22.5..157.5).contains(&angle) {
-                0 // horizontal edge -> suppress vertically
-            } else if angle < 67.5 {
-                1 // 45-degree
-            } else if angle < 112.5 {
-                2 // vertical edge -> suppress horizontally
-            } else {
-                3 // 135-degree
-            };
-        }
-
-        // Step 4: Non-maximum suppression
-        let mut nms_out = vec![T::ZERO; len];
-        nms_out
-            .par_chunks_mut(w)
-            .enumerate()
-            .for_each(|(y, row_out)| {
-                if y == 0 || y >= h - 1 {
-                    return;
-                }
-                for x in 1..w - 1 {
-                    let idx = y * w + x;
-                    let mag = magnitude[idx];
-                    let (n1, n2) = match direction[idx] {
-                        0 => (magnitude[idx - 1], magnitude[idx + 1]), // horizontal
-                        1 => (
-                            magnitude[(y - 1) * w + x - 1],
-                            magnitude[(y + 1) * w + x + 1],
-                        ), // 45 (gradient (+,+): thin along the main diagonal)
-                        2 => (magnitude[(y - 1) * w + x], magnitude[(y + 1) * w + x]), // vertical
-                        _ => (
-                            magnitude[(y - 1) * w + x + 1],
-                            magnitude[(y + 1) * w + x - 1],
-                        ), // 135 (gradient (+,-): thin along the anti-diagonal)
-                    };
-                    if mag >= n1 && mag >= n2 {
-                        row_out[x] = mag;
-                    }
-                }
-            });
-
-        // Step 5: Hysteresis thresholding
-        // Mark strong and weak edges
-        let mut edge_map = vec![0u8; len]; // 0=none, 1=weak, 2=strong
-        for i in 0..len {
-            if nms_out[i] >= high_threshold {
-                edge_map[i] = 2;
-            } else if nms_out[i] >= low_threshold {
-                edge_map[i] = 1;
-            }
-        }
-
-        // Trace weak edges connected to strong edges using iterative flood fill
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for y in 1..h - 1 {
-                for x in 1..w - 1 {
-                    let idx = y * w + x;
-                    if edge_map[idx] != 1 {
-                        continue;
-                    }
-                    // Check 8-connected neighbors for strong edge
-                    let has_strong = edge_map[(y - 1) * w + x - 1] == 2
-                        || edge_map[(y - 1) * w + x] == 2
-                        || edge_map[(y - 1) * w + x + 1] == 2
-                        || edge_map[y * w + x - 1] == 2
-                        || edge_map[y * w + x + 1] == 2
-                        || edge_map[(y + 1) * w + x - 1] == 2
-                        || edge_map[(y + 1) * w + x] == 2
-                        || edge_map[(y + 1) * w + x + 1] == 2;
-                    if has_strong {
-                        edge_map[idx] = 2;
-                        changed = true;
-                    }
-                }
-            }
-        }
-
-        // Build output: strong edges = 255, rest = 0 (matches canny.wgsl / OpenCV)
         let mut output_storage = S::new(len, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
-        for i in 0..len {
-            if edge_map[i] == 2 {
-                dst[i] = T::from_f32(255.0);
-            }
+        for (d, &m) in dst.iter_mut().zip(&mask) {
+            *d = T::from_f32(m as f32);
         }
 
         Ok(Tensor {
@@ -308,83 +229,55 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
 
-        let rho_f = rho.to_f32();
-        let theta_f = theta.to_f32();
-
-        // Accumulator dimensions
-        let diag = ((w * w + h * h) as f32).sqrt();
-        let num_rho = ((2.0 * diag) / rho_f.max(1e-6)).ceil() as usize + 1;
-        let num_theta = (std::f32::consts::PI / theta_f.max(1e-6)).ceil() as usize;
+        // Layout, binning and peak rule live in `cpu::hough_standard` so the GPU
+        // backend reports exactly the same lines.
+        let layout =
+            crate::cpu::hough_standard::HoughLayout::new(w, h, rho.to_f32(), theta.to_f32());
+        let (num_rho, num_theta) = (layout.num_rho, layout.num_theta);
 
         // Check for overflow in accumulator size
         let acc_size = num_rho
             .checked_mul(num_theta)
             .ok_or_else(|| crate::Error::InvalidInput("Hough accumulator size too large".into()))?;
 
-        // Precompute sin/cos tables
-        let cos_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).cos()).collect();
-        let sin_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).sin()).collect();
+        let (cos_table, sin_table) = layout.trig_tables();
 
-        let rho_offset = diag; // rho can be negative, shift by diagonal
-
-        // Accumulate votes (parallel per row, then merge)
-        let row_accums: Vec<Vec<u32>> = (0..h)
+        // Accumulate votes. One accumulator per rayon *task*, not per image
+        // row: a per-row `vec![0; acc_size]` held h accumulators at once -
+        // at 1920x1080 with rho = 1, theta = 1 deg that is 793k bins x 4 B x
+        // 1080 rows, ~3.4 GB - and then summed them all serially.
+        let accumulator = (0..h)
             .into_par_iter()
-            .map(|y| {
-                let mut acc = vec![0u32; acc_size];
-                for x in 0..w {
-                    if src[y * w + x] > T::ZERO {
-                        let xf = x as f32;
-                        let yf = y as f32;
-                        for t in 0..num_theta {
-                            let r = xf * cos_table[t] + yf * sin_table[t];
-                            let r_idx = ((r + rho_offset) / rho_f).round() as usize;
-                            if r_idx < num_rho {
-                                if let Some(idx) =
-                                    t.checked_mul(num_rho).and_then(|v| v.checked_add(r_idx))
-                                {
-                                    if idx < acc_size {
-                                        acc[idx] += 1;
-                                    }
+            .fold(
+                || vec![0u32; acc_size],
+                |mut acc, y| {
+                    for x in 0..w {
+                        if src[y * w + x] > T::ZERO {
+                            for t in 0..num_theta {
+                                let k = layout.bin(x, y, cos_table[t], sin_table[t]);
+                                if let Some(i) = layout.index(t, k) {
+                                    acc[i] += 1;
                                 }
                             }
                         }
                     }
-                }
-                acc
-            })
-            .collect();
-
-        // Merge accumulators
-        let mut accumulator = vec![0u32; acc_size];
-        for row_acc in &row_accums {
-            for i in 0..accumulator.len() {
-                accumulator[i] += row_acc[i];
-            }
-        }
-
-        // Extract peaks above threshold
-        let mut lines = Vec::new();
-        for t in 0..num_theta {
-            for r in 0..num_rho {
-                if let Some(idx) = t.checked_mul(num_rho).and_then(|v| v.checked_add(r)) {
-                    if idx < acc_size {
-                        let votes = accumulator[idx];
-                        if votes >= threshold {
-                            let rho_val = r as f32 * rho_f - rho_offset;
-                            let theta_val = t as f32 * theta_f;
-                            lines.push(cv_core::HoughLine {
-                                rho: rho_val,
-                                theta: theta_val,
-                                score: votes,
-                            });
-                        }
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0u32; acc_size],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(&b) {
+                        *x += y;
                     }
-                }
-            }
-        }
+                    a
+                },
+            );
 
-        Ok(lines)
+        // OpenCV's `findLocalMaximums`, strongest first (see `cpu::hough_standard`).
+        // Without the local-maximum test a single 64-px segment came back as
+        // three lines (theta 1.553/1.571/1.588, votes 58/64/57).
+        Ok(layout.peaks(&accumulator, threshold))
     }
 
     fn hough_circles<
@@ -818,6 +711,11 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Right image not on CPU".into()))?;
 
+        if left.shape.channels != 1 || right.shape.channels != 1 {
+            return Err(crate::Error::InvalidInput(
+                "stereo_match expects single-channel (grayscale) images".into(),
+            ));
+        }
         let (h, w) = left.shape.hw();
         let (rh, rw) = right.shape.hw();
         if h != rh || w != rw {
@@ -831,7 +729,24 @@ impl ComputeContext for CpuBackend {
         let min_disp = params.min_disparity;
         let num_disp = params.num_disparities;
 
-        let mut output_storage = OS::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
+        // Border pixels are "no match", and the sentinel says so explicitly.
+        //
+        // The buffer was previously initialised to `T::ZERO`, so a border pixel
+        // read back as disparity 0.0 - which is a *valid* disparity for any
+        // matcher whose range includes 0. The GPU shader writes -1.0 for the same
+        // pixels (`crates/hal/shaders/stereo_match.wgsl` line ~47), so the two
+        // backends disagreed: measured, CPU `[0,0,0,...]` against GPU
+        // `[-1,-1,-1,...]` around the border ring.
+        //
+        // `disparity_to_depth` happens to filter `d < 0.5`, which catches both, so
+        // nothing downstream was corrupted - but a caller reading the raw map
+        // cannot tell a border pixel from a genuine zero-disparity match, and the
+        // two backends returning different values for the same input is exactly
+        // the divergence the parity suite exists to catch. That suite only found
+        // it once the probe actually asserted instead of printing.
+        const NO_MATCH: f32 = -1.0;
+        let mut output_storage =
+            OS::new(h * w, T::from_f32(NO_MATCH)).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
@@ -846,8 +761,12 @@ impl ComputeContext for CpuBackend {
                     continue;
                 }
 
+                // NO_MATCH unless some disparity could actually be tested.
+                // Starting from 0 reported disparity 0 - a valid value - for
+                // pixels where every candidate fell outside the right image
+                // (e.g. `min_disparity = 8` near the left edge).
                 let mut best_sad = T::from_f32(f32::MAX);
-                let mut best_disp = T::ZERO;
+                let mut best_disp = T::from_f32(NO_MATCH);
 
                 for d in 0..num_disp {
                     let disp = min_disp + d;
@@ -1577,85 +1496,89 @@ impl ComputeContext for CpuBackend {
         let mut next = vec![0u8; src_data.len()];
 
         for _ in 0..iterations {
-            let src = &current;
-            next.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
-                let y = y as isize;
-                let mut x = 0;
+            // CHW planes are eroded/dilated independently (see convolve_2d).
+            next.par_chunks_mut(w)
+                .enumerate()
+                .for_each(|(row_idx, row_out)| {
+                    let plane = row_idx / h;
+                    let src = &current[plane * h * w..(plane + 1) * h * w];
+                    let y = (row_idx % h) as isize;
+                    let mut x = 0;
 
-                // SIMD path (32 pixels at a time)
-                while x + 32 <= w {
-                    let mut res_v = u8x32::splat(identity);
+                    // SIMD path (32 pixels at a time)
+                    while x + 32 <= w {
+                        let mut res_v = u8x32::splat(identity);
 
-                    for ky in 0..kh {
-                        let sy_raw = y + ky as isize - cy as isize;
+                        for ky in 0..kh {
+                            let sy_raw = y + ky as isize - cy as isize;
 
-                        for kx in 0..kw {
-                            if k_data[ky * kw + kx] == 0 {
-                                continue;
-                            }
+                            for kx in 0..kw {
+                                if k_data[ky * kw + kx] == 0 {
+                                    continue;
+                                }
 
-                            // If the source row is out of bounds, use identity element
-                            if sy_raw < 0 || sy_raw >= h as isize {
-                                // identity element: no effect on min/max
-                                continue;
-                            }
-                            let sy = sy_raw as usize;
-                            let row_src = &src[sy * w..(sy + 1) * w];
-                            let sx_base = x as isize + kx as isize - cx as isize;
+                                // If the source row is out of bounds, use identity element
+                                if sy_raw < 0 || sy_raw >= h as isize {
+                                    // identity element: no effect on min/max
+                                    continue;
+                                }
+                                let sy = sy_raw as usize;
+                                let row_src = &src[sy * w..(sy + 1) * w];
+                                let sx_base = x as isize + kx as isize - cx as isize;
 
-                            // Load 32 bytes, using identity for out-of-bounds columns
-                            let mut bytes = [identity; 32];
-                            for i in 0..32 {
-                                let sx = sx_base + i as isize;
-                                if sx >= 0 && sx < w as isize {
-                                    bytes[i] = row_src[sx as usize];
+                                // Load 32 bytes, using identity for out-of-bounds columns
+                                let mut bytes = [identity; 32];
+                                for i in 0..32 {
+                                    let sx = sx_base + i as isize;
+                                    if sx >= 0 && sx < w as isize {
+                                        bytes[i] = row_src[sx as usize];
+                                    }
+                                }
+
+                                let v = u8x32::from(bytes);
+                                if typ == MorphologyType::Erode {
+                                    res_v = res_v.min(v);
+                                } else {
+                                    res_v = res_v.max(v);
                                 }
                             }
-
-                            let v = u8x32::from(bytes);
-                            if typ == MorphologyType::Erode {
-                                res_v = res_v.min(v);
-                            } else {
-                                res_v = res_v.max(v);
-                            }
                         }
+
+                        let res_arr: [u8; 32] = res_v.into();
+                        row_out[x..x + 32].copy_from_slice(&res_arr);
+                        x += 32;
                     }
 
-                    let res_arr: [u8; 32] = res_v.into();
-                    row_out[x..x + 32].copy_from_slice(&res_arr);
-                    x += 32;
-                }
-
-                // Scalar tail
-                for cx_idx in x..w {
-                    let mut val = identity;
-                    for ky in 0..kh {
-                        let sy_raw = y + ky as isize - cy as isize;
-                        for kx in 0..kw {
-                            if k_data[ky * kw + kx] == 0 {
-                                continue;
-                            }
-                            let sx_raw = cx_idx as isize + kx as isize - cx as isize;
-                            // Use identity element for out-of-bounds pixels
-                            let v = if sy_raw < 0
-                                || sy_raw >= h as isize
-                                || sx_raw < 0
-                                || sx_raw >= w as isize
-                            {
-                                identity
-                            } else {
-                                src[sy_raw as usize * w + sx_raw as usize]
-                            };
-                            if typ == MorphologyType::Erode {
-                                val = val.min(v);
-                            } else {
-                                val = val.max(v);
+                    // Scalar tail
+                    for cx_idx in x..w {
+                        let mut val = identity;
+                        for ky in 0..kh {
+                            let sy_raw = y + ky as isize - cy as isize;
+                            for kx in 0..kw {
+                                if k_data[ky * kw + kx] == 0 {
+                                    continue;
+                                }
+                                let sx_raw = cx_idx as isize + kx as isize - cx as isize;
+                                // Use identity element for out-of-bounds pixels
+                                let v = if sy_raw < 0
+                                    || sy_raw >= h as isize
+                                    || sx_raw < 0
+                                    || sx_raw >= w as isize
+                                {
+                                    identity
+                                } else {
+                                    src[sy_raw as usize * w + sx_raw as usize]
+                                };
+                                if typ == MorphologyType::Erode {
+                                    val = val.min(v);
+                                } else {
+                                    val = val.max(v);
+                                }
                             }
                         }
+                        row_out[cx_idx] = val;
                     }
-                    row_out[cx_idx] = val;
-                }
-            });
+                });
             std::mem::swap(&mut current, &mut next);
         }
 
@@ -1683,61 +1606,69 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
         let (nw, nh) = (new_shape.0, new_shape.1);
-        let mut output_storage = S::new(nw * nh, T::ZERO).map_err(crate::Error::MemoryError)?;
+        // Every CHW plane is warped; the output keeps the channel count. Only
+        // a single `nw * nh` plane was produced before, sampled from rows of
+        // the whole `c * h` buffer as if it were one plane.
+        let c = input.shape.channels.max(1);
+        let mut output_storage = S::new(c * nw * nh, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-        dst.par_chunks_mut(nw).enumerate().for_each(|(y, row_out)| {
-            for x in 0..nw {
-                let fx = T::from_f32(x as f32);
-                let fy = T::from_f32(y as f32);
+        dst.par_chunks_mut(nw)
+            .enumerate()
+            .for_each(|(row_idx, row_out)| {
+                let (plane, y) = (row_idx / nh, row_idx % nh);
+                let src = &src[plane * h * w..(plane + 1) * h * w];
+                for x in 0..nw {
+                    let fx = T::from_f32(x as f32);
+                    let fy = T::from_f32(y as f32);
 
-                let sw = matrix[2][0] * fx + matrix[2][1] * fy + matrix[2][2];
-                let sx = (matrix[0][0] * fx + matrix[0][1] * fy + matrix[0][2]) / sw;
-                let sy = (matrix[1][0] * fx + matrix[1][1] * fy + matrix[1][2]) / sw;
+                    let sw = matrix[2][0] * fx + matrix[2][1] * fy + matrix[2][2];
+                    let sx = (matrix[0][0] * fx + matrix[0][1] * fy + matrix[0][2]) / sw;
+                    let sy = (matrix[1][0] * fx + matrix[1][1] * fy + matrix[1][2]) / sw;
 
-                // The bound is inclusive of the last valid column/row. It was
-                // `sx < w - 1`, which excluded column `w - 1` entirely, so the
-                // final column of every destination row was never written and
-                // kept the zero it was initialised with - while the GPU shader
-                // sampled it correctly. On a 53-wide identity warp that is 89 of
-                // 1961 pixels wrong, and the CPU is the wrong one.
-                //
-                // `x1`/`y1` are then clamped rather than trusted: with `sx`
-                // reaching `w - 1` the naive `x0 + 1` would index one past the
-                // end of the row.
-                if sx >= T::ZERO
-                    && sx <= T::from_f32((w - 1) as f32)
-                    && sy >= T::ZERO
-                    && sy <= T::from_f32((h - 1) as f32)
-                {
-                    // Bilinear interpolation
-                    let x0 = sx.to_f32() as usize;
-                    let y0 = sy.to_f32() as usize;
-                    let x1 = (x0 + 1).min(w - 1);
-                    let y1 = (y0 + 1).min(h - 1);
-                    let dx = sx - T::from_f32(x0 as f32);
-                    let dy = sy - T::from_f32(y0 as f32);
-                    let one = T::ONE;
+                    // The bound is inclusive of the last valid column/row. It was
+                    // `sx < w - 1`, which excluded column `w - 1` entirely, so the
+                    // final column of every destination row was never written and
+                    // kept the zero it was initialised with - while the GPU shader
+                    // sampled it correctly. On a 53-wide identity warp that is 89 of
+                    // 1961 pixels wrong, and the CPU is the wrong one.
+                    //
+                    // `x1`/`y1` are then clamped rather than trusted: with `sx`
+                    // reaching `w - 1` the naive `x0 + 1` would index one past the
+                    // end of the row.
+                    if sx >= T::ZERO
+                        && sx <= T::from_f32((w - 1) as f32)
+                        && sy >= T::ZERO
+                        && sy <= T::from_f32((h - 1) as f32)
+                    {
+                        // Bilinear interpolation
+                        let x0 = sx.to_f32() as usize;
+                        let y0 = sy.to_f32() as usize;
+                        let x1 = (x0 + 1).min(w - 1);
+                        let y1 = (y0 + 1).min(h - 1);
+                        let dx = sx - T::from_f32(x0 as f32);
+                        let dy = sy - T::from_f32(y0 as f32);
+                        let one = T::ONE;
 
-                    let v00 = src[y0 * w + x0];
-                    let v10 = src[y0 * w + x1];
-                    let v01 = src[y1 * w + x0];
-                    let v11 = src[y1 * w + x1];
+                        let v00 = src[y0 * w + x0];
+                        let v10 = src[y0 * w + x1];
+                        let v01 = src[y1 * w + x0];
+                        let v11 = src[y1 * w + x1];
 
-                    let val = v00 * (one - dx) * (one - dy)
-                        + v10 * dx * (one - dy)
-                        + v01 * (one - dx) * dy
-                        + v11 * dx * dy;
-                    row_out[x] = val;
+                        let val = v00 * (one - dx) * (one - dy)
+                            + v10 * dx * (one - dy)
+                            + v01 * (one - dx) * dy
+                            + v11 * dx * dy;
+                        row_out[x] = val;
+                    }
                 }
-            }
-        });
+            });
 
         Ok(Tensor {
             storage: output_storage,
-            shape: TensorShape::new(1, nh, nw),
+            shape: TensorShape::new(c, nh, nw),
             dtype: input.dtype,
             _phantom: std::marker::PhantomData,
         })
@@ -1753,6 +1684,12 @@ impl ComputeContext for CpuBackend {
             .storage
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
+        if input.shape.channels != 1 {
+            return Err(crate::Error::InvalidInput(format!(
+                "nms expects a single-channel response map, got {} channels",
+                input.shape.channels
+            )));
+        }
         let (h, w) = input.shape.hw();
         let mut output_storage =
             S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
@@ -2641,13 +2578,15 @@ impl ComputeContext for CpuBackend {
         let vs = voxel_size.to_f32();
         let iso = iso_level.to_f32();
 
-        // Helper to get TSDF value at integer voxel coordinates
-        let get_tsdf = |ix: usize, iy: usize, iz: usize| -> f32 {
+        // TSDF value at integer voxel coordinates, or `None` if the voxel has
+        // never been observed (weight zero) or lies outside the volume. An
+        // unobserved voxel's value is a placeholder, not a distance.
+        let get_tsdf = |ix: usize, iy: usize, iz: usize| -> Option<f32> {
             if ix >= vx || iy >= vy || iz >= vz {
-                return 1.0;
+                return None;
             }
             let idx = iz * (vx * vy * 2) + (iy * vx + ix) * 2;
-            vol_data[idx].to_f32()
+            (vol_data[idx + 1].to_f32() > 0.0).then(|| vol_data[idx].to_f32())
         };
 
         // Standard marching cubes corner offsets (Paul Bourke numbering):
@@ -2995,10 +2934,24 @@ impl ComputeContext for CpuBackend {
         for iz in 0..vz.saturating_sub(1) {
             for iy in 0..vy.saturating_sub(1) {
                 for ix in 0..vx.saturating_sub(1) {
-                    // Get TSDF values at 8 corners
+                    // Get TSDF values at 8 corners. A cell with any
+                    // unobserved corner is skipped: meshing against the
+                    // zero-weight placeholder emitted a phantom back surface
+                    // wherever the observed band behind a wall met the
+                    // never-observed voxels further behind it.
                     let mut corners = [0.0f32; 8];
+                    let mut observed = true;
                     for (ci, &(dx, dy, dz)) in corner_offsets.iter().enumerate() {
-                        corners[ci] = get_tsdf(ix + dx, iy + dy, iz + dz);
+                        match get_tsdf(ix + dx, iy + dy, iz + dz) {
+                            Some(t) => corners[ci] = t,
+                            None => {
+                                observed = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !observed {
+                        continue;
                     }
 
                     // Determine cube index
@@ -3014,13 +2967,16 @@ impl ComputeContext for CpuBackend {
                         continue;
                     }
 
-                    // Compute world-space positions of the 8 corners
+                    // World-space positions of the 8 corners: voxel centres,
+                    // `(i + 0.5) * vs`, which is where `tsdf_integrate`
+                    // evaluated the distances. `i * vs` shifted every vertex
+                    // half a voxel toward the origin.
                     let positions: [[f32; 3]; 8] = core::array::from_fn(|i| {
                         let (dx, dy, dz) = corner_offsets[i];
                         [
-                            (ix + dx) as f32 * vs,
-                            (iy + dy) as f32 * vs,
-                            (iz + dz) as f32 * vs,
+                            ((ix + dx) as f32 + 0.5) * vs,
+                            ((iy + dy) as f32 + 0.5) * vs,
+                            ((iz + dz) as f32 + 0.5) * vs,
                         ]
                     });
 
@@ -3108,111 +3064,229 @@ impl ComputeContext for CpuBackend {
 
         use std::any::TypeId;
         if TypeId::of::<T>() == TypeId::of::<f32>() {
+            // Pyramidal Lucas-Kanade in Bouguet's formulation, the algorithm
+            // behind OpenCV's `calcOpticalFlowPyrLK`:
+            //
+            // * at level L the feature sits at `p / 2^L`; the template window of
+            //   `prev` (intensity and gradients) is sampled bilinearly around that
+            //   point - the feature itself, never the running estimate;
+            // * `next` is sampled bilinearly at `p / 2^L + g + v`, where `g` is the
+            //   guess carried down from the coarser level and `v` the in-level
+            //   residual flow; each solve updates `v` only;
+            // * the guess is propagated as `g = 2 (g + v)`.
+            //
+            // The previous version anchored an integer window at `round(u)` and
+            // sampled `next` at an *integer* offset `round(u) - anchor` while
+            // adding the solve to the fractional `u`, so the sub-pixel part was
+            // counted twice. A smooth image shifted by 2.3 px (window 21) came
+            // back as dx 2.155, 2.459, 2.763, 2.362, 1.864, 1.877 after 1, 2, 3,
+            // 5, 10, 20 iterations. At finer levels it also centred the template
+            // on the doubled tracked position rather than on the feature.
             let levels = prev_pyramid.len();
-            // Input points are in level-0 coordinates. The coarsest level
-            // (levels - 1) is scaled down by 2^(levels-1); each finer level then
-            // doubles the coordinates, matching the GPU path.
-            let coarsest_scale = 1.0 / (1 << (levels - 1)) as f32;
-            let mut scaled_points: Vec<[f32; 2]> = points
-                .iter()
-                .map(|&pt| {
-                    let pt_f: [f32; 2] = bytemuck::cast_slice(&[pt])[0];
-                    [pt_f[0] * coarsest_scale, pt_f[1] * coarsest_scale]
-                })
-                .collect();
 
-            for level in (0..levels).rev() {
-                let prev = &prev_pyramid[level];
-                let next = &next_pyramid[level];
-
-                let prev_data = prev
-                    .storage
-                    .as_slice()
-                    .ok_or_else(|| crate::Error::MemoryError("Prev not on CPU".into()))?;
-                let next_data = next
-                    .storage
-                    .as_slice()
-                    .ok_or_else(|| crate::Error::MemoryError("Next not on CPU".into()))?;
-
-                let prev_data_f32: &[f32] = bytemuck::cast_slice(prev_data);
-                let next_data_f32: &[f32] = bytemuck::cast_slice(next_data);
-
-                let (h, w) = prev.shape.hw();
-
-                let win = window_size as i32;
-                let half_win = win / 2;
-
-                let scaled: Vec<[f32; 2]> = scaled_points
-                    .par_iter()
-                    .map(|&pt| {
-                        let mut u = pt[0];
-                        let mut v = pt[1];
-
-                        for _ in 0..max_iters {
-                            let ix = u.round() as i32;
-                            let iy = v.round() as i32;
-
-                            if ix - half_win < 0
-                                || ix + half_win >= w as i32
-                                || iy - half_win < 0
-                                || iy + half_win >= h as i32
-                            {
-                                break;
-                            }
-
-                            let mut g: nalgebra::Matrix2<f32> = nalgebra::Matrix2::zeros();
-                            let mut b: nalgebra::Vector2<f32> = nalgebra::Vector2::zeros();
-
-                            for dy in -half_win..=half_win {
-                                for dx in -half_win..=half_win {
-                                    let x = ix + dx;
-                                    let y = iy + dy;
-
-                                    let i_x = (utils::get_pixel_cpu(prev_data_f32, w, h, x + 1, y)
-                                        - utils::get_pixel_cpu(prev_data_f32, w, h, x - 1, y))
-                                        * 0.5;
-                                    let i_y = (utils::get_pixel_cpu(prev_data_f32, w, h, x, y + 1)
-                                        - utils::get_pixel_cpu(prev_data_f32, w, h, x, y - 1))
-                                        * 0.5;
-
-                                    let next_val = utils::get_val_cpu(next_data_f32, w, h, x, y);
-                                    let i_t = next_val - utils::get_pixel_cpu(prev_data_f32, w, h, x, y);
-
-                                    g[(0, 0)] += i_x * i_x;
-                                    g[(0, 1)] += i_x * i_y;
-                                    g[(1, 0)] += i_x * i_y;
-                                    g[(1, 1)] += i_y * i_y;
-
-                                    b[0] -= i_x * i_t;
-                                    b[1] -= i_y * i_t;
-                                }
-                            }
-
-                            if let Some(delta) = g.try_inverse().map(|inv| inv * b) {
-                                u += delta[0];
-                                v += delta[1];
-                                if delta.norm_squared() < 0.01 {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                        [u, v]
-                    })
-                    .collect();
-
-                scaled_points = if level > 0 {
-                    // Carry the tracked position up to the next finer level.
-                    scaled.iter().map(|&p| [p[0] * 2.0, p[1] * 2.0]).collect()
-                } else {
-                    scaled
-                };
+            struct Level<'a> {
+                w: usize,
+                h: usize,
+                prev: &'a [f32],
+                next: &'a [f32],
+                gx: Vec<f32>,
+                gy: Vec<f32>,
             }
 
-            let results: Vec<[T; 2]> = scaled_points
-                .iter()
-                .map(|&pt| bytemuck::cast_slice(&[pt])[0])
+            let mut pyr: Vec<Level<'_>> = Vec::with_capacity(levels);
+            for level in 0..levels {
+                let prev = &prev_pyramid[level];
+                let next = &next_pyramid[level];
+                let (h, w) = prev.shape.hw();
+                if next.shape.hw() != (h, w) || w == 0 || h == 0 {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "optical_flow_lk: level {level} has prev {}x{} but next {}x{}",
+                        w,
+                        h,
+                        next.shape.hw().1,
+                        next.shape.hw().0
+                    )));
+                }
+                let prev_data: &[f32] = bytemuck::cast_slice(
+                    prev.storage
+                        .as_slice()
+                        .ok_or_else(|| crate::Error::MemoryError("Prev not on CPU".into()))?,
+                );
+                let next_data: &[f32] = bytemuck::cast_slice(
+                    next.storage
+                        .as_slice()
+                        .ok_or_else(|| crate::Error::MemoryError("Next not on CPU".into()))?,
+                );
+                if prev_data.len() < w * h || next_data.len() < w * h {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "optical_flow_lk: level {level} storage is smaller than {w}x{h}"
+                    )));
+                }
+
+                // Central-difference gradients of `prev`, computed once per level
+                // and sampled bilinearly at the template's sub-pixel positions.
+                let mut gx = vec![0.0f32; w * h];
+                let mut gy = vec![0.0f32; w * h];
+                gx.par_chunks_mut(w)
+                    .zip(gy.par_chunks_mut(w))
+                    .enumerate()
+                    .for_each(|(y, (rx, ry))| {
+                        let y = y as i32;
+                        for x in 0..w as i32 {
+                            rx[x as usize] = (utils::get_pixel_cpu(prev_data, w, h, x + 1, y)
+                                - utils::get_pixel_cpu(prev_data, w, h, x - 1, y))
+                                * 0.5;
+                            ry[x as usize] = (utils::get_pixel_cpu(prev_data, w, h, x, y + 1)
+                                - utils::get_pixel_cpu(prev_data, w, h, x, y - 1))
+                                * 0.5;
+                        }
+                    });
+                pyr.push(Level {
+                    w,
+                    h,
+                    prev: prev_data,
+                    next: next_data,
+                    gx,
+                    gy,
+                });
+            }
+
+            // Bilinear sample with replicated border.
+            fn bilinear(img: &[f32], w: usize, h: usize, x: f32, y: f32) -> f32 {
+                let x = x.clamp(0.0, (w - 1) as f32);
+                let y = y.clamp(0.0, (h - 1) as f32);
+                let x0 = (x.floor() as usize).min(w - 1);
+                let y0 = (y.floor() as usize).min(h - 1);
+                let x1 = (x0 + 1).min(w - 1);
+                let y1 = (y0 + 1).min(h - 1);
+                let ax = x - x0 as f32;
+                let ay = y - y0 as f32;
+                let top = img[y0 * w + x0] * (1.0 - ax) + img[y0 * w + x1] * ax;
+                let bot = img[y1 * w + x0] * (1.0 - ax) + img[y1 * w + x1] * ax;
+                top * (1.0 - ay) + bot * ay
+            }
+
+            let half_win = (window_size / 2) as i32;
+            // OpenCV's default termination: 0.01 px step.
+            const EPS2: f64 = 1e-4;
+
+            // Residual flow `v` at one level for the feature at `(px, py)` with the
+            // carried guess `g`. Zero when the template does not fit or is
+            // untextured, so the guess passes through unchanged.
+            let track_level = |lv: &Level<'_>, px: f32, py: f32, g: [f32; 2]| -> [f32; 2] {
+                let (w, h) = (lv.w, lv.h);
+                let hw = half_win as f32;
+                if !(px - hw >= 0.0
+                    && px + hw <= (w - 1) as f32
+                    && py - hw >= 0.0
+                    && py + hw <= (h - 1) as f32)
+                {
+                    return [0.0, 0.0];
+                }
+
+                let n = (2 * half_win + 1) as usize;
+                let mut tmpl = Vec::with_capacity(n * n);
+                let (mut a11, mut a12, mut a22) = (0.0f64, 0.0f64, 0.0f64);
+                for dy in -half_win..=half_win {
+                    for dx in -half_win..=half_win {
+                        let sx = px + dx as f32;
+                        let sy = py + dy as f32;
+                        let i0 = bilinear(lv.prev, w, h, sx, sy);
+                        let ix = bilinear(&lv.gx, w, h, sx, sy) as f64;
+                        let iy = bilinear(&lv.gy, w, h, sx, sy) as f64;
+                        a11 += ix * ix;
+                        a12 += ix * iy;
+                        a22 += iy * iy;
+                        tmpl.push((i0, ix, iy));
+                    }
+                }
+                let det = a11 * a22 - a12 * a12;
+                let tr = a11 + a22;
+                let min_eig = 0.5 * (tr - ((a11 - a22).powi(2) + 4.0 * a12 * a12).sqrt());
+                // Relative conditioning floor (shared with the GPU kernel): an
+                // untextured or aperture-limited window is not tracked.
+                if !det.is_finite() || det <= 0.0 || min_eig <= 1e-6 * tr {
+                    return [0.0, 0.0];
+                }
+                let inv_det = 1.0 / det;
+
+                let mut v = [0.0f64; 2];
+                let mut prev_delta = [0.0f64; 2];
+                for j in 0..max_iters {
+                    let cx = px as f64 + g[0] as f64 + v[0];
+                    let cy = py as f64 + g[1] as f64 + v[1];
+                    // Stop once the window centre leaves the frame.
+                    if !(cx.is_finite()
+                        && cy.is_finite()
+                        && cx >= 0.0
+                        && cx <= (w - 1) as f64
+                        && cy >= 0.0
+                        && cy <= (h - 1) as f64)
+                    {
+                        break;
+                    }
+                    let (mut b1, mut b2) = (0.0f64, 0.0f64);
+                    let mut k = 0;
+                    for dy in -half_win..=half_win {
+                        for dx in -half_win..=half_win {
+                            let j1 = bilinear(
+                                lv.next,
+                                w,
+                                h,
+                                (cx + dx as f64) as f32,
+                                (cy + dy as f64) as f32,
+                            );
+                            let (i0, ix, iy) = tmpl[k];
+                            let it = (j1 - i0) as f64;
+                            b1 += it * ix;
+                            b2 += it * iy;
+                            k += 1;
+                        }
+                    }
+                    // delta = -G^{-1} b
+                    let delta = [
+                        (a12 * b2 - a22 * b1) * inv_det,
+                        (a12 * b1 - a11 * b2) * inv_det,
+                    ];
+                    if !(delta[0].is_finite() && delta[1].is_finite()) {
+                        break;
+                    }
+                    v[0] += delta[0];
+                    v[1] += delta[1];
+                    if delta[0] * delta[0] + delta[1] * delta[1] <= EPS2 {
+                        break;
+                    }
+                    // OpenCV's oscillation guard: a step that undoes the previous
+                    // one means the minimum lies between them.
+                    if j > 0
+                        && (delta[0] + prev_delta[0]).abs() < 0.01
+                        && (delta[1] + prev_delta[1]).abs() < 0.01
+                    {
+                        v[0] -= 0.5 * delta[0];
+                        v[1] -= 0.5 * delta[1];
+                        break;
+                    }
+                    prev_delta = delta;
+                }
+                [v[0] as f32, v[1] as f32]
+            };
+
+            let results: Vec<[T; 2]> = points
+                .par_iter()
+                .map(|&pt| {
+                    let p0: [f32; 2] = bytemuck::cast_slice(&[pt])[0];
+                    let mut g = [0.0f32; 2];
+                    for level in (0..levels).rev() {
+                        let s = 1.0 / (1u32 << level) as f32;
+                        let v = track_level(&pyr[level], p0[0] * s, p0[1] * s, g);
+                        g = [g[0] + v[0], g[1] + v[1]];
+                        if level > 0 {
+                            g = [2.0 * g[0], 2.0 * g[1]];
+                        }
+                    }
+                    let out = [p0[0] + g[0], p0[1] + g[1]];
+                    bytemuck::cast_slice(&[out])[0]
+                })
                 .collect();
 
             Ok(results)
@@ -3510,31 +3584,33 @@ impl ComputeContext for CpuBackend {
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-        let src_width_f = T::from_f32(w as f32 - 1.0);
-        let src_height_f = T::from_f32(h as f32 - 1.0);
-        let dst_width_f = T::from_f32((nw.max(1) - 1) as f32);
-        let dst_height_f = T::from_f32((nh.max(1) - 1) as f32);
+        let src_width_f = T::from_f32(w as f32);
+        let src_height_f = T::from_f32(h as f32);
+        let dst_width_f = T::from_f32(nw.max(1) as f32);
+        let dst_height_f = T::from_f32(nh.max(1) as f32);
 
         dst.par_chunks_mut(nw * c)
             .enumerate()
             .for_each(|(y, row_out)| {
                 for x in 0..nw {
-                    // Align-corners mapping. Lower-bound in float; upper-bound index
-                    // clamp in integer space so f32(w-1) rounding cannot OOB.
-                    let fx = if nw <= 1 {
-                        T::ZERO
-                    } else {
-                        let v = T::from_f32(x as f32) * src_width_f / dst_width_f;
+                    // Half-pixel mapping (OpenCV `resize` semantics): output
+                    // pixel x samples `(x + 0.5) * w / nw - 0.5`. Positions
+                    // below 0 clamp to the edge; the upper-bound index clamp is
+                    // in integer space so f32 rounding cannot OOB.
+                    let fx = {
+                        let v = (T::from_f32(x as f32) + T::from_f32(0.5)) * src_width_f
+                            / dst_width_f
+                            - T::from_f32(0.5);
                         if v < T::ZERO {
                             T::ZERO
                         } else {
                             v
                         }
                     };
-                    let fy = if nh <= 1 {
-                        T::ZERO
-                    } else {
-                        let v = T::from_f32(y as f32) * src_height_f / dst_height_f;
+                    let fy = {
+                        let v = (T::from_f32(y as f32) + T::from_f32(0.5)) * src_height_f
+                            / dst_height_f
+                            - T::from_f32(0.5);
                         if v < T::ZERO {
                             T::ZERO
                         } else {
@@ -3632,8 +3708,16 @@ impl ComputeContext for CpuBackend {
         // OpenCV derives sigma from the kernel size when sigma <= 0; use
         // unit sigma here.
         let one = T::ONE;
-        let sigma_color_eff = if sigma_color > T::ZERO { sigma_color } else { one };
-        let sigma_space_eff = if sigma_space > T::ZERO { sigma_space } else { one };
+        let sigma_color_eff = if sigma_color > T::ZERO {
+            sigma_color
+        } else {
+            one
+        };
+        let sigma_space_eff = if sigma_space > T::ZERO {
+            sigma_space
+        } else {
+            one
+        };
         let color_coeff = T::from_f32(-0.5) / (sigma_color_eff * sigma_color_eff);
         let space_coeff = T::from_f32(-0.5) / (sigma_space_eff * sigma_space_eff);
 
@@ -4025,7 +4109,11 @@ impl ComputeContext for CpuBackend {
                     }
                 }
 
-                if best_dist as f32 <= ratio_threshold * second_best as f32 {
+                // An empty train set leaves `best_dist` at its sentinel; with
+                // `ratio >= 1` the test below passed (`MAX <= MAX`) and a match
+                // to train index 0 - which does not exist - was fabricated.
+                if best_dist != u32::MAX && best_dist as f32 <= ratio_threshold * second_best as f32
+                {
                     Some(cv_core::FeatureMatch::new(
                         qi as i32,
                         best_idx as i32,
@@ -4225,12 +4313,17 @@ impl ComputeContext for CpuBackend {
                     }
                     let norm_inv = 1.0 / (norm_sq.sqrt() + 1e-7);
 
-                    let data: Vec<u8> = hist
+                    // Lowe / OpenCV: clamp each normalised bin at 0.2, then
+                    // *renormalise*, scale by 512 and round. Skipping the
+                    // second normalisation left clamped descriptors shorter
+                    // than unit length - and different from the GPU path,
+                    // which does renormalise - shifting every distance.
+                    let clamped: Vec<f32> = hist.iter().map(|&v| (v * norm_inv).min(0.2)).collect();
+                    let norm2 = clamped.iter().map(|v| v * v).sum::<f32>().sqrt();
+                    let scale = 512.0 / norm2.max(f32::EPSILON);
+                    let data: Vec<u8> = clamped
                         .iter()
-                        .map(|&v| {
-                            let norm_v = (v * norm_inv).min(0.2);
-                            ((norm_v * 512.0).min(255.0)) as u8
-                        })
+                        .map(|&v| (v * scale).round().clamp(0.0, 255.0) as u8)
                         .collect();
 
                     cv_core::Descriptor::new(data, *kp)
@@ -4536,19 +4629,22 @@ impl ComputeContext for CpuBackend {
                 let y = y as i32;
                 for x in 0..w {
                     let x = x as i32;
-                    let lx = (get_val(x + 1, y - 1)
-                        + T::from_f32(3.0) * get_val(x + 1, y)
-                        + get_val(x + 1, y + 1))
-                        - (get_val(x - 1, y - 1)
-                            + T::from_f32(3.0) * get_val(x - 1, y)
-                            + get_val(x - 1, y + 1));
+                    // Scharr: [3, 10, 3] smoothing, central difference,
+                    // / 32 for unit gain on a unit ramp. The taps were
+                    // [1, 3, 1], a gain of 10/32 = 0.3125.
+                    let lx = (T::from_f32(3.0) * get_val(x + 1, y - 1)
+                        + T::from_f32(10.0) * get_val(x + 1, y)
+                        + T::from_f32(3.0) * get_val(x + 1, y + 1))
+                        - (T::from_f32(3.0) * get_val(x - 1, y - 1)
+                            + T::from_f32(10.0) * get_val(x - 1, y)
+                            + T::from_f32(3.0) * get_val(x - 1, y + 1));
 
-                    let ly = (get_val(x - 1, y + 1)
-                        + T::from_f32(3.0) * get_val(x, y + 1)
-                        + get_val(x + 1, y + 1))
-                        - (get_val(x - 1, y - 1)
-                            + T::from_f32(3.0) * get_val(x, y - 1)
-                            + get_val(x + 1, y - 1));
+                    let ly = (T::from_f32(3.0) * get_val(x - 1, y + 1)
+                        + T::from_f32(10.0) * get_val(x, y + 1)
+                        + T::from_f32(3.0) * get_val(x + 1, y + 1))
+                        - (T::from_f32(3.0) * get_val(x - 1, y - 1)
+                            + T::from_f32(10.0) * get_val(x, y - 1)
+                            + T::from_f32(3.0) * get_val(x + 1, y - 1));
 
                     row_lx[x as usize] = lx / T::from_f32(32.0);
                     row_ly[x as usize] = ly / T::from_f32(32.0);
@@ -4601,7 +4697,14 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
 
-        // Sample gradients
+        // Sample gradients. Zero gradients are excluded, as OpenCV's
+        // `compute_k_percentile` does: on a mostly flat image (a small bright
+        // square on black, blurred) they put the 70th percentile at k = 0, and
+        // the Perona-Malik conductance `1 / (1 + |grad|^2 / k^2)` then turned
+        // 4032 of 4096 pixels into NaN (`0 / 0`) in a single diffusion step.
+        if h < 3 || w < 3 {
+            return Ok(T::from_f32(0.03));
+        }
         let mut mags: Vec<T> = (1..h - 1)
             .into_par_iter()
             .flat_map(|y| {
@@ -4609,7 +4712,10 @@ impl ComputeContext for CpuBackend {
                 for x in 1..w - 1 {
                     let lx = src[y * w + x + 1] - src[y * w + x - 1];
                     let ly = src[(y + 1) * w + x] - src[(y - 1) * w + x];
-                    row_mags.push((lx * lx + ly * ly).sqrt());
+                    let mag = (lx * lx + ly * ly).sqrt();
+                    if mag > T::ZERO {
+                        row_mags.push(mag);
+                    }
                 }
                 row_mags
             })

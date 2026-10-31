@@ -102,9 +102,17 @@ pub fn lfilter(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
     assert!(!a.is_empty() && a[0] != 0.0, "a[0] must be nonzero");
     assert!(!b.is_empty(), "b must be non-empty");
 
-    let a0 = a[0];
     let order = b.len().max(a.len());
     let mut z = vec![0.0; order]; // delay line
+    lfilter_state(b, a, x, &mut z)
+}
+
+/// `lfilter` with an explicit delay-line state (length `max(b.len(), a.len())`).
+///
+/// The state is advanced in place, so the caller can chain passes.
+fn lfilter_state(b: &[f64], a: &[f64], x: &[f64], z: &mut [f64]) -> Vec<f64> {
+    let a0 = a[0];
+    let order = b.len().max(a.len());
 
     let mut y = Vec::with_capacity(x.len());
     for &xi in x {
@@ -121,13 +129,55 @@ pub fn lfilter(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
     y
 }
 
+/// Delay-line state that puts the filter in the steady state of a *constant*
+/// input, i.e. the fixed point `zi = A*zi + B` of the transposed direct form II
+/// (scipy's `lfilter_zi`, MATLAB's `filtic`).
+///
+/// For a held unit input the output settles at `y_ss = sum(b) / sum(a)` and the
+/// state can be accumulated backwards in closed form:
+/// `zi[i] = sum_{j > i} (b[j] - a[j] * y_ss) / a[0]`.
+///
+/// Starting a pass from this instead of from zeros removes the start-up
+/// transient: a normalised lowpass applied to a constant must return that
+/// constant, not a ringing edge.
+fn lfilter_zi(b: &[f64], a: &[f64]) -> Vec<f64> {
+    assert!(!a.is_empty() && a[0] != 0.0, "a[0] must be nonzero");
+    assert!(!b.is_empty(), "b must be non-empty");
+
+    let a0 = a[0];
+    let order = b.len().max(a.len());
+    let coeff = |c: &[f64], i: usize| if i < c.len() { c[i] / a0 } else { 0.0 };
+
+    let num: f64 = (0..order).map(|i| coeff(b, i)).sum();
+    let den: f64 = (0..order).map(|i| coeff(a, i)).sum();
+    let y_ss = if den == 0.0 { 0.0 } else { num / den };
+
+    let mut zi = vec![0.0; order];
+    let mut acc = 0.0;
+    for i in (0..order.saturating_sub(1)).rev() {
+        acc += coeff(b, i + 1) - coeff(a, i + 1) * y_ss;
+        zi[i] = acc;
+    }
+    zi
+}
+
 /// Zero-phase IIR filtering (forward + reverse pass).
 ///
-/// The signal is padded with reflected edges to reduce transient artifacts.
+/// The signal is padded with reflected edges to reduce transient artifacts, and
+/// each pass starts from the steady state of the sample it starts on
+/// (`lfilter_zi` scaled by `x[0]` forward and by the forward pass's last output
+/// backwards), so a constant input comes out unchanged. Without that
+/// initialisation the forward pass's transient was mirrored by the reverse pass
+/// and survived inside the *unpadded* region: on 300 samples of the constant
+/// 3.25 with `butter(4, 50, 1000)` the output reached 3.6113 at index 297
+/// (deviation 3.613e-1), 3.1689 at index 288 and 3.1846 at index 5; for a
+/// 10-sample constant the error reached 9.9976e-1 (the last sample came back as
+/// 0.00077 instead of 3.25).
 pub fn filtfilt(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
     if x.is_empty() {
         return Vec::new();
     }
+    let zi = lfilter_zi(b, a);
     let nfilt = b.len().max(a.len());
     let pad_len = 3 * nfilt;
 
@@ -135,9 +185,11 @@ pub fn filtfilt(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
     let n = x.len();
     if n <= pad_len {
         // Signal too short for padding; just do forward+reverse without padding
-        let fwd = lfilter(b, a, x);
+        let mut z: Vec<f64> = zi.iter().map(|v| v * x[0]).collect();
+        let fwd = lfilter_state(b, a, x, &mut z);
         let mut rev: Vec<f64> = fwd.into_iter().rev().collect();
-        rev = lfilter(b, a, &rev);
+        let mut z2: Vec<f64> = zi.iter().map(|v| v * rev[0]).collect();
+        rev = lfilter_state(b, a, &rev, &mut z2);
         rev.reverse();
         return rev;
     }
@@ -153,11 +205,13 @@ pub fn filtfilt(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
         padded.push(2.0 * x[n - 1] - x[n - 1 - i]);
     }
 
-    // Forward pass
-    let fwd = lfilter(b, a, &padded);
-    // Reverse pass
+    // Forward pass, started in the steady state of the first padded sample.
+    let mut z: Vec<f64> = zi.iter().map(|v| v * padded[0]).collect();
+    let fwd = lfilter_state(b, a, &padded, &mut z);
+    // Reverse pass, started in the steady state of the last forward output.
     let mut rev: Vec<f64> = fwd.into_iter().rev().collect();
-    rev = lfilter(b, a, &rev);
+    let mut z2: Vec<f64> = zi.iter().map(|v| v * rev[0]).collect();
+    rev = lfilter_state(b, a, &rev, &mut z2);
     rev.reverse();
 
     // Trim padding
@@ -311,8 +365,13 @@ pub fn butter_bandpass(
     let a = poly_from_roots(&digital_poles);
     let b_raw = poly_from_roots(&digital_zeros);
 
-    // Normalise gain at center frequency
-    let w_center = 2.0 * PI * (low + high) / 2.0 / sample_rate;
+    // Normalise to unit gain where the analog prototype has it: the
+    // geometric centre w0 of the prewarped band, mapped back through the
+    // bilinear transform (w = 2 atan(w0)). The arithmetic centre
+    // (low + high) / 2 used before is not that point, so every b
+    // coefficient was off by a constant factor (b0 0.206585 vs SciPy
+    // 0.206572 for order 2, [100, 300] Hz at 1 kHz).
+    let w_center = 2.0 * w0.atan();
     let ejw = Complex::new(0.0, w_center).exp();
     let num: Complex<f64> = b_raw
         .iter()
@@ -389,10 +448,104 @@ fn poly_from_roots(roots: &[Complex<f64>]) -> Vec<f64> {
 // Spectral Analysis
 // ---------------------------------------------------------------------------
 
+/// Periodic ("DFT-even") Hann window, `scipy.signal.get_window('hann', n)`:
+/// `0.5 - 0.5 cos(2π i / n)`. Spectral estimators use this form; the
+/// symmetric [`hann_window`] (denominator `n - 1`) is for filter design.
+fn hann_periodic(n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos())
+        .collect()
+}
+
+/// Periodic Tukey window, `scipy.signal.get_window(('tukey', alpha), n)`:
+/// the symmetric Tukey window of length `n + 1` without its last sample.
+fn tukey_periodic(n: usize, alpha: f64) -> Vec<f64> {
+    let m = n + 1;
+    if m == 1 {
+        return vec![1.0];
+    }
+    let width = (alpha * (m - 1) as f64 / 2.0).floor() as usize;
+    let mut w = vec![1.0; m];
+    for (i, wi) in w.iter_mut().enumerate().take(width + 1) {
+        *wi = 0.5 * (1.0 + (PI * (-1.0 + 2.0 * i as f64 / alpha / (m - 1) as f64)).cos());
+    }
+    for (i, wi) in w.iter_mut().enumerate().skip(m - width - 1) {
+        *wi = 0.5
+            * (1.0 + (PI * (-2.0 / alpha + 1.0 + 2.0 * i as f64 / alpha / (m - 1) as f64)).cos());
+    }
+    w.truncate(n);
+    w
+}
+
+/// Windowed one-sided spectra of the segments `x[k*step .. k*step+nperseg]`
+/// (complete segments only), optionally mean-detrended first.
+fn segment_spectra(
+    x: &[f64],
+    window: &[f64],
+    step: usize,
+    detrend: bool,
+) -> Vec<Vec<Complex<f64>>> {
+    let nperseg = window.len();
+    let n_freqs = nperseg / 2 + 1;
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while offset + nperseg <= x.len() {
+        let seg = &x[offset..offset + nperseg];
+        let m = if detrend {
+            seg.iter().sum::<f64>() / nperseg as f64
+        } else {
+            0.0
+        };
+        let windowed: Vec<f64> = seg
+            .iter()
+            .zip(window)
+            .map(|(&xi, &wi)| (xi - m) * wi)
+            .collect();
+        let mut spectrum = fft(&windowed);
+        spectrum.truncate(n_freqs);
+        out.push(spectrum);
+        offset += step;
+    }
+    out
+}
+
+/// `|X|²` with SciPy's one-sided `'density'` scaling: `1 / (fs Σw²)`, doubled
+/// except at DC and (for even `nperseg`) Nyquist.
+fn density(spectrum: &[Complex<f64>], nperseg: usize, scale: f64) -> Vec<f64> {
+    let n = spectrum.len();
+    let last_doubled = if nperseg.is_multiple_of(2) { n - 1 } else { n };
+    spectrum
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let p = c.norm_sqr() * scale;
+            if i > 0 && i < last_doubled {
+                2.0 * p
+            } else {
+                p
+            }
+        })
+        .collect()
+}
+
+fn rfft_freqs(nperseg: usize, sample_rate: f64) -> Vec<f64> {
+    (0..nperseg / 2 + 1)
+        .map(|i| i as f64 * sample_rate / nperseg as f64)
+        .collect()
+}
+
 /// Welch's method for power spectral density estimation.
 ///
-/// Returns `(frequencies, psd)`.
-/// `nperseg` is the segment length, `noverlap` defaults to `nperseg / 2`.
+/// Returns `(frequencies, psd)`. Matches `scipy.signal.welch(x, fs, nperseg=...,
+/// noverlap=...)` with its defaults: periodic Hann window, `noverlap =
+/// nperseg / 2`, `nfft = nperseg`, `detrend='constant'` (each segment's mean
+/// removed), one-sided, `scaling='density'`, `average='mean'`. Other SciPy
+/// options (window choice, `nfft`, linear detrend, `'spectrum'` scaling,
+/// median averaging) are not supported.
+///
+/// The previous version used a symmetric Hann window and no detrending: on
+/// `5 + sin(0.7 i)`, 64 samples, `nperseg = 16`, `PSD[0]` was 249.9 (SciPy
+/// 0.175).
 pub fn welch(
     x: &[f64],
     nperseg: usize,
@@ -401,59 +554,38 @@ pub fn welch(
 ) -> (Vec<f64>, Vec<f64>) {
     assert!(nperseg > 0 && nperseg <= x.len(), "nperseg out of range");
     let noverlap = noverlap.unwrap_or(nperseg / 2);
+    assert!(noverlap < nperseg, "noverlap must be < nperseg");
     let step = nperseg - noverlap;
-    assert!(step > 0, "noverlap must be < nperseg");
 
-    let window = hann_window(nperseg);
-    let win_ss: f64 = window.iter().map(|w| w * w).sum();
-    let n_freqs = nperseg / 2 + 1;
+    let window = hann_periodic(nperseg);
+    let scale = 1.0 / (sample_rate * window.iter().map(|w| w * w).sum::<f64>());
+    let spectra = segment_spectra(x, &window, step, true);
 
-    let mut psd = vec![0.0; n_freqs];
-    let mut n_segments = 0usize;
-
-    let mut offset = 0;
-    while offset + nperseg <= x.len() {
-        // Window the segment and FFT
-        let segment: Vec<f64> = x[offset..offset + nperseg]
-            .iter()
-            .zip(window.iter())
-            .map(|(&xi, &wi)| xi * wi)
-            .collect();
-        let spectrum = fft(&segment);
-
-        for i in 0..n_freqs {
-            psd[i] += spectrum[i].norm_sqr();
+    let mut psd = vec![0.0; nperseg / 2 + 1];
+    for s in &spectra {
+        for (p, d) in psd.iter_mut().zip(density(s, nperseg, scale)) {
+            *p += d;
         }
-        n_segments += 1;
-        offset += step;
     }
-
-    // Average and normalise
-    let scale = 1.0 / (sample_rate * win_ss * n_segments as f64);
+    let k = spectra.len() as f64;
     for p in &mut psd {
-        *p *= scale;
+        *p /= k;
     }
-    // Double non-DC, non-Nyquist
-    let nyquist_idx = if nperseg.is_multiple_of(2) {
-        n_freqs - 1
-    } else {
-        n_freqs
-    };
-    for p in psd.iter_mut().take(nyquist_idx).skip(1) {
-        *p *= 2.0;
-    }
-
-    let freqs: Vec<f64> = (0..n_freqs)
-        .map(|i| i as f64 * sample_rate / nperseg as f64)
-        .collect();
-
-    (freqs, psd)
+    (rfft_freqs(nperseg, sample_rate), psd)
 }
 
 /// Short-Time Fourier Transform.
 ///
 /// Returns `(times, frequencies, complex_spectrogram)` where each element
-/// of the spectrogram is `(real, imag)`.
+/// of the spectrogram is `(real, imag)`, indexed `[time][frequency]`
+/// (SciPy's `Zxx` transposed).
+///
+/// Matches `scipy.signal.stft(x, fs, nperseg=..., noverlap=...)` with its
+/// defaults: periodic Hann window, `noverlap = nperseg / 2`, no detrending,
+/// `boundary='zeros'` (`nperseg / 2` zeros on both ends, so `times` starts at
+/// 0), `padded=True` (zeros appended to complete the last segment), and
+/// `scaling='spectrum'` (divided by `Σw`). Other SciPy options are not
+/// supported.
 #[allow(clippy::type_complexity)]
 pub fn stft(
     x: &[f64],
@@ -463,52 +595,62 @@ pub fn stft(
 ) -> (Vec<f64>, Vec<f64>, Vec<Vec<(f64, f64)>>) {
     assert!(nperseg > 0 && nperseg <= x.len());
     let noverlap = noverlap.unwrap_or(nperseg / 2);
+    assert!(noverlap < nperseg);
     let step = nperseg - noverlap;
-    assert!(step > 0);
 
-    let window = hann_window(nperseg);
-    let n_freqs = nperseg / 2 + 1;
+    // boundary='zeros'
+    let half = nperseg / 2;
+    let mut padded = vec![0.0; half];
+    padded.extend_from_slice(x);
+    padded.extend(std::iter::repeat_n(0.0, half));
+    // padded=True: complete the last segment.
+    let nadd = (step - (padded.len() - nperseg) % step) % step;
+    padded.extend(std::iter::repeat_n(0.0, nadd));
 
-    let freqs: Vec<f64> = (0..n_freqs)
-        .map(|i| i as f64 * sample_rate / nperseg as f64)
+    let window = hann_periodic(nperseg);
+    let wsum: f64 = window.iter().sum();
+    let spectra = segment_spectra(&padded, &window, step, false);
+
+    let times: Vec<f64> = (0..spectra.len())
+        .map(|k| (k * step) as f64 / sample_rate)
         .collect();
-
-    let mut times = Vec::new();
-    let mut spectro = Vec::new();
-
-    let mut offset = 0;
-    while offset + nperseg <= x.len() {
-        let segment: Vec<f64> = x[offset..offset + nperseg]
-            .iter()
-            .zip(window.iter())
-            .map(|(&xi, &wi)| xi * wi)
-            .collect();
-        let spectrum = fft(&segment);
-
-        let frame: Vec<(f64, f64)> = spectrum[..n_freqs].iter().map(|c| (c.re, c.im)).collect();
-        spectro.push(frame);
-        times.push((offset as f64 + nperseg as f64 / 2.0) / sample_rate);
-        offset += step;
-    }
-
-    (times, freqs, spectro)
+    let frames = spectra
+        .iter()
+        .map(|s| s.iter().map(|c| (c.re / wsum, c.im / wsum)).collect())
+        .collect();
+    (times, rfft_freqs(nperseg, sample_rate), frames)
 }
 
-/// Spectrogram (magnitude-squared of STFT).
+/// Spectrogram: power spectral density of successive segments.
 ///
-/// Returns `(times, frequencies, power_spectrogram)`.
+/// Returns `(times, frequencies, power_spectrogram)` indexed
+/// `[time][frequency]` (SciPy's `Sxx` transposed).
+///
+/// Matches `scipy.signal.spectrogram(x, fs, nperseg=..., noverlap=...)` with
+/// its defaults: periodic Tukey(0.25) window, `noverlap = nperseg / 8`,
+/// `detrend='constant'`, one-sided, `scaling='density'`, `mode='psd'`, no
+/// boundary extension (times are segment centres). Other SciPy options are
+/// not supported.
 pub fn spectrogram(
     x: &[f64],
     nperseg: usize,
     noverlap: Option<usize>,
     sample_rate: f64,
 ) -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>) {
-    let (times, freqs, complex_spectro) = stft(x, nperseg, noverlap, sample_rate);
-    let power: Vec<Vec<f64>> = complex_spectro
-        .iter()
-        .map(|frame| frame.iter().map(|&(re, im)| re * re + im * im).collect())
+    assert!(nperseg > 0 && nperseg <= x.len());
+    let noverlap = noverlap.unwrap_or(nperseg / 8);
+    assert!(noverlap < nperseg);
+    let step = nperseg - noverlap;
+
+    let window = tukey_periodic(nperseg, 0.25);
+    let scale = 1.0 / (sample_rate * window.iter().map(|w| w * w).sum::<f64>());
+    let spectra = segment_spectra(x, &window, step, true);
+
+    let times: Vec<f64> = (0..spectra.len())
+        .map(|k| (k * step) as f64 / sample_rate + nperseg as f64 / 2.0 / sample_rate)
         .collect();
-    (times, freqs, power)
+    let power = spectra.iter().map(|s| density(s, nperseg, scale)).collect();
+    (times, rfft_freqs(nperseg, sample_rate), power)
 }
 
 // ---------------------------------------------------------------------------
@@ -580,17 +722,29 @@ pub fn find_peaks(
         return Vec::new();
     }
 
-    // Find all local maxima
+    // Find all local maxima, SciPy's `_local_maxima_1d`: a flat top counts
+    // as one peak at its midpoint (rounded down). Requiring strictly greater
+    // on both sides never found a plateau: `[0, 1, 1, 0, 2, 0]` gave `[4]`
+    // where SciPy gives `[1, 4]`.
+    let n = data.len();
     let mut peaks: Vec<usize> = Vec::new();
-    for i in 1..data.len() - 1 {
-        if data[i] > data[i - 1] && data[i] > data[i + 1] {
-            if let Some(h) = min_height {
-                if data[i] < h {
-                    continue;
-                }
+    let mut i = 1;
+    while i < n - 1 {
+        if data[i - 1] < data[i] {
+            let mut ahead = i + 1;
+            while ahead < n - 1 && data[ahead] == data[i] {
+                ahead += 1;
             }
-            peaks.push(i);
+            if data[ahead] < data[i] {
+                let mid = (i + ahead - 1) / 2;
+                if min_height.is_none_or(|h| data[mid] >= h) {
+                    peaks.push(mid);
+                }
+                i = ahead;
+                continue;
+            }
         }
+        i += 1;
     }
 
     // Enforce minimum distance (greedy, prefer taller peaks)
@@ -657,14 +811,18 @@ pub fn resample(x: &[f64], num: usize) -> Vec<f64> {
             new_spectrum[num - nyq] = spectrum[nyq] * Complex::new(0.5, 0.0);
         }
     } else {
-        // Truncate. The source Nyquist bin (even n) lies outside both copied
-        // windows and its energy is intentionally dropped — splitting it into
-        // two half-weight bins would require shifting one of them onto the
-        // other side of DC.
+        // Truncate. For even `num` the output's Nyquist bin aliases both
+        // `X[num/2]` and `X[-num/2]`; SciPy folds them together. Only the
+        // negative one was copied, so that bin carried half its energy:
+        // `resample([1, 3, -2, 5, .5, -1, 2, 4], 4)` gave `[2.405, 1.259, ..]`
+        // against SciPy's `[2.593, 1.071, ..]`.
         let half = num.div_ceil(2);
         new_spectrum[..half].copy_from_slice(&spectrum[..half]);
         let neg_count = num - half;
         new_spectrum[half..half + neg_count].copy_from_slice(&spectrum[n - neg_count..n]);
+        if num.is_multiple_of(2) {
+            new_spectrum[num / 2] += spectrum[num / 2];
+        }
     }
 
     let result = ifft(&new_spectrum);
@@ -1193,6 +1351,15 @@ pub fn dwt(signal: &[f64], wavelet: Wavelet) -> (Vec<f64>, Vec<f64>) {
 }
 
 /// 1D Inverse Discrete Wavelet Transform (single level) with periodic boundary.
+///
+/// The output length is `2 * approx.len()`.
+///
+/// # Preconditions
+///
+/// `approx.len()` must equal `detail.len()`. A longer `approx` indexes past the
+/// end of `detail` and panics; a longer `detail` is silently truncated to
+/// `approx.len()` — so an odd-length signal cannot be rebuilt (the filter bank
+/// below is even-length only).
 pub fn idwt(approx: &[f64], detail: &[f64], wavelet: Wavelet) -> Vec<f64> {
     let lo = wavelet.lo_r();
     let hi = wavelet.hi_r();
@@ -1214,7 +1381,13 @@ pub fn idwt(approx: &[f64], detail: &[f64], wavelet: Wavelet) -> Vec<f64> {
 
 /// Multi-level DWT decomposition.
 ///
-/// Returns `[detail_level_n, ..., detail_level_1, approx_level_n]`.
+/// Returns `[approx_level_n, detail_level_n, detail_level_{n-1}, ..., detail_level_1]`
+/// — the multi-resolution pyramid, coarsest approximation first, each following
+/// entry being the detail of the level *above* it. Note that the lengths *grow*
+/// down the list (`n/2^levels` for the approximation, then `2 *` per step), and
+/// that this is exactly what `waverec` consumes. The order used to be documented
+/// as the reverse (`[detail_n, ..., detail_1, approx_n]`), which would have made
+/// `waverec` reconstruct a different signal.
 pub fn wavedec(signal: &[f64], wavelet: Wavelet, levels: usize) -> Vec<Vec<f64>> {
     let mut coeffs = Vec::with_capacity(levels + 1);
     let mut current = signal.to_vec();
@@ -1231,7 +1404,13 @@ pub fn wavedec(signal: &[f64], wavelet: Wavelet, levels: usize) -> Vec<Vec<f64>>
 
 /// Multi-level DWT reconstruction.
 ///
-/// Input format: `[approx, detail_1, detail_2, ..., detail_n]` (same as wavedec output).
+/// Input format is `wavedec`'s output, coarsest first:
+/// `[approx_level_n, detail_level_n, ..., detail_level_1]` — each `idwt` pairs
+/// the running approximation with the detail of the level that produced it.
+/// (The doc used to say `[approx, detail_1, ..., detail_n]`, i.e. the details in
+/// the opposite order; `idwt` would then have paired each approximation with
+/// the wrong detail. The implementation has always used the coarsest-first
+/// order — see `test_wavedec_levels`, which pins it.)
 #[allow(clippy::needless_range_loop)]
 pub fn waverec(coeffs: &[Vec<f64>], wavelet: Wavelet) -> Vec<f64> {
     if coeffs.is_empty() {

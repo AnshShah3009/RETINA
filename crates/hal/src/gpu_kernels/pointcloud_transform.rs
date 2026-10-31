@@ -124,8 +124,8 @@ pub fn pointcloud_transform(
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
 
-        let wg_x = num_points.div_ceil(256);
-        pass.dispatch_workgroups(wg_x, 1, 1);
+        let (x, y, z) = super::dispatch_1d(num_points, 256);
+        pass.dispatch_workgroups(x, y, z);
     }
 
     ctx.submit(encoder);

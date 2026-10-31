@@ -4,7 +4,14 @@ pub type Result<T> = cv_core::Result<T>;
 
 // Module declarations
 pub mod distortion;
-pub use distortion::{init_undistort_rectify_map, undistort_image, undistort_points};
+// The fisheye entry points were public in `distortion` but not re-exported, so no
+// caller outside this crate could name them - including `fisheye_init_undistort_rectify_map`,
+// which is the version of the map builder that got the singular-intrinsics check
+// right in the first place.
+pub use distortion::{
+    fisheye_init_undistort_rectify_map, fisheye_undistort_points, init_undistort_rectify_map,
+    undistort_image, undistort_points,
+};
 
 // The single normalised-DLT / Hartley-normalisation implementation, shared with
 // `cv-features`' RANSAC estimators.

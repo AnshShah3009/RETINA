@@ -78,6 +78,9 @@ fn bilateral_filter_depth_internal(
     height: u32,
     params: BilateralFilterParams,
 ) {
+    if width == 0 || height == 0 {
+        return;
+    }
     let kernel_size = params.kernel_size;
     let half_kernel = kernel_size / 2;
     let sigma_space_sq = 2.0 * params.sigma_space * params.sigma_space;
@@ -184,6 +187,9 @@ fn bilateral_filter_rgb_internal(
     height: u32,
     params: BilateralFilterParams,
 ) {
+    if width == 0 || height == 0 {
+        return;
+    }
     let kernel_size = params.kernel_size;
     let half_kernel = kernel_size / 2;
     let sigma_space_sq = 2.0 * params.sigma_space * params.sigma_space;
@@ -308,6 +314,9 @@ fn joint_bilateral_filter_internal(
     height: u32,
     params: BilateralFilterParams,
 ) {
+    if width == 0 || height == 0 {
+        return;
+    }
     let kernel_size = params.kernel_size;
     let half_kernel = kernel_size / 2;
     let sigma_space_sq = 2.0 * params.sigma_space * params.sigma_space;

@@ -48,10 +48,14 @@ impl BriefDescriptor {
         let width = image.width() as i32;
         let height = image.height() as i32;
 
-        // Bug 7 fix: rotate pattern coordinates by keypoint angle to match GPU path.
-        // When angle is -1.0 (unset), use identity rotation (no rotation).
-        let (cos_a, sin_a) = if angle >= 0.0 {
-            (angle.cos(), angle.sin())
+        // Rotate pattern coordinates by the keypoint angle to match the GPU
+        // path. `KeyPoint::angle` is in degrees (OpenCV's convention, and what
+        // ORB stores); exactly -1.0 means "no orientation". Any other negative
+        // angle is a real orientation - atan2 produces them for half of all
+        // keypoints.
+        let (cos_a, sin_a) = if angle != -1.0 {
+            let r = angle.to_radians();
+            (r.cos(), r.sin())
         } else {
             (1.0, 0.0)
         };

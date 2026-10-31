@@ -411,6 +411,15 @@ pub fn bm3d<T: Float + Default + 'static>(
             "Image too small for block size".into(),
         ));
     }
+    // `dct_basis(bs)` does `b.chunks_mut(bs)`, which panics with "chunk size
+    // must be non-zero" for `block_size == 0` - after the `height < block_size`
+    // check above has passed, because 16 >= 0. A caller passing 0 is not asking
+    // for a 0-sized-block BM3D; the value cannot mean anything here.
+    if block_size == 0 {
+        return Err(cv_core::Error::InvalidInput(
+            "bm3d: block_size must be greater than 0".into(),
+        ));
+    }
 
     let src = image
         .storage
@@ -420,6 +429,35 @@ pub fn bm3d<T: Float + Default + 'static>(
     let bs = block_size;
     let half_sw = search_window / 2;
     let sigma_f64 = sigma.to_f64();
+
+    // BM3D is parameterised by a *noise* level, and every threshold below is
+    // derived from it: the hard threshold `lambda * sigma`, the block-match
+    // radius `threshold^2 * bs^2`, and the Wiener shrinkage
+    // `energy / (energy + sigma^2)`. All three need `sigma` finite and strictly
+    // positive, and two outright failures were measured with it set to zero or
+    // negative:
+    //
+    // * `sigma == 0` -> the Wiener factor is `0 / (0 + 0) = NaN` wherever the
+    //   pilot coefficient is also zero, and that NaN reaches `idct_2d`, so it
+    //   spreads through the whole block. Measured on a 16x16 step image:
+    //   **256 of 256 output pixels NaN**, min `+inf`, max `-inf`.
+    // * `sigma < 0` -> the match threshold `dist < sigma^2 * bs^2` is satisfied
+    //   by almost nothing, every reference block falls through to the
+    //   single-self-match fallback, and the result is finite but is not BM3D at
+    //   all. Measured on the same step image: the whole edge smeared into
+    //   0.2556 .. 0.6784 where the input was a clean 0.3 / 0.7 step.
+    //
+    // A negative sigma has no meaning at all, and a zero sigma says "no noise",
+    // which is not something this function can assert (it can only shrink the
+    // signal). Rejecting both is the honest answer; there is no threshold the
+    // function could pick that would make the caller's parameter meaningful.
+    if !sigma_f64.is_finite() || sigma_f64 <= 0.0 {
+        return Err(cv_core::Error::InvalidInput(format!(
+            "bm3d: sigma must be a finite positive noise standard deviation, got {sigma_f64} \
+             (sigma is the noise level, not a tolerance: sigma == 0 makes the Wiener factor \
+              0/0 and returns an all-NaN image, and a negative sigma admits no block matches)"
+        )));
+    }
     let threshold = 2.7 * sigma_f64; // hard threshold = lambda * sigma
 
     // Orthonormal DCT-II basis and reusable scratch (allocated once — a

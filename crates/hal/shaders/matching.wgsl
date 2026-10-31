@@ -11,8 +11,14 @@ struct Params {
 @group(0) @binding(3) var<uniform> params: Params;
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let q_idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let q_idx = global_id.x + global_id.y * num_wg.x * 64u;
     if (q_idx >= params.query_len) {
         return;
     }

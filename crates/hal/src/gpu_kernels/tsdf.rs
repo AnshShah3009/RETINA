@@ -5,6 +5,32 @@ use cv_core::{Tensor, TensorShape};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+/// Invert a rigid transform `[R | t]` into `[R^T | -R^T t]`.
+///
+/// The bottom row of the input is ignored and replaced with `[0, 0, 0, 1]`, i.e.
+/// the input is treated as a rigid pose even if its last row is not stored
+/// canonically. This mirrors `CpuBackend::tsdf_raycast`, which documents and
+/// assumes the same rigid form.
+pub fn rigid_inverse(pose: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0f32; 4]; 4];
+    // Rotation: transpose of the upper-left 3x3.
+    for r in 0..3 {
+        for c in 0..3 {
+            out[r][c] = pose[c][r];
+        }
+    }
+    // Translation: -R^T * t.
+    for r in 0..3 {
+        let mut v = 0.0;
+        for c in 0..3 {
+            v += out[r][c] * pose[c][3];
+        }
+        out[r][3] = -v;
+    }
+    out[3] = [0.0, 0.0, 0.0, 1.0];
+    out
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct TsdfParams {
@@ -84,6 +110,19 @@ pub fn integrate(
             source: wgpu::ShaderSource::Wgsl(shader_source.into()),
         });
 
+    // Only the bindings the entry point actually reaches are declared. The shader
+    // still *mentions* `color_image` (binding 1) and `colors` (binding 3), but
+    // `main` never references either, so they are absent from the derived
+    // resource interface and safe to leave out of an explicit layout.
+    //
+    // They used to be bound, to the *same* buffers as bindings 0 and 2:
+    // depth (an f32 buffer) reinterpreted as `array<u32>` "colours", and the TSDF
+    // volume exposed a second `read_write` `array<u32>` view of itself. Binding 3
+    // aliased binding 2: writing a voxel colour would have scribbled over the
+    // `Voxel(tsdf, weight)` records. That was latent only because nothing writes
+    // it yet, but it is a trap for whoever implements colour integration - and
+    // there is no colour image at this call site at all, so there is nothing
+    // legitimate to bind. Both are now omitted instead of aliased.
     let bgl_0 = ctx
         .device
         .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -100,27 +139,7 @@ pub fn integrate(
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: false },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -198,17 +217,9 @@ pub fn integrate(
                 resource: depth_image.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
-                binding: 1,
-                resource: depth_image.storage.buffer().as_entire_binding(),
-            }, // Dummy color read
-            wgpu::BindGroupEntry {
                 binding: 2,
                 resource: voxel_volume.storage.buffer().as_entire_binding(),
             },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: voxel_volume.storage.buffer().as_entire_binding(),
-            }, // Dummy color write
         ],
     });
 
@@ -311,16 +322,27 @@ pub fn raycast(
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
+    // `camera_pose` is WORLD-TO-CAMERA, the convention the CPU backend documents
+    // and implements (`CpuBackend::tsdf_raycast`), and the one
+    // `tsdf_integrate.wgsl` / `CpuBackend::tsdf_integrate` already use to project
+    // world points into the camera. The shader wants a camera-to-world matrix to
+    // build rays with, so invert it here instead of passing the pose straight
+    // through: for any non-identity pose that handed the shader the transpose of
+    // the matrix it needed, silently raycasting from the wrong origin and in the
+    // wrong direction.
+    let c2w = rigid_inverse(camera_pose);
+
+    // WGSL mat4x4 is column-major, so element (row r, col c) lives at c*4 + r.
     let mut pose_flat = [0.0f32; 16];
     for r in 0..4 {
         for c in 0..4 {
-            pose_flat[c * 4 + r] = camera_pose[r][c];
+            pose_flat[c * 4 + r] = c2w[r][c];
         }
     }
     let pose_buffer = ctx
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Raycast Pose"),
+            label: Some("Raycast Pose (camera-to-world)"),
             contents: bytemuck::cast_slice(&pose_flat),
             usage: wgpu::BufferUsages::UNIFORM,
         });

@@ -29,6 +29,9 @@ pub fn compute_cdf(hist: &[u32; 256]) -> [u32; 256] {
 
 #[allow(clippy::needless_range_loop)]
 pub fn histogram_equalization(image: &GrayImage) -> GrayImage {
+    if image.width() == 0 || image.height() == 0 {
+        return image.clone();
+    }
     let hist = compute_histogram(image);
     let cdf = compute_cdf(&hist);
 
@@ -69,11 +72,19 @@ pub fn histogram_equalization(image: &GrayImage) -> GrayImage {
 
 // ── CLAHE ────────────────────────────────────────────────────────────────────
 
-/// CLAHE (Contrast Limited Adaptive Histogram Equalization).
+/// CLAHE (Contrast Limited Adaptive Histogram Equalization), as
+/// `cv2.createCLAHE(clip_limit, tile_grid).apply(image)`.
 ///
-/// Divides the image into `tile_grid` tiles, computes a contrast-limited
-/// histogram equalization per tile, and bilinearly interpolates between
-/// neighboring tiles for smooth transitions.
+/// Follows OpenCV's algorithm:
+/// * if the size is not a multiple of the grid, tile statistics are taken on
+///   an image padded right/bottom with BORDER_REFLECT_101 up to the next
+///   multiple; the tile size is that padded size divided by the grid;
+/// * each tile histogram is clipped at `max(int(clip_limit * tileArea / 256), 1)`
+///   (no clipping when `clip_limit <= 0`), the excess is spread evenly over all
+///   bins and the remainder added to every `256 / residual`-th bin;
+/// * the LUT is `round(cdf * 255 / tileArea)`;
+/// * each output pixel interpolates the LUTs of the four nearest tile
+///   centres bilinearly.
 ///
 /// # Arguments
 /// * `image` — Input grayscale image
@@ -85,112 +96,117 @@ pub fn histogram_equalization(image: &GrayImage) -> GrayImage {
 /// let enhanced = clahe(&gray_image, 2.0, (8, 8));
 /// ```
 pub fn clahe(image: &GrayImage, clip_limit: f32, tile_grid: (u32, u32)) -> GrayImage {
-    let (w, h) = (image.width(), image.height());
-    let (nx, ny) = (tile_grid.0.max(1), tile_grid.1.max(1));
-    let tw = w / nx; // tile width
-    let th = h / ny; // tile height
-
-    if tw == 0 || th == 0 {
+    const HIST: usize = 256;
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let (nx, ny) = (tile_grid.0.max(1) as usize, tile_grid.1.max(1) as usize);
+    if w == 0 || h == 0 {
         return image.clone();
     }
 
-    let tile_pixels = (tw * th) as f32;
-    // Compute the actual clip count from the normalized clip_limit
-    let clip_count = (clip_limit * tile_pixels / 256.0).max(1.0) as u32;
+    // OpenCV pads by `tiles - size % tiles` when the size is not divisible.
+    let ext_w = if w % nx != 0 { w + nx - w % nx } else { w };
+    let ext_h = if h % ny != 0 { h + ny - h % ny } else { h };
+    let tw = ext_w / nx;
+    let th = ext_h / ny;
+    let src = image.as_raw();
+    // BORDER_REFLECT_101 index for the padded region (pad < tile size <= size
+    // is not guaranteed for tiny images, so fold periodically).
+    let reflect101 = |i: usize, n: usize| -> usize {
+        if n == 1 {
+            return 0;
+        }
+        let period = 2 * (n - 1);
+        let m = i % period;
+        if m < n {
+            m
+        } else {
+            period - m
+        }
+    };
 
-    // Step 1: Compute clipped+redistributed LUT for each tile
-    let mut luts = vec![[0u8; 256]; (nx * ny) as usize];
+    let tile_area = (tw * th) as i64;
+    let clip = if clip_limit > 0.0 {
+        ((clip_limit * tile_area as f32 / HIST as f32) as i64).max(1)
+    } else {
+        0
+    };
+    let lut_scale = (HIST - 1) as f32 / tile_area as f32;
 
-    for ty in 0..ny {
-        for tx in 0..nx {
-            let x0 = tx * tw;
-            let y0 = ty * th;
-            let x1 = if tx == nx - 1 { w } else { x0 + tw };
-            let y1 = if ty == ny - 1 { h } else { y0 + th };
-            let n_pixels = (x1 - x0) * (y1 - y0);
-
-            // Compute histogram for this tile
-            let mut hist = [0u32; 256];
-            for py in y0..y1 {
-                for px in x0..x1 {
-                    hist[image.get_pixel(px, py)[0] as usize] += 1;
+    let mut luts = vec![[0u8; HIST]; nx * ny];
+    luts.par_iter_mut().enumerate().for_each(|(t, lut)| {
+        let (tx, ty) = (t % nx, t / nx);
+        let mut hist = [0i64; HIST];
+        for yy in ty * th..(ty + 1) * th {
+            let row = reflect101(yy, h) * w;
+            for xx in tx * tw..(tx + 1) * tw {
+                hist[src[row + reflect101(xx, w)] as usize] += 1;
+            }
+        }
+        if clip > 0 {
+            let mut clipped = 0i64;
+            for v in hist.iter_mut() {
+                if *v > clip {
+                    clipped += *v - clip;
+                    *v = clip;
                 }
             }
-
-            // Clip histogram and redistribute excess
-            let mut excess = 0u32;
-            for h in hist.iter_mut() {
-                if *h > clip_count {
-                    excess += *h - clip_count;
-                    *h = clip_count;
-                }
+            let batch = clipped / HIST as i64;
+            let mut residual = clipped - batch * HIST as i64;
+            for v in hist.iter_mut() {
+                *v += batch;
             }
-            let per_bin = excess / 256;
-            let remainder = (excess % 256) as usize;
-            for (i, h) in hist.iter_mut().enumerate() {
-                *h += per_bin;
-                if i < remainder {
-                    *h += 1;
-                }
-            }
-
-            // Build CDF → LUT
-            let mut cdf = [0u32; 256];
-            cdf[0] = hist[0];
-            for i in 1..256 {
-                cdf[i] = cdf[i - 1] + hist[i];
-            }
-            let cdf_min = cdf.iter().find(|&&x| x > 0).copied().unwrap_or(0);
-            let denom = n_pixels.saturating_sub(cdf_min);
-
-            let lut = &mut luts[(ty * nx + tx) as usize];
-            if denom > 0 {
-                for i in 0..256 {
-                    lut[i] = ((cdf[i].saturating_sub(cdf_min) as f32 / denom as f32) * 255.0)
-                        .round()
-                        .clamp(0.0, 255.0) as u8;
-                }
-            } else {
-                for i in 0..256 {
-                    lut[i] = i as u8;
+            if residual != 0 {
+                let step = ((HIST as i64) / residual).max(1) as usize;
+                let mut i = 0usize;
+                while i < HIST && residual > 0 {
+                    hist[i] += 1;
+                    i += step;
+                    residual -= 1;
                 }
             }
         }
-    }
-
-    // Step 2: Bilinear interpolation between neighboring tile LUTs
-    let mut output = GrayImage::new(w, h);
-
-    for py in 0..h {
-        for px in 0..w {
-            let src = image.get_pixel(px, py)[0] as usize;
-
-            // Find which tile centers surround this pixel
-            // Tile center = (tx * tw + tw/2, ty * th + th/2)
-            let fx = (px as f32 - tw as f32 / 2.0) / tw as f32;
-            let fy = (py as f32 - th as f32 / 2.0) / th as f32;
-
-            let tx0 = (fx.floor() as i32).clamp(0, nx as i32 - 1) as u32;
-            let ty0 = (fy.floor() as i32).clamp(0, ny as i32 - 1) as u32;
-            let tx1 = (tx0 + 1).min(nx - 1);
-            let ty1 = (ty0 + 1).min(ny - 1);
-
-            let ax = (fx - tx0 as f32).clamp(0.0, 1.0);
-            let ay = (fy - ty0 as f32).clamp(0.0, 1.0);
-
-            let v00 = luts[(ty0 * nx + tx0) as usize][src] as f32;
-            let v10 = luts[(ty0 * nx + tx1) as usize][src] as f32;
-            let v01 = luts[(ty1 * nx + tx0) as usize][src] as f32;
-            let v11 = luts[(ty1 * nx + tx1) as usize][src] as f32;
-
-            let val = v00 * (1.0 - ax) * (1.0 - ay)
-                + v10 * ax * (1.0 - ay)
-                + v01 * (1.0 - ax) * ay
-                + v11 * ax * ay;
-
-            output.put_pixel(px, py, image::Luma([val.round().clamp(0.0, 255.0) as u8]));
+        let mut sum = 0i64;
+        for (l, v) in lut.iter_mut().zip(hist.iter()) {
+            sum += v;
+            *l = (sum as f32 * lut_scale).round_ties_even().clamp(0.0, 255.0) as u8;
         }
-    }
+    });
+
+    // Bilinear interpolation between the four surrounding tile LUTs.
+    let inv_tw = 1.0f32 / tw as f32;
+    let inv_th = 1.0f32 / th as f32;
+    let xs: Vec<(usize, usize, f32)> = (0..w)
+        .map(|x| {
+            let txf = x as f32 * inv_tw - 0.5;
+            let tx1 = txf.floor() as i64;
+            let xa = txf - tx1 as f32;
+            let t1 = tx1.max(0) as usize;
+            let t2 = ((tx1 + 1) as usize).min(nx - 1);
+            (t1, t2, xa)
+        })
+        .collect();
+
+    let mut output = GrayImage::new(w as u32, h as u32);
+    output
+        .as_mut()
+        .par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let tyf = y as f32 * inv_th - 0.5;
+            let ty1 = tyf.floor() as i64;
+            let ya = tyf - ty1 as f32;
+            let ya1 = 1.0 - ya;
+            let r1 = ty1.max(0) as usize * nx;
+            let r2 = ((ty1 + 1) as usize).min(ny - 1) * nx;
+            for (x, out) in row.iter_mut().enumerate() {
+                let v = src[y * w + x] as usize;
+                let (t1, t2, xa) = xs[x];
+                let xa1 = 1.0 - xa;
+                let res = (luts[r1 + t1][v] as f32 * xa1 + luts[r1 + t2][v] as f32 * xa) * ya1
+                    + (luts[r2 + t1][v] as f32 * xa1 + luts[r2 + t2][v] as f32 * xa) * ya;
+                *out = res.round_ties_even().clamp(0.0, 255.0) as u8;
+            }
+        });
 
     output
 }

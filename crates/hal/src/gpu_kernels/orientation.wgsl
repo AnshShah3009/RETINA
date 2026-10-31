@@ -40,9 +40,12 @@ var<workgroup> local_m01: array<f32, 256>;
 @compute @workgroup_size(256)
 fn main(
     @builtin(workgroup_id) group_id: vec3<u32>,
-    @builtin(local_invocation_id) local_id: vec3<u32>
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
-    let kp_idx = group_id.x;
+    // One workgroup per keypoint, spread over a 2-D grid so neither axis
+    // exceeds 65535 (see gpu_kernels::dispatch_groups_1d).
+    let kp_idx = group_id.x + group_id.y * num_wg.x;
     if (kp_idx >= params.num_keypoints) {
         return;
     }

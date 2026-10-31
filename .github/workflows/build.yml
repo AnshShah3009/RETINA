@@ -49,11 +49,35 @@ jobs:
     - name: Build workspace
       run: cargo build --workspace
 
+    - name: Check half-precision feature
+      # Nothing else builds this feature, and it went uncompilable unnoticed:
+      # a bf16 shader it include_str!'d did not exist.
+      run: cargo check -p cv-hal --features half-precision
+
+    - name: Build examples
+      # `cargo build --workspace` does not build examples, so without this
+      # `example_smoke` silently skipped every example: the guard it has always
+      # had ("skipping: not built") turned a whole class of failures into a
+      # green run. That is how a GPU ORB path that panicked on its first call
+      # and a viewer example that hung for 120s both reached CI unnoticed.
+      run: cargo build --workspace --examples
+
     - name: Run clippy
       run: cargo clippy --workspace --lib -- -W clippy::all
 
     - name: Run tests
       run: cargo nextest run --workspace
+
+    - name: Run doctests
+      # `cargo nextest` deliberately does not support doctests, so the 32 doc
+      # examples in this workspace were never executed by CI at all - the same
+      # shape of gap the "Build examples" step above records for examples. One
+      # was already broken and invisible: a mathematical formula written in an
+      # indented block in `gaussian_splatting::types`, which rustdoc compiles as
+      # Rust, failing on the `·` in `a·dx²`. For a library whose documentation is
+      # the first thing a user copies, a doc example that has never been run is
+      # not documentation.
+      run: cargo test --doc --workspace
 
   ci-macos:
     name: CI (macOS)
@@ -85,9 +109,13 @@ jobs:
 
     - name: Build workspace (CPU backend)
       run: cargo build --workspace --features cpu
+    - name: Build examples
+      run: cargo build --workspace --features cpu --examples
 
     - name: Build workspace (MLX backend)
       run: cargo build --workspace --features mlx
+    - name: Build examples
+      run: cargo build --workspace --features mlx --examples
 
     - name: Run clippy
       run: cargo clippy --workspace --lib -- -W clippy::all

@@ -27,8 +27,38 @@ fn load(dir: &str, n: usize) -> Vec<(String, image::GrayImage)> {
 }
 
 fn main() {
-    let dir = "/home/Phoenix/RUST/datasets/rgbd_dataset_freiburg1_desk";
-    let frames: Vec<(String, image::GrayImage)> = load(dir, 20);
+    // The dataset path used to be a hardcoded absolute path into one machine's
+    // home directory. Everywhere else - CI included - the directory does not
+    // exist, `load` returns nothing, and the example then prints nothing at all.
+    // The smoke test that runs it asserted on that missing output and failed
+    // with a message about "failing early", which is what it was.
+    //
+    // It is now an argument or an environment variable, and the example says so
+    // plainly and exits rather than appearing to run.
+    let dir = std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("ORBDIAG_DATASET").ok())
+        .unwrap_or_else(|| {
+            eprintln!(
+                "orbdiag: no dataset given.\n\
+                 usage: orbdiag <path to an RGB-D sequence directory>\n\
+                 or set ORBDIAG_DATASET. It expects the TUM-style layout \
+                 (rgb/*.png and a timestamp file)."
+            );
+            std::process::exit(2);
+        });
+
+    if !std::path::Path::new(&dir).is_dir() {
+        eprintln!("orbdiag: {dir:?} is not a directory.");
+        std::process::exit(2);
+    }
+
+    let frames: Vec<(String, image::GrayImage)> = load(&dir, 20);
+    if frames.is_empty() {
+        eprintln!("orbdiag: no frames loaded from {dir:?} - is this an RGB-D sequence?");
+        std::process::exit(2);
+    }
+    println!("orbdiag: {} frames from {dir}", frames.len());
     let intrinsics = CameraIntrinsics::new(517.3, 516.5, 318.6, 255.3, 640, 480);
 
     for n in [800usize, 1000, 1200, 1400, 1500, 1600, 2000, 3000] {

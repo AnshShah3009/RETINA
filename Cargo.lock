@@ -1342,6 +1342,7 @@ name = "cv-geometry2d"
 version = "0.1.0"
 dependencies = [
  "geo 0.28.0",
+ "robust 1.2.0",
 ]
 
 [[package]]
@@ -1379,6 +1380,7 @@ dependencies = [
  "cv-runtime",
  "image",
  "nalgebra",
+ "pollster",
  "rand 0.9.2",
  "rayon",
  "tracing",
@@ -1440,6 +1442,7 @@ name = "cv-photo"
 version = "0.1.0"
 dependencies = [
  "cv-core",
+ "cv-imgproc",
  "image",
 ]
 
@@ -1583,6 +1586,7 @@ dependencies = [
  "cv-optimize",
  "cv-runtime",
  "cv-video",
+ "futures",
  "image",
  "nalgebra",
 ]
@@ -1619,7 +1623,9 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "epaint",
+ "image",
  "nalgebra",
+ "pollster",
  "wgpu 28.0.0",
 ]
 

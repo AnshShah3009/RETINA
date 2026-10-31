@@ -82,9 +82,40 @@ pub fn gaussian_kernel(sigma: f32, size: usize) -> Kernel {
         }
     }
 
+    /// Normalise, then force the f32 sum to be exactly 1.
+    //
+    /// Dividing by `sum` alone is not enough: the f32 *taps* are accurate to ~6e-9
+    /// (measured, summed in f64), but summing 169 of them in f32 accumulates
+    /// rounding and lands off 1. Measured for a 13-tap sigma-2.0 kernel:
+    //
+    /// f64 sum of the f32 taps : 0.999999994139216142   (5.9e-9 - the taps)
+    /// f32 sum of the f32 taps : 1.000000357627868650   (3.6e-7 - the summation)
+    //
+    /// The consequence is not academic. A **normalised blur of a constant image must
+    /// return that constant**, and at sigma 2.0 this returned `127` where OpenCV
+    /// returns `128` - for **100% of pixels**, because `128 * 0.99999964` truncates to
+    /// `127`. Any detector thresholding a blurred image sees a uniform brightness
+    /// shift. Verified against `cv2.filter2D` on a constant 128 image:
+    //
+    /// cv2  reflect101 / replicate : 128   (kernel sums to exactly 1)
+    /// rust                       : 127   (kernel sums to 0.99999964)
+    //
+    /// Correcting the **last** tap costs one subtraction and lands on the smallest
+    /// tap in the kernel, so the filter shape is perturbed negligibly: at sigma 2.0
+    /// / size 13 that is the 4.5e-6 corner, against a peak near 1. Accumulating the
+    /// normalisation in f64 first is *also* not sufficient - measured, the error is
+    /// the same 3.6e-7, because it is the summation of the narrowed taps, not the
+    /// accumulation of the weights, that carries it.
+    //
+    /// After this the sum is exactly 1.0 for every sigma and size measured
+    /// (0.75/1.5/2.0/3.0 at size 5, and size 13).
+    let inv = 1.0f32 / sum;
     for v in &mut data {
-        *v /= sum;
+        *v *= inv;
     }
+    let last = data.len() - 1;
+    let head: f32 = data[..last].iter().sum();
+    data[last] = 1.0 - head;
 
     Kernel::new(data, size, size)
 }
@@ -104,9 +135,17 @@ pub fn gaussian_kernel_1d(sigma: f32, size: usize) -> Vec<f32> {
     }
 
     if sum != 0.0 {
+        // Same correction as the 2-D case above, and for the same reason: dividing
+        // by `sum` leaves the f32 taps summing to 1 +/- a few ulp, which a constant
+        // image does not survive after truncation. Measured on a 13-tap sigma-2.0
+        // 1-D kernel: `1 - sum = 5.960e-8` after division, `0` after this.
+        let inv = 1.0f32 / sum;
         for v in &mut kernel {
-            *v /= sum;
+            *v *= inv;
         }
+        let last = kernel.len() - 1;
+        let head: f32 = kernel[..last].iter().sum();
+        kernel[last] = 1.0 - head;
     }
 
     kernel
@@ -180,13 +219,15 @@ pub fn convolve(image: &GrayImage, kernel: &Kernel) -> GrayImage {
 }
 
 pub fn convolve_with_border(image: &GrayImage, kernel: &Kernel, border: BorderMode) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback: use CPU registry if available
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     convolve_ctx(image, kernel, border, &runner)
 }
 
@@ -235,7 +276,7 @@ pub fn convolve_with_border_into(
 }
 
 pub fn gaussian_blur_with_border(image: &GrayImage, sigma: f32, border: BorderMode) -> GrayImage {
-    match cv_runtime::best_runner() {
+    match cv_runtime::best_runner().map(|(r, _)| r) {
         Ok(runner) => gaussian_blur_ctx(image, sigma, border, &runner),
         Err(_) => {
             // Fallback: compute on CPU
@@ -291,7 +332,7 @@ fn gaussian_blur_gpu(
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
     GrayImage::from_raw(image.width(), image.height(), data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
@@ -337,7 +378,7 @@ fn convolve_gpu(
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
     GrayImage::from_raw(image.width(), image.height(), data)
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
@@ -357,6 +398,9 @@ pub fn convolve_with_border_into_ctx(
     }
     let width = image.width() as usize;
     let height = image.height() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
     let input_data = image.as_raw();
 
     group.run(|| {
@@ -389,7 +433,7 @@ pub fn convolve_with_border_into_ctx(
                         }
                     }
 
-                    row[x] = sum.clamp(0.0, 255.0) as u8;
+                    row[x] = sum.round_ties_even().clamp(0.0, 255.0) as u8;
                 }
             });
     });
@@ -443,9 +487,25 @@ pub fn separable_convolve_into_ctx(
 
     let width = image.width() as usize;
     let height = image.height() as usize;
+    if width == 0 || height == 0 {
+        return;
+    }
     let rx = kx.len() / 2;
     let ry = ky.len() / 2;
     let src = image.as_raw();
+
+    // Value the *whole* row takes when it lies outside the image under a
+    // `Constant` border. The vertical pass convolves rows of the horizontal
+    // result, so an out-of-range row must be the horizontal convolution of a
+    // row filled with `v`, i.e. `v * Σkx` - not `v`. Substituting the raw
+    // constant made the separable path disagree with the 2-D
+    // `convolve_with_border` by a factor of `Σkx`: zero for a derivative
+    // kernel (`[-1, 0, 1]`), larger for an unnormalised smoothing kernel
+    // (`[1, 2, 1]` -> `4v`). It agreed only for kernels that sum to exactly 1.
+    let constant_row_value = match border {
+        BorderMode::Constant(v) => v as f32 * kx.iter().sum::<f32>(),
+        _ => 0.0,
+    };
 
     let mut tmp: Vec<f32> = vec![0.0f32; width * height];
 
@@ -488,14 +548,14 @@ pub fn separable_convolve_into_ctx(
                             if let Some(iy) = target_y {
                                 let idx = iy * width + x;
                                 vals.copy_from_slice(&tmp[idx..idx + 8]);
-                            } else if let BorderMode::Constant(v) = border {
-                                vals = [v as f32; 8];
+                            } else {
+                                vals = [constant_row_value; 8];
                             }
                             sum_v += f32x8::from(vals) * w_v;
                         }
                         let res: [f32; 8] = sum_v.into();
                         for i in 0..8 {
-                            row_out[x + i] = res[i].clamp(0.0, 255.0) as u8;
+                            row_out[x + i] = res[i].round_ties_even().clamp(0.0, 255.0) as u8;
                         }
                     } else {
                         for cx in x..width {
@@ -504,14 +564,11 @@ pub fn separable_convolve_into_ctx(
                                 let sy = (y as isize) + (k as isize) - (ry as isize);
                                 let val = match map_coord(sy, height, border) {
                                     Some(iy) => tmp[iy * width + cx],
-                                    None => match border {
-                                        BorderMode::Constant(v) => v as f32,
-                                        _ => 0.0,
-                                    },
+                                    None => constant_row_value,
                                 };
                                 sum += val * ky[k];
                             }
-                            row_out[cx] = sum.clamp(0.0, 255.0) as u8;
+                            row_out[cx] = sum.round_ties_even().clamp(0.0, 255.0) as u8;
                         }
                     }
                 }

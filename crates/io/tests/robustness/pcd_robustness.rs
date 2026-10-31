@@ -156,35 +156,10 @@ fn pcd_binary_hostile_points_is_rejected_promptly() {
     assert!(err.contains("refusing"), "got: {err}");
 }
 
-/// The plain-binary path's cap holds, but the *ASCII* path clamps the
-/// reservation to 200M points - 2.4 GB - and commits it before looking at the
-/// body, so a 90-byte file with `POINTS 40000000000` costs 2.4 GB of memory to
-/// discover that it is empty. Not a crash, but a cheap amplification.
-#[test]
-fn pcd_ascii_hostile_points_reserves_2_4gb_for_an_empty_body() {
-    let file = pcd_ascii("40000000000", "POINTS 40000000000\n", "");
-    // `run_with_budget` runs the parser on a dedicated 4 MiB stack, and the
-    // *first* such thread in a process also gets glibc's per-thread malloc
-    // arena. Both land in the process's `VmSize`, so measuring before/after
-    // across the call attributes ~68 MiB of the harness's own cost to the
-    // parser - which is more than this test's 64 MiB budget, and made the
-    // result depend on whether some earlier test happened to have spawned a
-    // thread first. Warm the cost up so what is left is the parser's own.
-    let _ = run_with_budget(DEFAULT_BUDGET, || Ok(0u8));
-    let before = address_space_bytes();
-    let cloud = parse_hostile(run_pcd, &file).expect_ok("empty ascii body");
-    assert_eq!(cloud.len(), 0, "no data lines means no points");
-    let grew = address_space_bytes()
-        .zip(before)
-        .map(|(after, before)| after.saturating_sub(before))
-        .unwrap_or(0);
-    assert!(
-        grew < 64 * 1024 * 1024,
-        "KNOWN BUG: `POINTS 40000000000` on an empty ASCII body grew the address space by \
-         {grew} bytes (the reservation is clamped to 200M points, still 2.4 GB); a 90-byte file \
-         should not cost gigabytes"
-    );
-}
+// The ASCII path's 200M-point clamp - a 2.4 GB reservation for a 90-byte
+// file claiming `POINTS 40000000000` - is measured in `tests/memory_probe.rs`.
+// The measurement reads the process-wide `VmSize` and was flaky here under
+// `cargo test`'s threaded runner.
 
 /// `POINTS` = `usize::MAX` overflows `stride * count`; the `checked_mul` guard
 /// must turn that into an error rather than a wrapped, too-small buffer.
@@ -213,67 +188,41 @@ fn pcd_binary_small_stride_huge_count_does_not_hang() {
     }
 }
 
-/// The address-space probe: whatever the outcome, a hostile header must not
-/// commit a 48 GB virtual allocation. (Belt and braces for the byte cap.)
-#[test]
-fn pcd_hostile_points_does_not_commit_gigabytes() {
-    let before = address_space_bytes();
-    let _ = parse_hostile(run_pcd, &pcd_binary("4000000000", "", &[]));
-    if let (Some(before), Some(after)) = (before, address_space_bytes()) {
-        let grew = after.saturating_sub(before);
-        assert!(
-            grew < 1024 * 1024 * 1024,
-            "address space grew by {} bytes for a hostile POINTS header",
-            grew
-        );
-    }
-}
+// The address-space probe lives with its sibling in `tests/memory_probe.rs`.
 
 // ===========================================================================
 // 4. Arithmetic overflow in the size / offset computation
 // ===========================================================================
 
-/// `WIDTH`/`HEIGHT` are multiplied at `pcd.rs:142` with no overflow check:
-/// `points_count = width * height`. Both operands are file-controlled, the
-/// product feeds a `vec![0u8; total]`, and a `POINTS` line is optional, so a
-/// header of
+/// `WIDTH`/`HEIGHT` used to be multiplied at `pcd.rs:142` with no overflow
+/// check: `points_count = width * height`. Both operands are file-controlled
+/// and a `POINTS` line is optional, so a header of
 ///
 /// ```text
-/// WIDTH 18446744073709551615
+/// WIDTH 9223372036854775808
 /// HEIGHT 2
 /// DATA binary
 /// ```
 ///
-/// is enough.
+/// is enough. `2^63 * 2` is `2^64`, which is one past `usize::MAX`:
 ///
-/// Consequences, both verified by the standalone reproducer
-/// `scratchpad/pcd_width_height_overflow_repro.rs`:
+/// * overflow checks off (this repo's release profile): the product WRAPS to 0,
+///   the reader reads no records at all and returns `Ok` with **zero points**
+///   while a complete, valid body sits unread - a silently empty cloud that no
+///   caller can tell from a file that really is empty;
+/// * overflow checks on (debug): the same line panics with "attempt to
+///   multiply with overflow" from inside a library that promises errors.
 ///
-/// * overflow checks on (debug, and any profile with `overflow-checks = true`):
-///   panic "attempt to multiply with overflow" from inside the parser;
-/// * overflow checks off (release): the product wraps to `2^64 - 2`, `stride *
-///   count` wraps again to `2^64 - 1`, `checked_mul` at pcd.rs:297 reports no
-///   overflow, the 8 GiB cap rejects it - so the wrapped value happens to be
-///   caught *here*, by luck of the byte cap rather than by a guard.
-///
-/// The unguarded multiply itself is the defect: it is a panic on one line of
-/// input in a library that promises errors, and the safety of the surrounding
-/// code depends on an unrelated 8 GiB cap. A 32-bit target wraps far sooner and
-/// is not saved by the cap.
+/// Either way the product is now rejected where it is computed.
+/// (`crates/io/tests/pcd_defect_regressions.rs` covers the same defect
+/// behaviourally, writing the file to a temp path and reading it back.)
 #[test]
-fn pcd_width_times_height_multiply_is_unguarded() {
-    let source = include_str!("../../src/pcd.rs");
-    let line_no = source
-        .lines()
-        .position(|l| l.contains("points_count = width * height"))
-        .expect("the width*height expression moved; re-check this test");
-    let line = source.lines().nth(line_no).unwrap();
+fn pcd_width_times_height_overflow_is_rejected() {
+    let file = b"# .PCD v0.7\nVERSION 0.7\nFIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\nWIDTH 9223372036854775808\nHEIGHT 2\nDATA binary\n".to_vec();
+    let err = parse_err(run_pcd, &file, "WIDTH * HEIGHT overflow");
     assert!(
-        !line.contains("checked_mul")
-            && !line.contains("saturating_mul")
-            && !line.contains("wrapping_mul"),
-        "pcd.rs:{} looked unguarded before but is now: {line:?} - re-evaluate this test",
-        line_no + 1
+        err.contains("WIDTH") && err.contains("HEIGHT"),
+        "the error should name the product that did not fit, got: {err}"
     );
 }
 

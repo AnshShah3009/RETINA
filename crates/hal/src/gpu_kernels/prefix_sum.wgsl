@@ -10,29 +10,42 @@ var<workgroup> temp: array<u32, 512 + 16>; // Extra space for bank conflict avoi
 // Kernel 1: Scan individual blocks of 512 elements and record block totals.
 @compute @workgroup_size(256)
 fn scan_blocks(
-    @builtin(global_invocation_id) global_id: vec3<u32>,
     @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
+    // Workgroups are spread over a 2-D grid so neither axis exceeds 65535
+    // (see gpu_kernels::dispatch_groups_1d). Surplus tail workgroups own no
+    // block and have no block_sums slot; the test is workgroup-uniform, so
+    // returning before the barriers is allowed.
+    let wid = group_id.x + group_id.y * num_wg.x;
+    if (wid * 512u >= num_elements) {
+        return;
+    }
     let thid = local_id.x;
-    let gid = global_id.x;
     let n = 512u;
-    
-    // Load data into shared memory
+
+    // Load data into shared memory. Slot `ai` holds block element `ai` and
+    // slot `bi` holds element `bi` - the tree below scans slots in order.
+    // Loading `data[2 * gid]` / `data[2 * gid + 1]` here put element 2t in
+    // slot t and 2t+1 in slot t+256, so the block was scanned in a shuffled
+    // order and every output past index 0 was wrong.
     let ai = thid;
     let bi = thid + 256u;
+    let src_a = wid * n + ai;
+    let src_b = wid * n + bi;
     
     let bank_offset_a = ai >> 5u;
     let bank_offset_b = bi >> 5u;
 
-    if (2u * gid < num_elements) {
-        temp[ai + bank_offset_a] = data[2u * gid];
+    if (src_a < num_elements) {
+        temp[ai + bank_offset_a] = data[src_a];
     } else {
         temp[ai + bank_offset_a] = 0u;
     }
     
-    if (2u * gid + 1u < num_elements) {
-        temp[bi + bank_offset_b] = data[2u * gid + 1u];
+    if (src_b < num_elements) {
+        temp[bi + bank_offset_b] = data[src_b];
     } else {
         temp[bi + bank_offset_b] = 0u;
     }
@@ -54,7 +67,7 @@ fn scan_blocks(
     // Clear last element and save block sum
     if (thid == 0u) {
         let last_idx = n - 1u + ((n - 1u) >> 5u);
-        block_sums[group_id.x] = temp[last_idx];
+        block_sums[wid] = temp[last_idx];
         temp[last_idx] = 0u;
     }
 
@@ -76,11 +89,11 @@ fn scan_blocks(
     workgroupBarrier();
 
     // Write block-local prefix sum
-    if (2u * gid < num_elements) {
-        data[2u * gid] = temp[ai + bank_offset_a];
+    if (src_a < num_elements) {
+        data[src_a] = temp[ai + bank_offset_a];
     }
-    if (2u * gid + 1u < num_elements) {
-        data[2u * gid + 1u] = temp[bi + bank_offset_b];
+    if (src_b < num_elements) {
+        data[src_b] = temp[bi + bank_offset_b];
     }
 }
 
@@ -90,11 +103,16 @@ fn scan_blocks(
 
 @compute @workgroup_size(256)
 fn add_offsets(
-    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>,
     @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
-    let gid = global_id.x;
-    let wid = group_id.x;
+    // Same 2-D workgroup grid as scan_blocks.
+    let wid = group_id.x + group_id.y * num_wg.x;
+    if (wid * 512u >= num_elements) {
+        return;
+    }
+    let gid = wid * 256u + local_id.x;
     let offset = block_offsets[wid];
     
     if (2u * gid < num_elements) {

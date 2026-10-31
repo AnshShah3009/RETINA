@@ -57,9 +57,11 @@ fn get_u8(idx: u32) -> f32 {
 
 @compute @workgroup_size(256)
 fn main(
-    @builtin(global_invocation_id) global_id: vec3<u32>
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
 ) {
-    let kp_idx = global_id.x;
+    // 1-D range dispatched as a 2-D grid (see gpu_kernels::dispatch_1d).
+    let kp_idx = global_id.x + global_id.y * num_wg.x * 256u;
     if (kp_idx >= params.num_keypoints) {
         return;
     }

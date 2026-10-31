@@ -274,6 +274,35 @@ impl CsrMatrix {
 // Eigensolvers
 // ---------------------------------------------------------------------------
 
+/// Deterministic pseudo-random start vector for the iterative eigensolvers.
+///
+/// The previous start vector was `(1, 1, ..., 1)/sqrt(n)`. That vector is an
+/// EXACT eigenvector for the structured SPD matrices these solvers exist to
+/// attack (1D/2D discrete Laplacians, Poisson stencils with Dirichlet
+/// boundaries), so the iteration was a fixed point from the first step and the
+/// routine reported success on whichever eigenvalue it happened to sit on
+/// (eigenvalue 1 instead of 3 for [[2,-1],[-1,2]]). A fixed LCG stream keeps
+/// the routine reproducible while making the degenerate case unreachable in
+/// practice.
+fn deterministic_start(n: usize, seed: u64) -> DVector<f64> {
+    let mut s = seed;
+    let mut v = DVector::zeros(n);
+    for i in 0..n {
+        s = s
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        // Top 53 bits -> [0, 1) -> (-1, 1)
+        let u = ((s >> 11) as f64) * (2.0 / ((1u64 << 53) as f64)) - 1.0;
+        // Never seed a component of exactly 0.
+        v[i] = if u == 0.0 { 0.5 } else { u };
+    }
+    let norm = v.norm();
+    if norm > 0.0 {
+        v /= norm;
+    }
+    v
+}
+
 /// Which eigenvalues to compute.
 #[derive(Debug, Clone, Copy)]
 pub enum EigWhich {
@@ -288,7 +317,10 @@ pub enum EigWhich {
 /// Power iteration for finding the largest eigenvalue/eigenvector of a
 /// symmetric matrix.
 ///
-/// Returns `(eigenvalue, eigenvector)`.
+/// Returns `(eigenvalue, eigenvector)`. The returned pair is accepted only
+/// when the residual `||A v - lambda v|| / (||A|| * ||v||)` is within `tol`;
+/// otherwise an `Err` is returned rather than an unconverged result reported as
+/// success.
 pub fn eigs_power(
     a: &CsrMatrix,
     max_iters: usize,
@@ -300,25 +332,98 @@ pub fn eigs_power(
         return Err("Matrix must be non-empty".into());
     }
 
-    // Start with a deterministic vector (1, 1, ..., 1) normalized
-    let mut v = DVector::from_element(n, 1.0 / (n as f64).sqrt());
+    // Randomised (but deterministic) start vector: an all-ones start is an
+    // eigenvector for structured SPD matrices, which froze the iteration.
+    let mut v = deterministic_start(n, 0x2545_F491_4F6C_DD1D);
+    let anorm = matrix_inf_norm(a).max(1e-300);
+    // `tol` is the caller's absolute tolerance on the eigenvalue; the residual
+    // gets a floor at 1e-8 relative, which is well below the accuracy the
+    // recurrence can deliver for any realistic n yet far above the roundoff of
+    // a converged Ritz pair.
+    let res_tol = (tol / anorm).max(1e-8);
     let mut eigenvalue = 0.0;
 
     for _ in 0..max_iters {
         let w = a.spmv(&v);
-        let new_eigenvalue = v.dot(&w);
         let norm = w.norm();
-        if norm < 1e-15 {
+        if norm < 1e-300 {
             return Err("Power iteration: zero vector encountered".into());
         }
         v = w / norm;
-        if (new_eigenvalue - eigenvalue).abs() < tol {
+        // Re-evaluate the Rayleigh quotient at the NEW iterate, so the
+        // returned lambda and v are always the same pair.
+        let av = a.spmv(&v);
+        let new_eigenvalue = v.dot(&av);
+        // The residual is the only real convergence proof: a vanishing
+        // eigenvalue change is also satisfied by ANY eigenvector of the matrix
+        // (the all-ones start is exactly one for the discrete Laplacian), and
+        // reporting that as success returned the smallest eigenvalue.
+        if residual_ok(a, new_eigenvalue, &v, res_tol) && (new_eigenvalue - eigenvalue).abs() < tol
+        {
             return Ok((new_eigenvalue, v));
         }
         eigenvalue = new_eigenvalue;
     }
 
+    if !residual_ok(a, eigenvalue, &v, res_tol) {
+        return Err(format!(
+            "Power iteration failed to converge: residual test not satisfied \
+             (lambda = {eigenvalue}, tol = {tol})"
+        ));
+    }
+
     Ok((eigenvalue, v))
+}
+
+/// Scale bound `||A||_inf` used to normalise the eigenpair residual.
+fn matrix_inf_norm(a: &CsrMatrix) -> f64 {
+    let mut best = 0.0_f64;
+    for r in 0..a.nrows {
+        let mut s = 0.0_f64;
+        for idx in a.row_ptr[r]..a.row_ptr[r + 1] {
+            s += a.values[idx].abs();
+        }
+        if s > best {
+            best = s;
+        }
+    }
+    best
+}
+
+/// True when `||A v - lambda v|| <= tol * ||A|| * ||v||`.
+///
+/// The Rayleigh quotient used by the iterative solvers can be a stationary
+/// point of a completely wrong (non-dominant) eigenpair, so convergence has to
+/// be confirmed against the residual rather than assumed.
+fn residual_ok(a: &CsrMatrix, lambda: f64, v: &DVector<f64>, tol: f64) -> bool {
+    let av = a.spmv(v);
+    let r = (&av - v * lambda).norm();
+    let vnorm = v.norm();
+    let scale = matrix_inf_norm(a) * vnorm;
+    if !r.is_finite() {
+        return false;
+    }
+    r <= tol.max(f64::EPSILON) * scale
+}
+
+/// A deterministic unit vector orthogonal (to working precision) to `v`.
+fn orthogonal_perturbation(v: &DVector<f64>, n: usize, seed: u64) -> DVector<f64> {
+    // Folding the bits via rotation instead of a plain sum: summing f64 bit
+    // patterns overflows u64 (and therefore panics under overflow checks).
+    let mut mix = seed;
+    for x in v.iter() {
+        mix = mix.rotate_left(7) ^ x.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    let mut w = deterministic_start(n, mix);
+    let d = w.dot(v);
+    w -= v * d;
+    let norm = w.norm();
+    if norm > 1e-12 {
+        w /= norm;
+    } else {
+        w = deterministic_start(n, seed.wrapping_add(1));
+    }
+    w
 }
 
 /// Inverse power iteration for finding the eigenvalue closest to `sigma`.
@@ -346,9 +451,12 @@ pub fn eigs_inverse_power(
 
     for _ in 0..max_iters {
         // Solve B * w = v using CG (or GMRES for non-SPD)
-        let w = gmres_solve(&b, &v, 30, 200, 1e-12)?;
+        // Inverse iteration only needs the direction of B⁻¹v and tolerates an
+        // inexact solve - B is nearly singular by design when sigma is a good
+        // shift - so the GMRES iterate is used even short of 1e-12.
+        let (w, _rel_residual) = gmres_iterate(&b, &v, 30, 200, 1e-12);
         let norm = w.norm();
-        if norm < 1e-15 {
+        if !(norm > 0.0) || !norm.is_finite() {
             return Err("Inverse power iteration: zero vector encountered".into());
         }
         v = &w / norm;
@@ -393,8 +501,11 @@ pub fn eigsh(
     let mut alpha = Vec::with_capacity(m); // diagonal
     let mut beta = Vec::with_capacity(m); // sub-diagonal
 
-    // Start with a normalized vector
-    let q0 = DVector::from_element(n, 1.0 / (n as f64).sqrt());
+    // Start with a randomised (deterministic) vector. An all-ones start makes
+    // A*q0 proportional to q0 for structured SPD matrices (Laplacian,
+    // Poisson), so b_0 = 0, the loop broke at j = 0 and the routine returned a
+    // single Ritz value while reporting success — even for k > 1.
+    let q0 = deterministic_start(n, 0x2545_F491_4F6C_DD1D);
     q_vecs.push(q0);
 
     let mut w;
@@ -418,11 +529,38 @@ pub fn eigsh(
 
         let b_j = w.norm();
         if b_j < tol {
-            // Invariant subspace found
-            break;
+            if j + 1 < k {
+                // An invariant subspace was reached before k Ritz values
+                // existed. Falling through here used to silently return fewer
+                // than k eigenvalues as Ok; restart the chain from a fresh
+                // direction so the caller either gets k values or an error.
+                let trial = orthogonal_perturbation(&q_vecs[j], n, 0xD1B5_4A32_D192_ED03);
+                if q_vecs.iter().all(|qi| trial.dot(qi).abs() < 1e-8) {
+                    // A zero off-diagonal block is an exact (block-diagonal)
+                    // invariant subspace, so the Ritz values of the restarted
+                    // chain ARE eigenvalues of T. Give it a small but
+                    // non-degenerate coupling so the restarted block converges
+                    // to the true eigenvectors instead of stalling on a
+                    // half-normalised Ritz vector.
+                    let coupling = b_j.max(1e-4 * alpha[j].abs()).max(1e-12);
+                    beta.push(coupling);
+                    q_vecs.push(trial);
+                } else {
+                    return Err(format!(
+                        "Lanczos broke down after {} vector(s) before reaching k={} \
+                         eigenvalues",
+                        j + 1,
+                        k
+                    ));
+                }
+            } else {
+                // Invariant subspace found; k Ritz values are available.
+                break;
+            }
+        } else {
+            beta.push(b_j);
+            q_vecs.push(w / b_j);
         }
-        beta.push(b_j);
-        q_vecs.push(w / b_j);
     }
 
     let m_actual = alpha.len();
@@ -463,6 +601,13 @@ pub fn eigsh(
     }
 
     let k_actual = k.min(m_actual);
+    if k_actual < k {
+        // Never hand back a short result as success: the caller asked for k
+        // eigenvalues and the Krylov space only yielded k_actual distinct ones.
+        return Err(format!(
+            "Lanczos produced only {k_actual} of the requested {k} eigenvalues"
+        ));
+    }
     let mut result_vals = DVector::zeros(k_actual);
     let mut result_vecs = DMatrix::zeros(n, k_actual);
 
@@ -481,6 +626,21 @@ pub fn eigsh(
         }
     }
 
+    // Verify the returned pairs really are eigenpairs of the ORIGINAL matrix
+    // before reporting success.
+    let scale = matrix_inf_norm(a);
+    for c in 0..k_actual {
+        let v = result_vecs.column(c).clone_owned();
+        let av = a.spmv(&v);
+        let r = (&av - &v * result_vals[c]).norm();
+        if !(r <= tol.max(f64::EPSILON) * scale * v.norm()) {
+            return Err(format!(
+                "Lanczos residual check failed for Ritz pair {c}: \
+                 ||Av - lambda v|| = {r} exceeds tol * ||A|| * ||v||"
+            ));
+        }
+    }
+
     Ok((result_vals, result_vecs))
 }
 
@@ -490,7 +650,15 @@ pub fn eigsh(
 
 /// Conjugate Gradient solver for symmetric positive-definite systems `A x = b`.
 ///
-/// Returns the solution vector `x`.
+/// Stops when the relative residual `‖b − A x‖ / ‖b‖ < tol`. Returns `Err`
+/// (with the achieved relative residual) if that does not happen within
+/// `max_iters` iterations, and if a search direction has non-positive
+/// curvature `pᵀ A p ≤ 0` - the matrix is not positive definite. A zero `b`
+/// gives the zero solution.
+///
+/// No threshold here is absolute: the old `1e-15` / `1e-30` cut-offs turned a
+/// system scaled by `1e-16` into `Ok([0, 0, 0])`, and the iteration cap
+/// returned `Ok` at any residual (one step on `[[4, 1], [1, 3]]`: 0.71).
 pub fn cg_solve(
     a: &CsrMatrix,
     b: &DVector<f64>,
@@ -502,19 +670,23 @@ pub fn cg_solve(
 
     let n = a.nrows;
     let mut x = DVector::zeros(n);
+    let b_norm = b.norm();
+    if b_norm == 0.0 {
+        return Ok(x);
+    }
     let mut r = b.clone(); // r = b - A*x, but x=0 so r=b
     let mut p = r.clone();
     let mut rs_old = r.dot(&r);
-    let b_norm = b.norm();
-    if b_norm < 1e-15 {
-        return Ok(x);
-    }
 
-    for _ in 0..max_iters {
+    for it in 0..max_iters {
         let ap = a.spmv(&p);
         let p_ap = p.dot(&ap);
-        if p_ap.abs() < 1e-30 {
-            break;
+        if !(p_ap > 0.0) {
+            return Err(format!(
+                "CG breakdown at iteration {it}: pᵀAp = {p_ap:e} <= 0, the matrix is \
+                 not positive definite (relative residual {:e})",
+                rs_old.sqrt() / b_norm
+            ));
         }
         let alpha = rs_old / p_ap;
         x += &p * alpha;
@@ -528,14 +700,140 @@ pub fn cg_solve(
         rs_old = rs_new;
     }
 
-    Ok(x)
+    let res = (b - a.spmv(&x)).norm() / b_norm;
+    if res < tol {
+        return Ok(x);
+    }
+    Err(format!(
+        "CG did not converge in {max_iters} iterations: relative residual {res:e} \
+         (tol {tol:e})"
+    ))
+}
+
+/// Restarted GMRES, returning the iterate and its relative residual whether or
+/// not `tol` was reached. `max_iters` counts Arnoldi steps over all cycles.
+pub(crate) fn gmres_iterate(
+    a: &CsrMatrix,
+    b: &DVector<f64>,
+    restart: usize,
+    max_iters: usize,
+    tol: f64,
+) -> (DVector<f64>, f64) {
+    let n = a.nrows;
+    let mut x = DVector::zeros(n);
+    let b_norm = b.norm();
+    if b_norm == 0.0 {
+        return (x, 0.0);
+    }
+    let m = restart.max(1).min(n.max(1));
+    let mut used = 0usize;
+
+    loop {
+        let r = b - &a.spmv(&x);
+        let r_norm = r.norm();
+        if r_norm / b_norm < tol || used >= max_iters || r_norm == 0.0 {
+            return (x, r_norm / b_norm);
+        }
+
+        // Arnoldi basis vectors
+        let mut v: Vec<DVector<f64>> = Vec::with_capacity(m + 1);
+        v.push(&r / r_norm);
+
+        // Upper Hessenberg matrix H (stored as (m+1) x m), reduced in place
+        // to upper triangular by Givens rotations.
+        let mut h = DMatrix::zeros(m + 1, m);
+        // Transformed RHS for least squares
+        let mut g = DVector::zeros(m + 1);
+        g[0] = r_norm;
+
+        let mut cs: Vec<f64> = Vec::with_capacity(m);
+        let mut sn: Vec<f64> = Vec::with_capacity(m);
+
+        let mut j = 0;
+        while j < m && used < max_iters {
+            used += 1;
+            let mut wj = a.spmv(&v[j]);
+            let w_norm = wj.norm();
+
+            // Arnoldi: modified Gram-Schmidt against previous basis vectors
+            for i in 0..=j {
+                h[(i, j)] = v[i].dot(&wj);
+                wj -= &v[i] * h[(i, j)];
+            }
+            let h_next = wj.norm();
+            h[(j + 1, j)] = h_next;
+            // Lucky breakdown: A v_j lies in the current Krylov space, judged
+            // relative to |A v_j| (not against an absolute 1e-15, which
+            // fired on any matrix scaled by 1e-16).
+            let breakdown = h_next <= (n as f64) * f64::EPSILON * w_norm;
+            if !breakdown {
+                v.push(wj / h_next);
+            }
+
+            // Apply previous Givens rotations to column j of H. This must
+            // happen before leaving on a breakdown too: skipping it left the
+            // triangular solve with an unrotated column.
+            for i in 0..j {
+                let temp = cs[i] * h[(i, j)] + sn[i] * h[(i + 1, j)];
+                h[(i + 1, j)] = -sn[i] * h[(i, j)] + cs[i] * h[(i + 1, j)];
+                h[(i, j)] = temp;
+            }
+
+            // New rotation zeroing H[j+1, j]
+            let a_jj = h[(j, j)];
+            let a_j1j = h[(j + 1, j)];
+            let denom = a_jj.hypot(a_j1j);
+            if denom == 0.0 {
+                cs.push(1.0);
+                sn.push(0.0);
+            } else {
+                cs.push(a_jj / denom);
+                sn.push(a_j1j / denom);
+            }
+            h[(j, j)] = cs[j] * a_jj + sn[j] * a_j1j;
+            h[(j + 1, j)] = 0.0;
+
+            let temp = cs[j] * g[j] + sn[j] * g[j + 1];
+            g[j + 1] = -sn[j] * g[j] + cs[j] * g[j + 1];
+            g[j] = temp;
+
+            j += 1;
+            if breakdown || g[j].abs() / b_norm < tol {
+                break;
+            }
+        }
+
+        // Back-substitute H(0..j, 0..j) y = g(0..j). A zero pivot means the
+        // Krylov space is singular for A; that direction is dropped.
+        let mut y = DVector::zeros(j);
+        for i in (0..j).rev() {
+            let mut s = g[i];
+            for k in (i + 1)..j {
+                s -= h[(i, k)] * y[k];
+            }
+            y[i] = if h[(i, i)] == 0.0 { 0.0 } else { s / h[(i, i)] };
+        }
+        for i in 0..j {
+            x += &v[i] * y[i];
+        }
+    }
 }
 
 /// GMRES(restart) solver for general sparse systems `A x = b`.
 ///
 /// Uses the restarted Generalized Minimal Residual method. The `restart`
 /// parameter controls how many Arnoldi vectors are kept before restarting
-/// (typical value: 30).
+/// (typical value: 30); `max_iters` caps the total number of Arnoldi steps.
+///
+/// Returns `Ok(x)` only if `‖b − A x‖ / ‖b‖ < tol`, else `Err` with the
+/// achieved relative residual. Breakdown and pivot tests are relative. A zero
+/// `b` gives the zero solution.
+///
+/// Before: a lucky breakdown left the loop before the earlier Givens rotations
+/// were applied to the last column (`diag(1, 2)`, `b = [1, 1]`, one cycle of 2:
+/// relative residual 0.107 instead of exact), absolute `1e-15` thresholds
+/// returned `Ok([0, 0, 0])` for `1e-16 · diag(1, 2, 3)`, and the iteration cap
+/// returned `Ok` at any residual.
 pub fn gmres_solve(
     a: &CsrMatrix,
     b: &DVector<f64>,
@@ -545,117 +843,15 @@ pub fn gmres_solve(
 ) -> Result<DVector<f64>, String> {
     assert_eq!(a.nrows, a.ncols, "Matrix must be square for GMRES");
     assert_eq!(a.nrows, b.nrows(), "Dimension mismatch");
-
-    let n = a.nrows;
-    let b_norm = b.norm();
-    if b_norm < 1e-15 {
-        return Ok(DVector::zeros(n));
+    let (x, res) = gmres_iterate(a, b, restart, max_iters, tol);
+    if res < tol || b.norm() == 0.0 {
+        Ok(x)
+    } else {
+        Err(format!(
+            "GMRES({restart}) did not converge in {max_iters} iterations: relative \
+             residual {res:e} (tol {tol:e})"
+        ))
     }
-
-    let mut x = DVector::zeros(n);
-
-    for _outer in 0..(max_iters / restart.max(1) + 1) {
-        let r = b - &a.spmv(&x);
-        let r_norm = r.norm();
-        if r_norm / b_norm < tol {
-            return Ok(x);
-        }
-
-        let m = restart.min(n);
-        // Arnoldi basis vectors
-        let mut v: Vec<DVector<f64>> = Vec::with_capacity(m + 1);
-        v.push(&r / r_norm);
-
-        // Upper Hessenberg matrix H (stored as (m+1) x m)
-        let mut h = DMatrix::zeros(m + 1, m);
-        // Transformed RHS for least squares
-        let mut g = DVector::zeros(m + 1);
-        g[0] = r_norm;
-
-        // Givens rotation coefficients
-        let mut cs: Vec<f64> = Vec::with_capacity(m);
-        let mut sn: Vec<f64> = Vec::with_capacity(m);
-
-        let mut j = 0;
-        while j < m {
-            let w = a.spmv(&v[j]);
-            let mut wj = w;
-
-            // Arnoldi: orthogonalize against previous basis vectors
-            for i in 0..=j {
-                h[(i, j)] = v[i].dot(&wj);
-                wj -= &v[i] * h[(i, j)];
-            }
-            h[(j + 1, j)] = wj.norm();
-
-            if h[(j + 1, j)].abs() < 1e-15 {
-                // Lucky breakdown
-                j += 1;
-                break;
-            }
-            v.push(wj / h[(j + 1, j)]);
-
-            // Apply previous Givens rotations to column j of H
-            for i in 0..j {
-                let temp = cs[i] * h[(i, j)] + sn[i] * h[(i + 1, j)];
-                h[(i + 1, j)] = -sn[i] * h[(i, j)] + cs[i] * h[(i + 1, j)];
-                h[(i, j)] = temp;
-            }
-
-            // Compute new Givens rotation for row j
-            let a_jj = h[(j, j)];
-            let a_j1j = h[(j + 1, j)];
-            let denom = (a_jj * a_jj + a_j1j * a_j1j).sqrt();
-            if denom < 1e-15 {
-                cs.push(1.0);
-                sn.push(0.0);
-            } else {
-                cs.push(a_jj / denom);
-                sn.push(a_j1j / denom);
-            }
-
-            h[(j, j)] = cs[j] * a_jj + sn[j] * a_j1j;
-            h[(j + 1, j)] = 0.0;
-
-            // Apply rotation to g
-            let temp = cs[j] * g[j] + sn[j] * g[j + 1];
-            g[j + 1] = -sn[j] * g[j] + cs[j] * g[j + 1];
-            g[j] = temp;
-
-            if g[j + 1].abs() / b_norm < tol {
-                j += 1;
-                break;
-            }
-            j += 1;
-        }
-
-        // Back-substitute to find y: H(0..j, 0..j) * y = g(0..j)
-        let mut y = DVector::zeros(j);
-        for i in (0..j).rev() {
-            let mut s = g[i];
-            for k in (i + 1)..j {
-                s -= h[(i, k)] * y[k];
-            }
-            if h[(i, i)].abs() < 1e-15 {
-                y[i] = 0.0;
-            } else {
-                y[i] = s / h[(i, i)];
-            }
-        }
-
-        // Update x = x + V * y
-        for i in 0..j {
-            x += &v[i] * y[i];
-        }
-
-        // Check convergence
-        let final_r = b - &a.spmv(&x);
-        if final_r.norm() / b_norm < tol {
-            return Ok(x);
-        }
-    }
-
-    Ok(x)
 }
 
 // ---------------------------------------------------------------------------
