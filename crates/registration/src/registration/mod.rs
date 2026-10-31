@@ -647,77 +647,67 @@ fn exponential_map_se3(delta: &nalgebra::Vector6<f32>) -> Matrix4<f32> {
     transform
 }
 
-/// Compute information matrix from registration
+/// Information matrix of a registration, as Open3D's
+/// `GetInformationMatrixFromPointClouds`.
 ///
-/// The information matrix of a point-to-point ICP problem is the sum of outer
-/// products of the per-point Jacobian, which for a rigid perturbation is
-///
-/// ```text
-/// J_p = [ p ; p x (t q_p - s p) ]
-/// ```
-///
-/// where `p` is the source point and `t q_p - s p` is the residual `q_p - T p`.
-/// The rotation block here was already right; the **translation** block was not.
-/// It was filled with the residual instead of the source point:
+/// For every source point `p` whose transformed position `T p` has a nearest
+/// target point `q` closer than `max_correspondence_distance`, the
+/// correspondence contributes `G^T G` with
 ///
 /// ```text
-/// jacobian = [ diff ; p x diff ]        // was
-/// jacobian = [ p   ; p x diff ]        // now
+/// G = [ -[q]x | I3 ]        (3 x 6)
 /// ```
 ///
-/// so the whole matrix collapsed to zero exactly when the registration was
-/// *perfect* - `diff = 0` for every correspondence - and reported "no
-/// information about the pose" for the one answer that pins it down hardest.
+/// i.e. the Jacobian of `T p` with respect to a left-multiplied twist, linearised
+/// at the target point. The twist ordering is Open3D's, **rotation first**:
+/// `H[0..3, 0..3]` is the rotation block, `H[3..6, 3..6]` the translation block
+/// (`N * I3`), and the coupling block `H[0..3, 3..6] = sum [q]x` follows the
+/// centroid of the matched target points (zero for a cloud centred on the
+/// origin), exactly as in Open3D. This is the matrix pose-graph edges expect.
 ///
-/// Measured: two identical clouds under the identity transform give
-/// `diag = [0, 0, 0, 0, 0, 0]` and `det = 0`, before the fix; after, the same
-/// case gives non-zero translation diagonals that grow with the spread of the
-/// cloud. A 0.01 offset along y, which `diff` did see, gave
-/// `diag = [0, 0.0020, 0, 0, 0, 0.0025]` before and non-zero x and z
-/// translation entries as well after - the two cases are now consistent, which is
-/// what identifies the asymmetry as the defect rather than the zero.
+/// The result depends only on *which* points correspond, not on their residual:
+/// the information content of a correspondence set is the same whether or not
+/// the alignment is perfect.
 ///
-/// The residual is still the right thing for the rotation block: `p x diff` is
-/// the moment arm, and the residual is what makes it a *mismatch*.
-///
-/// No other crate in the workspace calls this function, so nothing else shifts.
+/// Previously the translation rows held the source coordinates and the rotation
+/// rows were multiplied by the residual, with a hard-coded 0.05 gate. Two
+/// identical clouds under the identity gave `diag [1043, 1043, 1043, 0, 0, 0]` -
+/// no rotation information at the alignment that pins rotation hardest, and a
+/// translation block that grew with the distance from the origin.
 pub fn get_information_matrix_from_point_clouds(
     source: &PointCloud,
     target: &PointCloud,
     transformation: &Matrix4<f32>,
+    max_correspondence_distance: f32,
 ) -> nalgebra::Matrix6<f32> {
-    let mut information = nalgebra::Matrix6::<f32>::zeros();
+    let mut information = nalgebra::Matrix6::<f64>::zeros();
+    if source.points.is_empty() || target.points.is_empty() {
+        return information.cast();
+    }
 
-    // Build simple nearest neighbor for target
     let target_nn = SimpleNN::new(target.points.clone());
 
-    // Accumulate information from correspondences
     for src_point in &source.points {
         let transformed = transformation.transform_point(src_point);
-
-        if let Some((target_point, _, dist_sq)) = target_nn.nearest(&transformed) {
-            if dist_sq.sqrt() < 0.05 {
-                // Small distance threshold
-                let diff = transformed - target_point;
-                let p = src_point.coords;
-
-                // Translation acts on the point itself; rotation acts about it
-                // through the residual.
-                let jacobian = nalgebra::Vector6::new(
-                    p.x,
-                    p.y,
-                    p.z,
-                    p.y * diff.z - p.z * diff.y,
-                    p.z * diff.x - p.x * diff.z,
-                    p.x * diff.y - p.y * diff.x,
-                );
-
-                information += jacobian * jacobian.transpose();
-            }
+        let Some((q, _, dist_sq)) = target_nn.nearest(&transformed) else {
+            continue;
+        };
+        if dist_sq.sqrt() >= max_correspondence_distance {
+            continue;
+        }
+        let (x, y, z) = (f64::from(q.x), f64::from(q.y), f64::from(q.z));
+        // Rows of G = [-[q]x | I], written out.
+        let rows = [
+            nalgebra::Vector6::new(0.0, z, -y, 1.0, 0.0, 0.0),
+            nalgebra::Vector6::new(-z, 0.0, x, 0.0, 1.0, 0.0),
+            nalgebra::Vector6::new(y, -x, 0.0, 0.0, 0.0, 1.0),
+        ];
+        for g in &rows {
+            information += g * g.transpose();
         }
     }
 
-    information
+    information.cast()
 }
 
 /// Evaluate registration quality, returning `(fitness, inlier_rmse)`.
