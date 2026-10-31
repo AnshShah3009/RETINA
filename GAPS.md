@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (46 open, was 77)
+## (g) Second review, 2026-10-31 — findings (44 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -329,7 +329,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
 Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` uses it as the match threshold. Doc fix only.
 
-### (g4) slam / rendering / plot / cli / dnn / python (9 open, was 11)
+### (g4) slam / rendering / plot / cli / dnn / python (7 open, was 11)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -341,8 +341,8 @@ Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` u
 | g-m6 | `dnn/src/lib.rs` preprocess | **CLOSED.** Luma plane repeated per channel (planar CHW); pinned by `test_preprocess_is_planar_chw`. Was: HWC data labelled NCHW → RGB models see a garbled image | was HIGH — fixed | ARGUED |
 | g-m7 | `slam/src/tracking.rs` `refine_pose_with_icp` | relative translation applied twice | MED | ARGUED |
 | g-m8 | `rendering/.../optimize.rs` `reset_opacity` | **CLOSED.** Opacities capped at the target (3DGS §5.2); the unit test that pinned raising now pins capping. Was: raises low opacities instead of capping at 0.01 | was MED — fixed | CONFIRMED |
-| g-m9 | `plot/src/export.rs` `format_tick_value` | decimals from value, not step → duplicate labels `0,0,0.001,…` | MED | CONFIRMED |
-| g-m10 | `plot/src/export.rs` bars | drawn from axis min, not 0 | MED | CONFIRMED |
+| g-m9 | `plot/src/export.rs` `format_tick_value` | **CLOSED.** Decimals from the tick step (fewest that write it exactly). Pinned by `tick_label_tests` in `export.rs`. Was: decimals from value, not step → duplicate labels `0,0,0.001,…` | was MED — fixed | CONFIRMED |
+| g-m10 | `plot/src/export.rs` bars | **CLOSED.** Matplotlib `bar`: 0.8 data units wide, from y = 0, bar extents in the autoscale with y = 0 sticky; pinned against matplotlib's limits in `tests/svg_geometry.rs`. Was: drawn from axis min, not 0 | was MED — fixed | CONFIRMED |
 | g-m11 | `plot/src/three_d.rs` `camera_position` | HTML camera convention disagrees with SVG `project` (~22° at defaults) | LOW-MED | CONFIRMED |
 
 Minor (LOW): python `pose.matrix()` flattened column-major (numpy gets the transpose);

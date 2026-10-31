@@ -52,6 +52,9 @@ impl Rect {
 }
 
 /// Padded data range of one panel.
+/// Matplotlib's default `bar` width, in data units.
+const BAR_WIDTH: f64 = 0.8;
+
 #[derive(Debug, Clone, Copy)]
 struct Bounds {
     min_x: f64,
@@ -81,17 +84,30 @@ impl Bounds {
         let mut min_y = f64::MAX;
         let mut max_y = f64::MIN;
         let mut any = false;
+        let mut has_bars = false;
 
         for series in &subplot.series {
+            let is_bar = matches!(series.plot_type, PlotType::Bar);
             for (x, y) in series.x.iter().zip(series.y.iter()) {
                 if !x.is_finite() || !y.is_finite() {
                     continue;
                 }
                 any = true;
-                min_x = min_x.min(*x);
-                max_x = max_x.max(*x);
-                min_y = min_y.min(*y);
-                max_y = max_y.max(*y);
+                if is_bar {
+                    // A bar is the rectangle [x ± width/2] x [0, y]: its
+                    // extent, not its centre point, is the data limit
+                    // (Matplotlib's `bar`).
+                    has_bars = true;
+                    min_x = min_x.min(x - BAR_WIDTH / 2.0);
+                    max_x = max_x.max(x + BAR_WIDTH / 2.0);
+                    min_y = min_y.min(y.min(0.0));
+                    max_y = max_y.max(y.max(0.0));
+                } else {
+                    min_x = min_x.min(*x);
+                    max_x = max_x.max(*x);
+                    min_y = min_y.min(*y);
+                    max_y = max_y.max(*y);
+                }
             }
         }
         if !any {
@@ -111,11 +127,24 @@ impl Bounds {
         };
         let x_pad = pad(min_x, max_x);
         let y_pad = pad(min_y, max_y);
+        // Bars make y = 0 a *sticky edge*: when the data limit is exactly 0
+        // the margin is not applied past it, so bars stand on the axis
+        // (measured, matplotlib 3.x: bar([0,1,2],[10,11,12]) -> ylim (0, 12.6)).
+        let lo_y = if has_bars && min_y == 0.0 {
+            0.0
+        } else {
+            min_y - y_pad
+        };
+        let hi_y = if has_bars && max_y == 0.0 {
+            0.0
+        } else {
+            max_y + y_pad
+        };
         Some(Self {
             min_x: min_x - x_pad,
             max_x: max_x + x_pad,
-            min_y: min_y - y_pad,
-            max_y: max_y + y_pad,
+            min_y: lo_y,
+            max_y: hi_y,
         })
     }
 
@@ -393,11 +422,21 @@ fn nice_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
     out
 }
 
+/// Spacing of a tick grid (0 for fewer than two ticks).
+fn tick_step(ticks: &[f64]) -> f64 {
+    match ticks {
+        [a, b, ..] => b - a,
+        _ => 0.0,
+    }
+}
+
 /// Render the tick labels and marks for one axis of a panel.
 fn render_ticks(svg: &mut String, rect: &Rect, bounds: &Bounds, x_label: &str, y_label: &str) {
     const TICKS: usize = 5;
     // x axis, along the bottom
-    for v in nice_ticks(bounds.min_x, bounds.max_x, TICKS) {
+    let xticks = nice_ticks(bounds.min_x, bounds.max_x, TICKS);
+    let xstep = tick_step(&xticks);
+    for v in xticks {
         let px = rect.x + (v - bounds.min_x) / (bounds.max_x - bounds.min_x) * rect.w;
         if px < rect.x - 1.0 || px > rect.x + rect.w + 1.0 {
             continue;
@@ -412,11 +451,13 @@ fn render_ticks(svg: &mut String, rect: &Rect, bounds: &Bounds, x_label: &str, y
             r#"  <text x="{px:.2}" y="{}" class="tick tick-x" text-anchor="middle">{}</text>
 "#,
             rect.bottom() + 17.0,
-            format_tick_value(v)
+            format_tick_value(v, xstep)
         ));
     }
     // y axis, up the left side
-    for v in nice_ticks(bounds.min_y, bounds.max_y, TICKS) {
+    let yticks = nice_ticks(bounds.min_y, bounds.max_y, TICKS);
+    let ystep = tick_step(&yticks);
+    for v in yticks {
         let py = rect.y + rect.h - (v - bounds.min_y) / (bounds.max_y - bounds.min_y) * rect.h;
         if py < rect.y - 1.0 || py > rect.y + rect.h + 1.0 {
             continue;
@@ -431,7 +472,7 @@ fn render_ticks(svg: &mut String, rect: &Rect, bounds: &Bounds, x_label: &str, y
             r#"  <text x="{}" y="{py:.2}" class="tick tick-y" text-anchor="end">{}</text>
 "#,
             rect.x - 8.0,
-            format_tick_value(v)
+            format_tick_value(v, ystep)
         ));
     }
     let _ = (x_label, y_label);
@@ -442,7 +483,14 @@ fn render_ticks(svg: &mut String, rect: &Rect, bounds: &Bounds, x_label: &str, y
 /// The default `{:.6}` would print `0.2000000000000001` for a value that is exactly
 /// 0.2 in the grid, which is both ugly and a symptom of the step not being a nice
 /// number in the first place.
-fn format_tick_value(v: f64) -> String {
+///
+/// The number of decimals comes from the tick **step**, not from each value:
+/// choosing per value labelled ticks 1.0, 1.25, 1.5, ... as `1, 1.2, 1.5, 1.8, 2`
+/// (rounding 1.25 and 1.75 away), and ticks over `0..0.001` as
+/// `0, 0, 0.001, 0.001, 0.001`. A step's decimals are the fewest that write it
+/// exactly (`0.25` -> 2, `0.2` -> 1, `5` -> 0), so every tick on its grid is
+/// exact and distinct.
+fn format_tick_value(v: f64, step: f64) -> String {
     let a = v.abs();
     if a == 0.0 {
         return "0".to_string();
@@ -456,15 +504,7 @@ fn format_tick_value(v: f64) -> String {
             .trim_end_matches('.')
             .to_string();
     }
-    let decimals = if a >= 100.0 {
-        0
-    } else if a >= 1.0 {
-        1
-    } else {
-        // Enough decimals to show the step, and no more.
-        let step_digits = if a >= 0.1 { 2 } else { 3 };
-        step_digits
-    };
+    let decimals = step_decimals(step);
     let s = format!("{:.*}", decimals, v);
     // **Trim the decimal point, never the digits.** My first version did
     // `trim_end_matches('0').trim_end_matches('.')`, which turned `100.0` into
@@ -481,6 +521,20 @@ fn format_tick_value(v: f64) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// Fewest decimals that write `step` exactly (to 1e-9 relative), capped at 10.
+fn step_decimals(step: f64) -> usize {
+    let step = step.abs();
+    if !step.is_finite() || step == 0.0 {
+        return 0;
+    }
+    (0..=10)
+        .find(|&d| {
+            let scaled = step * 10f64.powi(d as i32);
+            (scaled - scaled.round()).abs() <= 1e-9 * scaled.max(1.0)
+        })
+        .unwrap_or(10)
 }
 
 pub fn to_svg(figure: &Figure) -> String {
@@ -653,24 +707,24 @@ pub fn to_svg(figure: &Figure) -> String {
                                 }
                             }
                             PlotType::Bar => {
-                                let bar_width = rect.w / series.x.len().max(1) as f64 * 0.8;
+                                // Matplotlib's bar: width 0.8 in *data* units,
+                                // drawn from y = 0 to the value. Bars used to
+                                // be sized in pixels (`rect.w / n * 0.8`) and
+                                // grown up from the padded axis minimum, so
+                                // [10, 11, 12] drew heights in ratio 1:11:21
+                                // and negative values grew upward.
                                 for (x, y) in &run {
-                                    // Baseline is the bottom of the (padded)
-                                    // axis, as before: the bar's height is the
-                                    // value's distance above the axis minimum,
-                                    // and its top edge still lands exactly on
-                                    // the value.
-                                    let (px, _) = bounds.project(&rect, *x, 0.0);
-                                    let bar_height =
-                                        (y - bounds.min_y) / (bounds.max_y - bounds.min_y) * rect.h;
-                                    let py = rect.bottom() - bar_height;
+                                    let (x0, y_top) =
+                                        bounds.project(&rect, x - BAR_WIDTH / 2.0, y.max(0.0));
+                                    let (x1, y_bot) =
+                                        bounds.project(&rect, x + BAR_WIDTH / 2.0, y.min(0.0));
                                     svg.push_str(&format!(
                                         r#"  <rect x="{}" y="{}" width="{}" height="{}" fill="{}" opacity="{}"/>
 "#,
-                                        px - bar_width / 2.0,
-                                        py,
-                                        bar_width,
-                                        bar_height,
+                                        x0,
+                                        y_top,
+                                        x1 - x0,
+                                        y_bot - y_top,
                                         series_color,
                                         series.style.fill_alpha
                                     ));
@@ -925,5 +979,42 @@ mod margin_tests {
                 b.max_y
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tick_label_tests {
+    use super::*;
+
+    fn labels(lo: f64, hi: f64) -> Vec<String> {
+        let ticks = nice_ticks(lo, hi, 5);
+        let step = tick_step(&ticks);
+        ticks.iter().map(|&v| format_tick_value(v, step)).collect()
+    }
+
+    /// Labels on one grid are distinct and exact. Per-value decimals used to
+    /// print `1, 1.2, 1.5, 1.8, 2` for ticks at quarter steps and
+    /// `0, 0, 0.001, 0.001, 0.001` for ticks over `0..0.001`.
+    #[test]
+    fn tick_labels_follow_the_step() {
+        for (lo, hi) in [
+            (1.0, 2.0),
+            (0.0, 0.001),
+            (0.0, 100.0),
+            (-3.0, 7.0),
+            (0.0, 0.25),
+        ] {
+            let l = labels(lo, hi);
+            let mut uniq = l.clone();
+            uniq.dedup();
+            assert_eq!(uniq.len(), l.len(), "duplicate labels {l:?} for {lo}..{hi}");
+            for (v, s) in nice_ticks(lo, hi, 5).iter().zip(&l) {
+                let back: f64 = s.parse().unwrap();
+                assert!((back - v).abs() <= 1e-9 * v.abs().max(1.0), "{s} for {v}");
+            }
+        }
+        assert_eq!(step_decimals(0.25), 2);
+        assert_eq!(step_decimals(0.2), 1);
+        assert_eq!(step_decimals(5.0), 0);
     }
 }

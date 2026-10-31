@@ -266,12 +266,15 @@ fn legend_has_one_entry_per_series_and_honours_the_toggle() {
     );
 }
 
-/// Every bar must produce one rect, `plot_width / n * 0.8` wide, with a height
-/// proportional to the value above the padded minimum.
+/// Bars follow Matplotlib's `bar`: one rect per bar, 0.8 data units wide,
+/// drawn from y = 0 to the value, with y = 0 a sticky edge of the autoscale.
+/// Reference limits measured with matplotlib 3.x:
+/// `bar([0,1,2,3],[1,2,3,4])` -> xlim (-0.59, 3.59), ylim (0, 4.2);
+/// `bar([0,1,2],[-3,2,5])`   -> ylim (-3.4, 5.4).
 ///
-/// Wrong answer: fewer rects than bars (a zip truncation), a zero or NaN width
-/// (division by a zero-length series), a height measured from the top instead
-/// of the padded minimum, or bars whose x does not increase with the data.
+/// This test used to pin the previous geometry - bars `plot_width / n * 0.8`
+/// pixels wide, grown up from the *padded axis minimum* - which drew
+/// `[10, 11, 12]` with heights in ratio 1:11:21 and grew negative bars upward.
 #[test]
 fn bar_series_draws_one_hand_sized_rect_per_bar() {
     let mut fig = Figure::new("b")
@@ -286,27 +289,47 @@ fn bar_series_draws_one_hand_sized_rect_per_bar() {
 
     let plot_w = 800.0 - ML - MR;
     let plot_h = 600.0 - MT - MB;
-    assert_close(attr_f64(rects[0], "width"), plot_w / 4.0 * 0.8, "bar width");
     for r in &rects {
-        assert_close(attr_f64(r, "width"), plot_w / 4.0 * 0.8, "bar width");
+        assert_close(attr_f64(r, "width"), 0.8 / 4.18 * plot_w, "bar width");
     }
+    for (r, v) in rects.iter().zip([1.0, 2.0, 3.0, 4.0]) {
+        assert_close(attr_f64(r, "height"), v / 4.2 * plot_h, "bar height");
+        // Every bar stands on y = 0, the bottom of the axes.
+        assert_close(
+            attr_f64(r, "y") + attr_f64(r, "height"),
+            MT + plot_h,
+            "bar base",
+        );
+    }
+    assert_close(
+        attr_f64(rects[0], "x"),
+        ML + (0.19 / 4.18) * plot_w,
+        "first bar left edge",
+    );
+}
 
-    // y data span 1..4 -> padded 0.85..4.15 (span 3.3), Matplotlib's 5% margins.
+/// A negative bar hangs down from y = 0.
+#[test]
+fn negative_bars_hang_from_zero() {
+    let mut fig = Figure::new("b")
+        .size(800.0, 600.0)
+        .legend(false)
+        .grid(false);
+    fig.bar(&[0.0, 1.0, 2.0], &[-3.0, 2.0, 5.0], "bars");
+    let svg = fig.to_svg_for_test();
+    let rects = tags_with(&svg, "<rect");
+    let plot_h = 600.0 - MT - MB;
+    let zero_y = MT + plot_h * (5.4 / 8.8);
+    assert_close(attr_f64(rects[0], "y"), zero_y, "negative bar top is y = 0");
     assert_close(
         attr_f64(rects[0], "height"),
-        (1.0 - 0.85) / 3.3 * plot_h,
-        "height of the shortest bar",
+        3.0 / 8.8 * plot_h,
+        "negative bar height",
     );
     assert_close(
-        attr_f64(rects[3], "height"),
-        (4.0 - 0.85) / 3.3 * plot_h,
-        "height of the tallest bar",
-    );
-
-    let xs: Vec<f64> = rects.iter().map(|r| attr_f64(r, "x")).collect();
-    assert!(
-        xs.windows(2).all(|w| w[1] > w[0]),
-        "bar x positions must increase with the data: {xs:?}"
+        attr_f64(rects[2], "y") + attr_f64(rects[2], "height"),
+        zero_y,
+        "positive bar base is y = 0",
     );
 }
 
