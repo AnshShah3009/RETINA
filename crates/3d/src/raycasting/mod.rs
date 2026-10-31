@@ -468,24 +468,44 @@ pub fn point_inside_mesh(query: &Point3<f32>, mesh: &TriangleMesh) -> bool {
 }
 
 /// Check if point is inside mesh using a pre-built BVH.
+///
+/// Parity of ray crossings, voted over three rays in generic directions. A
+/// single axis-aligned ray (`+x`, as this used) runs straight through the
+/// shared diagonal edges of axis-aligned meshes, and the inclusive
+/// ray/triangle test then counts that one crossing twice - the centre of a
+/// 12-triangle unit cube came back *outside*. Generic directions make
+/// edge/vertex hits a measure-zero event, and the majority of three absorbs
+/// the rare one that still lands on an edge.
+///
+/// The BVH is not used: it reports only the closest hit, and parity needs all
+/// of them, so crossings are counted over every face.
 pub fn point_inside_mesh_bvh(query: &Point3<f32>, mesh: &TriangleMesh, _bvh: &Bvh) -> bool {
-    // Cast ray in +X direction and count intersections via BVH
-    let ray = Ray::new(*query, Vector3::x());
-    // BVH gives us only the closest hit. To count all intersections,
-    // we need to walk through all hits. For now, fall back to brute force
-    // since BVH only returns closest. This is still correct.
-    let mut intersection_count = 0;
-    for face in &mesh.faces {
-        let v0 = mesh.vertices[face[0]];
-        let v1 = mesh.vertices[face[1]];
-        let v2 = mesh.vertices[face[2]];
-        if let Some(t) = ray_triangle_intersection(&ray, v0, v1, v2) {
-            if t > 0.0 {
-                intersection_count += 1;
-            }
-        }
-    }
-    intersection_count % 2 == 1
+    const DIRECTIONS: [[f32; 3]; 3] = [
+        [1.0, 0.312_719_8, 0.193_147_2],
+        [-0.271_103_4, 1.0, 0.451_890_7],
+        [0.371_928_5, -0.162_327_9, 1.0],
+    ];
+    let inside_votes = DIRECTIONS
+        .iter()
+        .filter(|d| {
+            let ray = Ray::new(*query, Vector3::new(d[0], d[1], d[2]).normalize());
+            let crossings = mesh
+                .faces
+                .iter()
+                .filter(|face| {
+                    ray_triangle_intersection(
+                        &ray,
+                        mesh.vertices[face[0]],
+                        mesh.vertices[face[1]],
+                        mesh.vertices[face[2]],
+                    )
+                    .is_some_and(|t| t > 0.0)
+                })
+                .count();
+            crossings % 2 == 1
+        })
+        .count();
+    inside_votes >= 2
 }
 
 #[cfg(test)]
