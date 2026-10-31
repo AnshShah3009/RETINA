@@ -269,19 +269,19 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (34 open, was 0)
+## (g) Second review, 2026-10-31 — findings (46 open, was 47)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
 features/imgproc, `g-i` io/runtime/distributed/video/photo/videoio, `g-m` slam/rendering/
 plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
-### (g1) hal (12 open, was 12)
+### (g1) hal (11 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-h1 | `gpu_kernels/{threshold,color,icp,subtract,pointcloud_transform}.rs` | 1-D dispatches exceed wgpu's 65535-group limit: `threshold` / `cvt_color` on a 3840x2160 frame panic with `dispatch group size dimension ([129600, 1, 1]) must be less or equal to 65535` | HIGH | CONFIRMED |
-| g-h2 | `cpu/border.rs` | `Reflect` and `Reflect101` swapped vs OpenCV (cb25ce4 swapped them and pinned the swap in tests); `cv-imgproc`'s own mapping was right | HIGH | CONFIRMED vs `cv2.copyMakeBorder` |
+| g-h2 | `cpu/border.rs` | **CLOSED.** Was: `Reflect` and `Reflect101` swapped vs OpenCV (cb25ce4 swapped them and pinned the swap in tests); `cv-imgproc`'s own mapping was right. Now the same periodic folding as imgproc; test tables are `cv2.copyMakeBorder` output, including coordinates more than one width outside | was HIGH — fixed | CONFIRMED vs `cv2.copyMakeBorder` |
 | g-h3 | `cpu/compute_context_impl.rs` `akaze_contrast_k` | 70th-percentile gradient over all pixels is 0 on mostly flat images; diffusion then divides `0/0` → 4032/4096 pixels NaN | HIGH | CONFIRMED |
 | g-h4 | `cpu/compute_context_impl.rs` `tsdf_extract_mesh` | vertex positions use `i*vs` while integration uses `(i+0.5)*vs` (half-voxel shift), and zero-weight corners are meshed → phantom back surface (wall at z=0.4 gives vertices at 0.375 and 0.471) | HIGH | CONFIRMED |
 | g-h5 | `cpu/compute_context_impl.rs` `hough_lines` | one full accumulator allocated per image row (~3.4 GB at 1080p) | HIGH | ARGUED |
