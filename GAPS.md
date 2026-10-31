@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (15 open, was 96)
+## (g) Second review, 2026-10-31 — findings (14 open, was 96)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -416,7 +416,7 @@ matches finite differences (~1e-7, including θ≈π) — checked, not defects.
 | g-s8 | `calib3d/src/calibration.rs` | **CLOSED.** Removed. Was: leftover debug `eprintln!` on every calibration / every 10 LM iterations | was LOW — fixed | CONFIRMED |
 | g-s9 | `calib3d/src/distortion.rs` `fisheye_init_undistort_rectify_map` | **CLOSED.** Zero-size guard copied from the pinhole map; pinned in `tests/undistort_map_singular_intrinsics.rs`. Was: zero-size image panics (`chunk_size must not be zero`) | was LOW — fixed | CONFIRMED |
 
-### (g9) follow-ups found while fixing (g1)–(g8) (7 open, was 9)
+### (g9) follow-ups found while fixing (g1)–(g8) (6 open, was 9)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -426,7 +426,7 @@ matches finite differences (~1e-7, including θ≈π) — checked, not defects.
 | g-x4 | `rendering` `SphericalHarmonics::eval` | **CLOSED.** 3DGS reference basis (bands 1-3, its order/signs/constants) per channel on the normalised direction; matches numpy `eval_sh` to 1e-5 (`tests/spherical_harmonics_basis.rs`). Was: degree ≥ 1 is not the standard SH basis (channels mixed, constants missing); rendering uses DC only, so loaded `f_rest` view-dependence is wrong | was LOW — fixed | ARGUED (noted in g4, still open) |
 | g-x5 | `hal/src/gpu_kernels` `radix_sort_u32` | scatter is not stable, so later passes scramble lower digits: 32 of 1000 keys out of order (the prefix scan it uses was fixed in `a6f8e9c`) | MED | CONFIRMED (found during g-h1) |
 | g-x6 | `hal/shaders` spatial `voxel_downsample` | fails wgpu shader validation (`voxel_of(..) == my_voxel` yields `vec3<bool>` where `bool` is needed) - broken on master before this review | MED | CONFIRMED |
-| g-x7 | `hal/src/gpu_kernels/sparse.rs` `dot`, `vec_scale` | bind groups built from layouts 2 / 3 but set at index 0 | MED | ARGUED |
+| g-x7 | `hal/src/gpu_kernels/sparse.rs` `dot`, `vec_scale` | **CLOSED.** Bound at their declared groups 2 / 3 with empty bind groups in the lower slots; match plain Rust on the GPU (`tests/gpu_sparse_vector_ops.rs`). `cv-optimize`'s GPU CG, which calls `dot`, could not have run before. Was: bind groups built from layouts 2 / 3 but set at index 0 | was MED — fixed | ARGUED |
 | g-x8 | `hal` `half-precision` feature | references `color_cvt_bf16.wgsl`, which does not exist | LOW | CONFIRMED |
 | g-x9 | `features/src/markers/gpu.rs:420` | one workgroup per candidate in a 1-D dispatch - can exceed 65535 (the g-h1 class, outside hal) | LOW | ARGUED |
 
