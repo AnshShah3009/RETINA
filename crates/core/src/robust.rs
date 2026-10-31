@@ -143,6 +143,47 @@ impl<D, M: RobustModel<D>> Ransac<D, M> {
             }
         }
 
+        // Final refit on the consensus set, as OpenCV does after RANSAC: the
+        // winning model came from one minimal sample, so it carries that
+        // sample's noise (and, with the all-inlier early stop, is simply the
+        // first sample drawn). Estimators that use every point they are given
+        // (DLT homography, 8-point F) return the least-squares model on the
+        // inliers. The refit is kept only if it is no worse - at least as many
+        // inliers and no larger mean error - so an estimator that only reads
+        // its first k points cannot make the result worse.
+        if best_model.is_some() && best_num_inliers > k {
+            {
+                let consensus: Vec<&D> = data
+                    .iter()
+                    .zip(&best_inliers)
+                    .filter_map(|(d, &inl)| inl.then_some(d))
+                    .collect();
+                if let Some(refit) = estimator.estimate(&consensus) {
+                    let mut inliers = vec![false; n];
+                    let (mut count, mut total) = (0usize, 0.0f64);
+                    for (j, d) in data.iter().enumerate() {
+                        let err = estimator.compute_error(&refit, d);
+                        if err < self.config.threshold {
+                            inliers[j] = true;
+                            count += 1;
+                            total += err;
+                        }
+                    }
+                    let residual = if count > 0 {
+                        total / count as f64
+                    } else {
+                        f64::INFINITY
+                    };
+                    if count >= best_num_inliers && residual <= best_residual {
+                        best_model = Some(refit);
+                        best_inliers = inliers;
+                        best_num_inliers = count;
+                        best_residual = residual;
+                    }
+                }
+            }
+        }
+
         RobustResult {
             model: best_model,
             inliers: best_inliers,
@@ -755,10 +796,11 @@ mod tests {
         });
         let r = ransac.run(&Counting(&calls), &pts);
         assert_eq!(r.num_inliers, 50);
+        // One sampled model, then one consensus refit.
         assert_eq!(
             calls.get(),
-            1,
-            "ran {} iterations on an all-inlier set",
+            2,
+            "{} estimator calls on an all-inlier set",
             calls.get()
         );
     }
