@@ -420,6 +420,12 @@ pub fn solve_pnp_ransac(
     let mut best_count = 0usize;
     let mut best_error = f64::INFINITY;
 
+    let model = cv_core::PinholeModel::new(
+        *intrinsics,
+        distortion
+            .cloned()
+            .unwrap_or_else(cv_core::Distortion::none),
+    );
     for i in 0..iters {
         let idx = sample_unique_indices(n, sample_k, i as u64 + 11);
         let sample_obj: [nalgebra::Vector3<f64>; 3] = [
@@ -433,12 +439,6 @@ pub fn solve_pnp_ransac(
             [image_points[idx[2]].x, image_points[idx[2]].y],
         ];
 
-        let model = cv_core::PinholeModel::new(
-            *intrinsics,
-            distortion
-                .cloned()
-                .unwrap_or_else(cv_core::Distortion::none),
-        );
         let poses = match PnpSolver::estimate_p3p(&sample_obj, &sample_img, &model) {
             Ok(v) => v,
             Err(_) => continue,
@@ -490,16 +490,30 @@ pub fn solve_pnp_ransac(
         .filter_map(|(p, &m)| if m { Some(*p) } else { None })
         .collect();
 
-    let refined_pose = if inlier_obj.len() >= 6 {
-        solve_pnp_refine(
+    // Refine on the inliers whenever the refinement is over-determined
+    // (>= 4 points). It used to require 6, so a 4- or 5-inlier result was
+    // returned as the raw minimal-sample P3P pose. The refined pose is kept
+    // only if it fits the inliers no worse.
+    let mean_inlier_error = |pose: &Pose| {
+        inlier_obj
+            .iter()
+            .zip(&inlier_img)
+            .map(|(o, i)| reprojection_error_px_dist(pose, intrinsics, distortion, o, i))
+            .sum::<f64>()
+            / inlier_obj.len().max(1) as f64
+    };
+    let refined_pose = if inlier_obj.len() >= 4 {
+        match solve_pnp_refine(
             &best_pose,
             &inlier_obj,
             &inlier_img,
             intrinsics,
             distortion,
             20,
-        )
-        .unwrap_or(best_pose)
+        ) {
+            Ok(p) if mean_inlier_error(&p) <= mean_inlier_error(&best_pose) => p,
+            _ => best_pose,
+        }
     } else {
         best_pose
     };
@@ -514,6 +528,14 @@ fn reprojection_error_px_dist(
     object_point: &Point3<f64>,
     image_point: &Point2<f64>,
 ) -> f64 {
+    // A point behind the camera is not an inlier, whatever pixel it would
+    // mirror to. `project_point_dist` maps such points to (0, 0), so an
+    // observation near the image origin used to score a behind-camera pose
+    // as a good fit.
+    let z = (extrinsics.rotation * object_point.coords + extrinsics.translation).z;
+    if z <= 0.0 {
+        return f64::INFINITY;
+    }
     let pred = project_point_dist(intrinsics, distortion, extrinsics, object_point);
     ((pred.x - image_point.x).powi(2) + (pred.y - image_point.y).powi(2)).sqrt()
 }
@@ -551,9 +573,11 @@ pub fn solve_pnp_refine_ctx(
     max_iters: usize,
     group: &RuntimeRunner,
 ) -> Result<Pose> {
-    if object_points.len() != image_points.len() || object_points.len() < 6 {
+    // Six pose parameters, two residuals per point: four points already
+    // over-determine the refinement (OpenCV's solvePnPRefineLM needs 3).
+    if object_points.len() != image_points.len() || object_points.len() < 4 {
         return Err(cv_core::Error::AlgorithmError(
-            "solve_pnp_refine needs >=6 paired points".to_string(),
+            "solve_pnp_refine needs >=4 paired points".to_string(),
         ));
     }
     require_finite_correspondences(object_points, image_points)?;
