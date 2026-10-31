@@ -349,12 +349,16 @@ fn preprocess_grayscale(
         runner,
     );
 
-    let mut data: Vec<f32> = Vec::with_capacity(target_w * target_h * channels);
-    for &v in resized.as_raw().iter() {
-        let normalized = v as f32 / 255.0;
-        for _ in 0..channels {
-            data.push(normalized);
-        }
+    // Planar (CHW): the tensor is labelled `TensorShape::new(channels, h, w)`
+    // and handed to tract as NCHW, so the luma plane is repeated once per
+    // channel. Repeating each *pixel* `channels` times wrote interleaved HWC
+    // data under a CHW label: plane 0 held the first third of the image with
+    // every pixel tripled, and every multi-channel model saw a scrambled
+    // input. Single-channel models were unaffected, which hid it.
+    let plane: Vec<f32> = resized.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
+    let mut data: Vec<f32> = Vec::with_capacity(plane.len() * channels);
+    for _ in 0..channels {
+        data.extend_from_slice(&plane);
     }
 
     Tensor::from_vec(
@@ -384,5 +388,24 @@ mod tests {
         assert_eq!(tensor.shape.height, 4);
         assert_eq!(tensor.shape.width, 4);
         assert_eq!(tensor.as_slice().expect("slice").len(), 3 * 4 * 4);
+    }
+
+    #[test]
+    fn test_preprocess_is_planar_chw() {
+        // Each channel plane must be the whole image in row-major order, not
+        // the first third of it with every pixel repeated.
+        let group = cv_runtime::orchestrator::scheduler()
+            .expect("scheduler")
+            .get_default_group()
+            .expect("default group");
+        let src = GrayImage::from_fn(4, 4, |x, y| image::Luma([(16 * (y * 4 + x)) as u8]));
+        let img = DynamicImage::ImageLuma8(src.clone());
+
+        let tensor = preprocess_grayscale(&img, 3, 4, 4, &group).expect("preprocess failed");
+        let data = tensor.as_slice().expect("slice");
+        let plane: Vec<f32> = src.as_raw().iter().map(|&v| v as f32 / 255.0).collect();
+        for c in 0..3 {
+            assert_eq!(&data[c * 16..(c + 1) * 16], plane.as_slice(), "plane {c}");
+        }
     }
 }
