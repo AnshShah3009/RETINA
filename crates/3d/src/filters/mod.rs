@@ -33,9 +33,43 @@ pub struct VoxelDownsampleResult {
     pub colors: Option<Vec<Vector3<f64>>>,
 }
 
-#[inline]
-fn dist_sq(a: &Point3<f64>, b: &Point3<f64>) -> f64 {
-    (a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)
+/// f64 KD-tree over `points` for the k-NN filters.
+///
+/// `cv_math::spatial::KDTree` rather than `crate::spatial::KDTree`: the
+/// latter stores `f32` points and squared `f32` distances, which would change
+/// which neighbours are selected and every distance these `f64` filters
+/// report. The math tree computes `sqrt((dx*dx + dy*dy) + dz*dz)` in `f64`,
+/// bit-identical to the brute-force scan's `sqrt` of the squared distance.
+fn knn_tree(points: &[Point3<f64>]) -> cv_math::spatial::KDTree {
+    let coords: Vec<Vec<f64>> = points.iter().map(|p| vec![p.x, p.y, p.z]).collect();
+    cv_math::spatial::KDTree::new(&coords).expect("non-empty point set")
+}
+
+/// The `k` nearest neighbours of `points[i]` other than `i` itself, as
+/// `(index, euclidean distance)` in ascending distance; `k < points.len()`.
+///
+/// Queries `k + 1` neighbours and drops `i`. If `i` is not among them, the
+/// `k + 1` results all lie at distance 0 (`i` itself is at 0 and lost a tie),
+/// so they coincide with `points[i]` and dropping the last one leaves the
+/// same distances and coordinates as dropping `i` would.
+fn knn_excluding_self(
+    tree: &cv_math::spatial::KDTree,
+    points: &[Point3<f64>],
+    i: usize,
+    k: usize,
+) -> Vec<(usize, f64)> {
+    let p = &points[i];
+    let mut nn = tree.query(&[p.x, p.y, p.z], k + 1);
+    match nn.iter().position(|&(j, _)| j == i) {
+        Some(pos) => {
+            nn.remove(pos);
+        }
+        None => {
+            nn.pop();
+        }
+    }
+    nn.truncate(k);
+    nn
 }
 
 #[cfg(test)]

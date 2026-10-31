@@ -465,96 +465,23 @@ impl ComputeContext for CpuBackend {
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-        // Precompute template statistics for normalized / coefficient methods
-        let mut tmpl_sum = T::ZERO;
-        let mut tmpl_sq_sum = T::ZERO;
-        let tmpl_len_f = T::from_f32((tmpl_h * tmpl_w) as f32);
-        for ty in 0..tmpl_h {
-            for tx in 0..tmpl_w {
-                let tv = tmpl[ty * tmpl_w + tx];
-                tmpl_sum += tv;
-                tmpl_sq_sum += tv * tv;
-            }
-        }
-        let tmpl_mean = tmpl_sum / tmpl_len_f;
-        let tmpl_var = tmpl_sq_sum - tmpl_sum * tmpl_sum / tmpl_len_f;
-        let tmpl_norm = tmpl_var.sqrt();
-
-        let needs_mean = matches!(
+        // f64 accumulation, one pass per window, integral images for the
+        // window sums (see `cpu::template_match`).
+        let img64: Vec<f64> = img.iter().map(|v| Float::to_f64(*v)).collect();
+        let tmpl64: Vec<f64> = tmpl.iter().map(|v| Float::to_f64(*v)).collect();
+        let scores = crate::cpu::template_match::match_template_f64(
+            &img64,
+            img_w,
+            img_h,
+            &tmpl64,
+            tmpl_w,
+            tmpl_h,
             method,
-            TemplateMatchMethod::Ccoeff | TemplateMatchMethod::CcoeffNormed
+            Float::to_f64(T::EPSILON),
         );
-
-        dst.par_chunks_mut(out_w)
-            .enumerate()
-            .for_each(|(y, row_out)| {
-                for x in 0..out_w {
-                    let mut sum_sq_diff = T::ZERO;
-                    let mut sum_ccorr = T::ZERO;
-                    let mut patch_sum = T::ZERO;
-                    let mut patch_sq_sum = T::ZERO;
-                    let mut sum_ccoeff = T::ZERO;
-
-                    // Compute patch mean first if needed for Ccoeff methods
-                    let patch_mean = if needs_mean {
-                        let mut s = T::ZERO;
-                        for ty in 0..tmpl_h {
-                            for tx in 0..tmpl_w {
-                                s += img[(y + ty) * img_w + (x + tx)];
-                            }
-                        }
-                        s / tmpl_len_f
-                    } else {
-                        T::ZERO
-                    };
-
-                    for ty in 0..tmpl_h {
-                        for tx in 0..tmpl_w {
-                            let iv = img[(y + ty) * img_w + (x + tx)];
-                            let tv = tmpl[ty * tmpl_w + tx];
-                            let diff = iv - tv;
-                            sum_sq_diff += diff * diff;
-                            sum_ccorr += iv * tv;
-                            patch_sum += iv;
-                            patch_sq_sum += iv * iv;
-                            if needs_mean {
-                                sum_ccoeff += (iv - patch_mean) * (tv - tmpl_mean);
-                            }
-                        }
-                    }
-
-                    row_out[x] = match method {
-                        TemplateMatchMethod::SqDiff => sum_sq_diff,
-                        TemplateMatchMethod::SqDiffNormed => {
-                            let denom = (patch_sq_sum * tmpl_sq_sum).sqrt();
-                            if denom > T::EPSILON {
-                                sum_sq_diff / denom
-                            } else {
-                                T::ZERO
-                            }
-                        }
-                        TemplateMatchMethod::Ccorr => sum_ccorr,
-                        TemplateMatchMethod::CcorrNormed => {
-                            let denom = (patch_sq_sum * tmpl_sq_sum).sqrt();
-                            if denom > T::EPSILON {
-                                sum_ccorr / denom
-                            } else {
-                                T::ZERO
-                            }
-                        }
-                        TemplateMatchMethod::Ccoeff => sum_ccoeff,
-                        TemplateMatchMethod::CcoeffNormed => {
-                            let patch_var = patch_sq_sum - patch_sum * patch_sum / tmpl_len_f;
-                            let denom = patch_var.sqrt() * tmpl_norm;
-                            if denom > T::EPSILON {
-                                sum_ccoeff / denom
-                            } else {
-                                T::ZERO
-                            }
-                        }
-                    };
-                }
-            });
+        dst.par_iter_mut()
+            .zip(scores.par_iter())
+            .for_each(|(d, &v)| *d = T::from_f64(v));
 
         Ok(Tensor {
             storage: output_storage,
@@ -750,6 +677,31 @@ impl ComputeContext for CpuBackend {
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
+
+        // Integer-valued images (the usual u8-derived input): per-disparity
+        // running box sums, O(W*H*D) instead of O(W*H*D*B^2). Every partial
+        // sum is an exact integer in `T` under `integer_pixels`' bound, so the
+        // costs, comparisons and chosen disparities equal the dense loop's.
+        if block_size >= 1 {
+            if let Some((li, ri)) =
+                crate::cpu::stereo_sad::integer_pixels(left_data, right_data, block_size)
+            {
+                let best = crate::cpu::stereo_sad::block_match_sad(
+                    &li, &ri, w, h, block_size, min_disp, num_disp,
+                );
+                for (o, b) in dst.iter_mut().zip(&best) {
+                    if let Some(d) = b {
+                        *o = T::from_f32(*d as f32);
+                    }
+                }
+                return Ok(Tensor {
+                    storage: output_storage,
+                    shape: TensorShape::new(1, h, w),
+                    dtype: left.dtype,
+                    _phantom: std::marker::PhantomData,
+                });
+            }
+        }
 
         // Block matching with SAD (Sum of Absolute Differences)
         dst.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
@@ -1495,6 +1447,43 @@ impl ComputeContext for CpuBackend {
         let mut current = src_data.to_vec();
         let mut next = vec![0u8; src_data.len()];
 
+        // Rectangular kernel (every tap set): separable min/max, bit-identical
+        // to the per-tap loop below (see `cpu::morph_rect`). Up to 5x5 the
+        // 32-lane per-tap loop is as fast (measured 0.7 vs 1.4 ms at 3x3 on
+        // 1920x1080), so small rectangles stay on it.
+        let is_rect = kw > 0
+            && kh > 0
+            && kw * kh > 25
+            && k_data.len() >= kh * kw
+            && k_data[..kh * kw].iter().all(|&k| k != 0);
+        if is_rect && w > 0 && h > 0 {
+            let is_max = typ != MorphologyType::Erode;
+            let axis_map = |n: usize, c: usize, k: usize| -> Vec<Option<usize>> {
+                (0..n + k - 1)
+                    .map(|j| {
+                        let p = j as isize - c as isize;
+                        (p >= 0 && p < n as isize).then_some(p as usize)
+                    })
+                    .collect()
+            };
+            let col_map = axis_map(w, cx, kw);
+            let row_map = axis_map(h, cy, kh);
+            for _ in 0..iterations {
+                for (src_plane, dst_plane) in current.chunks(h * w).zip(next.chunks_mut(h * w)) {
+                    crate::cpu::morph_rect::rect_extremum(
+                        src_plane, w, h, dst_plane, kw, kh, &col_map, &row_map, identity, is_max,
+                    );
+                }
+                std::mem::swap(&mut current, &mut next);
+            }
+            return Ok(Tensor {
+                storage: S::from_vec(current).map_err(crate::Error::MemoryError)?,
+                shape: input.shape,
+                dtype: input.dtype,
+                _phantom: std::marker::PhantomData,
+            });
+        }
+
         for _ in 0..iterations {
             // CHW planes are eroded/dilated independently (see convolve_2d).
             next.par_chunks_mut(w)
@@ -1527,15 +1516,20 @@ impl ComputeContext for CpuBackend {
                                 let sx_base = x as isize + kx as isize - cx as isize;
 
                                 // Load 32 bytes, using identity for out-of-bounds columns
-                                let mut bytes = [identity; 32];
-                                for i in 0..32 {
-                                    let sx = sx_base + i as isize;
-                                    if sx >= 0 && sx < w as isize {
-                                        bytes[i] = row_src[sx as usize];
+                                let v = if sx_base >= 0 && sx_base as usize + 32 <= w {
+                                    let s = sx_base as usize;
+                                    let bytes: [u8; 32] = row_src[s..s + 32].try_into().unwrap();
+                                    u8x32::from(bytes)
+                                } else {
+                                    let mut bytes = [identity; 32];
+                                    for i in 0..32 {
+                                        let sx = sx_base + i as isize;
+                                        if sx >= 0 && sx < w as isize {
+                                            bytes[i] = row_src[sx as usize];
+                                        }
                                     }
-                                }
-
-                                let v = u8x32::from(bytes);
+                                    u8x32::from(bytes)
+                                };
                                 if typ == MorphologyType::Erode {
                                     res_v = res_v.min(v);
                                 } else {
