@@ -30,11 +30,16 @@ pub use vocabulary::Vocabulary;
 
 use cv_core::Descriptors;
 
-/// Compute the Hamming distance between two binary descriptors.
+/// Hamming distance between two binary descriptors.
 ///
-/// Bits are compared over the overlapping prefix; trailing bytes present in only
-/// one of the slices are ignored.
+/// Different lengths are not comparable. Comparing only the overlapping prefix
+/// reported distance 0 for an 8-byte descriptor and a 32-byte descriptor that
+/// differed in every byte the short one does not have. A mismatch returns the
+/// maximum distance, which fails a ratio test and any distance threshold.
 pub(crate) fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+    if a.len() != b.len() {
+        return u32::MAX;
+    }
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (x ^ y).count_ones())
@@ -77,5 +82,19 @@ pub(crate) mod test_support {
             out[bit / 8] ^= 1 << (bit % 8);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod hamming_tests {
+    use super::hamming_distance;
+
+    #[test]
+    fn mismatched_lengths_are_maximally_distant() {
+        let mut long = vec![0u8; 32];
+        long[31] = 0xff;
+        assert_eq!(hamming_distance(&[0; 8], &long), u32::MAX);
+        assert_eq!(hamming_distance(&long, &[0; 8]), u32::MAX);
+        assert_eq!(hamming_distance(&[0b1111_0000], &[0b1111_1111]), 4);
     }
 }

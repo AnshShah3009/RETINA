@@ -91,8 +91,17 @@ impl FlannIndex {
         }
     }
 
-    /// Search for k nearest neighbors
+    /// Search for k nearest neighbors.
+    ///
+    /// A query whose length differs from the indexed descriptors is not a
+    /// neighbor of any of them. Returning them at distance 0 is how a short
+    /// query used to match a longer descriptor on the shared prefix alone.
     pub fn search_knn(&self, query: &[u8], k: usize) -> Vec<(usize, u32)> {
+        if let Some(stored) = self.trees.first().and_then(|t| t.points.first()) {
+            if stored.len() != query.len() {
+                return Vec::new();
+            }
+        }
         let mut candidates = BinaryHeap::new();
 
         // Search all trees
@@ -272,8 +281,17 @@ impl KdTree {
     }
 }
 
-/// Compute Hamming distance between two byte vectors
+/// Hamming distance between two binary descriptors.
+///
+/// Different lengths are not comparable. `zip` would stop at the shorter
+/// slice, so an 8-byte descriptor against a 32-byte one measured only the
+/// shared prefix and could report 0. That is a confident match between
+/// different kinds of descriptor, and a ratio test cannot repair a distance
+/// that was already wrong. A mismatch returns the maximum distance.
 fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
+    if a.len() != b.len() {
+        return u32::MAX;
+    }
     a.iter()
         .zip(b.iter())
         .map(|(x, y)| (x ^ y).count_ones())
@@ -443,5 +461,21 @@ mod tests {
             matches.len() <= query.len(),
             "Should not have more matches than queries"
         );
+    }
+
+    /// An 8-byte query must not match a 32-byte descriptor that shares its prefix.
+    #[test]
+    fn mismatched_descriptor_length_is_not_a_neighbor() {
+        let train = create_test_descriptors(8);
+        let mut index = FlannIndex::new(4, 2);
+        index.build(&train);
+
+        let short = vec![0u8; 8];
+        assert!(
+            index.search_knn(&short, 3).is_empty(),
+            "a shorter query was returned as a neighbor"
+        );
+        assert_eq!(hamming_distance(&short, &vec![0u8; 32]), u32::MAX);
+        assert_eq!(hamming_distance(&[0b1111_0000], &[0b1111_1111]), 4);
     }
 }
