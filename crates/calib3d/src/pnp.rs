@@ -878,6 +878,11 @@ impl PnpSolver {
                 continue;
             }
             let p = (m * d + sa * sa * (q * q - 1.0)) / denom;
+            // The law-of-cosines system is satisfied by a negative distance
+            // ratio too; that solution puts point A behind the camera.
+            if p <= 1e-8 || !p.is_finite() {
+                continue;
+            }
 
             let cam_a = rays[0] * (p * w);
             let cam_b = rays[1] * (q * w);
@@ -920,9 +925,14 @@ impl PnpSolver {
                 .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed in P3P".to_string()))?;
             let mut r_rot = vt.transpose() * u.transpose();
             if r_rot.determinant() < 0.0 {
-                let mut vt_fix = vt.clone();
-                for rr in 0..3 {
-                    vt_fix[(rr, 2)] = -vt_fix[(rr, 2)];
+                // R = V diag(1, 1, -1) U^T: flip V's last *column*, which is
+                // row 2 of V^T. Flipping column 2 of V^T instead gave a matrix
+                // that maps none of the points, so on three points (rank-2
+                // covariance, this branch about half the time) the true pose
+                // was discarded by the check below.
+                let mut vt_fix = vt;
+                for cc in 0..3 {
+                    vt_fix[(2, cc)] = -vt_fix[(2, cc)];
                 }
                 r_rot = vt_fix.transpose() * u.transpose();
             }
@@ -1176,7 +1186,11 @@ fn sample_unique_indices(n: usize, k: usize, seed: u64) -> Vec<usize> {
     let mut state = seed ^ 0x9E3779B97F4A7C15;
     while out.len() < k {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let idx = (state as usize) % n;
+        // The low bits of a power-of-two-modulus LCG have short periods: with
+        // `state % n` and n = 2^m the whole sample was a function of
+        // `seed mod n`, so RANSAC drew only n distinct samples however many
+        // iterations it ran. The high bits are well mixed.
+        let idx = ((state >> 33) as usize) % n;
         if !used[idx] {
             used[idx] = true;
             out.push(idx);
