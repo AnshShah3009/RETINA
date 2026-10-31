@@ -34,7 +34,14 @@ pub fn undistort_points(
     for p in distorted_points {
         let xd = (p.x - intrinsics.cx) / intrinsics.fx;
         let yd = (p.y - intrinsics.cy) / intrinsics.fy;
-        let (xu, yu) = distortion.remove(xd, yd);
+        // `remove` hands back its input when it cannot invert the model, which
+        // here would return the *distorted* pixel as if it were corrected.
+        let (xu, yu) = distortion.remove_checked(xd, yd).ok_or_else(|| {
+            cv_core::Error::AlgorithmError(format!(
+                "undistort_points: the distortion model has no inverse at ({}, {})",
+                p.x, p.y
+            ))
+        })?;
         out.push(nalgebra::Point2::new(
             intrinsics.fx * xu + intrinsics.cx,
             intrinsics.fy * yu + intrinsics.cy,

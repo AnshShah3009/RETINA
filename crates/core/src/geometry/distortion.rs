@@ -35,6 +35,19 @@ impl Distortion {
         (x * radial + dx, y * radial + dy)
     }
 
+    /// Jacobian of [`Distortion::apply`] at `(x, y)` as `(∂xd/∂x, ∂xd/∂y,
+    /// ∂yd/∂y)`; the map's Jacobian is symmetric, so `∂yd/∂x = ∂xd/∂y`.
+    fn jacobian(&self, x: f64, y: f64) -> (f64, f64, f64) {
+        let r2 = x * x + y * y;
+        let radial = 1.0 + self.k1 * r2 + self.k2 * r2 * r2 + self.k3 * r2 * r2 * r2;
+        // d(radial)/dx = g * x, d(radial)/dy = g * y
+        let g = 2.0 * self.k1 + 4.0 * self.k2 * r2 + 6.0 * self.k3 * r2 * r2;
+        let j11 = radial + g * x * x + 2.0 * self.p1 * y + 6.0 * self.p2 * x;
+        let j12 = g * x * y + 2.0 * self.p1 * x + 2.0 * self.p2 * y;
+        let j22 = radial + g * y * y + 6.0 * self.p1 * y + 2.0 * self.p2 * x;
+        (j11, j12, j22)
+    }
+
     /// Remove distortion from distorted normalized coordinates `(x, y)`.
     ///
     /// Solved by **bisection on the radius**, which is what makes this robust.
@@ -128,22 +141,47 @@ impl Distortion {
             }
         }
 
-        // Fixed-point steps for the tangential terms, which shift the angle as
-        // well as the radius. Iterated to convergence rather than run a fixed
-        // two times: two steps left a residual of ~4e-8 normalized, which is
-        // ~3e-5 px at fx = 620 and failed the existing calib3d round-trip test.
-        // Once the radius is correct this iteration converges quickly, and the
-        // loop stops on the step size rather than at a fixed count.
-        let mut ux = r_undistorted * cos_t;
-        let mut uy = r_undistorted * sin_t;
-        for _ in 0..32 {
+        // Refine on the full 2-D map with damped Newton steps, starting from
+        // the solved radius on the distorted point's ray. The tangential terms
+        // move the angle as well as the radius, so the radial solution is only
+        // a starting point.
+        //
+        // This used to be the fixed-point step `u += x - apply(u)`, which
+        // contracts only while the map's Jacobian stays within (0, 2) of the
+        // identity. With strong radial terms it does not: k1 = .5, k2 = .2,
+        // k3 = .05 plus p1 = 1e-3 diverged at r = 0.8, `remove_checked`
+        // returned `None`, and `remove` handed back the *distorted* point -
+        // 166.6 px off at fx = 500 where `cv2.undistortPointsIter` is exact.
+        let (mut ux, mut uy) = (r_undistorted * cos_t, r_undistorted * sin_t);
+        let tol2 = (1e-15 * r.max(1.0)).powi(2);
+        for _ in 0..50 {
             let (ax, ay) = self.apply(ux, uy);
-            let (dx, dy) = (x - ax, y - ay);
-            if dx * dx + dy * dy < 1e-24 {
+            let (fx, fy) = (ax - x, ay - y);
+            let f2 = fx * fx + fy * fy;
+            if f2 <= tol2 {
                 break;
             }
-            ux += dx;
-            uy += dy;
+            let (j11, j12, j22) = self.jacobian(ux, uy);
+            let det = j11 * j22 - j12 * j12;
+            if !det.is_finite() || det.abs() < 1e-300 {
+                return None;
+            }
+            let sx = (j22 * fx - j12 * fy) / det;
+            let sy = (j11 * fy - j12 * fx) / det;
+            // Halve the step until the residual drops, so a step that
+            // overshoots near a fold of the map cannot run away.
+            let mut t = 1.0;
+            loop {
+                let (nx, ny) = (ux - t * sx, uy - t * sy);
+                let (bx, by) = self.apply(nx, ny);
+                let n2 = (bx - x).powi(2) + (by - y).powi(2);
+                if n2 < f2 || t < 1e-6 {
+                    ux = nx;
+                    uy = ny;
+                    break;
+                }
+                t *= 0.5;
+            }
             if !ux.is_finite() || !uy.is_finite() {
                 return None;
             }
@@ -273,121 +311,21 @@ impl DistortionF32 {
             return Some((x, y));
         }
 
+        // Solve in f64 with the same bracketed-radius + damped-Newton solver
+        // as `Distortion::remove_checked`, then round once. The f32-native
+        // iteration this replaces could not converge where the f64 one now
+        // does (tangential terms with strong radial coefficients), and an f32
+        // Newton step would only lose the precision the gate below needs.
         let r = (x * x + y * y).sqrt();
-        if r == 0.0 {
-            return Some((0.0, 0.0));
-        }
-        let cos_t = x / r;
-        let sin_t = y / r;
-
-        // The radius the forward model actually produces for a given undistorted
-        // radius. This is NOT the same as the pure radial polynomial `A(r)`
-        // whenever `p1`/`p2` are nonzero: the tangential terms add
-        // `2 p1 x y` and `p1 (r^2 + 2 y^2)` (and their p2 counterparts) to the
-        // distorted point, so they change its length as well as its angle.
-        // The f64 twin bisects on `A(r)` and only cleans up the angle
-        // afterwards, which is fine at f64 precision but targets the wrong
-        // radius once `p1`/`p2` do anything. Measured here with tangential-only
-        // coefficients, that left a residual of 6.2e-4 at r = 0.5 and 7.5e-3
-        // with radial and tangential together - an order of magnitude above
-        // what f32 can achieve and far above the noise floor, so it is the
-        // model being wrong, not the arithmetic. Bisecting on this closes
-        // against the real forward map instead, so the tangential terms are
-        // accounted for exactly rather than approximately.
-        let radial = |r: f32| {
-            let (ax, ay) = self.apply(r * cos_t, r * sin_t);
-            (ax * ax + ay * ay).sqrt()
-        };
-
-        // The distorted radius is at least the undistorted one when the
-        // polynomial is positive there, but a barrel distortion can make it
-        // smaller. Bracket both ways rather than assuming.
-        let mut lo = 0.0f32;
-        let mut hi = r.max(1e-12);
-        // Grow the upper bound until it brackets, bounded so a pathological
-        // coefficient cannot spin here.
-        let mut grew = 0;
-        while radial(hi) < r && grew < 200 {
-            hi *= 1.5;
-            grew += 1;
-        }
-        if !radial(hi).is_finite() || radial(hi) < r {
-            return None;
-        }
-        // The map need not be monotone if the polynomial turns over; verify the
-        // bracket actually contains the root before bisecting.
-        if !(radial(lo) <= r && r <= radial(hi)) {
-            return None;
-        }
-
-        // 64 iterations is well past what an f32 bisection needs - the loop
-        // below breaks as soon as `mid` stops moving, which for f32 happens
-        // after roughly 26 steps because the mantissa runs out first.
-        let mut r_undistorted = 0.5 * (lo + hi);
-        for _ in 0..64 {
-            let mid = 0.5 * (lo + hi);
-            if mid == lo || mid == hi {
-                break; // converged to f32 precision
-            }
-            r_undistorted = mid;
-            if radial(mid) < r {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
-        }
-        if !r_undistorted.is_finite() {
-            return None;
-        }
-
-        // Fixed-point steps for the tangential terms, which shift the angle. Two
-        // things here are NOT the same as the f64 twin, and both are forced by
-        // f32:
-        //
-        // 1. The convergence threshold is `1e-14` squared, i.e. ~1e-7 in
-        //    distance - one ULP at unit magnitude, as tight as f32 can
-        //    measure. The f64 twin uses `1e-24` squared (~1e-12); copying that
-        //    would put the threshold far below the f32 noise floor, so the
-        //    loop could never satisfy it and would always burn all 32 steps.
-        //
-        // 2. Each step is projected back onto the circle of radius
-        //    `r_undistorted`, the radius the bisection already solved. The
-        //    residual direction of this iteration is `1 - A'(r)`, the same
-        //    quantity that made the original ten-step loop diverge, so the
-        //    radial degree of freedom is *unstable* here too - at r = 0.985
-        //    with the coefficients in the doc comment, `A'(r)` is about 3.7 and
-        //    the factor is -2.7. The f64 twin gets away with it only because
-        //    its threshold trips after one or two steps, before the
-        //    instability can accumulate; at f32 the threshold is reachable but
-        //    the loop runs long enough for it to bite, and the radius walks
-        //    away (measured: r = 0.985 came back as 1.71). Re-imposing the
-        //    solved radius removes that degree of freedom entirely, leaving
-        //    only the angle, and on that circle the iteration contracts
-        //    because `|p1|, |p2|` are small.
-        let mut ux = r_undistorted * cos_t;
-        let mut uy = r_undistorted * sin_t;
-        for _ in 0..32 {
-            let (ax, ay) = self.apply(ux, uy);
-            let (dx, dy) = (x - ax, y - ay);
-            if dx * dx + dy * dy < 1e-14 {
-                break;
-            }
-            ux += dx;
-            uy += dy;
-            if !ux.is_finite() || !uy.is_finite() {
-                return None;
-            }
-            // Project back onto the radius the bisection already solved (see
-            // note 2 above). Without this the radial degree of freedom is
-            // free to run away and the radius is lost.
-            let len = (ux * ux + uy * uy).sqrt();
-            if !len.is_finite() || len == 0.0 {
-                return None;
-            }
-            let s = r_undistorted / len;
-            ux *= s;
-            uy *= s;
-        }
+        let d64 = Distortion::new(
+            self.k1 as f64,
+            self.k2 as f64,
+            self.p1 as f64,
+            self.p2 as f64,
+            self.k3 as f64,
+        );
+        let (ux, uy) = d64.remove_checked(x as f64, y as f64)?;
+        let (ux, uy) = (ux as f32, uy as f32);
 
         // Verify the answer actually undoes the distortion. Without this the
         // caller cannot tell a converged result from a plausible-looking one,

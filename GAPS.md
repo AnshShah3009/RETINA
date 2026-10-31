@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (44 open, was 86)
+## (g) Second review, 2026-10-31 — findings (43 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -397,7 +397,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-n11 | `math/src/stats.rs` normal cdf/ppf, p-values | lower-tail cancellation (`cdf(-10)` = 0), unrefined `ppf`, `1 - cdf` p-values | MED | CONFIRMED vs SciPy |
 | g-n12 | `math/src/integrate.rs` | `quad` is a fixed trapezoid with error 0 and evaluates endpoints; `ode_solve` overshoots `t_end` and stops silently at 10k steps | MED | ARGUED |
 
-### (g8) sfm / triangulation / distortion / calibration (5 open, was 9)
+### (g8) sfm / triangulation / distortion / calibration (4 open, was 9)
 
 Second calib3d pass, covering what (g5) did not reach. `calibrate_camera_planar` matches
 `cv2.calibrateCamera` to every printed digit (rms 0.237948) and the BA analytic Jacobian
@@ -405,7 +405,7 @@ matches finite differences (~1e-7, including θ≈π) — checked, not defects.
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
-| g-s1 | `core/src/geometry/distortion.rs` `remove` | undistortion fixed-point diverges with tangential terms; `remove` then returns the *distorted* point: 166.6 px error at r = 0.8 (`cv2.undistortPointsIter` exact) | HIGH | CONFIRMED vs cv2 |
+| g-s1 | `core/src/geometry/distortion.rs` `remove` | **CLOSED.** Damped Newton on the full 2-D map (analytic Jacobian) after the radial bracket; f32 delegates to it; `undistort_points` errors instead of returning the distorted point. Matches `cv2.undistortPointsIter` to 1e-6 px (`tests/undistort_strong_tangential.rs`). Was: undistortion fixed-point diverges with tangential terms; `remove` then returns the *distorted* point: 166.6 px error at r = 0.8 (`cv2.undistortPointsIter` exact) | was HIGH — fixed | CONFIRMED vs cv2 |
 | g-s2 | `sfm/src/mapper.rs` `triangulate_track` | **CLOSED.** Cheirality in camera A's frame; pinned by `an_orbit_registers_views_facing_away_from_the_seed` (22/36 before, ≥ 34/36 after). Was: cheirality tests world z, not depth in camera A: 36-view orbit registers 19/36 | was HIGH — fixed | CONFIRMED |
 | g-s3 | `calib3d/src/project.rs` rotation Jacobian | `rotation_matrix_to_rodrigues` divides by sin θ: max \|J − FD\| = 2.1e8 at θ = π | HIGH | CONFIRMED |
 | g-s4 | `calib3d/src/stereo.rs` `stereo_rectify_matrices` | always rotates the baseline onto +x: right-camera-on-left rectifies 180° turned, vertical stereo 90° (cv2 gives R1 = I) | MED | CONFIRMED vs cv2 |
