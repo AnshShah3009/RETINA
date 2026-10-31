@@ -465,96 +465,23 @@ impl ComputeContext for CpuBackend {
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-        // Precompute template statistics for normalized / coefficient methods
-        let mut tmpl_sum = T::ZERO;
-        let mut tmpl_sq_sum = T::ZERO;
-        let tmpl_len_f = T::from_f32((tmpl_h * tmpl_w) as f32);
-        for ty in 0..tmpl_h {
-            for tx in 0..tmpl_w {
-                let tv = tmpl[ty * tmpl_w + tx];
-                tmpl_sum += tv;
-                tmpl_sq_sum += tv * tv;
-            }
-        }
-        let tmpl_mean = tmpl_sum / tmpl_len_f;
-        let tmpl_var = tmpl_sq_sum - tmpl_sum * tmpl_sum / tmpl_len_f;
-        let tmpl_norm = tmpl_var.sqrt();
-
-        let needs_mean = matches!(
+        // f64 accumulation, one pass per window, integral images for the
+        // window sums (see `cpu::template_match`).
+        let img64: Vec<f64> = img.iter().map(|v| Float::to_f64(*v)).collect();
+        let tmpl64: Vec<f64> = tmpl.iter().map(|v| Float::to_f64(*v)).collect();
+        let scores = crate::cpu::template_match::match_template_f64(
+            &img64,
+            img_w,
+            img_h,
+            &tmpl64,
+            tmpl_w,
+            tmpl_h,
             method,
-            TemplateMatchMethod::Ccoeff | TemplateMatchMethod::CcoeffNormed
+            Float::to_f64(T::EPSILON),
         );
-
-        dst.par_chunks_mut(out_w)
-            .enumerate()
-            .for_each(|(y, row_out)| {
-                for x in 0..out_w {
-                    let mut sum_sq_diff = T::ZERO;
-                    let mut sum_ccorr = T::ZERO;
-                    let mut patch_sum = T::ZERO;
-                    let mut patch_sq_sum = T::ZERO;
-                    let mut sum_ccoeff = T::ZERO;
-
-                    // Compute patch mean first if needed for Ccoeff methods
-                    let patch_mean = if needs_mean {
-                        let mut s = T::ZERO;
-                        for ty in 0..tmpl_h {
-                            for tx in 0..tmpl_w {
-                                s += img[(y + ty) * img_w + (x + tx)];
-                            }
-                        }
-                        s / tmpl_len_f
-                    } else {
-                        T::ZERO
-                    };
-
-                    for ty in 0..tmpl_h {
-                        for tx in 0..tmpl_w {
-                            let iv = img[(y + ty) * img_w + (x + tx)];
-                            let tv = tmpl[ty * tmpl_w + tx];
-                            let diff = iv - tv;
-                            sum_sq_diff += diff * diff;
-                            sum_ccorr += iv * tv;
-                            patch_sum += iv;
-                            patch_sq_sum += iv * iv;
-                            if needs_mean {
-                                sum_ccoeff += (iv - patch_mean) * (tv - tmpl_mean);
-                            }
-                        }
-                    }
-
-                    row_out[x] = match method {
-                        TemplateMatchMethod::SqDiff => sum_sq_diff,
-                        TemplateMatchMethod::SqDiffNormed => {
-                            let denom = (patch_sq_sum * tmpl_sq_sum).sqrt();
-                            if denom > T::EPSILON {
-                                sum_sq_diff / denom
-                            } else {
-                                T::ZERO
-                            }
-                        }
-                        TemplateMatchMethod::Ccorr => sum_ccorr,
-                        TemplateMatchMethod::CcorrNormed => {
-                            let denom = (patch_sq_sum * tmpl_sq_sum).sqrt();
-                            if denom > T::EPSILON {
-                                sum_ccorr / denom
-                            } else {
-                                T::ZERO
-                            }
-                        }
-                        TemplateMatchMethod::Ccoeff => sum_ccoeff,
-                        TemplateMatchMethod::CcoeffNormed => {
-                            let patch_var = patch_sq_sum - patch_sum * patch_sum / tmpl_len_f;
-                            let denom = patch_var.sqrt() * tmpl_norm;
-                            if denom > T::EPSILON {
-                                sum_ccoeff / denom
-                            } else {
-                                T::ZERO
-                            }
-                        }
-                    };
-                }
-            });
+        dst.par_iter_mut()
+            .zip(scores.par_iter())
+            .for_each(|(d, &v)| *d = T::from_f64(v));
 
         Ok(Tensor {
             storage: output_storage,
