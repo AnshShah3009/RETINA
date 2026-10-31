@@ -5,11 +5,37 @@ use rayon::prelude::*;
 /// Matching strategy used by [`Matcher`].
 pub enum MatchType {
     /// Brute-force Hamming distance matching (binary descriptors). Alias of
-    /// [`MatchType::BruteForceHamming`] — both variants run the same Hamming
-    /// matcher, since [`Descriptor`](cv_core::Descriptor) holds byte data.
+    /// [`MatchType::BruteForceHamming`]. Note this differs from OpenCV, whose
+    /// `"BruteForce"` is L2; it is kept as Hamming because the workspace's ORB
+    /// pipelines (sfm, localization) rely on it.
     BruteForce,
-    /// Brute-force Hamming distance matching (for binary descriptors).
+    /// Brute-force Hamming distance matching (for binary descriptors: ORB,
+    /// BRIEF, AKAZE-MLDB).
     BruteForceHamming,
+    /// Brute-force Euclidean (L2) distance over the descriptor bytes, read as
+    /// unsigned values - OpenCV's `NORM_L2` on `CV_8U` descriptors. Use this
+    /// for gradient-histogram descriptors such as SIFT: Hamming on those
+    /// bytes is meaningless (query byte 128 is Hamming 8 from 127 but 1 from
+    /// 0, so the far descriptor wins).
+    BruteForceL2,
+}
+
+impl MatchType {
+    fn distance(&self, a: &cv_core::Descriptor, b: &cv_core::Descriptor) -> f32 {
+        match self {
+            MatchType::BruteForce | MatchType::BruteForceHamming => a.hamming_distance(b) as f32,
+            MatchType::BruteForceL2 => a
+                .data
+                .iter()
+                .zip(&b.data)
+                .map(|(&x, &y)| {
+                    let d = x as f32 - y as f32;
+                    d * d
+                })
+                .sum::<f32>()
+                .sqrt(),
+        }
+    }
 }
 
 /// Feature descriptor matcher with optional ratio test and cross-check filtering.
@@ -43,11 +69,7 @@ impl Matcher {
 
     /// Match each query descriptor to the best training descriptor.
     pub fn match_descriptors(&self, query: &Descriptors, train: &Descriptors) -> Matches {
-        match self.match_type {
-            MatchType::BruteForce | MatchType::BruteForceHamming => {
-                self.brute_force_match(query, train)
-            }
-        }
+        self.brute_force_match(query, train)
     }
 
     fn brute_force_match(&self, query: &Descriptors, train: &Descriptors) -> Matches {
@@ -55,11 +77,11 @@ impl Matcher {
             .into_par_iter()
             .filter_map(|query_idx| {
                 let q_desc = &query.descriptors[query_idx];
-                let mut best_match: Option<(usize, u32)> = None;
-                let mut second_best: Option<u32> = None;
+                let mut best_match: Option<(usize, f32)> = None;
+                let mut second_best: Option<f32> = None;
 
                 for (train_idx, t_desc) in train.iter().enumerate() {
-                    let distance = q_desc.hamming_distance(t_desc);
+                    let distance = self.match_type.distance(q_desc, t_desc);
 
                     match best_match {
                         None => {
@@ -92,10 +114,10 @@ impl Matcher {
                             // Such matches are common wherever an image has
                             // repeated texture, and each one that survives flows
                             // into track building and PnP looking confident.
-                            let rejected = if second == 0 {
+                            let rejected = if second == 0.0 {
                                 true
                             } else {
-                                distance as f32 / second as f32 > threshold
+                                distance / second > threshold
                             };
                             if rejected {
                                 keep_match = false;
@@ -114,7 +136,7 @@ impl Matcher {
                         return Some(FeatureMatch::new(
                             query_idx as i32,
                             train_idx as i32,
-                            distance as f32,
+                            distance,
                         ));
                     }
                 }
@@ -135,19 +157,16 @@ impl Matcher {
         query_idx: usize,
     ) -> Option<usize> {
         let q_desc = query.descriptors.get(query_idx)?;
-
-        let mut best_idx = 0;
-        let mut best_dist = q_desc.hamming_distance(&train.descriptors[0]);
-
-        for (idx, t_desc) in train.iter().enumerate().skip(1) {
-            let distance = q_desc.hamming_distance(t_desc);
-            if distance < best_dist {
-                best_dist = distance;
-                best_idx = idx;
-            }
-        }
-
-        Some(best_idx)
+        // `None` for an empty set rather than indexing `descriptors[0]`.
+        train
+            .iter()
+            .enumerate()
+            .map(|(idx, t_desc)| (idx, self.match_type.distance(q_desc, t_desc)))
+            .fold(None, |best: Option<(usize, f32)>, (idx, d)| match best {
+                Some((_, bd)) if bd <= d => best,
+                _ => Some((idx, d)),
+            })
+            .map(|(idx, _)| idx)
     }
 }
 
