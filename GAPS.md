@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (40 open, was 86)
+## (g) Second review, 2026-10-31 — findings (38 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -397,7 +397,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-n11 | `math/src/stats.rs` normal cdf/ppf, p-values | lower-tail cancellation (`cdf(-10)` = 0), unrefined `ppf`, `1 - cdf` p-values | MED | CONFIRMED vs SciPy |
 | g-n12 | `math/src/integrate.rs` | `quad` is a fixed trapezoid with error 0 and evaluates endpoints; `ode_solve` overshoots `t_end` and stops silently at 10k steps | MED | ARGUED |
 
-### (g8) sfm / triangulation / distortion / calibration (3 open, was 9)
+### (g8) sfm / triangulation / distortion / calibration (1 open, was 9)
 
 Second calib3d pass, covering what (g5) did not reach. `calibrate_camera_planar` matches
 `cv2.calibrateCamera` to every printed digit (rms 0.237948) and the BA analytic Jacobian
@@ -410,8 +410,8 @@ matches finite differences (~1e-7, including θ≈π) — checked, not defects.
 | g-s3 | `calib3d/src/project.rs` rotation Jacobian | **CLOSED.** rvec via unit quaternion (stable at π) and central differences rebuilt from rvec; matches an independent FD to 1e-3 px/rad at θ = 1, π−1e-3, π−1e-7 (`tests/project_jacobian_near_pi.rs`). Was: `rotation_matrix_to_rodrigues` divides by sin θ: max \|J − FD\| = 2.1e8 at θ = π | was HIGH — fixed | CONFIRMED |
 | g-s4 | `calib3d/src/stereo.rs` `stereo_rectify_matrices` | always rotates the baseline onto +x: right-camera-on-left rectifies 180° turned, vertical stereo 90° (cv2 gives R1 = I) | MED | CONFIRMED vs cv2 |
 | g-s5 | `sfm/src/mapper.rs` `sample_unique_indices` | **CLOSED.** High LCG bits, as g-c3. Was: same LCG low-bit sampler as g-c3: n distinct samples for n = 2^m | was MED — fixed | CONFIRMED |
-| g-s6 | `sfm/src/bundle_adjustment.rs` `bundle_adjust_sequential` | cost not recomputed after `remove_outliers` → any next step accepted | MED | ARGUED |
-| g-s7 | `sfm/src/bundle_adjustment.rs` `compute_point_reprojection_error_index` | behind-camera observations skipped (error 0) → never pruned | MED | ARGUED |
+| g-s6 | `sfm/src/bundle_adjustment.rs` `bundle_adjust_sequential` | **CLOSED.** Cost and residuals re-measured after `remove_outliers`. (Argued fix; no dedicated test — the step-acceptance comparison is now between like quantities.) Was: cost not recomputed after `remove_outliers` → any next step accepted | was MED — fixed | ARGUED |
+| g-s7 | `sfm/src/bundle_adjustment.rs` `compute_point_reprojection_error_index` | **CLOSED.** Behind-camera observation scores `INFINITY`; pinned by `landmark_behind_its_camera_is_pruned`. Was: behind-camera observations skipped (error 0) → never pruned | was MED — fixed | ARGUED |
 | g-s8 | `calib3d/src/calibration.rs` | **CLOSED.** Removed. Was: leftover debug `eprintln!` on every calibration / every 10 LM iterations | was LOW — fixed | CONFIRMED |
 | g-s9 | `calib3d/src/distortion.rs` `fisheye_init_undistort_rectify_map` | **CLOSED.** Zero-size guard copied from the pinhole map; pinned in `tests/undistort_map_singular_intrinsics.rs`. Was: zero-size image panics (`chunk_size must not be zero`) | was LOW — fixed | CONFIRMED |
 

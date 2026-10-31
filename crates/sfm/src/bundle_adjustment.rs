@@ -464,11 +464,16 @@ impl SfMState {
             let cam = &self.cameras[*cam_idx];
             let pt_cam = cam.rotation * lm.position + cam.translation;
 
-            if pt_cam.z > 0.0 {
-                let proj = self.intrinsics.project(&pt_cam);
-                error += (proj.x - obs.x).powi(2) + (proj.y - obs.y).powi(2);
-                count += 1;
+            // A landmark behind a camera that observed it is wrong by
+            // definition. Skipping that observation scored such a landmark 0 -
+            // never pruned - while `residuals()` kept fitting its mirrored
+            // projection.
+            if pt_cam.z <= 0.0 {
+                return f64::INFINITY;
             }
+            let proj = self.intrinsics.project(&pt_cam);
+            error += (proj.x - obs.x).powi(2) + (proj.y - obs.y).powi(2);
+            count += 1;
         }
 
         if count > 0 {
@@ -667,6 +672,13 @@ fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfi
 
         if config.robust_kernel && iteration % 5 == 0 {
             state.remove_outliers(10.0);
+            // Removing outliers zeroes their residual rows, so the cost the
+            // next step is compared against must be re-measured. Comparing
+            // the outlier-free cost of the next step with this stale,
+            // outlier-inclusive one accepted any step at all - even one that
+            // raised the inlier cost - and divided lambda by 10 for it.
+            current_residuals = state.residuals();
+            current_err = current_residuals.norm_squared();
         }
     }
 }
@@ -911,6 +923,28 @@ mod tests {
         // Good landmark should still be valid, bad one should be invalid
         assert!(state.landmarks[0].is_valid);
         assert!(!state.landmarks[1].is_valid);
+    }
+
+    /// A landmark behind the camera that observed it is an outlier; it used
+    /// to score 0 (its only observation was skipped) and survive pruning.
+    #[test]
+    fn landmark_behind_its_camera_is_pruned() {
+        let mut state = SfMState::new(create_test_intrinsics());
+        state.add_camera(create_test_pose(Vector3::zeros()));
+        state.add_landmark(
+            Point3::new(0.0, 0.0, 5.0),
+            vec![(0, Point2::new(320.0, 240.0))],
+        );
+        state.add_landmark(
+            Point3::new(0.0, 0.0, -5.0),
+            vec![(0, Point2::new(320.0, 240.0))],
+        );
+        state.remove_outliers(1.0);
+        assert!(state.landmarks[0].is_valid);
+        assert!(
+            !state.landmarks[1].is_valid,
+            "behind-camera landmark survived"
+        );
     }
 
     #[test]
