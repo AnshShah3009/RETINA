@@ -46,13 +46,30 @@ impl PyPointCloud {
         self.points.len()
     }
 
-    pub fn set_normals(&mut self, normals: Vec<(f32, f32, f32)>) {
+    /// Attach one normal per point.
+    ///
+    /// The list is positional: `normals[i]` is the normal of `points[i]`. A
+    /// list of a different length used to be accepted verbatim, which left the
+    /// two arrays out of step and made every consumer read the wrong normal for
+    /// a point - or read past the end of the shorter one. From Python
+    /// `set_normals` raised nothing, so the cloud looked valid while
+    /// `num_points()` and `len(get_normals())` disagreed.
+    pub fn set_normals(&mut self, normals: Vec<(f32, f32, f32)>) -> PyResult<()> {
+        if normals.len() != self.points.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "set_normals: got {} normals for {} points; the list is positional, \
+                 so it must hold exactly one normal per point",
+                normals.len(),
+                self.points.len()
+            )));
+        }
         self.normals = Some(
             normals
                 .iter()
                 .map(|(x, y, z)| Vector3::new(*x, *y, *z))
                 .collect(),
         );
+        Ok(())
     }
 
     /// Get normals as a flat list: [nx0,ny0,nz0, nx1,ny1,nz1, ...].

@@ -32,8 +32,14 @@ fn distance_sq_to_aabb(p: vec3<f32>, b_min: vec3<f32>, b_max: vec3<f32>) -> f32 
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let idx = global_id.x + global_id.y * num_wg.x * 256u;
     if (idx >= params.num_points) { return; }
 
     let center_idx = sorted_indices[idx];
@@ -55,7 +61,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     stack[stack_ptr] = 0u; // Root is internal node 0
     stack_ptr = stack_ptr + 1u;
 
-    while (stack_ptr > 0u) {
+    // A well-formed LBVH has 2n-1 nodes and each is popped at most once; the
+    // cap only stops a malformed tree (e.g. built from unsorted Morton codes)
+    // from looping the GPU forever.
+    let max_visits = 2u * params.num_points;
+    var visits = 0u;
+    while (stack_ptr > 0u && visits < max_visits) {
+        visits = visits + 1u;
         stack_ptr = stack_ptr - 1u;
         let node_idx = stack[stack_ptr];
         let node = nodes[node_idx];

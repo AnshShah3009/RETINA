@@ -1359,10 +1359,27 @@ compiles and reads the wrong bytes produces a quiet wrong answer and survives
 indefinitely. The only defence is to run both backends on the same input and
 compare.
 
-## Open: `convolve_2d` border modes diverge from the CPU, and it is not where it looks
+## Resolved: `convolve_2d` border modes diverged from the CPU, and it was not where it looked
 
-Found by the parity sweep, and **not fixed**. Recorded here because the
-characterisation is sharp even though the cause is not.
+**Now fixed.** The characterisation below was sharp; the cause was one layer
+down and in a different file. `crates/hal/src/cpu/border.rs` folded
+`BorderMode::Reflect` with `period - c - 1` over a period of `2n`, and
+`BorderMode::Reflect101` with `period - c` over `2n - 2` - which written out are
+the *same* reflection, so two enum variants behaved identically and both
+disagreed with OpenCV by one:
+
+| index | -3 | -2 | -1 | 0 | 4 | 5 | 6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `BORDER_REFLECT` (correct) | 3 | 2 | 1 | 0 | 4 | 3 | 2 |
+| `BORDER_REFLECT_101` (correct) | 2 | 1 | 0 | 0 | 4 | 4 | 3 |
+| `Reflect` did | 2 | 1 | 0 | 0 | 4 | 4 | 3 |
+| `Reflect101` did | 3 | 2 | 1 | 0 | 4 | 3 | 2 |
+
+Fixing `border.rs` resolved this as a side effect, and
+`sweep::convolve_2d_border_modes_match` now passes on real hardware across all
+five modes. A fix attempted in `convolve_2d` itself had panicked the CPU and
+been reverted - the bug was in a shared helper underneath. The original
+characterisation is kept below as the record.
 
 A 37x33 f32 image, a symmetric 5x5 Gaussian, the same input uploaded to both
 backends and verified identical after a round trip:
@@ -1453,40 +1470,42 @@ be falsified before the real shape emerged.
 The test still reports rather than asserts, the diagnostic probes are deleted, and
 this is left as a known defect with its shape documented.
 
-## `research/cubecl`: in sync, and functionally empty
+## `research/cubecl`: ported, and honestly marked as untrusted
 
-**Git parity: yes.** The branch is 0 commits behind `master` and carries 62 of its
-own. It builds and the whole workspace test suite passes on it.
+**Git parity: yes.** 0 commits behind `master`, carrying its own work.
 
-**Functional parity: no, because its own work does not function.** Three modules
-totalling 1,973 lines are committed and referenced by nothing:
+**The dead modules are now built.** Three files totalling ~1,973 lines were
+committed and compiled by nothing - not declared in `gpu_kernels/mod.rs`, not
+under the `cubecl` feature, not reachable from any API. `cargo build -p cv-hal
+--features cubecl` succeeded while compiling strictly less than it appeared to.
 
-| file | lines | referenced by |
-| --- | ---: | --- |
-| `crates/hal/src/gpu_kernels/cubecl_backend.rs` | 526 | nothing |
-| `crates/hal/src/gpu_kernels/cubecl_advanced.rs` | 793 | nothing |
-| `crates/hal/src/gpu_kernels/cubecl_optimized.rs` | 654 | nothing |
+All three now build under `#[cfg(feature = "cubecl")]`, with the feature off
+still clean. Declaring them produced **159 errors**; after the port, zero. The
+0.9 API, for the record:
 
-They are not declared in `gpu_kernels/mod.rs`, so they are not compiled, not
-tested, and not reachable from any API. Declaring them - three lines - does not
-compile: `cubecl_optimized.rs:565` has an unbalanced delimiter
-(`error: unexpected closing delimiter`), so these files have never been through a
-compiler at all. They were merged as text.
+- No `CubeContext` trait; a `ComputeClient<R>` *is* the context
+- No `ExecutionDims`; launches take `CubeCount` and `CubeDim`
+- Kernels are `#[cube(launch_unchecked)]`
+- `Tensor<T>` indexes **flat `usize` only** - no `t[[i, j]]`, so every kernel
+  computes its own row-major offset from `shape(d)`
+- Early exit is `terminate!()`, not `return`
+- `#[const]` is invalid; `#[comptime]` is broken in cubecl-macros 0.9.0 (it
+  passes a raw Rust `u32` where an `ExpandElement` is expected), so those became
+  plain runtime parameters
 
-`benches/cubecl_perf.rs`, added on the same branch, is a CPU-baseline
-criterion suite that does not reference the modules either, and
-`docs/GPU_BENCHMARK_RESULTS.md` reports matmul and voxel-downsampling speedups
-that no benchmark on the branch can produce. Those figures were measured on
-different hardware (the document says an Intel Meteor Lake iGPU; this machine has
-a Radeon 890M and an RTX 5070 Ti) and nothing in the tree reproduces them.
+**They are not correct.** The files were written against an imagined API and had
+never been compiled, so they also carry logic defects independent of the port.
+**32 `BUG(original)` markers** record them at each site, and they are not
+cosmetic - a batched convolution wrote every channel to channel 0, and a
+"transposed" convolution never referenced `ky`/`kx` so every tap read the same
+input pixel. A file that compiles and is documented as wrong is worth more than
+one that compiles and claims to work.
 
-So "the cubecl branch is in parity with master" is true of the commit graph and
-false of behaviour: the branch inherits everything master does, and adds code
-that does not run. The honest options are to make the three modules compile, test
-and benchmark them - in which case they are a real contribution - or to drop them
-and leave the branch as a tracking branch for CubeCL work. Carrying 2,000 lines
-of non-compiling code in a branch whose stated purpose is functional parity makes
-the branch harder to reason about than the empty alternative.
+**What "in parity" now means.** The branch builds and its tests pass, and its
+own three modules now exist in the build graph rather than beside it. It does not
+provide working CubeCL kernels, and no kernel is numerically verified against a
+reference. That is the outstanding work, and claiming parity on behaviour would
+be false.
 
 ## Why the shader element-type class was contained, and where it could still bite
 

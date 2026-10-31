@@ -50,10 +50,12 @@ impl Default for SgmMatcher {
 
 impl StereoMatcher for SgmMatcher {
     fn compute(&self, left: &GrayImage, right: &GrayImage) -> Result<DisparityMap> {
-        let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-            // Fallback to CPU registry on error
-            cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
-        });
+        let runner = cv_runtime::best_runner()
+            .map(|(r, _)| r)
+            .unwrap_or_else(|_| {
+                // Fallback to CPU registry on error
+                cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
+            });
         self.compute_ctx(left, right, &runner)
     }
 }

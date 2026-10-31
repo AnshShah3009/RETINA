@@ -31,6 +31,9 @@ impl Slam {
         }
     }
 
+    /// Track one monocular frame. See [`Tracker::process_frame`]: the first
+    /// frame returns `Err` while it is held as the initialisation reference;
+    /// the map is built from a later frame with enough parallax.
     pub fn process_image(
         &mut self,
         image: &image::GrayImage,
@@ -45,6 +48,36 @@ impl Slam {
         // Clear pooled buffers to avoid accumulation
         cv_hal::buffer_utils::global_pool().clear();
 
+        res
+    }
+
+    /// Track one RGB-D frame. `depth` is row-major metric depth (camera z),
+    /// one value per pixel of `image`; non-finite or non-positive values are
+    /// missing. The first frame bootstraps the map. See
+    /// [`Tracker::process_frame_with_depth`].
+    pub fn process_image_with_depth(
+        &mut self,
+        image: &image::GrayImage,
+        depth: &[f32],
+    ) -> Result<(Pose, Vec<usize>), String> {
+        let (h, w) = (image.height() as usize, image.width() as usize);
+        if depth.len() != h * w {
+            return Err(format!(
+                "depth has {} values, the {w}x{h} image needs {}",
+                depth.len(),
+                h * w
+            ));
+        }
+        let shape = cv_core::TensorShape::new(1, h, w);
+        let tensor: Tensor<u8, CpuStorage<u8>> =
+            Tensor::from_vec(image.to_vec(), shape).map_err(|e| e.to_string())?;
+        let depth: Tensor<f32, CpuStorage<f32>> =
+            Tensor::from_vec(depth.to_vec(), shape).map_err(|e| e.to_string())?;
+
+        let res = self
+            .tracker
+            .process_frame_with_depth(&tensor, &depth, &mut self.map);
+        cv_hal::buffer_utils::global_pool().clear();
         res
     }
 }

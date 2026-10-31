@@ -109,7 +109,11 @@ pub struct Point3D {
 ///
 /// Each non-comment line must contain at least `CAMERA_ID MODEL WIDTH HEIGHT`;
 /// `SIMPLE_PINHOLE` requires 3 parameters and `PINHOLE` 4, otherwise an error is
-/// returned. `WIDTH`/`HEIGHT` must be positive.
+/// returned. `WIDTH`/`HEIGHT` must be positive, and for the two pinhole models
+/// the parameters are value-checked as well as counted: focal lengths must be
+/// finite and strictly positive and the principal point must be finite (see
+/// [`check_intrinsics_values`]). Models other than those two are stored raw and
+/// are not value-checked here.
 pub fn read_cameras_text<P: AsRef<Path>>(path: P) -> Result<Vec<Camera>> {
     let path = path.as_ref();
     let text = fs::read_to_string(path)?;
@@ -162,6 +166,10 @@ pub fn read_cameras_text<P: AsRef<Path>>(path: P) -> Result<Vec<Camera>> {
                         params.len()
                     )));
                 }
+                check_intrinsics_values(
+                    &ctx,
+                    &[(params[0], "f"), (params[1], "cx"), (params[2], "cy")],
+                )?;
                 Some(CameraIntrinsics::new(
                     params[0], params[0], params[1], params[2], width, height,
                 ))
@@ -173,6 +181,15 @@ pub fn read_cameras_text<P: AsRef<Path>>(path: P) -> Result<Vec<Camera>> {
                         params.len()
                     )));
                 }
+                check_intrinsics_values(
+                    &ctx,
+                    &[
+                        (params[0], "fx"),
+                        (params[1], "fy"),
+                        (params[2], "cx"),
+                        (params[3], "cy"),
+                    ],
+                )?;
                 Some(CameraIntrinsics::new(
                     params[0], params[1], params[2], params[3], width, height,
                 ))
@@ -191,6 +208,48 @@ pub fn read_cameras_text<P: AsRef<Path>>(path: P) -> Result<Vec<Camera>> {
     }
 
     Ok(cameras)
+}
+
+/// Value-check the intrinsic parameters of a pinhole camera model.
+///
+/// `entries` is the model's parameters paired with their COLMAP names.
+///
+/// Two things are enforced, and the difference between them is deliberate:
+///
+/// * **Focal lengths must be finite and strictly positive.** The intrinsic
+///   matrix is `diag(fx, fy, 1)`; a negative or zero `fx` is singular or has no
+///   usable inverse, and `CameraIntrinsics::inverse_matrix` answers such a
+///   matrix with the *identity* rather than failing. The consequence is silent:
+///   every point is used as its own pixel coordinate and `solve_pnp_dlt` returns
+///   a confident pose for a camera that has no focal length at all.
+/// * **The principal point must be finite.** It is an offset and has no
+///   inverse to protect, but a non-finite one puts NaN into every projected
+///   pixel coordinate.
+///
+/// The principal point is deliberately **not** required to lie inside the
+/// image. Calibration legitimately puts it outside the frame - a cropped or
+/// rescaled sensor, a partially masked camera - and the resulting intrinsic
+/// matrix is still perfectly invertible, so rejecting it would refuse files that
+/// are mathematically sound. Finiteness is the line; the range is a decision the
+/// caller can make for itself.
+fn check_intrinsics_values(ctx: &str, entries: &[(f64, &str)]) -> Result<()> {
+    for (value, name) in entries {
+        if !value.is_finite() {
+            return Err(Error::InvalidInput(format!(
+                "{ctx}: {name} = {value} is not a finite number"
+            )));
+        }
+    }
+    for (value, name) in entries.iter().filter(|(_, name)| name.starts_with('f')) {
+        if *value <= 0.0 {
+            return Err(Error::InvalidInput(format!(
+                "{ctx}: {name} = {value} must be strictly positive \
+                 (a zero or negative focal length makes the intrinsic matrix \
+                  singular and gives every point its own pixel coordinate)"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Read `images.txt` from a COLMAP text model.

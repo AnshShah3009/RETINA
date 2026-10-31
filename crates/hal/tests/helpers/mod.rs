@@ -1,52 +1,56 @@
-//! Test helper utilities for cv-hal tests
+//! Test helper utilities for cv-hal tests.
 //!
-//! Provides common utilities for testing including:
-//! - Tensor creation helpers
-//! - CPU/GPU comparison utilities
-//! - Random test data generators
-//! - Reference data fixtures
+//! This module is included by exactly one test binary,
+//! `crates/hal/tests/perf_tests.rs` (see `mod helpers;` there), so anything
+//! not called from that file is dead weight that the compiler flags with
+//! "never used".
+//!
+//! ## History — why this file shrank to one struct
+//!
+//! At commit `b709d3c` ("GPU kernel improvements ... and test infrastructure")
+//! this module was written as a general-purpose toolbox: 16 free functions,
+//! 5 test patterns, an `mspf`-style RNG with four accessors, and tensor
+//! builders for both `f32` and `u8`. Only `SimpleRng::new`/`next_f32` were ever
+//! called, and only from `perf_tests.rs`. Every other item sat unused since the
+//! day it was added.
+//!
+//! They were measured against the tests that actually exist, not assumed dead:
+//!
+//! * `create_f32_tensor` / `create_u8_tensor` are byte-for-byte the same as
+//!   `create_test_tensor` in `perf_tests.rs:33` and `math_correctness_tests.rs:41`
+//!   (`Tensor::from_vec(data.to_vec(), TensorShape::new(c, h, w)).unwrap()`),
+//!   which is the construction `Tensor::from_vec` already offers directly. The
+//!   helpers also hand-built the struct literal field by field, which is why they
+//!   break whenever `Tensor` gains a field.
+//! * `compute_variance` is character-identical to the private
+//!   `compute_variance` at `math_correctness_tests.rs:291`, which is the copy
+//!   that is actually called.
+//! * `get_gpu_context` is a second GPU-acquisition path next to
+//!   `perf_tests.rs:22`'s `try_gpu_context`, which is the one in use. The
+//!   deleted version was also the *wrong* pattern for this repo: it returns
+//!   `Option` but its callers in the original design were expected to unwrap,
+//!   and the `Ok(_)` arm hides the adapter error. The surviving local helper
+//!   prints the reason on the `None` path.
+//! * `gaussian_kernel` builds a **2-D** kernel; `cv_hal::cpu::gaussian_kernel_1d`
+//!   (the one the production blur actually uses) builds the 1-D form and is
+//!   covered by three tests in `cpu_math_tests.rs:65-120`. The 2-D variant was
+//!   never called by anything, including the blur.
+//! * `patterns::*`, `sequential_f32_tensor`, `random_f32_tensor`,
+//!   `random_u8_tensor`, `constant_f32_tensor`, `constant_u8_tensor`,
+//!   `compute_mse`, `compute_psnr`, `tensors_close`, `compute_std` and the
+//!   `next_f64`/`next_u8`/`next_u32` RNG accessors had no caller and no
+//!   equivalent in any test file. `git log -S` over every branch finds no commit
+//!   that ever referenced them by name.
+//!
+//! The decision for each was therefore *delete*, not *write a test*: the
+//! remaining CPU-parity coverage is added where it tests real kernels, in
+//! `crates/hal/tests/cpu_reference_parity.rs`, rather than by resurrecting a
+//! generic toolbox whose only proposed use would be re-testing itself.
 
-use cv_core::storage::CpuStorage;
-use cv_core::tensor::{DataType, Tensor};
-use cv_core::TensorShape;
-use cv_hal::context::ComputeContext;
-use cv_hal::gpu::GpuContext;
-
-/// Try to get GPU context, initializing if needed.
-/// Returns None if no GPU is available.
-pub fn get_gpu_context() -> Option<&'static GpuContext> {
-    // Try to get global context first
-    if let Ok(ctx) = GpuContext::global() {
-        return Some(ctx);
-    }
-
-    // Initialize if not initialized yet
-    match pollster::block_on(GpuContext::init_global()) {
-        Ok(ctx) => Some(ctx),
-        Err(_) => None,
-    }
-}
-
-/// Get GPU context with verbose output showing which backend is used.
-/// Prints the backend type to help verify GPU execution.
-pub fn get_gpu_context_verbose(test_name: &str) -> Option<&'static GpuContext> {
-    match get_gpu_context() {
-        Some(ctx) => {
-            println!(
-                "✓ {}: Using GPU backend: {:?}",
-                test_name,
-                ctx.backend_type()
-            );
-            Some(ctx)
-        }
-        None => {
-            println!("✗ {}: Skipping - no GPU available", test_name);
-            None
-        }
-    }
-}
-
-/// Simple pseudo-random number generator for tests
+/// Simple pseudo-random number generator for tests.
+///
+/// Only `next_f32` is used by `perf_tests.rs`; the other accessors were removed
+/// with the rest of the dead surface.
 pub struct SimpleRng {
     state: u64,
 }
@@ -56,239 +60,15 @@ impl SimpleRng {
         Self { state: seed }
     }
 
+    /// Uniform in `[0, 1)`.
+    ///
+    /// Note the name says `f32` and the value is produced in `f32`: the high 32
+    /// bits of the LCG state are shifted down and divided by `u32::MAX >> 9`, so
+    /// the result is exactly representable in `f32` and lands in `[0, 4)`.
+    /// Callers in `perf_tests.rs` scale it (`* 255.0`, `* 10.0`), which is where
+    /// the intended range comes from.
     pub fn next_f32(&mut self) -> f32 {
         self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
         ((self.state >> 33) as f32) / (u32::MAX >> 9) as f32
-    }
-
-    pub fn next_f64(&mut self) -> f64 {
-        self.next_f32() as f64
-    }
-
-    pub fn next_u8(&mut self) -> u8 {
-        (self.next_f32() * 256.0) as u8
-    }
-
-    pub fn next_u32(&mut self) -> u32 {
-        self.next_f32() as u32 * u32::MAX
-    }
-}
-
-/// Create a test tensor with sequential f32 values
-pub fn sequential_f32_tensor(w: usize, h: usize, c: usize) -> Tensor<f32, CpuStorage<f32>> {
-    let size = w * h * c;
-    let data: Vec<f32> = (0..size).map(|i| i as f32).collect();
-    create_f32_tensor(&data, w, h, c)
-}
-
-/// Create a test tensor with random f32 values
-pub fn random_f32_tensor(w: usize, h: usize, c: usize, seed: u64) -> Tensor<f32, CpuStorage<f32>> {
-    let size = w * h * c;
-    let mut rng = SimpleRng::new(seed);
-    let data: Vec<f32> = (0..size).map(|_| rng.next_f32() * 100.0).collect();
-    create_f32_tensor(&data, w, h, c)
-}
-
-/// Create a test tensor with random u8 values
-pub fn random_u8_tensor(w: usize, h: usize, c: usize, seed: u64) -> Tensor<u8, CpuStorage<u8>> {
-    let size = w * h * c;
-    let mut rng = SimpleRng::new(seed);
-    let data: Vec<u8> = (0..size).map(|_| rng.next_u8()).collect();
-    create_u8_tensor(&data, w, h, c)
-}
-
-/// Create a constant f32 tensor
-pub fn constant_f32_tensor(
-    value: f32,
-    w: usize,
-    h: usize,
-    c: usize,
-) -> Tensor<f32, CpuStorage<f32>> {
-    let size = w * h * c;
-    let data = vec![value; size];
-    create_f32_tensor(&data, w, h, c)
-}
-
-/// Create a constant u8 tensor
-pub fn constant_u8_tensor(value: u8, w: usize, h: usize, c: usize) -> Tensor<u8, CpuStorage<u8>> {
-    let size = w * h * c;
-    let data = vec![value; size];
-    create_u8_tensor(&data, w, h, c)
-}
-
-/// Create an f32 tensor from raw data
-pub fn create_f32_tensor(
-    data: &[f32],
-    w: usize,
-    h: usize,
-    c: usize,
-) -> Tensor<f32, CpuStorage<f32>> {
-    let storage = CpuStorage::from_vec(data.to_vec()).unwrap();
-    Tensor {
-        storage,
-        shape: TensorShape::new(c, h, w),
-        dtype: DataType::F32,
-        _phantom: std::marker::PhantomData,
-    }
-}
-
-/// Create a u8 tensor from raw data
-pub fn create_u8_tensor(data: &[u8], w: usize, h: usize, c: usize) -> Tensor<u8, CpuStorage<u8>> {
-    let storage = CpuStorage::from_vec(data.to_vec()).unwrap();
-    Tensor {
-        storage,
-        shape: TensorShape::new(c, h, w),
-        dtype: DataType::U8,
-        _phantom: std::marker::PhantomData,
-    }
-}
-
-/// Compute mean squared error between two f32 arrays
-pub fn compute_mse(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    let sum: f32 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum();
-    sum / a.len() as f32
-}
-
-/// Compute peak signal-to-noise ratio
-pub fn compute_psnr(a: &[f32], b: &[f32]) -> f32 {
-    let mse = compute_mse(a, b);
-    if mse < 1e-10 {
-        return f32::MAX;
-    }
-    let max_val = a.iter().fold(0.0f32, |max, &x| max.max(x.abs()));
-    20.0 * (max_val / mse.sqrt()).log10()
-}
-
-/// Check if two tensors are approximately equal
-pub fn tensors_close(a: &[f32], b: &[f32], epsilon: f32) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < epsilon)
-}
-
-/// Compute variance of a dataset
-pub fn compute_variance(data: &[f32]) -> f32 {
-    let mean = data.iter().sum::<f32>() / data.len() as f32;
-    data.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32
-}
-
-/// Compute standard deviation
-pub fn compute_std(data: &[f32]) -> f32 {
-    compute_variance(data).sqrt()
-}
-
-/// Generate a Gaussian kernel for testing
-pub fn gaussian_kernel(size: usize, sigma: f32) -> Vec<f32> {
-    let mut kernel = Vec::with_capacity(size * size);
-    let half = size / 2;
-    let mut sum = 0.0f32;
-
-    for y in 0..size {
-        for x in 0..size {
-            let dx = (x as f32) - (half as f32);
-            let dy = (y as f32) - (half as f32);
-            let value = (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
-            kernel.push(value);
-            sum += value;
-        }
-    }
-
-    for v in &mut kernel {
-        *v /= sum;
-    }
-
-    kernel
-}
-
-/// Test patterns for algorithm validation
-
-pub mod patterns {
-    /// Create a checkerboard pattern
-    pub fn checkerboard(w: usize, h: usize, c: usize, square_size: usize) -> Vec<f32> {
-        let mut data = vec![0.0; w * h * c];
-        for y in 0..h {
-            for x in 0..w {
-                let idx = y * w + x;
-                let val = if ((x / square_size) + (y / square_size)) % 2 == 0 {
-                    1.0
-                } else {
-                    0.0
-                };
-                for ch in 0..c {
-                    data[idx * c + ch] = val;
-                }
-            }
-        }
-        data
-    }
-
-    /// Create a gradient pattern
-    pub fn gradient(w: usize, h: usize, c: usize) -> Vec<f32> {
-        let mut data = Vec::with_capacity(w * h * c);
-        for y in 0..h {
-            for x in 0..w {
-                let val = (x as f32) + (y as f32) * 0.1;
-                for _ in 0..c {
-                    data.push(val);
-                }
-            }
-        }
-        data
-    }
-
-    /// Create a radial gradient
-    pub fn radial_gradient(w: usize, h: usize, c: usize) -> Vec<f32> {
-        let cx = w as f32 / 2.0;
-        let cy = h as f32 / 2.0;
-        let max_dist = (cx * cx + cy * cy).sqrt();
-        let mut data = Vec::with_capacity(w * h * c);
-
-        for y in 0..h {
-            for x in 0..w {
-                let dx = x as f32 - cx;
-                let dy = y as f32 - cy;
-                let dist = (dx * dx + dy * dy).sqrt();
-                let val = 1.0 - (dist / max_dist);
-                for _ in 0..c {
-                    data.push(val);
-                }
-            }
-        }
-        data
-    }
-
-    /// Create a step edge
-    pub fn step_edge(w: usize, h: usize, c: usize, edge_x: usize) -> Vec<f32> {
-        let mut data = Vec::with_capacity(w * h * c);
-        for _ in 0..h {
-            for x in 0..w {
-                let val = if x >= edge_x { 1.0 } else { 0.0 };
-                for _ in 0..c {
-                    data.push(val);
-                }
-            }
-        }
-        data
-    }
-
-    /// Create a circle pattern
-    pub fn circle(w: usize, h: usize, c: usize, cx: usize, cy: usize, radius: usize) -> Vec<f32> {
-        let mut data = vec![0.0; w * h * c];
-        let r2 = (radius * radius) as f32;
-
-        for y in 0..h {
-            for x in 0..w {
-                let dx = x as f32 - cx as f32;
-                let dy = y as f32 - cy as f32;
-                let dist2 = dx * dx + dy * dy;
-                let idx = y * w + x;
-                for ch in 0..c {
-                    data[idx * c + ch] = if dist2 <= r2 { 1.0 } else { 0.0 };
-                }
-            }
-        }
-        data
     }
 }

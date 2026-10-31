@@ -14,7 +14,14 @@ use cv_core::point_cloud::PointCloud;
 use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 
-/// Poisson Surface Reconstruction
+/// Poisson Surface Reconstruction.
+///
+/// # Returns
+/// `None` when the input is unusable (no normals, mismatched or empty cloud) or
+/// when marching cubes extracts no isosurface. An empty mesh is *not* returned
+/// as `Some`: a mesh with no vertices has no normal and no area, so reporting it
+/// as a successful reconstruction only defers the failure to whichever pipeline
+/// divides by a vertex count next.
 pub fn poisson_reconstruction(
     cloud: &PointCloud,
     depth: usize,
@@ -256,8 +263,18 @@ pub fn poisson_reconstruction(
     let mesh = extract_isosurface(&chi, n, voxel_size, &origin, iso_value);
 
     if mesh.vertices.is_empty() {
-        // Fallback: if marching cubes produces nothing, return an empty-but-valid mesh
-        return Some(TriangleMesh::new());
+        // No isosurface was extracted. `None` is this function's existing way
+        // of saying "no result" — the guard at the top of this file returns
+        // `None` for a cloud with no or mismatched normals, and the signature
+        // is `Option<TriangleMesh>` precisely so absence can be expressed.
+        //
+        // It used to return `Some(TriangleMesh::new())` here, described as an
+        // "empty-but-valid mesh". That is a fabricated success: `.is_some()`
+        // reported that the reconstruction worked, and the caller went on to
+        // feed a zero-vertex mesh into normal and area pipelines, which divide
+        // by vertex and face counts. A mesh with no vertices has no normal and
+        // no area, so there is nothing to hand on.
+        return None;
     }
 
     Some(mesh)
@@ -427,6 +444,117 @@ impl PoissonOctreeNode {
             normal,
             current_depth + 1,
             max_depth,
+        );
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sphere point cloud with outward normals — the input the reconstruction
+    /// is meant for.
+    fn sphere_cloud(n: usize, radius: f32) -> PointCloud {
+        let golden = (1.0 + 5.0_f32.sqrt()) / 2.0;
+        let mut points = Vec::with_capacity(n);
+        let mut normals = Vec::with_capacity(n);
+        for i in 0..n {
+            let theta = 2.0 * std::f32::consts::PI * (i as f32) / golden;
+            let phi = (1.0 - 2.0 * (i as f32 + 0.5) / n as f32).acos();
+            let (sp, cp) = (phi.sin(), phi.cos());
+            let (st, ct) = (theta.sin(), theta.cos());
+            let p = Point3::new(radius * sp * ct, radius * sp * st, radius * cp);
+            points.push(p);
+            normals.push(Vector3::new(p.x, p.y, p.z).normalize());
+        }
+        PointCloud::new(points).with_normals(normals).unwrap()
+    }
+
+    /// Defect 4b: `Some(empty)` for "marching cubes found no isosurface" is a
+    /// fabricated success.
+    ///
+    /// `poisson_reconstruction` returned `Option<TriangleMesh>`, and `None`
+    /// already means "the input was rejected" (missing or mismatched normals,
+    /// empty cloud — `poisson.rs:23-25`). When marching cubes extracted nothing
+    /// it returned `Some(TriangleMesh::new())`, a zero-vertex mesh wrapped in
+    /// success. A caller checking `.is_some()` — e.g. the Python binding at
+    /// `crates/python/src/three_d.rs:83`, which maps the `Option` straight onto
+    /// an `Option<PyTriangleMesh>` — got "success" and then fed a zero-vertex
+    /// mesh into normal and area pipelines, which divide by vertex counts.
+    ///
+    /// The measured case: a cloud whose points are all identical, so every
+    /// coordinate is the same and marching cubes crosses its isovalue nowhere.
+    #[test]
+    fn a_cloud_that_yields_no_isosurface_is_reported_as_absent_not_as_an_empty_mesh() {
+        // All points identical -> zero extent in every axis -> the bounding cube
+        // is degenerate and no isosurface is ever crossed.
+        let points = vec![Point3::new(1.0, 2.0, 3.0); 64];
+        let normals = vec![Vector3::new(0.0, 0.0, 1.0); 64];
+        let cloud = PointCloud::new(points).with_normals(normals).unwrap();
+
+        match poisson_reconstruction(&cloud, 3, 1.0) {
+            None => {}
+            Some(m) => panic!(
+                "marching cubes extracted no isosurface, yet the call returned Some with \
+                 {} vertices and {} faces. `None` is the same 'no result' the function \
+                 already uses for rejected input; `Some(empty)` told the caller it \
+                 succeeded and handed it a zero-vertex mesh for the normal and area \
+                 pipelines to divide by.",
+                m.vertices.len(),
+                m.faces.len()
+            ),
+        }
+    }
+
+    /// A second degenerate shape: two points, so the bounding box has zero extent
+    /// on two axes and only one sample per cloud.
+    #[test]
+    fn a_two_point_cloud_yields_no_empty_but_valid_mesh() {
+        let points = vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 0.0, 1.0)];
+        let normals = vec![Vector3::new(0.0, 0.0, -1.0); 2];
+        let cloud = PointCloud::new(points).with_normals(normals).unwrap();
+
+        if let Some(m) = poisson_reconstruction(&cloud, 3, 1.0) {
+            assert!(
+                !m.vertices.is_empty(),
+                "a returned mesh must carry geometry; an empty one is absence dressed up \
+                 as success"
+            );
+        }
+    }
+
+    /// CONTROL: real input still produces a real mesh. A fix that returned `None`
+    /// unconditionally would pass the two tests above and fail here.
+    #[test]
+    fn a_sphere_cloud_still_reconstructs_a_non_trivial_mesh() {
+        let cloud = sphere_cloud(2000, 1.0);
+
+        let mesh = poisson_reconstruction(&cloud, 5, 1.0)
+            .expect("CONTROL: a dense sphere cloud with outward normals must reconstruct");
+
+        assert!(
+            mesh.vertices.len() > 100,
+            "CONTROL: expected a non-trivial mesh, got {} vertices",
+            mesh.vertices.len()
+        );
+        assert!(
+            mesh.faces.len() > 100,
+            "CONTROL: expected a non-trivial mesh, got {} faces",
+            mesh.faces.len()
+        );
+    }
+
+    /// CONTROL: genuinely rejected input still reports `None`, and is
+    /// distinguishable from the isosurface case only by the message, not by
+    /// collapsing everything into a bogus empty mesh.
+    #[test]
+    fn input_without_normals_is_still_rejected() {
+        let cloud = PointCloud::new(vec![Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)]);
+        assert!(
+            poisson_reconstruction(&cloud, 3, 1.0).is_none(),
+            "CONTROL: a cloud with no normals must be rejected with None"
         );
     }
 }

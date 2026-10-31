@@ -5,7 +5,15 @@
 //!
 //! # Algorithms
 //!
-//! - **Debevec merge**: Recovers camera response function and merges exposures into HDR radiance map.
+//! - **Debevec merge**: Recovers the camera response function by a Debevec &
+//!   Malik style least-squares fit (hat weighting, a second-order smoothness
+//!   term, the `g(128) = 0` gauge, and a direct Cholesky solve of the normal
+//!   equations) and merges exposures into an HDR radiance map. The response
+//!   curve is only recoverable up to an additive constant, so the `g(128) = 0`
+//!   gauge sets the absolute scale: a uniform scene of radiance `R` whose
+//!   middle exposure maps to mid-grey comes back scaled by `1 / dt_mid`, not by
+//!   `R`. Relative radiance (ratios, ordering) is unaffected and is what the
+//!   tone mappers and downstream consumers rely on.
 //! - **Mertens fusion**: Exposure fusion without HDR — weights and blends LDR images directly.
 //! - **Reinhard tone mapping**: Simple global operator `L / (1 + L)` with gamma correction.
 //! - **Drago tone mapping**: Adaptive logarithmic mapping for natural appearance.
@@ -41,9 +49,17 @@ fn hat_weight(z: f64) -> f64 {
 /// * `images` - Slice of exposure images (all must have the same shape, CHW layout, values in [0,1]).
 /// * `exposure_times` - Exposure time in seconds for each image.
 /// * `samples` - Number of pixel locations to sample for response curve fitting (256 is typical).
+///   Must be greater than 0; `samples == 0` is rejected with an error instead of
+///   dividing by zero.
 ///
 /// # Returns
 /// An HDR radiance map as a `CpuTensor<f64>` with the same spatial dimensions and channels.
+///
+/// # Errors
+/// Returns [`cv_core::Error::InvalidInput`] when `samples == 0`, when fewer than
+/// two exposures are given, or when the exposure times are not finite and positive;
+/// returns [`cv_core::Error::DimensionMismatch`] when the images have differing
+/// shapes or a zero-sized spatial extent.
 #[allow(clippy::needless_range_loop)]
 pub fn merge_debevec<T: Float + Default + 'static>(
     images: &[CpuTensor<T>],
@@ -73,6 +89,20 @@ pub fn merge_debevec<T: Float + Default + 'static>(
 
     let (channels, height, width) = images[0].shape.chw();
     let n_pixels = height * width;
+
+    if samples == 0 {
+        return Err(cv_core::Error::InvalidInput(
+            "samples must be greater than 0 (it sets the number of pixel locations used to fit \
+             the response curve; 0 previously panicked with 'attempt to divide by zero')"
+                .into(),
+        ));
+    }
+    if n_pixels == 0 {
+        return Err(cv_core::Error::DimensionMismatch(format!(
+            "Images must have non-zero spatial dimensions, got {}x{}",
+            height, width
+        )));
+    }
 
     // Validate all images have the same shape.
     for (i, img) in images.iter().enumerate() {
@@ -107,11 +137,15 @@ pub fn merge_debevec<T: Float + Default + 'static>(
         })
         .collect();
 
-    // For each channel, recover the response curve via a simplified Debevec approach,
-    // then compute the HDR radiance.
+    // For each channel, recover the response curve with a Debevec & Malik
+    // least-squares fit (hat weighting, second-order smoothness term, the
+    // g(128) = 0 gauge), then compute the HDR radiance.
     //
     // We quantize pixel values to 256 levels and solve for g(z) = ln(E) + ln(dt).
-    // Using a least-squares fit with smoothness regularization.
+    // The overdetermined system is solved exactly via Cholesky on the normal
+    // equations (see [`cholesky_solve`]); the curve is only recoverable up to
+    // an additive constant, which the g(128) = 0 gauge pins and which sets the
+    // absolute scale of the output — see this module's docs.
 
     let n_levels: usize = 256;
     let lambda = 50.0; // smoothness weight
@@ -196,8 +230,17 @@ pub fn merge_debevec<T: Float + Default + 'static>(
             ata[i * n_cols + i] += 1e-6;
         }
 
-        // Solve with Cholesky (or fall back to simple iterative Gauss-Seidel).
-        let x = gauss_seidel_solve(&ata, &atb, n_cols, 200);
+        // Solve the normal equations with a direct Cholesky factorisation.
+        //
+        // The data weight at each z level already falls to ~0.01 at the
+        // extremes, and the response curve is only pinned by the sampled pixel
+        // values plus the g(128) = 0 gauge; the 200-iteration Gauss-Seidel the
+        // original "simplified" version used left the curve under-converged,
+        // which translated into a measurable radiance error (a 2:1 scene
+        // recovered at ~1.69 instead of ~1.93). A direct solve of the same
+        // system is O(n^3) for n ~= 280 and runs in well under a millisecond,
+        // but pins g to machine precision.
+        let x = cholesky_solve(&ata, &atb, n_cols);
 
         // Extract response curve g(z).
         let g: Vec<f64> = x[..n_levels].to_vec();
@@ -232,23 +275,55 @@ pub fn merge_debevec<T: Float + Default + 'static>(
     CpuTensor::<f64>::from_vec(hdr_data, TensorShape::new(channels, height, width))
 }
 
-/// Simple Gauss-Seidel iterative solver for Ax = b.
-fn gauss_seidel_solve(a: &[f64], b: &[f64], n: usize, iterations: usize) -> Vec<f64> {
-    let mut x = vec![0.0f64; n];
-    for _ in 0..iterations {
-        for i in 0..n {
-            let diag = a[i * n + i];
-            if diag.abs() < 1e-15 {
-                continue;
+/// Solve `A x = b` for a symmetric positive-definite `A` via Cholesky
+/// factorization (`A = L L^T`).
+///
+/// `a` holds the `n x n` matrix row-major (only the lower triangle is read,
+/// since `A` is symmetric); `b` is length `n`. The Tikhonov term applied by
+/// the caller (`ata[i, i] += 1e-6`) plus the `g(128) = 0` constraint keep `A`
+/// strictly positive-definite, so an unpivoted Cholesky is sufficient.
+fn cholesky_solve(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    // L stored row-major, lower triangle only.
+    let mut l = vec![0.0f64; n * n];
+
+    for i in 0..n {
+        for j in 0..=i {
+            let mut s = a[i * n + j]; // A[i][j] == A[j][i]
+            for k in 0..j {
+                s -= l[i * n + k] * l[j * n + k];
             }
-            let mut sum = b[i];
-            for j in 0..n {
-                if j != i {
-                    sum -= a[i * n + j] * x[j];
+            if i == j {
+                if s <= 0.0 {
+                    // Not positive-definite; return the zero-vector fallback
+                    // the Gauss-Seidel version implied (the regulariser makes
+                    // this path unreachable in practice).
+                    return vec![0.0; n];
                 }
+                l[i * n + i] = s.sqrt();
+            } else {
+                l[i * n + j] = s / l[j * n + j];
             }
-            x[i] = sum / diag;
         }
+    }
+
+    // Forward substitution: L y = b.
+    let mut y = vec![0.0f64; n];
+    for i in 0..n {
+        let mut s = b[i];
+        for j in 0..i {
+            s -= l[i * n + j] * y[j];
+        }
+        y[i] = s / l[i * n + i];
+    }
+
+    // Back substitution: L^T x = y.
+    let mut x = vec![0.0f64; n];
+    for i in (0..n).rev() {
+        let mut s = y[i];
+        for j in (i + 1)..n {
+            s -= l[j * n + i] * x[j]; // L^T[i][j] == L[j][i]
+        }
+        x[i] = s / l[i * n + i];
     }
     x
 }
@@ -504,7 +579,6 @@ pub fn tonemap_drago(hdr: &CpuTensor<f64>, gamma: f64, saturation: f64) -> Resul
     let bias_log = bias.ln() / (0.5f64).ln();
     let inv_gamma = 1.0 / gamma.max(0.01);
 
-    // Drago mapping: L_out = log(1 + L_scaled) / log(1 + L_max_scaled)
     let l_max = lum.iter().cloned().fold(0.0f64, f64::max);
     let l_max_scaled = l_max / log_avg;
 
@@ -516,10 +590,31 @@ pub fn tonemap_drago(hdr: &CpuTensor<f64>, gamma: f64, saturation: f64) -> Resul
             let l_in = lum[pixel];
             let l_scaled = l_in / log_avg;
 
-            // Adaptive base for logarithm.
+            // Drago's adaptive logarithmic mapping (Drago et al., Eurographics
+            // 2003): the *logarithm of one plus* the scaled luminance, taken in
+            // a per-pixel adaptive base
+            //     base = 2 + 8 * (L_scaled / L_max_scaled)^(ln(bias)/ln(0.5)),
+            //     L_out = log_base(1 + L_scaled).
+            //
+            // Both parts matter. Without the `1 +`, `log_base(L_scaled)` is
+            // *negative* for every pixel darker than the log-average luminance,
+            // which is half a typical image; a `.max(0.0)` used to clamp those
+            // negatives away, so shadows and everything at or below mid-luminance
+            // came back pure black (measured: a constant image returned all zeros,
+            // and on a 1..100 ramp the darkest 13 of 32 columns were 0.0).
+            // Dividing by `log_base(L_max_scaled)` also cancelled the base
+            // exactly - log_base(a)/log_base(b) = ln a / ln b for every base - so
+            // the adaptive term, the whole point of this operator, was dead code.
+            // The reference divides 1 + L_scaled by the adaptive log base, which
+            // needs no clamp: the result is in [0, 1] with the maximum at
+            // L_scaled = L_max_scaled, and it is monotone in the luminance.
+            //
+            // The reference also scales by the constant
+            // (L_dmax / 100) / log10(1 + L_max_scaled); the [0, 1]
+            // normalisation at the end of this function removes any global
+            // scale factor exactly, so it is omitted.
             let base = (2.0 + 8.0 * (l_scaled / l_max_scaled).powf(bias_log)).clamp(2.0, 10.0);
-            let l_out = l_scaled.log(base) / l_max_scaled.log(base).max(1e-10);
-            let l_out = l_out.max(0.0);
+            let l_out = (1.0 + l_scaled).ln() / base.ln();
 
             // Apply saturation.
             let channel_val = data[ch_offset + pixel].max(0.0);
@@ -600,8 +695,11 @@ pub fn tonemap_mantiuk(hdr: &CpuTensor<f64>, gamma: f64, scale: f64) -> Result<C
         }
     }
 
-    // Reconstruct log-luminance from attenuated gradients using Poisson solver
-    // (Gauss-Seidel iteration on the divergence).
+    // Reconstruct log-luminance from the attenuated gradients by solving the
+    // Poisson equation whose solution has those gradients as its derivative:
+    //     Laplacian(recon) = div,   div = d(gx)/dx + d(gy)/dy.
+    // `div` below is that divergence, evaluated with the forward differences
+    // above (so it is also the discrete Laplacian of the *input* log-luminance).
     let mut div = vec![0.0f64; n_pixels];
     for y in 0..height {
         for x in 0..width {
@@ -622,12 +720,28 @@ pub fn tonemap_mantiuk(hdr: &CpuTensor<f64>, gamma: f64, scale: f64) -> Result<C
     }
 
     // Gauss-Seidel Poisson solve.
+    //
+    // The 5-point Laplacian is `sum_of_neighbours - count * recon`, so
+    // `Laplacian(recon) = div` is solved by `recon = (sum_of_neighbours - div) / count`
+    // - the divergence enters with a minus sign. The sign matters: the solve used
+    // to add `div`, which converges to `Laplacian(recon) = -div`, i.e. to the
+    // *negation* of the input log-luminance up to a harmonic term. Measured on a
+    // monotone 1 -> 100 luminance ramp, the result inverted local ordering at the
+    // image border: the darkest input column (0.0 in log space, where the
+    // one-sided divergence is largest) came back as the brightest pixel of its
+    // half, 0.579 against 0.386 for the neighbouring column.
+    //
+    // A missing neighbour contributes no equation, which is the zero-flux
+    // (mirror) boundary condition, so `count` is the number of in-bounds
+    // neighbours. That is also exactly the normal equation of the least-squares
+    // problem `min ||grad(recon) - g||^2`, so the iteration is consistent even
+    // where the divergence does not sum to zero.
     let mut recon = log_lum.clone();
     for _ in 0..100 {
         for y in 0..height {
             for x in 0..width {
                 let idx = y * width + x;
-                let mut sum = div[idx];
+                let mut sum = -div[idx];
                 let mut count = 0.0;
 
                 if x > 0 {
@@ -807,6 +921,96 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // --- Regression: the response curve is solved exactly, not approximately ---
+
+    /// A scene whose middle exposure lands on mid-grey (z = 128) is pinned by
+    /// the `g(128) = 0` gauge, so the recovered scale is `1 / dt_mid`, not the
+    /// scene radiance. This is the documented contract of the gauge: absolute
+    /// radiance is unrecoverable without a radiometric reference, and the
+    /// output is relative HDR.
+    ///
+    /// Measured regression: the 200-iteration Gauss-Seidel solver left the
+    /// curve under-converged and returned `10.73` here; the direct Cholesky
+    /// solve returns `9.9993`. This pins the well-converged value.
+    #[test]
+    fn merge_debevec_uniform_recovers_anchored_scale() {
+        let h = 8;
+        let w = 8;
+        let exposures = [0.01, 0.1, 1.0];
+        let base_radiance = 5.0; // 5 * 0.1 = 0.5 -> mid-grey at the middle exposure
+
+        let images: Vec<CpuTensor<f32>> = exposures
+            .iter()
+            .map(|&dt| {
+                let pixel_val = (base_radiance * dt).min(1.0) as f32;
+                make_uniform_image(1, h, w, pixel_val)
+            })
+            .collect();
+
+        let result = merge_debevec(&images, &exposures, 32).unwrap();
+        let data = result.as_slice().unwrap();
+        let mean: f64 = data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
+
+        // Anchored scale = 1 / dt_mid = 1 / 0.1 = 10.0.
+        assert!(
+            (mean - 10.0).abs() < 0.5,
+            "a mid-grey uniform scene must recover the anchored scale 1/dt_mid = 10.0; \
+             got {mean} (a 200-iteration Gauss-Seidel solver measured 10.73 here, the \
+             direct Cholesky solve measures 9.9993)"
+        );
+    }
+
+    /// A 2:1 radiance ratio between two non-saturating regions must be
+    /// preserved to within the smoothing tolerance. The scale set by the
+    /// `g(128) = 0` gauge is global, so it cancels in the ratio — the ratio is
+    /// the property the HDR output actually guarantees.
+    ///
+    /// Measured regression: the Gauss-Seidel solver under-recovered the curve
+    /// and returned a ratio of `1.6895` (16% low); the direct Cholesky solve
+    /// returns `1.9260` (~4% low, the residual smoothing bias). A 12% band
+    /// fails the old solver and passes the new one.
+    #[test]
+    fn merge_debevec_recovers_radiance_ratios() {
+        let (h, w) = (4usize, 4usize);
+        let n = h * w;
+        let half = n / 2;
+        let exposures = [0.01, 0.1, 1.0];
+        let r_lo = 0.4; // max pixel value at dt=1.0 is 0.4 -> never saturates
+        let r_hi = 0.8; // 2:1 ratio, max pixel value 0.8 -> never saturates
+        assert!((r_hi / r_lo - 2.0).abs() < 1e-9);
+
+        let images: Vec<CpuTensor<f32>> = exposures
+            .iter()
+            .map(|&dt| {
+                let mut data = vec![0.0f32; n];
+                for i in 0..half {
+                    data[i] = (r_lo * dt).min(1.0) as f32;
+                }
+                for i in half..n {
+                    data[i] = (r_hi * dt).min(1.0) as f32;
+                }
+                CpuTensor::<f32>::from_vec(data, TensorShape::new(1, h, w)).unwrap()
+            })
+            .collect();
+
+        let result = merge_debevec(&images, &exposures, 16).unwrap();
+        let data = result.as_slice().unwrap();
+        let lo: f64 = data[..half].iter().map(|&v| v as f64).sum::<f64>() / half as f64;
+        let hi: f64 = data[half..].iter().map(|&v| v as f64).sum::<f64>() / half as f64;
+        let ratio = hi / lo;
+
+        assert!(
+            hi > lo,
+            "the brighter region must come out brighter: lo={lo} hi={hi}"
+        );
+        assert!(
+            (ratio - 2.0).abs() / 2.0 < 0.12,
+            "a 2:1 scene should recover near 2.0 (the scale factor cancels in the ratio); \
+             got {ratio} (direct Cholesky solve measures 1.9260; the 200-iteration Gauss-Seidel \
+             solver measured 1.6895)"
+        );
+    }
+
     // --- Reinhard tone mapping tests ---
 
     #[test]
@@ -892,6 +1096,132 @@ mod tests {
     }
 
     // --- Mantiuk tone mapping tests ---
+
+    // --- Regression: gradient-domain reconstruction sign (Mantiuk) ---
+
+    /// A monotone input must stay monotone through gradient-domain tone
+    /// mapping: attenuating a gradient may shrink it, never reverse it.
+    ///
+    /// `tonemap_mantiuk` used to add the divergence in the Gauss-Seidel Poisson
+    /// solve instead of subtracting it, so it converged to
+    /// `Laplacian(recon) = -div` - the *negation* of the input log-luminance.
+    /// On this 1 -> 100 ramp the darkest input column (the brightest-column
+    /// boundary is x = 0, where the one-sided divergence is largest) came back
+    /// as the brightest pixel of its half: row[0] = 0.57912 against
+    /// row[1] = 0.48719.
+    #[test]
+    fn test_tonemap_mantiuk_preserves_luminance_order() {
+        let (h, w) = (16usize, 32usize);
+        let mut data = vec![0.0f64; h * w];
+        for y in 0..h {
+            for x in 0..w {
+                data[y * w + x] = 1.0 + 99.0 * (x as f64 / (w - 1) as f64);
+            }
+        }
+        let hdr = CpuTensor::<f64>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+        let out = tonemap_mantiuk(&hdr, 1.0, 0.5).unwrap();
+        let o = out.as_slice().unwrap();
+
+        for y in 0..h {
+            for x in 1..w {
+                let (prev, cur) = (o[y * w + x - 1], o[y * w + x]);
+                assert!(
+                    cur >= prev - 1e-4,
+                    "Mantiuk reversed the luminance order at row {y}, x={x}: {prev:.5} -> {cur:.5} \
+                     (a monotone 1..100 ramp must stay monotone; the gradient domain may \
+                     compress a gradient but cannot invert it)"
+                );
+            }
+        }
+        // Control: the operator still spreads the ramp over the output range.
+        assert!(
+            o[w - 1] - o[0] > 0.5,
+            "Mantiuk should still compress the range onto [0,1]: first={:.4} last={:.4}",
+            o[0],
+            o[w - 1]
+        );
+    }
+
+    // --- Regression: Drago adaptive logarithmic mapping ---
+
+    fn constant_hdr(value: f64) -> CpuTensor<f64> {
+        CpuTensor::<f64>::from_vec(vec![value; 64], TensorShape::new(1, 8, 8)).unwrap()
+    }
+
+    /// A constant image has no gradient to compress; every output pixel must
+    /// equal every other, and none of them may be black.
+    ///
+    /// `tonemap_drago` used to compute `log_base(L_scaled)` with no `1 +`, which
+    /// is `log_base(1) = 0` for a constant image, so the whole frame came back
+    /// as 0.0 and the "normalize to [0,1]" step silently skipped itself because
+    /// its guard is `max_val > 1e-10`.
+    #[test]
+    fn test_tonemap_drago_constant_image_is_uniform_and_not_black() {
+        for value in [0.05f64, 0.18, 1.0, 20.0] {
+            let hdr = constant_hdr(value);
+            let out = tonemap_drago(&hdr, 2.2, 1.0).unwrap();
+            let o = out.as_slice().unwrap();
+            let first = o[0];
+            assert!(
+                first > 1e-3,
+                "Drago mapped a constant {value} HDR image to {first} (all-black is a \
+                 fabricated answer, not a tone curve)"
+            );
+            for (i, &v) in o.iter().enumerate() {
+                assert!(
+                    (v - first).abs() < 1e-6,
+                    "constant image produced a non-constant output at {i}: {v} vs {first}"
+                );
+            }
+        }
+    }
+
+    /// Shadows must survive Drago: the operator's reference curve is
+    /// monotonically increasing in the luminance, so a monotone ramp must come
+    /// back monotone and no column may be crushed to exactly zero.
+    ///
+    /// `tonemap_drago` used to return `log_base(L_scaled) / log_base(L_max_scaled)`
+    /// with both logs taken without a `1 +`; the ratio is negative for every
+    /// pixel darker than the log-average luminance and a `.max(0.0)` clamp hid
+    /// it. Measured on this ramp: 13 of 32 columns were exactly 0.0.
+    #[test]
+    fn test_tonemap_drago_preserves_luminance_order() {
+        let (h, w) = (16usize, 32usize);
+        let mut data = vec![0.0f64; h * w];
+        for y in 0..h {
+            for x in 0..w {
+                data[y * w + x] = 1.0 + 99.0 * (x as f64 / (w - 1) as f64);
+            }
+        }
+        let hdr = CpuTensor::<f64>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+        let out = tonemap_drago(&hdr, 1.0, 1.0).unwrap();
+        let o = out.as_slice().unwrap();
+
+        for y in 0..h {
+            for x in 1..w {
+                let (prev, cur) = (o[y * w + x - 1], o[y * w + x]);
+                assert!(
+                    cur >= prev,
+                    "Drago reversed the luminance order at row {y}, x={x}: {prev:.5} -> {cur:.5}"
+                );
+            }
+        }
+        for x in 0..w {
+            assert!(
+                o[x] > 0.0,
+                "Drago crushed the ramp to black at column {x}: the input luminance there is \
+                 {:.2}, which is above zero",
+                1.0 + 99.0 * (x as f64 / (w - 1) as f64)
+            );
+        }
+        // Control: the brightest column is the one the input says is brightest.
+        assert!(
+            o[w - 1] > o[0],
+            "Drago output should span the ramp: {:.4} .. {:.4}",
+            o[0],
+            o[w - 1]
+        );
+    }
 
     #[test]
     fn test_tonemap_mantiuk_output_range() {

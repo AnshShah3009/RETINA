@@ -49,6 +49,15 @@ pub struct HprResult {
 /// # Errors
 /// Returns `Err` if the point cloud has fewer than 4 non-degenerate points
 /// (a convex hull in 3D requires at least 4 non-coplanar points).
+///
+/// It also returns `Err` when the *flipped* point set is degenerate —
+/// collinear, coplanar or coincident — which happens when the input cloud has no
+/// three-dimensional extent. The algorithm needs an initial tetrahedron, so
+/// there is no hull to compute and no visibility answer to give. Reporting the
+/// degeneracy matters: this path used to mark every point visible and return
+/// `Ok`, so 11 collinear points viewed from `(0, 0, 20)` came back as 11/11
+/// visible when in fact the 10 points behind the nearest one are exactly
+/// occluded by it.
 pub fn hidden_point_removal(
     points: &[Point3<f64>],
     viewpoint: &Point3<f64>,
@@ -88,8 +97,11 @@ pub fn hidden_point_removal(
     // Add the origin (viewpoint).
     flipped.push(Point3::origin());
 
-    // 3. Convex hull of flipped points.
-    let on_hull = convex_hull_3d_membership(&flipped);
+    // 3. Convex hull of flipped points.  A degenerate hull (collinear, coplanar
+    //    or coincident points) is reported rather than answered with "everything
+    //    is visible".
+    let on_hull = convex_hull_3d_membership(&flipped)
+        .map_err(|why| format!("Degenerate point set for HPR: {why}"))?;
 
     // 4. Points whose flipped versions are on the hull (excluding the origin point)
     //    are visible.
@@ -295,20 +307,23 @@ struct Edge(usize, usize);
 
 /// Build the 3D convex hull incrementally and return a boolean vector indicating
 /// which input points lie on the hull.
-fn convex_hull_3d_membership(points: &[Point3<f64>]) -> Vec<bool> {
+///
+/// # Errors
+/// Returns `Err` with the degeneracy's description when no initial tetrahedron
+/// can be formed — the points are coincident, collinear or coplanar.
+///
+/// The previous code treated that case as "everything is on the hull" and
+/// returned a full mask anyway. That is not a conservative fallback, it is a
+/// confident wrong answer: with 11 collinear points on the z-axis viewed from
+/// `(0, 0, 20)`, the nearest point is the only visible one and the other 10 are
+/// exactly occluded by it, yet the function reported 11/11 visible. An
+/// incremental 3D hull genuinely cannot answer here — it has no faces to start
+/// from — so the degeneracy is reported instead.
+fn convex_hull_3d_membership(points: &[Point3<f64>]) -> Result<Vec<bool>, String> {
     let n = points.len();
     let mut on_hull = vec![false; n];
 
-    let tet = match find_initial_tetrahedron(points) {
-        Ok(t) => t,
-        Err(_) => {
-            // Degenerate — mark all points as on-hull (safe fallback for HPR).
-            for v in on_hull.iter_mut() {
-                *v = true;
-            }
-            return on_hull;
-        }
-    };
+    let tet = find_initial_tetrahedron(points)?;
 
     let [i0, i1, i2, i3] = tet;
 
@@ -418,7 +433,7 @@ fn convex_hull_3d_membership(points: &[Point3<f64>]) -> Vec<bool> {
         }
     }
 
-    on_hull
+    Ok(on_hull)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -566,7 +581,7 @@ mod tests {
             Point3::new(0.0, 0.0, 1.0),
             Point3::new(0.1, 0.1, 0.1),
         ];
-        let on_hull = convex_hull_3d_membership(&points);
+        let on_hull = convex_hull_3d_membership(&points).unwrap();
         assert!(on_hull[0]);
         assert!(on_hull[1]);
         assert!(on_hull[2]);
@@ -586,7 +601,7 @@ mod tests {
         }
         points.push(Point3::new(0.5, 0.5, 0.5));
 
-        let on_hull = convex_hull_3d_membership(&points);
+        let on_hull = convex_hull_3d_membership(&points).unwrap();
         for i in 0..8 {
             assert!(on_hull[i]);
         }

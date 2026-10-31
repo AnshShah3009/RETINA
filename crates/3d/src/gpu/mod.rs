@@ -18,10 +18,12 @@ pub mod point_cloud {
 
     /// Transform point cloud using the best available runner
     pub fn transform(points: &[Point3<f32>], transform: &Matrix4<f32>) -> Vec<Point3<f32>> {
-        let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-            // Fallback to CPU registry on error
-            cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
-        });
+        let runner = cv_runtime::best_runner()
+            .map(|(r, _)| r)
+            .unwrap_or_else(|_| {
+                // Fallback to CPU registry on error
+                cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
+            });
         transform_ctx(points, transform, &runner)
     }
 
@@ -42,10 +44,12 @@ pub mod point_cloud {
 
     /// Compute normals using the runtime scheduler
     pub fn compute_normals(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32>> {
-        let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-            warn!("GPU not available for compute_normals, using CPU");
-            cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
-        });
+        let runner = cv_runtime::best_runner()
+            .map(|(r, _)| r)
+            .unwrap_or_else(|_| {
+                warn!("GPU not available for compute_normals, using CPU");
+                cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0))
+            });
         compute_normals_ctx(points, k, &runner)
     }
 
@@ -69,15 +73,33 @@ pub mod point_cloud {
     fn compute_normals_gpu_with_ctx(
         points: &[Point3<f32>],
         k: usize,
-        _gpu: &cv_hal::gpu::GpuContext,
+        gpu: &cv_hal::gpu::GpuContext,
     ) -> Vec<Vector3<f32>> {
         eprintln!(
             "[GPU] compute_normals_gpu_with_ctx: {} points - using hybrid path (CPU kNN + GPU PCA)",
             points.len()
         );
-        // Full GPU path (Morton + LBVH) has bind group layout issues.
-        // Use hybrid path: CPU voxel-hash kNN + GPU batch PCA
-        compute_normals_hybrid(points, k)
+        // The hybrid path is used rather than Morton + LBVH: CPU voxel-hash kNN,
+        // then GPU batch PCA. (The LBVH's bind group layout was a real problem
+        // and has since been fixed - it declared five storage bindings against a
+        // device limit of four - but wiring it into this path is separate work,
+        // and the hybrid path is correct as it stands.)
+        //
+        // The `gpu` argument is used for the PCA step. It was previously
+        // underscore-prefixed and ignored, with the context looked up globally
+        // instead - so a caller that passed one device could have had another
+        // used, and on a machine with more than one GPU the two disagree. The
+        // kNN step is CPU and is documented as such above.
+        match cv_hal::gpu_kernels::pointcloud::compute_normals_from_covariances_gpu(
+            gpu,
+            &compute_covariances_parallel(points, k),
+        ) {
+            Ok(normals) => normals,
+            Err(e) => {
+                warn!("GPU PCA failed: {:?}, falling back to CPU", e);
+                compute_normals_hybrid(points, k)
+            }
+        }
     }
 
     /// Estimate normals using tiled GPU brute-force kNN + analytic PCA.
@@ -95,7 +117,7 @@ pub mod point_cloud {
         }
         let k = k.min(points.len().saturating_sub(1)).max(3);
 
-        let runner = cv_runtime::best_runner().ok();
+        let runner = cv_runtime::best_runner().ok().map(|(r, _)| r);
         if let Some(ref r) = runner {
             if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = r.device() {
                 let pts: Vec<nalgebra::Vector3<f32>> = points.iter().map(|p| p.coords).collect();
@@ -146,6 +168,31 @@ pub mod point_cloud {
             voxel_grid.entry((vx, vy, vz)).or_default().push(i);
         }
 
+        // Exact fallback for points the 27-voxel shell cannot answer. The
+        // shell only contains a point's true k nearest neighbours when the
+        // k-th of them lies within one voxel size (the ball then fits inside
+        // the shell). In sparse regions - a wall of 25 points next to a dense
+        // 10k-point floor, with the voxel size set by the whole cloud - the
+        // shell held fewer than 3 points and the normal silently became
+        // (0, 0, 1). Those points now get exact k-NN from a KD-tree, built
+        // only if some point needs it.
+        let kdtree = std::sync::OnceLock::new();
+        let exact_knn = |center: &Point3<f32>| -> Vec<(f32, usize)> {
+            let tree = kdtree.get_or_init(|| {
+                let mut items: Vec<(Point3<f32>, usize)> = points
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(i, p)| (p, i))
+                    .collect();
+                crate::spatial::KDTree::build(&mut items)
+            });
+            tree.k_nearest_neighbors(center, k + 1)
+                .into_iter()
+                .map(|(p, idx, _)| ((p - center).norm_squared(), idx))
+                .collect()
+        };
+
         points
             .par_iter()
             .enumerate()
@@ -182,6 +229,16 @@ pub mod point_cloud {
                         a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
                     });
                     candidates.truncate(k);
+                }
+                let shell_is_exact =
+                    candidates.len() >= k && candidates.iter().all(|&(d, _)| d <= vs * vs);
+                if !shell_is_exact {
+                    let exact: Vec<(f32, usize)> = exact_knn(center)
+                        .into_iter()
+                        .filter(|&(_, idx)| idx != i)
+                        .take(k)
+                        .collect();
+                    return compute_pca_normal(center, &exact, points);
                 }
 
                 compute_pca_normal(center, &candidates, points)
@@ -234,10 +291,6 @@ pub mod point_cloud {
     /// This is the classic approach used by Open3D and most 3D libraries.
     /// O(n log n) construction, O(n log k) queries.
     pub fn compute_normals_cpu_kdtree(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32>> {
-        eprintln!(
-            "[CPU-KDTREE] compute_normals_cpu_kdtree: {} points",
-            points.len()
-        );
         if points.is_empty() {
             return Vec::new();
         }
@@ -301,8 +354,23 @@ pub mod point_cloud {
         let sz = (max_z - min_z).max(1e-9_f32);
 
         // Sort spans smallest → largest.
+        //
+        // `total_cmp` rather than `partial_cmp(..).unwrap()`. This is hardening,
+        // not a fix for an observed panic: Rust's `f32::min`/`max` return the
+        // *non-NaN* operand, so a single NaN coordinate is silently swallowed by
+        // the sentinel accumulation above and never reaches this sort - verified,
+        // `f32::MAX.min(f32::NAN) == f32::MAX`. The spans are therefore finite
+        // today for any input whose coordinates are finite or NaN.
+        //
+        // `total_cmp` orders every bit pattern, so this line cannot panic even if
+        // a NaN reaches it - which it could, since a span computed as
+        // `n / (sx * sy * sz)` overflows to infinity or NaN for a degenerate
+        // cloud, and `.max(1e-9)` on a NaN that is already the left operand
+        // returns the finite bound rather than repairing it. An unwrap on a
+        // comparison that can see NaN is a panic waiting for the input that
+        // produces it.
         let mut spans = [sx, sy, sz];
-        spans.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        spans.sort_by(|a, b| a.total_cmp(b));
         let (s0, s1, s2) = (spans[0], spans[1], spans[2]);
 
         let vs = if s0 > s2 * 0.01 {
@@ -545,7 +613,7 @@ pub mod point_cloud {
         let covs = compute_covariances_parallel(points, k);
 
         // Phase 2: GPU batch eigenvectors, or CPU analytic fallback.
-        let runner = cv_runtime::best_runner().ok();
+        let runner = cv_runtime::best_runner().ok().map(|(r, _)| r);
         if let Some(ref r) = runner {
             if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = r.device() {
                 match cv_hal::gpu_kernels::pointcloud::compute_normals_from_covariances_gpu(
@@ -683,6 +751,9 @@ pub mod point_cloud {
             .collect()
     }
 
+    /// **Honest contract:** `_voxel_size` is currently **ignored** and the result is
+    /// identical to `compute_normals(points, 30)`. The parameter is retained for
+    /// API compatibility only; passing a different voxel size changes nothing.
     pub fn voxel_based_normals_simple(
         points: &[Point3<f32>],
         _voxel_size: f32,
@@ -692,18 +763,68 @@ pub mod point_cloud {
 
     /// Transfer voxel normals onto the points that fall in each voxel.
     ///
-    /// Not implemented. It previously returned a zero vector per point, which is
-    /// a valid-length result carrying no information - a caller had no way to
-    /// distinguish "no normals" from "normals are zero". It is a public API, so
-    /// the honest signal is an empty result rather than fabricated normals.
+    /// **Convention** (pinned here because nothing else defines it): the
+    /// occupied voxels of the grid built from `points` at `voxel_size` are
+    /// ordered lexicographically by `(x, y, z)` key, and `normals[j]` is the
+    /// normal of the j-th voxel in that order. Every point copies the normal
+    /// of its voxel. (Pairing against `voxel_downsample`'s output would not
+    /// work: that runs through a `HashMap`, whose iteration order is not
+    /// reproducible, so the same call can number voxels differently.)
+    ///
+    /// It previously returned `Vec::new()` - before that a zero vector per
+    /// point. Both are `points.len()`-shaped answers carrying no normals; this
+    /// one is the contract above, and it is tested.
     pub fn voxel_to_point_normal_transfer(
         points: &[Point3<f32>],
-        _normals: &[Vector3<f32>],
-        _voxel_size: f32,
+        normals: &[Vector3<f32>],
+        voxel_size: f32,
     ) -> Vec<Vector3<f32>> {
-        Vec::new()
+        use std::collections::BTreeMap;
+
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let vs = if voxel_size > 0.0 {
+            voxel_size
+        } else {
+            compute_adaptive_voxel_size(points, 6)
+        };
+        if vs <= 0.0 {
+            return vec![Vector3::zeros(); points.len()];
+        }
+
+        let key = |p: &Point3<f32>| -> (i32, i32, i32) {
+            (
+                (p.x / vs).floor() as i32,
+                (p.y / vs).floor() as i32,
+                (p.z / vs).floor() as i32,
+            )
+        };
+
+        // Occupied voxels in lexicographic key order: the index j that
+        // `normals` is written against.
+        let mut cells: BTreeMap<(i32, i32, i32), usize> = BTreeMap::new();
+        for p in points {
+            *cells.entry(key(p)).or_insert(0) += 1;
+        }
+        let index: BTreeMap<(i32, i32, i32), usize> =
+            cells.keys().enumerate().map(|(j, k)| (*k, j)).collect();
+
+        points
+            .iter()
+            .map(|p| {
+                index
+                    .get(&key(p))
+                    .and_then(|&j| normals.get(j))
+                    .copied()
+                    .unwrap_or(Vector3::zeros())
+            })
+            .collect()
     }
 
+    /// **Honest contract:** `_epsilon` is currently **ignored** and the result is
+    /// identical to `compute_normals(points, k)`. The parameter is retained for
+    /// API compatibility only; passing a different epsilon changes nothing.
     pub fn approximate_normals_simple(
         points: &[Point3<f32>],
         k: usize,
@@ -723,7 +844,7 @@ pub mod stereo {
         right: &::image::GrayImage,
         params: &StereoMatchParams,
     ) -> cv_hal::Result<::image::ImageBuffer<::image::Luma<f32>, Vec<f32>>> {
-        let runner =
+        let (runner, _) =
             cv_runtime::best_runner().map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
         match_stereo_ctx(left, right, params, &runner)
     }
@@ -813,6 +934,34 @@ pub fn force_gpu_mode() -> cv_hal::gpu_kernels::unified::ComputeConfig {
 mod normal_tests {
     use super::point_cloud as pc;
     use nalgebra::Point3;
+
+    /// The transfer convention: voxels in lexicographic key order, each point
+    /// copying its voxel's normal. The old versions answered `Vec::new()` and
+    /// zero-per-point - same shape as a real answer, no normals in it.
+    #[test]
+    fn voxel_normal_transfer_follows_the_documented_voxel_order() {
+        use nalgebra::Vector3;
+
+        // Two voxels at size 1.0: keys (0,0,0) and (1,0,0), in that order.
+        let pts = vec![
+            Point3::new(0.1, 0.1, 0.1),
+            Point3::new(0.9, 0.2, 0.3),
+            Point3::new(1.5, 0.1, 0.1),
+        ];
+        let n0 = Vector3::new(1.0, 0.0, 0.0);
+        let n1 = Vector3::new(0.0, 1.0, 0.0);
+        let out = pc::voxel_to_point_normal_transfer(&pts, &[n0, n1], 1.0);
+
+        assert_eq!(out.len(), pts.len(), "one normal per point");
+        assert_eq!(out[0], n0, "x=0.1 falls in voxel (0,0,0), index 0");
+        assert_eq!(out[1], n0, "x=0.9 falls in the same voxel");
+        assert_eq!(out[2], n1, "x=1.5 falls in voxel (1,0,0), index 1");
+
+        // A missing normal for a voxel yields zeros for its points rather than
+        // an out-of-range answer.
+        let out = pc::voxel_to_point_normal_transfer(&pts, &[n0], 1.0);
+        assert_eq!(out[2], Vector3::zeros());
+    }
 
     /// Build an n×n flat grid of points at z=0 in [0, 1]².
     fn flat_plane(n: usize) -> Vec<Point3<f32>> {

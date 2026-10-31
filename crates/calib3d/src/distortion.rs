@@ -21,11 +21,27 @@ pub fn undistort_points(
         ));
     }
 
+    for (i, p) in distorted_points.iter().enumerate() {
+        if !p.x.is_finite() || !p.y.is_finite() {
+            return Err(cv_core::Error::InvalidInput(format!(
+                "undistort_points: point {i} is not finite ({}, {})",
+                p.x, p.y
+            )));
+        }
+    }
+
     let mut out = Vec::with_capacity(distorted_points.len());
     for p in distorted_points {
         let xd = (p.x - intrinsics.cx) / intrinsics.fx;
         let yd = (p.y - intrinsics.cy) / intrinsics.fy;
-        let (xu, yu) = distortion.remove(xd, yd);
+        // `remove` hands back its input when it cannot invert the model, which
+        // here would return the *distorted* pixel as if it were corrected.
+        let (xu, yu) = distortion.remove_checked(xd, yd).ok_or_else(|| {
+            cv_core::Error::AlgorithmError(format!(
+                "undistort_points: the distortion model has no inverse at ({}, {})",
+                p.x, p.y
+            ))
+        })?;
         out.push(nalgebra::Point2::new(
             intrinsics.fx * xu + intrinsics.cx,
             intrinsics.fy * yu + intrinsics.cy,
@@ -70,11 +86,31 @@ pub fn init_undistort_rectify_map(
     let mut map_x = vec![0.0f32; (width * height) as usize];
     let mut map_y = vec![0.0f32; (width * height) as usize];
 
-    let k_new_inv = new_intrinsics
-        .matrix()
-        .try_inverse()
-        .unwrap_or(Matrix3::identity());
-    let r_inv = rectification.try_inverse().unwrap_or(Matrix3::identity());
+    // Neither matrix may fall back to the identity.
+    //
+    // The identity means "no intrinsics", so a destination pixel is treated as
+    // already being in normalised coordinates. Measured with a zero focal
+    // length, the resulting map collapsed *every* destination onto the principal
+    // point:
+    //
+    //     valid:  map_x row 0 = [0, 1, 2, 3, 4, 5, 6, 7],  map_y row 0 = [0; 8]
+    //     zero fx: map_x row 0 = [4, 4, 4, 4, 4, 4, 4, 4],  map_y row 0 = [3; 8]
+    //
+    // and all 48 destinations still mapped *inside* the source image, so the
+    // result looked perfect to any bounds check. Undistorting with it reproduces
+    // a single pixel across the whole frame.
+    let k_new_inv = new_intrinsics.try_inverse_matrix().ok_or_else(|| {
+        cv_core::Error::InvalidInput(format!(
+            "init_undistort_rectify_map: new_intrinsics are singular \
+             (fx={}, fy={})",
+            new_intrinsics.fx, new_intrinsics.fy
+        ))
+    })?;
+    let r_inv = rectification.try_inverse().ok_or_else(|| {
+        cv_core::Error::InvalidInput(
+            "init_undistort_rectify_map: rectification rotation is singular".into(),
+        )
+    })?;
 
     map_x
         .par_chunks_mut(width as usize)
@@ -116,6 +152,12 @@ pub fn fisheye_init_undistort_rectify_map(
     rectification: &Matrix3<f64>,
     new_intrinsics: &CameraIntrinsics,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
+    // Same guard as the pinhole map: `par_chunks_mut(0)` panics.
+    if image_size.0 == 0 || image_size.1 == 0 {
+        return Err(cv_core::Error::AlgorithmError(
+            "fisheye_init_undistort_rectify_map requires non-zero image size".to_string(),
+        ));
+    }
     let (width, height) = image_size;
     let mut map_x = vec![0.0f32; (width * height) as usize];
     let mut map_y = vec![0.0f32; (width * height) as usize];
@@ -173,12 +215,14 @@ pub fn undistort_image_ex(
     interpolation: cv_imgproc::Interpolation,
     border: cv_imgproc::BorderMode,
 ) -> Result<GrayImage> {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     undistort_image_ex_ctx(
         src,
         intrinsics,
@@ -263,7 +307,14 @@ fn undistort_gpu(
 
     let interp = match interpolation {
         cv_imgproc::Interpolation::Nearest => cv_hal::context::Interpolation::Nearest,
-        _ => cv_hal::context::Interpolation::Linear,
+        cv_imgproc::Interpolation::Linear => cv_hal::context::Interpolation::Linear,
+        // Decline rather than run cubic/lanczos as bilinear: the dispatcher's
+        // CPU fallback (`remap_ex_ctx`) honours every mode.
+        other => {
+            return Err(cv_hal::Error::NotSupported(format!(
+                "GPU undistort supports Nearest and Linear; got {other:?}"
+            )))
+        }
     };
 
     let border_hal = match border {
@@ -291,7 +342,7 @@ fn undistort_gpu(
         .as_slice()
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to get CPU slice".into()))?
         .iter()
-        .map(|v: &f32| v.clamp(0.0, 255.0) as u8)
+        .map(|v: &f32| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
 
     GrayImage::from_raw(new_intrinsics.width, new_intrinsics.height, res_data)

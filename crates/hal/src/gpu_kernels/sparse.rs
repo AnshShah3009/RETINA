@@ -114,8 +114,8 @@ pub fn spmv(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (rows as u32).div_ceil(256);
-        pass.dispatch_workgroups(x, 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(rows as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 
@@ -125,6 +125,28 @@ pub fn spmv(
         dtype: cv_core::DataType::F32,
         _phantom: PhantomData,
     })
+}
+
+/// Empty bind groups for the auto-derived layout's slots `0..group`.
+///
+/// `vector_ops.wgsl` puts each entry point's bindings in its own group
+/// (`dot_product` in @group(2), `vec_scale` in @group(3)); the derived
+/// pipeline layout still has (empty) slots below that, and wgpu requires a
+/// bind group in every slot.
+fn empty_lower_groups(
+    ctx: &GpuContext,
+    pipeline: &wgpu::ComputePipeline,
+    group: u32,
+) -> Vec<wgpu::BindGroup> {
+    (0..group)
+        .map(|g| {
+            ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Empty lower bind group"),
+                layout: &pipeline.get_bind_group_layout(g),
+                entries: &[],
+            })
+        })
+        .collect()
 }
 
 pub fn dot(
@@ -164,14 +186,21 @@ pub fn dot(
         ],
     });
 
+    let lower = empty_lower_groups(ctx, &pipeline, 2);
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups(num_groups, 1, 1);
+        for (g, bg) in lower.iter().enumerate() {
+            pass.set_bind_group(g as u32, bg, &[]);
+        }
+        // `dot_product` declares its bindings in @group(2); binding them
+        // at index 0 failed wgpu validation on every call.
+        pass.set_bind_group(2, &bind_group, &[]);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_groups_1d(num_groups);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 
@@ -232,7 +261,8 @@ pub fn axpy(
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((len as u32).div_ceil(256), 1, 1);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(len as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
     Ok(())
@@ -267,14 +297,20 @@ pub fn vec_scale(ctx: &GpuContext, alpha: f32, v: &mut Tensor<f32, GpuStorage<f3
         ],
     });
 
+    let lower = empty_lower_groups(ctx, &pipeline, 3);
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.dispatch_workgroups((len as u32).div_ceil(256), 1, 1);
+        for (g, bg) in lower.iter().enumerate() {
+            pass.set_bind_group(g as u32, bg, &[]);
+        }
+        // `vec_scale` declares its bindings in @group(3).
+        pass.set_bind_group(3, &bind_group, &[]);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(len as u32, 256);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
     Ok(())

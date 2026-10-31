@@ -16,12 +16,19 @@ pub struct GNCOptimizer {
     pub gnc_iterations: usize,
     pub convergence_threshold: f32,
     pub geometric_cost_threshold: f32,
+    /// The correspondence-distance budget the caller asked for.
+    ///
+    /// Kept separately because the robust-loss scale is a *squared* quantity
+    /// (`mu: max_residual * max_residual`), so it cannot be used as the inlier
+    /// gate without comparing a distance against a distance-squared.
+    pub max_correspondence_distance: f32,
 }
 
 impl GNCOptimizer {
     /// Create new GNC optimizer with Geman-McClure loss
     pub fn new_geman_mcclure(max_residual: f32) -> Self {
         Self {
+            max_correspondence_distance: max_residual,
             loss: RobustLoss::GemanMcClure {
                 mu: max_residual * max_residual,
             },
@@ -35,6 +42,7 @@ impl GNCOptimizer {
     /// Create new GNC optimizer with Truncated Least Squares (best for outlier rejection)
     pub fn new_tls(max_residual: f32) -> Self {
         Self {
+            max_correspondence_distance: max_residual,
             loss: RobustLoss::TruncatedLeastSquares { c: max_residual },
             max_iterations: 50,
             gnc_iterations: 10,
@@ -46,6 +54,7 @@ impl GNCOptimizer {
     /// Create new GNC optimizer with Welsch loss
     pub fn new_welsch(max_residual: f32) -> Self {
         Self {
+            max_correspondence_distance: max_residual,
             loss: RobustLoss::Welsch {
                 mu: max_residual * max_residual,
             },
@@ -85,14 +94,22 @@ impl GNCOptimizer {
         //
         // The loss is `Copy`, so taking a snapshot costs nothing and gives every
         // iteration the same yardstick.
+        //
+        // It is also the anchor of the annealing schedule. The schedule used to
+        // be computed from `self.loss`, which the previous outer iteration had
+        // already overwritten with `update_param`, so each step multiplied the
+        // last scheduled value by up to 100 instead of interpolating between
+        // `100 * mu0` and `mu0`. Measured (Geman-McClure, mu0 = 0.0025, 200
+        // correspondences, 40% outliers): mu ended at 2.7e12 - every weight ~2,
+        // i.e. plain least squares - and the mutation persisted, so a second
+        // call on the same optimizer started from there and reached ~3e27.
         let reference_loss = self.loss;
-        let reference_param = self.loss.get_param();
 
         // GNC outer loop - gradually reduce parameter
         for gnc_iter in 0..self.gnc_iterations {
             // Compute current parameter schedule
             let alpha = gnc_iter as f32 / (self.gnc_iterations as f32 - 1.0).max(1.0);
-            let param = self.compute_parameter_schedule(alpha);
+            let param = Self::compute_parameter_schedule(&reference_loss, alpha);
             self.loss.update_param(param);
 
             // Inner loop - weighted least squares
@@ -134,6 +151,11 @@ impl GNCOptimizer {
             }
         }
 
+        // Hand the caller back the loss they configured. Leaving the last
+        // scheduled parameter in `self.loss` made the next call anneal from a
+        // different starting point and return a different answer.
+        self.loss = reference_loss;
+
         // Final evaluation
         let inliers: Vec<_> = correspondences
             .iter()
@@ -147,7 +169,7 @@ impl GNCOptimizer {
                 // parameter here described a different function than the one the
                 // returned pose was chosen for, so `inlier_count` and `fitness`
                 // were measured against a mixture of two parameterisations.
-                residual < reference_param
+                residual < self.max_correspondence_distance
             })
             .copied()
             .collect();
@@ -166,7 +188,24 @@ impl GNCOptimizer {
                 .sum();
             (squared_errors / inliers.len() as f32).sqrt()
         } else {
-            0.0
+            // An empty inlier set is zero *support*, not zero error: every
+            // correspondence was found and every one of them fell outside the
+            // gate, so the residual is known to exceed
+            // `max_correspondence_distance`. Reporting 0.0 claims the opposite,
+            // and `fitness` beside it reports 0.0 as well - zero inliers *and*
+            // zero error at once, which is not a coherent answer for any
+            // transform.
+            //
+            // Measured: `max_correspondence_distance = 0.0` on perfectly matching
+            // clouds gave `Some(GNCResult { fitness: 0.0, inlier_rmse: 0.0,
+            // inlier_count: 0, .. })` before the fix. A gate of zero is an
+            // ordinary way to ask "what does this report with no inlier budget",
+            // and it returned a perfect error score.
+            //
+            // `INFINITY` rather than `NaN`, for the reason spelled out on
+            // `evaluate_registration`: it sorts as worse than any finite error
+            // under the ordinary `<` a caller uses to ask "did this converge".
+            f32::INFINITY
         };
 
         Some(GNCResult {
@@ -181,8 +220,13 @@ impl GNCOptimizer {
 
     /// Compute parameter schedule for GNC
     /// α ∈ [0, 1] where 0 = convex surrogate, 1 = target cost
-    fn compute_parameter_schedule(&self, alpha: f32) -> f32 {
-        match &self.loss {
+    ///
+    /// `reference` must be the *target* loss as configured by the caller, never
+    /// the annealed `self.loss`: the schedule interpolates between a multiple of
+    /// the target parameter and the target itself, so reading an already
+    /// annealed value compounds it every outer iteration.
+    fn compute_parameter_schedule(reference: &RobustLoss, alpha: f32) -> f32 {
+        match reference {
             RobustLoss::GemanMcClure { mu } => {
                 // Start with large μ (convex), decrease to target
                 let max_mu = mu * 100.0;
@@ -222,13 +266,26 @@ impl GNCOptimizer {
     /// Check for convergence
     fn has_converged(&self, residuals: &[f32], weights: &[f32]) -> bool {
         // Check if cost change is small
+        if residuals.is_empty() {
+            return true;
+        }
         let weighted_residual: f32 = residuals
             .iter()
             .zip(weights.iter())
             .map(|(r, w)| r * w)
             .sum();
 
-        weighted_residual < self.convergence_threshold * residuals.len() as f32
+        // The MEAN, not the sum.
+        //
+        // The sum runs over every correspondence but was compared against a
+        // threshold inflated only by `len()`, so the test asked whether the mean
+        // per-point residual was below `eps / N` rather than `eps`. Verified: 60
+        // correspondences at 5e-7 each triggered convergence with
+        // `transformation` still equal to `init_transform` - not one
+        // Gauss-Newton step taken - while reporting a cost as though a solve had
+        // completed.
+        let mean_weighted_residual = weighted_residual / residuals.len() as f32;
+        mean_weighted_residual < self.convergence_threshold
     }
 
     /// Solve weighted least squares problem
@@ -321,6 +378,38 @@ pub fn registration_gnc(
     max_correspondence_distance: f32,
     loss_type: RobustLossType,
 ) -> Option<GNCResult> {
+    // Reject non-finite input explicitly.
+    //
+    // Without this the malformed point is dropped *by accident* rather than by
+    // design: its residual is NaN, `exp(-NaN)` is 0, so every robust loss
+    // assigns it weight 0 and it quietly contributes nothing. Measured, clouds
+    // differing only in one NaN coordinate:
+    //
+    //     finite  -> fitness 1.000000, rmse 0.000000
+    //     one NaN -> fitness 0.983333, rmse 0.000000
+    //
+    // Both `Some`, with a correct-looking identity transform. So the answer is
+    // right, but the caller is told a malformed cloud registered cleanly, and
+    // the point count that vanished (1 of 60 here) is only visible by comparing
+    // `fitness` against 59/60. That is an accident of `exp`, not a contract, and
+    // a loss whose weight does not saturate would poison the covariance instead.
+    for (i, &(src_idx, tgt_idx)) in correspondences.iter().enumerate() {
+        let src_finite = source
+            .get(src_idx)
+            .is_some_and(|p| p.coords.iter().all(|v| v.is_finite()));
+        let tgt_finite = target
+            .get(tgt_idx)
+            .is_some_and(|p| p.coords.iter().all(|v| v.is_finite()));
+        if !src_finite || !tgt_finite {
+            return None;
+        }
+    }
+    for (i, p) in source.iter().chain(target.iter()).enumerate() {
+        if !p.coords.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+    }
+
     let mut optimizer = match loss_type {
         RobustLossType::GemanMcClure => {
             GNCOptimizer::new_geman_mcclure(max_correspondence_distance)
@@ -360,6 +449,21 @@ mod tests {
         let w_small = loss.weight(0.1);
         let w_large = loss.weight(10.0);
         assert!(w_large < w_small);
+    }
+
+    #[test]
+    fn the_schedule_interpolates_between_surrogate_and_target() {
+        let target = RobustLoss::GemanMcClure { mu: 0.0025 };
+        let first = GNCOptimizer::compute_parameter_schedule(&target, 0.0);
+        let last = GNCOptimizer::compute_parameter_schedule(&target, 1.0);
+        assert!((first - 0.25).abs() < 1e-6, "alpha=0 gave {first}");
+        assert!((last - 0.0025).abs() < 1e-9, "alpha=1 gave {last}");
+        let mut prev = f32::INFINITY;
+        for i in 0..=9 {
+            let mu = GNCOptimizer::compute_parameter_schedule(&target, i as f32 / 9.0);
+            assert!((0.0025..=0.25).contains(&mu) && mu <= prev);
+            prev = mu;
+        }
     }
 
     #[test]

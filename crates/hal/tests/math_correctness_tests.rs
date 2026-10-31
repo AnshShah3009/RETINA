@@ -24,12 +24,6 @@ fn load_fixture_f32(path: &str) -> Vec<f32> {
     arr.into_owned().into_shape(len).unwrap().into_raw_vec()
 }
 
-fn l2_error(a: &[f32], b: &[f32]) -> f32 {
-    assert_eq!(a.len(), b.len());
-    let sum: f32 = a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum();
-    sum.sqrt()
-}
-
 fn max_abs_error(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
     a.iter()
@@ -291,18 +285,6 @@ mod convolution_tests {
 fn compute_variance(data: &[f32]) -> f32 {
     let mean = data.iter().sum::<f32>() / data.len() as f32;
     data.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / data.len() as f32
-}
-
-fn compute_epe(predicted: &[f32], ground_truth: &[f32]) -> f32 {
-    assert_eq!(predicted.len(), ground_truth.len());
-    let n = predicted.len() / 2;
-    let mut total_error = 0.0f32;
-    for i in 0..n {
-        let dx = predicted[i * 2] - ground_truth[i * 2];
-        let dy = predicted[i * 2 + 1] - ground_truth[i * 2 + 1];
-        total_error += (dx * dx + dy * dy).sqrt();
-    }
-    total_error / n as f32
 }
 
 fn compute_mean_flow(predicted: &[f32]) -> (f32, f32) {

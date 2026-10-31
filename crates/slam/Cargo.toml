@@ -14,5 +14,8 @@ cv-optimize = { workspace = true }
 nalgebra = { workspace = true }
 image = { workspace = true }
 
+[dev-dependencies]
+futures = { workspace = true }
+
 [features]
 default = []

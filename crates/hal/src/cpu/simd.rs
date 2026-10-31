@@ -60,13 +60,14 @@ pub fn convolve_row_1d(src: &[f32], dst: &mut [f32], kernel: &[f32], radius: usi
     let k_len = kernel.len();
     assert_eq!(k_len, 2 * radius + 1);
 
-    // Process 8 pixels at a time
-    let chunk_size = 8;
-    let width_simd = if width >= chunk_size {
-        width - chunk_size + 1
-    } else {
-        0
-    };
+    // Process 8 pixels at a time. `step` is deliberately 1, not 8: the vectorised
+    // lane for output x needs src[x..x+8] for *every* tap, so lanes x and x+8
+    // both need different inputs. Stepping by 8 would recompute nothing and
+    // leave lane 8 (and every lane after a partial tail) to the scalar
+    // fallback, which is why short rows used to come back unwritten.
+    let chunk_size = 1;
+    let lanes = 8usize;
+    let width_simd = if width >= lanes { width - lanes + 1 } else { 0 };
 
     for x in (0..width_simd).step_by(chunk_size) {
         let mut sum_v = f32x8::ZERO;
@@ -75,15 +76,15 @@ pub fn convolve_row_1d(src: &[f32], dst: &mut [f32], kernel: &[f32], radius: usi
             let w = f32x8::splat(kernel[k]);
             // Load 8 pixels starting from src[x + k]
             let offset = x + k;
-            if offset + 8 <= src.len() {
+            if offset + lanes <= src.len() {
                 let mut chunk = [0.0f32; 8];
-                chunk.copy_from_slice(&src[offset..offset + 8]);
+                chunk.copy_from_slice(&src[offset..offset + lanes]);
                 sum_v += f32x8::from(chunk) * w;
             }
         }
 
         let res: [f32; 8] = sum_v.into();
-        dst[x..x + 8].copy_from_slice(&res);
+        dst[x..x + lanes].copy_from_slice(&res);
     }
 
     // Scalar fallback for remaining pixels (or entire row when width < 8)

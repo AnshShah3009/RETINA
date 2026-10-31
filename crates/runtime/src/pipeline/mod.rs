@@ -172,103 +172,53 @@ impl Pipeline {
         for &node_id in &graph.topology_order {
             match &self.nodes[node_id.0] {
                 PipelineNode::Kernel {
-                    name: _name,
+                    name,
                     inputs,
                     outputs,
-                    params: _params,
+                    params,
                 } => {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(
                         "Executing kernel: {} ({} inputs, {} outputs)",
-                        _name,
+                        name,
                         inputs.len(),
                         outputs.len()
                     );
 
-                    if !outputs.is_empty() {
-                        for &output_id in outputs {
-                            // Look each output size up by its own id: a
-                            // `filter_map`-compacted list indexed positionally
-                            // would shift later sizes when a buffer is missing.
-                            if let Some(&size) = self.buffers.get(&output_id) {
-                                allocator.allocate_or_update(output_id, size, &[])?;
-                            }
-                        }
-                    }
-
-                    // Execute kernel via cv-hal dispatch
-                    if let crate::device_registry::BackendContext::Gpu(gpu_ctx) =
+                    let crate::device_registry::BackendContext::Gpu(gpu_ctx) =
                         device_runtime.context()
-                    {
-                        // Create tensors for all buffers (keep them alive for dispatch)
-                        let mut all_tensors: Vec<Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> =
-                            Vec::new();
-
-                        // Input tensors
-                        for &input_id in inputs {
-                            if let Some(tensor) = allocator.create_tensor(input_id) {
-                                all_tensors.push(tensor);
-                            }
-                        }
-
-                        // Output tensors
-                        for &output_id in outputs {
-                            if let Some(tensor) = allocator.create_tensor(output_id) {
-                                all_tensors.push(tensor);
-                            }
-                        }
-
-                        // Get references to tensors
-                        let all_refs: Vec<&Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> =
-                            all_tensors.iter().collect();
-
-                        // Compute workgroup size based on largest buffer
-                        let max_size = outputs
-                            .iter()
-                            .filter_map(|&id| allocator.get_buffer_alloc(id))
-                            .map(|alloc| alloc.size)
-                            .max()
-                            .unwrap_or(1);
-
-                        let workgroups = (((max_size as f64 / 64.0).ceil() as u32).max(1), 1, 1);
-
-                        // Dispatch kernel - tensors stay alive through this call
-                        gpu_ctx.dispatch(_name, &all_refs, _params, workgroups)?;
-
-                        #[cfg(feature = "tracing")]
-                        tracing::debug!(
-                            "Dispatched kernel '{}' with {} buffers, workgroups {:?}",
-                            _name,
-                            all_refs.len(),
-                            workgroups
-                        );
-                    } else {
+                    else {
                         return Err(crate::Error::NotSupported(
                             "Kernel execution only supported on GPU".into(),
                         ));
-                    }
+                    };
+
+                    // Tensors stay alive through the dispatch call.
+                    let tensors =
+                        prepare_kernel_buffers(&allocator, &self.buffers, inputs, outputs)?;
+                    let refs: Vec<&GpuTensor> = tensors.iter().collect();
+                    let workgroups = kernel_workgroups(&self.buffers, outputs);
+                    gpu_ctx.dispatch(name, &refs, params, workgroups)?;
+                    finish_kernel(&allocator, outputs)?;
+
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(
+                        "Dispatched kernel '{}' with {} buffers, workgroups {:?}",
+                        name,
+                        refs.len(),
+                        workgroups
+                    );
                 }
                 PipelineNode::CpuOp {
                     inputs,
                     outputs,
                     op,
                 } => {
-                    let input_data: Vec<Vec<u8>> = inputs
-                        .iter()
-                        .filter_map(|&id| allocator.get_buffer_data(id))
-                        .collect();
-
+                    let input_data = gather_cpu_inputs(&allocator, &self.buffers, inputs)?;
                     let input_slices: Vec<&[u8]> =
                         input_data.iter().map(|v| v.as_slice()).collect();
                     let results = op(&input_slices);
-
-                    for (i, &output_id) in outputs.iter().enumerate() {
-                        if i < results.len() {
-                            if let Some(size) = self.buffers.get(&output_id) {
-                                allocator.allocate_or_update(output_id, *size, &results[i])?;
-                            }
-                        }
-                    }
+                    store_cpu_outputs(&allocator, &self.buffers, outputs, results)?;
                 }
                 PipelineNode::Barrier => {
                     if let crate::device_registry::BackendContext::Gpu(gpu_ctx) =
@@ -299,6 +249,108 @@ impl Pipeline {
     pub fn buffer_count(&self) -> usize {
         self.buffers.len()
     }
+}
+
+pub(crate) type GpuTensor = Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>;
+
+/// The registered size of `id`. An unregistered id is an error: silently
+/// skipping it (the old `filter_map`) shifted every later CPU-op input and
+/// every later kernel binding into the wrong slot.
+fn registered_size(buffers: &HashMap<BufferId, usize>, id: BufferId) -> Result<usize> {
+    buffers.get(&id).copied().ok_or_else(|| {
+        crate::Error::RuntimeError(format!(
+            "Pipeline buffer {:?} is used by a node but was never registered",
+            id
+        ))
+    })
+}
+
+/// Get a kernel's buffers onto the GPU and return them as tensors in binding
+/// order (inputs, then outputs).
+///
+/// Inputs must have been written by an earlier node; host-resident data (from
+/// a CPU op) is uploaded first. Outputs are allocated, and uploaded too if a
+/// CPU op left newer host data in them (read_write bindings).
+pub(crate) fn prepare_kernel_buffers(
+    pool: &TransientBufferPool,
+    buffers: &HashMap<BufferId, usize>,
+    inputs: &[BufferId],
+    outputs: &[BufferId],
+) -> Result<Vec<GpuTensor>> {
+    for &id in inputs {
+        pool.ensure_allocated(id, registered_size(buffers, id)?)?;
+        pool.sync_to_device(id, true)?;
+    }
+    for &id in outputs {
+        pool.ensure_allocated(id, registered_size(buffers, id)?)?;
+        pool.sync_to_device(id, false)?;
+    }
+    inputs
+        .iter()
+        .chain(outputs)
+        .map(|&id| {
+            pool.create_tensor(id).ok_or_else(|| {
+                crate::Error::RuntimeError(format!("Pipeline buffer {:?} has no GPU buffer", id))
+            })
+        })
+        .collect()
+}
+
+/// One 1-D workgroup per 64 bytes of the largest output.
+pub(crate) fn kernel_workgroups(
+    buffers: &HashMap<BufferId, usize>,
+    outputs: &[BufferId],
+) -> (u32, u32, u32) {
+    let max_size = outputs
+        .iter()
+        .filter_map(|id| buffers.get(id).copied())
+        .max()
+        .unwrap_or(1);
+    (((max_size as f64 / 64.0).ceil() as u32).max(1), 1, 1)
+}
+
+/// After a dispatch: the kernel's outputs now live on the GPU.
+pub(crate) fn finish_kernel(pool: &TransientBufferPool, outputs: &[BufferId]) -> Result<()> {
+    outputs
+        .iter()
+        .try_for_each(|&id| pool.mark_device_written(id))
+}
+
+/// A CPU op's inputs, in order, on the host (read back from the GPU when a
+/// kernel produced them). A missing or never-written input is an error.
+pub(crate) fn gather_cpu_inputs(
+    pool: &TransientBufferPool,
+    buffers: &HashMap<BufferId, usize>,
+    inputs: &[BufferId],
+) -> Result<Vec<Vec<u8>>> {
+    inputs
+        .iter()
+        .map(|&id| {
+            registered_size(buffers, id)?;
+            pool.read_host(id)
+        })
+        .collect()
+}
+
+/// Store a CPU op's results as the new host contents of its outputs.
+pub(crate) fn store_cpu_outputs(
+    pool: &TransientBufferPool,
+    buffers: &HashMap<BufferId, usize>,
+    outputs: &[BufferId],
+    results: Vec<Vec<u8>>,
+) -> Result<()> {
+    if results.len() != outputs.len() {
+        return Err(crate::Error::RuntimeError(format!(
+            "CPU op declared {} outputs but returned {}",
+            outputs.len(),
+            results.len()
+        )));
+    }
+    for (&id, data) in outputs.iter().zip(results) {
+        pool.ensure_allocated(id, registered_size(buffers, id)?)?;
+        pool.write_host(id, data)?;
+    }
+    Ok(())
 }
 
 impl Default for Pipeline {

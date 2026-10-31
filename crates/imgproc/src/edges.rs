@@ -5,9 +5,10 @@ use cv_runtime::orchestrator::RuntimeRunner;
 use image::GrayImage;
 use rayon::prelude::*;
 use tracing::{info, warn};
-use wide::*;
 
-use crate::convolve::{convolve_with_border_into_ctx, gaussian_blur_ctx, BorderMode, Kernel};
+use crate::convolve::{
+    convolve_with_border_into_ctx, gaussian_blur_with_border_into_ctx, BorderMode, Kernel,
+};
 
 fn sobel_kernels_1d(ksize: usize) -> Option<(Vec<f32>, Vec<f32>)> {
     match ksize {
@@ -28,25 +29,43 @@ fn scharr_kernels_1d() -> (Vec<f32>, Vec<f32>) {
     (vec![-1.0, 0.0, 1.0], vec![3.0, 10.0, 3.0])
 }
 
-#[allow(dead_code)]
-fn kernel_from_1d(kx: &[f32], ky: &[f32]) -> Kernel {
-    let mut data = vec![0.0f32; kx.len() * ky.len()];
-    for (y, &vy) in ky.iter().enumerate() {
-        for (x, &vx) in kx.iter().enumerate() {
-            data[y * kx.len() + x] = vx * vy;
-        }
-    }
-    Kernel::new(data, kx.len(), ky.len())
-}
-
 fn apply_linear_transform(mut img: GrayImage, scale: f32, delta: f32) -> GrayImage {
     img.as_mut().par_iter_mut().for_each(|px| {
         let v = (*px as f32) * scale + delta;
-        *px = v.clamp(0.0, 255.0) as u8;
+        *px = v.round_ties_even().clamp(0.0, 255.0) as u8;
     });
     img
 }
 
+/// The `ksize` values [`sobel_ex`] can build separable Sobel kernels for.
+pub const SOBEL_SUPPORTED_KSIZES: &[usize] = &[3, 5, 7];
+
+/// Validate a Sobel kernel size.
+///
+/// Returns `Err` for any size that has no separable 1-D Sobel derivative /
+/// smoothing kernel pair. Previously an unsupported size silently fell back to
+/// the 3x3 pair, so `ksize = 4` produced bit-identical output to `ksize = 3`
+/// with no error and no warning.
+pub fn validate_sobel_ksize(ksize: usize) -> crate::Result<()> {
+    if SOBEL_SUPPORTED_KSIZES.contains(&ksize) {
+        Ok(())
+    } else {
+        Err(crate::ImgprocError::InvalidInput(format!(
+            "sobel_ex: unsupported ksize = {}; supported sizes are {:?}. \
+             An unsupported size is no longer silently treated as 3",
+            ksize, SOBEL_SUPPORTED_KSIZES
+        )))
+    }
+}
+
+/// Compute a Sobel derivative image with an explicit kernel size.
+///
+/// `ksize` must be one of [`SOBEL_SUPPORTED_KSIZES`] (3, 5, 7).
+///
+/// # Errors
+/// Returns [`crate::ImgprocError::InvalidInput`] if `ksize` is not supported,
+/// instead of silently substituting the 3x3 kernel.
+#[allow(clippy::too_many_arguments)]
 pub fn sobel_ex(
     src: &GrayImage,
     dx: i32,
@@ -55,8 +74,9 @@ pub fn sobel_ex(
     scale: f32,
     delta: f32,
     border: BorderMode,
-) -> GrayImage {
-    match cv_runtime::best_runner() {
+) -> crate::Result<GrayImage> {
+    validate_sobel_ksize(ksize)?;
+    match cv_runtime::best_runner().map(|(r, _)| r) {
         Ok(runner) => sobel_ex_ctx(src, dx, dy, ksize, scale, delta, border, &runner),
         Err(_) => {
             warn!("GPU not available for sobel, falling back to CPU");
@@ -74,6 +94,12 @@ pub fn sobel_ex(
     }
 }
 
+/// Compute a Sobel derivative image with an explicit kernel size and an
+/// explicit execution group.
+///
+/// # Errors
+/// Returns [`crate::ImgprocError::InvalidInput`] if `ksize` is not one of
+/// [`SOBEL_SUPPORTED_KSIZES`].
 #[allow(clippy::too_many_arguments)]
 pub fn sobel_ex_ctx(
     src: &GrayImage,
@@ -84,7 +110,8 @@ pub fn sobel_ex_ctx(
     delta: f32,
     border: BorderMode,
     group: &RuntimeRunner,
-) -> GrayImage {
+) -> crate::Result<GrayImage> {
+    validate_sobel_ksize(ksize)?;
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
         // NOTE: GPU Sobel shader (sobel.wgsl) expects packed u8-in-u32 input but the Rust
         // host side uploads f32 tensors. The GPU path only works for ksize==3 single-axis
@@ -101,14 +128,19 @@ pub fn sobel_ex_ctx(
                 );
                 let (gx, gy) = result;
                 let target = if dx == 1 { gx } else { gy };
-                return apply_linear_transform(target, scale, delta);
+                return Ok(apply_linear_transform(target, scale, delta));
             }
         }
     }
 
     let mut out = GrayImage::new(src.width(), src.height());
-    let (deriv, smooth) =
-        sobel_kernels_1d(ksize).unwrap_or_else(|| (vec![-1.0, 0.0, 1.0], vec![1.0, 2.0, 1.0]));
+    // `ksize` was validated above, so this cannot take the fallback branch.
+    let (deriv, smooth) = sobel_kernels_1d(ksize).ok_or_else(|| {
+        crate::ImgprocError::InvalidInput(format!(
+            "sobel_ex: no separable Sobel kernel for ksize = {}",
+            ksize
+        ))
+    })?;
 
     let kx = if dx > 0 {
         deriv.as_slice()
@@ -123,7 +155,7 @@ pub fn sobel_ex_ctx(
 
     // Use separable convolution for performance
     crate::convolve::separable_convolve_into_ctx(src, &mut out, kx, ky, border, group);
-    apply_linear_transform(out, scale, delta)
+    Ok(apply_linear_transform(out, scale, delta))
 }
 
 fn sobel_gpu(
@@ -150,14 +182,14 @@ fn sobel_gpu(
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
     let gy_data: Vec<u8> = gy_cpu
         .storage
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
 
     let gx = GrayImage::from_raw(src.width(), src.height(), gx_data)
@@ -176,7 +208,7 @@ pub fn scharr_ex(
     delta: f32,
     border: BorderMode,
 ) -> GrayImage {
-    match cv_runtime::best_runner() {
+    match cv_runtime::best_runner().map(|(r, _)| r) {
         Ok(runner) => scharr_ex_ctx(src, dx, dy, scale, delta, border, &runner),
         Err(_) => {
             // Fallback: compute on CPU
@@ -228,8 +260,8 @@ pub fn sobel_with_border(src: &GrayImage, border: BorderMode) -> (GrayImage, Gra
             .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
-    let gx = sobel_ex_ctx(src, 1, 0, 3, 1.0, 0.0, border, &runner);
-    let gy = sobel_ex_ctx(src, 0, 1, 3, 1.0, 0.0, border, &runner);
+    let gx = sobel_ex_ctx(src, 1, 0, 3, 1.0, 0.0, border, &runner).expect("ksize=3 is supported");
+    let gy = sobel_ex_ctx(src, 0, 1, 3, 1.0, 0.0, border, &runner).expect("ksize=3 is supported");
     (gx, gy)
 }
 
@@ -280,7 +312,7 @@ pub fn sobel_magnitude_ctx(gx: &GrayImage, gy: &GrayImage, group: &RuntimeRunner
                 let gx_f = gx_val as f32;
                 let gy_f = gy_val as f32;
                 let mag = (gx_f * gx_f + gy_f * gy_f).sqrt();
-                *out = mag.min(255.0) as u8;
+                *out = mag.round_ties_even().min(255.0) as u8;
             });
 
         GrayImage::from_raw(width, height, output).unwrap_or_else(|| GrayImage::new(width, height))
@@ -305,224 +337,60 @@ pub fn laplacian_ctx(src: &GrayImage, group: &RuntimeRunner) -> GrayImage {
     out
 }
 
-fn gradients_and_directions(src: &GrayImage) -> (Vec<f32>, Vec<u8>) {
-    let width = src.width() as usize;
-    let height = src.height() as usize;
-    let data = src.as_raw();
-    let mut magnitude = vec![0.0f32; width * height];
-    let mut direction = vec![0u8; width * height];
-
-    magnitude
-        .par_chunks_mut(width)
-        .zip(direction.par_chunks_mut(width))
-        .enumerate()
-        .for_each(|(y, (mag_row, dir_row))| {
-            if y == 0 || y >= height - 1 {
-                return;
-            }
-            let r0_idx = (y - 1) * width;
-            let r1_idx = y * width;
-            let r2_idx = (y + 1) * width;
-            let r0 = &data[r0_idx..r0_idx + width];
-            let r1 = &data[r1_idx..r1_idx + width];
-            let r2 = &data[r2_idx..r2_idx + width];
-
-            let mut x = 1;
-
-            // SIMD Loop
-            while x + 8 < width - 1 {
-                // Load 3x10 block to cover 8 outputs (needs x-1 to x+8+1)
-                // We load 8-wide vectors shifted by -1, 0, 1
-                // Actually easier to load unaligned? f32x8 requires alignment? No, but load is from u8.
-                // We load u8 slices and convert.
-
-                let load_f32x8 = |slice: &[u8]| -> f32x8 {
-                    let mut arr = [0.0f32; 8];
-                    for i in 0..8 {
-                        arr[i] = slice[i] as f32;
-                    }
-                    f32x8::from(arr)
-                };
-
-                let p00 = load_f32x8(&r0[x - 1..]);
-                let p01 = load_f32x8(&r0[x..]);
-                let p02 = load_f32x8(&r0[x + 1..]);
-
-                let p10 = load_f32x8(&r1[x - 1..]);
-                // p11 unused for gradients
-                let p12 = load_f32x8(&r1[x + 1..]);
-
-                let p20 = load_f32x8(&r2[x - 1..]);
-                let p21 = load_f32x8(&r2[x..]);
-                let p22 = load_f32x8(&r2[x + 1..]);
-
-                // Sobel
-                let gx = p02 - p00 + (p12 - p10) * 2.0 + p22 - p20;
-                let gy = p20 - p00 + (p21 - p01) * 2.0 + p22 - p02;
-
-                // Magnitude
-                let mag = (gx * gx + gy * gy).sqrt();
-                let mag_arr: [f32; 8] = mag.into();
-                mag_row[x..x + 8].copy_from_slice(&mag_arr);
-
-                // Direction
-                // 0: |gy| <= |gx| * tan(22.5) => 0.4142
-                // 90: |gx| <= |gy| * 0.4142
-                // 45: sign(gx) == sign(gy)
-                // 135: else
-
-                let abs_gx = gx.abs();
-                let abs_gy = gy.abs();
-                let tan_22_5 = 0.41421356;
-
-                let is_0 = abs_gy.cmp_lt(abs_gx * tan_22_5);
-                let is_90 = abs_gx.cmp_lt(abs_gy * tan_22_5);
-
-                // For diagonal check:
-                // sign bit check. f32x8 doesn't have direct sign access efficiently?
-                // gx * gy > 0 means same sign.
-                let same_sign = (gx * gy).cmp_gt(f32x8::ZERO);
-
-                // Blend chain
-                // Default 135 (3)
-                // if same_sign -> 45 (1)
-                // if is_90 -> 90 (2)
-                // if is_0 -> 0 (0)
-                // Order matters? 0 and 90 take precedence over diagonals in ambiguous near-center cases?
-                // Logic:
-                // Region 0: [-22.5, 22.5] -> |y| < |x| * tan
-                // Region 90: [67.5, 112.5] -> |x| < |y| * cot(67.5) = |y| * tan(22.5)
-                // So is_0 and is_90 checks are correct and exclusive.
-
-                // Values: 0=0, 1=45, 2=90, 3=135
-                let val_diag = same_sign.blend(f32x8::splat(1.0), f32x8::splat(3.0));
-                let val_90 = is_90.blend(f32x8::splat(2.0), val_diag);
-                let val_0 = is_0.blend(f32x8::splat(0.0), val_90);
-
-                let dir_arr: [f32; 8] = val_0.into();
-                for i in 0..8 {
-                    dir_row[x + i] = dir_arr[i] as u8;
-                }
-
-                x += 8;
-            }
-
-            // Scalar tail
-            for cx in x..width - 1 {
-                let p00 = r0[cx - 1] as f32;
-                let p02 = r0[cx + 1] as f32;
-                let p10 = r1[cx - 1] as f32;
-                let p12 = r1[cx + 1] as f32;
-                let p20 = r2[cx - 1] as f32;
-                let p22 = r2[cx + 1] as f32;
-                let p01 = r0[cx] as f32;
-                let p21 = r2[cx] as f32;
-
-                let gx = -p00 + p02 - 2.0 * p10 + 2.0 * p12 - p20 + p22;
-                let gy = -p00 - 2.0 * p01 - p02 + p20 + 2.0 * p21 + p22;
-
-                mag_row[cx] = (gx * gx + gy * gy).sqrt();
-
-                // Scalar direction logic (consistent with SIMD)
-                let abs_gx = gx.abs();
-                let abs_gy = gy.abs();
-                let tan_22_5 = 0.41421356;
-
-                if abs_gy <= abs_gx * tan_22_5 {
-                    dir_row[cx] = 0;
-                } else if abs_gx <= abs_gy * tan_22_5 {
-                    dir_row[cx] = 2;
-                } else if gx * gy > 0.0 {
-                    dir_row[cx] = 1;
-                } else {
-                    dir_row[cx] = 3;
-                }
-            }
-        });
-
-    (magnitude, direction)
+/// Options for [`canny_with_options`].
+///
+/// The default reproduces `cv2.Canny(img, low, high)`: aperture 3,
+/// `L2gradient = false`, no smoothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CannyOptions {
+    /// Use `sqrt(dx² + dy²)` instead of `|dx| + |dy|` (OpenCV's
+    /// `L2gradient`). Thresholds stay in gradient units either way.
+    pub l2_gradient: bool,
+    /// Gaussian pre-blur (σ, BORDER_REFLECT_101) before the gradient.
+    /// OpenCV's Canny does not smooth; `None` matches it.
+    pub blur_sigma: Option<f32>,
 }
 
-fn non_max_suppression(width: usize, height: usize, mag: &[f32], dir: &[u8]) -> Vec<f32> {
-    let mut out = vec![0.0f32; width * height];
-
-    out.par_chunks_mut(width)
-        .enumerate()
-        .for_each(|(y, out_row)| {
-            if y == 0 || y >= height - 1 {
-                return;
-            }
-            let r0_idx = (y - 1) * width;
-            let r1_idx = y * width;
-            let r2_idx = (y + 1) * width;
-
-            for x in 1..width - 1 {
-                let m = mag[r1_idx + x];
-                // Gradients here use image-space y-down: gy = bottom - top.
-                // A same-sign gradient (gx>0, gy>0) points right-and-DOWN,
-                // so its normal line is the "\" diagonal (x-1,y-1)..(x+1,y+1).
-                // A previous revision sampled the "/" diagonal for bin 1 and
-                // vice versa, suppressing true diagonal edges.
-                let (m1, m2) = match dir[r1_idx + x] {
-                    0 => (mag[r1_idx + x - 1], mag[r1_idx + x + 1]),
-                    1 => (mag[r0_idx + x - 1], mag[r2_idx + x + 1]),
-                    2 => (mag[r0_idx + x], mag[r2_idx + x]),
-                    _ => (mag[r0_idx + x + 1], mag[r2_idx + x - 1]),
-                };
-
-                if m >= m1 && m >= m2 {
-                    out_row[x] = m;
-                }
-            }
-        });
-
-    out
+/// OpenCV's Canny on an 8-bit image: Sobel 3x3 (BORDER_REPLICATE), integer
+/// L1 or squared-L2 magnitude, NMS strict towards left/up (`>`) and
+/// non-strict towards right/down (`>=`), strict on both diagonal neighbours,
+/// thresholds strict, 8-connected hysteresis. Pixels outside the image have
+/// magnitude 0. The implementation lives in cv-hal
+/// (`cv_hal::cpu::canny_opencv`) so the GPU kernel shares its thresholds and
+/// hysteresis.
+fn canny_cpu(src: &GrayImage, low: f64, high: f64, l2: bool) -> GrayImage {
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let out = cv_hal::cpu::canny_opencv::canny_u8(src.as_raw(), w, h, low, high, l2);
+    GrayImage::from_raw(src.width(), src.height(), out)
+        .unwrap_or_else(|| GrayImage::new(src.width(), src.height()))
 }
 
-fn hysteresis(width: usize, height: usize, nms: &[f32], low: f32, high: f32) -> GrayImage {
-    const STRONG: u8 = 255;
-    const WEAK: u8 = 75;
-
-    let mut state = vec![0u8; width * height];
-    let mut stack = Vec::new();
-
-    for y in 1..height.saturating_sub(1) {
-        for x in 1..width.saturating_sub(1) {
-            let idx = y * width + x;
-            let v = nms[idx];
-            if v >= high {
-                state[idx] = STRONG;
-                stack.push((x, y));
-            } else if v >= low {
-                state[idx] = WEAK;
-            }
-        }
-    }
-
-    while let Some((x, y)) = stack.pop() {
-        let y0 = y.saturating_sub(1);
-        let y1 = (y + 1).min(height - 1);
-        let x0 = x.saturating_sub(1);
-        let x1 = (x + 1).min(width - 1);
-        for ny in y0..=y1 {
-            for nx in x0..=x1 {
-                let nidx = ny * width + nx;
-                if state[nidx] == WEAK {
-                    state[nidx] = STRONG;
-                    stack.push((nx, ny));
-                }
-            }
-        }
-    }
-
-    let mut out = GrayImage::new(width as u32, height as u32);
-    out.as_mut().par_iter_mut().enumerate().for_each(|(i, px)| {
-        *px = if state[i] == STRONG { 255 } else { 0 };
-    });
-    out
-}
-
+/// Canny edge detector, `cv2.Canny(src, low_threshold, high_threshold)`.
+///
+/// No smoothing is applied (OpenCV does not smooth either); blur the input
+/// first, or use [`canny_with_options`] with `blur_sigma`, if it is noisy.
+/// The gradient is a 3x3 Sobel and the magnitude is L1 (`|dx| + |dy|`).
+/// Output is 0/255.
 pub fn canny(src: &GrayImage, low_threshold: u8, high_threshold: u8) -> GrayImage {
+    canny_with_options(
+        src,
+        low_threshold as f32,
+        high_threshold as f32,
+        &CannyOptions::default(),
+    )
+}
+
+/// Canny with f32 thresholds (may exceed 255: the L1 Sobel magnitude goes up
+/// to 2040) and [`CannyOptions`]. `CannyOptions::default()` matches
+/// `cv2.Canny(src, low, high)`; `l2_gradient: true` matches
+/// `cv2.Canny(src, low, high, L2gradient=True)`. `low > high` are swapped, as
+/// in OpenCV.
+pub fn canny_with_options(
+    src: &GrayImage,
+    low_threshold: f32,
+    high_threshold: f32,
+    options: &CannyOptions,
+) -> GrayImage {
     let runner = cv_runtime::default_runner().unwrap_or_else(|_| {
         warn!("GPU not available for canny, falling back to CPU");
         cv_runtime::registry()
@@ -530,74 +398,95 @@ pub fn canny(src: &GrayImage, low_threshold: u8, high_threshold: u8) -> GrayImag
             .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
-    canny_ctx(src, low_threshold, high_threshold, &runner)
+    canny_with_options_ctx(src, low_threshold, high_threshold, options, &runner)
 }
 
+/// [`canny`] on a given runner.
 pub fn canny_ctx(
     src: &GrayImage,
     low_threshold: u8,
     high_threshold: u8,
     group: &RuntimeRunner,
 ) -> GrayImage {
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(res) = canny_gpu(gpu, src, low_threshold as f32, high_threshold as f32) {
-            info!(
-                "GPU canny: executed on GPU ({}x{})",
-                src.width(),
-                src.height()
-            );
-            return res;
-        }
-        warn!("GPU canny failed, falling back to CPU");
+    canny_with_options_ctx(
+        src,
+        low_threshold as f32,
+        high_threshold as f32,
+        &CannyOptions::default(),
+        group,
+    )
+}
+
+/// [`canny_with_options`] on a given runner.
+///
+/// On a GPU runner the `canny.wgsl` kernel runs Sobel, NMS and the double
+/// threshold (integer arithmetic, bit-exact with the CPU path and with
+/// OpenCV, L1 or L2); hysteresis runs on the host. The optional pre-blur
+/// always uses the CPU Gaussian, because the GPU Gaussian ignores the border
+/// mode (BORDER_REFLECT_101 here) and would change the edges. On any GPU
+/// error the CPU path runs instead.
+pub fn canny_with_options_ctx(
+    src: &GrayImage,
+    low_threshold: f32,
+    high_threshold: f32,
+    options: &CannyOptions,
+    group: &RuntimeRunner,
+) -> GrayImage {
+    if src.width() == 0 || src.height() == 0 {
+        return GrayImage::new(src.width(), src.height());
     }
 
-    let blurred = gaussian_blur_ctx(src, 1.0, BorderMode::Reflect101, group);
-    let width = blurred.width() as usize;
-    let height = blurred.height() as usize;
+    let blurred;
+    let input = match options.blur_sigma {
+        Some(sigma) if sigma > 0.0 => {
+            blurred = gaussian_blur_with_border_into_ctx(src, sigma, BorderMode::Reflect101, group);
+            &blurred
+        }
+        _ => src,
+    };
+
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        match canny_gpu(
+            gpu,
+            input,
+            low_threshold,
+            high_threshold,
+            options.l2_gradient,
+        ) {
+            Ok(res) => {
+                info!(
+                    "GPU canny: executed on GPU ({}x{})",
+                    src.width(),
+                    src.height()
+                );
+                return res;
+            }
+            Err(e) => warn!("GPU canny failed ({e}), falling back to CPU"),
+        }
+    }
 
     group.run(|| {
-        let (mag, dir) = gradients_and_directions(&blurred);
-        let nms = non_max_suppression(width, height, &mag, &dir);
-        let low = low_threshold as f32;
-        let high = high_threshold.max(low_threshold) as f32;
-        hysteresis(width, height, &nms, low, high)
+        canny_cpu(
+            input,
+            low_threshold as f64,
+            high_threshold as f64,
+            options.l2_gradient,
+        )
     })
 }
 
-// NOTE: GPU Canny shader (canny.wgsl) expects packed u8-in-u32 input but the Rust host
-// side uploads f32 tensors.  The `canny_gpu()` helper works around this by converting
-// to f32 before dispatch and converting back after readback.  A proper fix requires
-// either (a) rewriting the WGSL shader to accept f32 storage buffers, or (b) packing
-// u8 pixels into u32 on the host before upload.  If the GPU path fails for any reason,
-// `canny_ctx` silently falls back to the CPU implementation above.
 fn canny_gpu(
     gpu: &cv_hal::gpu::GpuContext,
     src: &GrayImage,
     low: f32,
     high: f32,
+    l2: bool,
 ) -> cv_hal::Result<GrayImage> {
-    use cv_hal::context::ComputeContext;
-    let src_f32: Vec<f32> = src.as_raw().iter().map(|&p| p as f32).collect();
-    let input_tensor = cv_core::CpuTensor::from_vec(
-        src_f32,
-        cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
-    )
-    .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
-    let input_gpu = input_tensor.to_gpu_ctx(gpu)?;
-
-    let res_gpu = gpu.canny(&input_gpu, low, high)?;
-
-    let res_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = res_gpu.to_cpu()?;
-    let res_data: Vec<u8> = res_cpu
-        .storage
-        .as_slice()
-        .unwrap()
-        .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
-        .collect();
-
-    GrayImage::from_raw(src.width(), src.height(), res_data)
-        .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let out =
+        cv_hal::gpu_kernels::canny::canny_u8(gpu, src.as_raw(), w, h, low as f64, high as f64, l2)?;
+    GrayImage::from_raw(src.width(), src.height(), out)
+        .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from mask".into()))
 }
 
 #[cfg(test)]
@@ -785,7 +674,7 @@ mod tests {
         // Count edge pixels in columns 30-33 vs. the rest of the image
         let mut edge_count_near_boundary = 0u32;
         let mut edge_count_elsewhere = 0u32;
-        // Only check interior rows to avoid border effects from Gaussian blur
+        // Only check interior rows
         for y in 5..59 {
             for x in 0..64 {
                 if edges.get_pixel(x, y)[0] > 0 {

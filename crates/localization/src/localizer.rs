@@ -84,9 +84,10 @@ impl<'a> Localizer<'a> {
     /// correspondences via the candidate's landmark indices → PnP + RANSAC →
     /// refine on the inliers.
     ///
-    /// Returns `None` (never panics) when the query or database is empty, no
-    /// candidate yields enough correspondences (`< max(config.min_matches, 6)`),
-    /// or the solver fails / produces too few inliers.
+    /// Returns `None` (never panics) when the query or database is empty, the
+    /// intrinsics are not finite, no candidate yields enough correspondences
+    /// (`< max(config.min_matches, 6)`), or the solver fails / produces too few
+    /// inliers.
     pub fn localize(
         &self,
         query_keypoints: &[KeyPoint],
@@ -94,6 +95,24 @@ impl<'a> Localizer<'a> {
         intrinsics: &CameraIntrinsics,
     ) -> Option<LocalizationResult> {
         if query_descriptors.is_empty() || self.database.is_empty() {
+            return None;
+        }
+
+        // Non-finite intrinsics are rejected here, where caller data enters.
+        // They are not caught downstream: a NaN focal length survives
+        // `try_inverse_matrix` and makes the DLT design matrix non-finite, and
+        // nalgebra's `svd(true, true)` does not terminate on non-finite input
+        // (every convergence comparison against NaN is false; the same hazard
+        // is documented in `cv_calib3d::pnp` for non-finite correspondences,
+        // which *are* guarded there). Measured: `localize` with `fx = NaN` and
+        // 20 exact correspondences did not return in 45 s, while the identical
+        // call with finite intrinsics returned a pose. The contract above says
+        // `None`, never a panic; a call that never returns is worse than both.
+        if !(intrinsics.fx.is_finite()
+            && intrinsics.fy.is_finite()
+            && intrinsics.cx.is_finite()
+            && intrinsics.cy.is_finite())
+        {
             return None;
         }
 

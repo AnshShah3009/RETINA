@@ -79,7 +79,8 @@ fn test_local_threshold_niblack() {
         11,
         -0.2,
         0.0,
-    );
+    )
+    .expect("Niblack ignores r, so r = 0.0 is valid here");
 
     assert_eq!(thresholded.width(), 20);
     assert_eq!(thresholded.height(), 20);

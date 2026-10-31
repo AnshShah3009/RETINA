@@ -26,8 +26,14 @@ struct Params {
 @group(0) @binding(4) var<uniform> params: Params;
 
 @compute @workgroup_size(256)
-fn spmv_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let row = global_id.x;
+fn spmv_main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let row = global_id.x + global_id.y * num_wg.x * 256u;
     
     // Bounds check
     if (row >= params.row_ptr_len - 1u) {

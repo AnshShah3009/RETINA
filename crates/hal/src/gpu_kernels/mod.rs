@@ -8,9 +8,51 @@ pub const WORKGROUP_SIZE_1D: u32 = 256;
 pub const WORKGROUP_SIZE_2D: u32 = 16;
 pub const WORKGROUP_SIZE_3D: u32 = 8;
 
-/// Compute dispatch helpers
+/// Compute dispatch helpers.
+///
+/// `dispatch_size_1d` returns a single x count and can exceed
+/// [`MAX_WORKGROUPS_PER_DIM`] for large inputs; prefer [`dispatch_1d`].
 pub fn dispatch_size_1d(count: u32) -> u32 {
     count.div_ceil(WORKGROUP_SIZE_1D)
+}
+
+/// WebGPU's guaranteed `maxComputeWorkgroupsPerDimension`. The device is
+/// requested with downlevel defaults, so this is the cap on every axis.
+pub const MAX_WORKGROUPS_PER_DIM: u32 = 65535;
+
+/// Spread `groups` workgroups of a 1-D problem over x and y so neither axis
+/// exceeds [`MAX_WORKGROUPS_PER_DIM`].
+///
+/// Returns `(groups, 1, 1)` when it fits, otherwise
+/// `(65535, ceil(groups / 65535), 1)`. The 2-D grid may contain up to 65534
+/// surplus workgroups at the tail, so the shader must linearise and
+/// bounds-check:
+///
+/// ```wgsl
+/// @builtin(global_invocation_id) gid: vec3<u32>,
+/// @builtin(num_workgroups) nwg: vec3<u32>,
+/// let idx = gid.x + gid.y * (nwg.x * WG_SIZE);
+/// if (idx >= n) { return; }
+/// ```
+///
+/// or, for one-workgroup-per-item kernels,
+/// `let wg = wid.x + wid.y * nwg.x; if (wg >= n_groups) { return; }`.
+pub fn dispatch_groups_1d(groups: u32) -> (u32, u32, u32) {
+    if groups <= MAX_WORKGROUPS_PER_DIM {
+        (groups, 1, 1)
+    } else {
+        (
+            MAX_WORKGROUPS_PER_DIM,
+            groups.div_ceil(MAX_WORKGROUPS_PER_DIM),
+            1,
+        )
+    }
+}
+
+/// Dispatch size for `count` invocations at `workgroup_size` per workgroup,
+/// split over x and y by [`dispatch_groups_1d`].
+pub fn dispatch_1d(count: u32, workgroup_size: u32) -> (u32, u32, u32) {
+    dispatch_groups_1d(count.div_ceil(workgroup_size))
 }
 
 pub fn dispatch_size_2d(width: u32, height: u32) -> (u32, u32) {
@@ -520,6 +562,92 @@ pub mod buffer_utils {
 
 #[cfg(test)]
 mod tests {
+    /// A non-finite coordinate must be reported, not panicked on.
+    ///
+    /// Reproduced before the fix: four points, one of them `[NaN, 0, 0]`, and
+    /// `batch_nearest_neighbors` **panicked** — `norm_squared()` of a vector with a
+    /// NaN component is NaN, so `partial_cmp(..).unwrap()` in the distance sort
+    /// hit `None`. One bad point in a cloud took down the caller.
+    #[test]
+    fn a_non_finite_point_is_reported() {
+        use super::spatial_gpu::validate_finite_points;
+        use nalgebra::Vector3;
+
+        for (label, bad) in [
+            ("NaN", f32::NAN),
+            ("+inf", f32::INFINITY),
+            ("-inf", f32::NEG_INFINITY),
+        ] {
+            let points = vec![
+                Vector3::new(0.0f32, 0.0, 0.0),
+                Vector3::new(bad, 0.0, 0.0),
+                Vector3::new(2.0, 0.0, 0.0),
+            ];
+            let err = validate_finite_points(&points)
+                .expect_err("a non-finite coordinate must be rejected");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("point 1") && msg.contains("not finite"),
+                "{label}: the error must name the offending index; got: {msg}"
+            );
+        }
+
+        // It must be the *coordinate* that is checked, in every axis.
+        use nalgebra::Vector3 as V;
+        for p in [
+            V::new(0.0f32, f32::NAN, 0.0),
+            V::new(0.0, 0.0, f32::NAN),
+            V::new(f32::INFINITY, 0.0, 0.0),
+        ] {
+            assert!(
+                validate_finite_points(&[p]).is_err(),
+                "each axis must be checked, missed {p:?}"
+            );
+        }
+    }
+
+    /// CONTROL: a finite cloud passes, so the check cannot reject everything.
+    #[test]
+    fn a_finite_point_cloud_is_accepted() {
+        use super::spatial_gpu::validate_finite_points;
+        use nalgebra::Vector3;
+
+        let points = vec![
+            Vector3::new(0.0f32, 0.0, 0.0),
+            Vector3::new(1.5, -2.0, 3.25),
+            Vector3::new(f32::MAX, f32::MIN, 0.0),
+        ];
+        assert!(
+            validate_finite_points(&points).is_ok(),
+            "finite coordinates must be accepted; f32::MAX/MIN are finite, not sentinels"
+        );
+        assert!(
+            validate_finite_points(&[]).is_ok(),
+            "an empty slice is vacuously finite"
+        );
+    }
+
+    /// The sort itself must not panic on a NaN distance, independently of the
+    /// guard above — it is defence in depth for a panic that took down the caller.
+    #[test]
+    fn sorting_distances_tolerates_nan() {
+        let mut d: Vec<(u32, f32)> = vec![
+            (0, 1.0),
+            (1, f32::NAN),
+            (2, 0.5),
+            (3, f32::INFINITY),
+            (4, f32::NEG_INFINITY),
+        ];
+        d.sort_by(|a, b| a.1.total_cmp(&b.1));
+        // -inf, 0.5, 1.0, +inf, NaN — NaN sorts last, so it is never a near
+        // neighbour, which is the meaningful answer for an undefined distance.
+        assert_eq!(
+            d.iter().map(|x| x.0).collect::<Vec<_>>(),
+            vec![4, 2, 0, 3, 1],
+            "total_cmp must order finite values normally and place NaN last"
+        );
+    }
+
     use super::buffer_utils::*;
 
     #[test]
@@ -546,7 +674,7 @@ mod tests {
 /// GPU-accelerated point cloud operations
 pub mod pointcloud_gpu {
     use crate::gpu::GpuContext;
-    use crate::gpu_kernels::{dispatch_size_1d, pointcloud};
+    use crate::gpu_kernels::{pointcloud, WORKGROUP_SIZE_1D};
     use crate::tensor_ext::{TensorToCpu, TensorToGpu};
     use nalgebra::{Matrix4, Point3, Vector3};
     /// Transform point cloud on GPU
@@ -641,8 +769,8 @@ pub mod pointcloud_gpu {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            let x = dispatch_size_1d(num_points);
-            pass.dispatch_workgroups(x, 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_points, WORKGROUP_SIZE_1D);
+            pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
 
         ctx.submit(encoder);
@@ -770,12 +898,43 @@ pub mod tsdf_gpu {
         let queue = &gpu.queue;
 
         let (vol_x, vol_y, vol_z) = vol_dims;
+        let voxel_count = (vol_x as usize)
+            .saturating_mul(vol_y as usize)
+            .saturating_mul(vol_z as usize);
 
-        // Pack TSDF and weights into voxel struct array
-        let voxel_count = (vol_x * vol_y * vol_z) as usize;
+        // The arrays must match the volume they describe.
+        //
+        // Previously each element was fetched with `.get(i).unwrap_or(..)`, so a
+        // `vol_dims` larger than the data silently padded it: missing TSDF values
+        // became `0.0` — which *is* the iso-surface, so unobserved space reported
+        // a surface hit — and missing weights became `1.0`, i.e. one observation.
+        //
+        // The weight is in fact never read: `tsdf_raycast.wgsl` declares the
+        // buffer as interleaved `(sdf, weight)` but every reference is either the
+        // `sdf` half or a comment naming the layout. So the padding was invisible
+        // even in the shape it took.
+        if tsdf_volume.len() != voxel_count {
+            return Err(crate::Error::InvalidInput(format!(
+                "tsdf_gpu::raycast_volume: volume is {} voxels but \
+                 tsdf_volume has {} entries",
+                voxel_count,
+                tsdf_volume.len()
+            )));
+        }
+        if !weights.is_empty() && weights.len() != voxel_count {
+            return Err(crate::Error::InvalidInput(format!(
+                "tsdf_gpu::raycast_volume: volume is {} voxels but \
+                 weights has {} entries",
+                voxel_count,
+                weights.len()
+            )));
+        }
+
         let mut voxel_data: Vec<[f32; 2]> = Vec::with_capacity(voxel_count);
         for i in 0..voxel_count {
-            let tsdf = tsdf_volume.get(i).copied().unwrap_or(0.0);
+            let tsdf = tsdf_volume[i];
+            // An absent weight array means "all voxels equally weighted"; a
+            // present one is length-checked above.
             let weight = weights.get(i).copied().unwrap_or(1.0);
             voxel_data.push([tsdf, weight]);
         }
@@ -1025,13 +1184,48 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
 /// GPU-accelerated spatial queries
 pub mod spatial_gpu {
-    use crate::gpu_kernels::buffer_utils::{create_buffer, read_buffer};
+    use crate::gpu_kernels::buffer_utils::{create_buffer, create_buffer_uninit, read_buffer};
     use nalgebra::Vector3;
     use std::sync::Arc;
     use wgpu::BufferUsages;
 
-    /// Build KDTree on GPU (parallel construction) - simplified version
-    /// Returns sorted Morton codes as a basic spatial index
+    /// Reject a point cloud containing a non-finite coordinate.
+    ///
+    /// Guards the boundary where caller data enters, rather than every internal
+    /// consumer. Two things used to go wrong silently with a NaN coordinate:
+    ///
+    /// * The bounding box below is accumulated with `f32::min`/`max`, which
+    ///   *return the non-NaN operand*, so a NaN point is quietly skipped in the
+    ///   box while remaining in the buffer. An all-NaN cloud leaves the sentinels
+    ///   in place and the box becomes `min > max`.
+    /// * `batch_nearest_neighbors` sorts distances with
+    ///   `partial_cmp(..).unwrap()`, and `norm_squared()` of a vector with a NaN
+    ///   component is NaN, so `partial_cmp` returns `None` and the query
+    ///   **panics**. Reproduced with four points, one of them `[NaN, 0, 0]`.
+    ///
+    /// A nearest-neighbour query over a non-finite cloud has no meaningful answer,
+    /// so this is reported rather than approximated.
+    pub(crate) fn validate_finite_points(points: &[Vector3<f32>]) -> crate::Result<()> {
+        if let Some(i) = points
+            .iter()
+            .position(|p| !(p.x.is_finite() && p.y.is_finite() && p.z.is_finite()))
+        {
+            return Err(crate::Error::InvalidInput(format!(
+                "point {i} is not finite ({}, {}, {}); a spatial query over a \
+                 non-finite point cloud is undefined",
+                points[i].x, points[i].y, points[i].z
+            )));
+        }
+        Ok(())
+    }
+
+    /// Build a Morton-ordered spatial index on the GPU.
+    ///
+    /// This is NOT a KDTree: it sorts nothing into nodes and stores no split
+    /// planes. `GpuKDTree` holds the point cloud plus one Morton code per point;
+    /// the query kernels are brute force over the cloud, so calling this
+    /// `build_kdtree` is a misnomer kept for API compatibility. The Morton codes
+    /// are computed but not traversed today.
     pub fn build_kdtree(
         gpu: &crate::gpu::GpuContext,
         points: &[Vector3<f32>],
@@ -1039,6 +1233,7 @@ pub mod spatial_gpu {
         if points.is_empty() {
             return Err(crate::Error::InvalidInput("Empty point cloud".into()));
         }
+        validate_finite_points(points)?;
 
         let device = gpu.device.clone();
 
@@ -1088,26 +1283,137 @@ pub mod spatial_gpu {
         );
 
         Ok(GpuKDTree {
-            nodes_buffer: points_buf,
-            points_buffer: morton_buf,
+            points_buffer: points_buf,
+            morton_buffer: morton_buf,
             num_points: points.len() as u32,
             device: device.clone(),
         })
     }
 
-    /// Batch nearest neighbor search - simplified brute force on GPU
+    /// Batch nearest neighbor search, brute force **on the GPU**.
+    ///
+    /// One invocation per query point scans the cloud and keeps a sorted top-k
+    /// (`knn_bruteforce.wgsl`). `k` is capped at 128 - the kernel's private
+    /// list size - and larger `k` is refused with a pointer to
+    /// [`batch_nearest_neighbors_cpu`] rather than silently computed
+    /// elsewhere. This function used to read the whole cloud back to the host
+    /// and loop there while the docs said GPU; that loop is now
+    /// `batch_nearest_neighbors_cpu`, named for what it is.
     pub fn batch_nearest_neighbors(
         gpu: &crate::gpu::GpuContext,
         kdtree: &GpuKDTree,
         queries: &[Vector3<f32>],
         k: u32,
     ) -> crate::Result<Vec<Vec<(u32, f32)>>> {
-        // Simplified: just return k nearest using brute force on CPU
-        // A proper GPU implementation would use the Morton codes
+        const K_MAX: u32 = 128;
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        if k == 0 {
+            return Ok(vec![Vec::new(); queries.len()]);
+        }
+        if k > K_MAX {
+            return Err(crate::Error::InvalidInput(format!(
+                "GPU k-NN supports k <= {K_MAX}; use batch_nearest_neighbors_cpu for larger k"
+            )));
+        }
+
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        #[repr(C)]
+        struct KnnParams {
+            num_points: u32,
+            k: u32,
+            num_queries: u32,
+            _pad: u32,
+        }
+
+        let q_data: Vec<[f32; 4]> = queries.iter().map(|q| [q.x, q.y, q.z, 0.0]).collect();
+        let q_buf = create_buffer(&gpu.device, &q_data, BufferUsages::STORAGE);
+        let out_len = queries.len() * k as usize * 2;
+        let out_buf = create_buffer_uninit(
+            &gpu.device,
+            out_len * std::mem::size_of::<f32>(),
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        );
+        let params = KnnParams {
+            num_points: kdtree.num_points,
+            k,
+            num_queries: queries.len() as u32,
+            _pad: 0,
+        };
+        let params_buf = create_buffer(&gpu.device, &[params], BufferUsages::UNIFORM);
+
+        let pipeline = gpu.create_compute_pipeline(include_str!("knn_bruteforce.wgsl"), "main");
+        let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("knn_bind_group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: kdtree.points_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: q_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: out_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(queries.len() as u32, 64);
+            pass.dispatch_workgroups(wg_x, wg_y, wg_z);
+        }
+        gpu.queue.submit(std::iter::once(encoder.finish()));
+
+        let out: Vec<f32> = pollster::block_on(read_buffer(
+            kdtree.device.clone(),
+            &gpu.queue,
+            &out_buf,
+            0,
+            out_len * std::mem::size_of::<f32>(),
+        ))?;
+
+        let per_query = k.min(kdtree.num_points) as usize;
+        Ok((0..queries.len())
+            .map(|qi| {
+                let base = qi * k as usize * 2;
+                (0..per_query)
+                    .map(|i| (out[base + 2 * i + 1] as u32, out[base + 2 * i]))
+                    .collect()
+            })
+            .collect())
+    }
+
+    /// Batch nearest neighbors on the **CPU**: reads the cloud back from the
+    /// GPU buffer and brute-forces there. O(queries * points), no `k` cap.
+    ///
+    /// This is the loop `batch_nearest_neighbors` used to run while claiming
+    /// to be a GPU kernel. It stays because `batch_radius_search` wants
+    /// `k = num_points` and the GPU path caps `k` at 128.
+    pub fn batch_nearest_neighbors_cpu(
+        gpu: &crate::gpu::GpuContext,
+        kdtree: &GpuKDTree,
+        queries: &[Vector3<f32>],
+        k: u32,
+    ) -> crate::Result<Vec<Vec<(u32, f32)>>> {
         let points_data: Vec<[f32; 4]> = pollster::block_on(read_buffer(
             kdtree.device.clone(),
             &gpu.queue,
-            &kdtree.nodes_buffer,
+            &kdtree.points_buffer,
             0,
             kdtree.num_points as usize * 16,
         ))?;
@@ -1125,7 +1431,18 @@ pub mod spatial_gpu {
                 })
                 .collect();
 
-            distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            // `total_cmp`, not `partial_cmp(..).unwrap()`.
+            //
+            // The unwrap panicked on any NaN distance, which one non-finite point
+            // was enough to produce. `total_cmp` is a total order that cannot
+            // panic; it agrees with `partial_cmp` on every finite value, and
+            // `sort_by` is stable, so the order of a valid cloud is unchanged. NaN
+            // sorts last, i.e. a NaN-distance point is never a near neighbour, which
+            // is the right answer.
+            //
+            // `validate_finite_points` above should make this unreachable. It is
+            // kept as defence in depth because the panic took down the caller.
+            distances.sort_by(|a, b| a.1.total_cmp(&b.1));
             distances.truncate(k as usize);
             results.push(distances);
         }
@@ -1142,9 +1459,11 @@ pub mod spatial_gpu {
     ) -> crate::Result<Vec<Vec<(u32, f32)>>> {
         let radius_sq = radius * radius;
 
-        // Use batch_nearest_neighbors and filter
+        // Use the CPU brute-force path and filter: radius search wants
+        // k = num_points (up to 1024 here), beyond the GPU kernel's k <= 128
+        // cap, and the CPU variant is named for exactly this.
         let k = kdtree.num_points.min(1024); // Limit search
-        let all_neighbors = batch_nearest_neighbors(gpu, kdtree, queries, k)?;
+        let all_neighbors = batch_nearest_neighbors_cpu(gpu, kdtree, queries, k)?;
 
         let results: Vec<Vec<(u32, f32)>> = all_neighbors
             .into_iter()
@@ -1281,10 +1600,15 @@ pub mod spatial_gpu {
         Ok(result)
     }
 
-    /// GPU KDTree handle
+    /// GPU "KDTree" handle - see `build_kdtree`: this is Morton-ordered points,
+    /// not a tree. Fields are named for what they hold.
     pub struct GpuKDTree {
-        pub nodes_buffer: wgpu::Buffer,
+        /// The point cloud, as `vec4<f32>` (w unused).
         pub points_buffer: wgpu::Buffer,
+        /// Morton codes, one per point - computed but not yet traversed: the
+        /// query kernels are brute force. Named for what it holds (it used to
+        /// be `points_buffer`, swapped with the one above).
+        pub morton_buffer: wgpu::Buffer,
         pub num_points: u32,
         pub device: Arc<wgpu::Device>,
     }
@@ -1364,14 +1688,14 @@ pub mod mesh_gpu {
         });
 
         // Dispatch compute shader
-        let workgroup_count = num_vertices.div_ceil(256);
+        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_vertices, 256);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         {
             let mut compute_pass =
                 encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             compute_pass.set_pipeline(&pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(workgroup_count, 1, 1);
+            compute_pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         queue.submit(Some(encoder.finish()));
 
@@ -1465,10 +1789,16 @@ pub mod mesh_gpu {
         Ok(())
     }
 
-    /// Simplify mesh on GPU - simplified version using voxel grid sampling
     #[allow(clippy::type_complexity)]
+    /// Simplify a mesh by uniform voxel-grid decimation. **Runs on CPU.**
+    ///
+    /// This used to take a `&GpuContext` it never used while its doc said
+    /// "Simplify mesh on GPU" - GPU in the signature, CPU in the body, and the
+    /// caller had no way to tell. There is no GPU kernel for this (yet); the
+    /// handle is gone and the doc says CPU, so what runs is what is claimed.
+    /// A GPU implementation would be a voxel-accumulation kernel plus face
+    /// remapping; when one exists this is where it goes.
     pub fn simplify_mesh(
-        _gpu: &crate::gpu::GpuContext,
         vertices: &[Point3<f32>],
         faces: &[[u32; 3]],
         target_ratio: f32,
@@ -1636,110 +1966,179 @@ pub mod raycasting_gpu {
         crate::gpu_kernels::raycasting::cast_rays(gpu, rays, vertices, faces)
     }
 
-    /// Compute distance field on GPU - signed distance to mesh surface
+    /// Closest point on triangle `a,b,c` to query `p` (Ericson), plus the
+    /// triangle's unit face normal. Returns `None` for a degenerate face.
+    fn closest_point_on_triangle(
+        p: Point3<f32>,
+        a: Point3<f32>,
+        b: Point3<f32>,
+        c: Point3<f32>,
+    ) -> Option<(Point3<f32>, Vector3<f32>)> {
+        let ab = b - a;
+        let ac = c - a;
+        let mut normal = ab.cross(&ac);
+        let n2 = normal.norm_squared();
+        if n2 < 1e-20 {
+            return None;
+        }
+        normal /= n2.sqrt();
+
+        let ap = p - a;
+        let d1 = ab.dot(&ap);
+        let d2 = ac.dot(&ap);
+        if d1 <= 0.0 && d2 <= 0.0 {
+            return Some((a, normal));
+        }
+
+        let bp = p - b;
+        let d3 = ab.dot(&bp);
+        let d4 = ac.dot(&bp);
+        if d3 >= 0.0 && d4 <= d3 {
+            return Some((b, normal));
+        }
+
+        let vc = d1 * d4 - d3 * d2;
+        if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            let v = d1 / (d1 - d3);
+            return Some((a + ab * v, normal));
+        }
+
+        let cp = p - c;
+        let d5 = ab.dot(&cp);
+        let d6 = ac.dot(&cp);
+        if d6 >= 0.0 && d5 <= d6 {
+            return Some((c, normal));
+        }
+
+        let vb = d5 * d2 - d1 * d6;
+        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            let w = d2 / (d2 - d6);
+            return Some((a + ac * w, normal));
+        }
+
+        let va = d3 * d6 - d5 * d4;
+        if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+            let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+            return Some((b + (c - b) * w, normal));
+        }
+
+        let denom = 1.0 / (va + vb + vc);
+        Some((a + ab * (vb * denom) + ac * (vc * denom), normal))
+    }
+
+    /// Signed distance field of a triangle mesh on a regular grid. **Runs on CPU.**
+    ///
+    /// This used to claim "on GPU" / "signed distance to mesh surface" while
+    /// the body ignored the GPU handle and returned the unsigned distance to
+    /// the closest *vertex* of each face — never negative, and not a surface
+    /// distance. The unused handle is gone; each voxel now stores the signed
+    /// Euclidean distance to the closest point on any triangle (Ericson), with
+    /// the sign taken from the winning face's winding normal (positive on the
+    /// normal side). Voxels with no face inside the search band stay at
+    /// `+∞` (`f32::MAX`). A GPU path would be a narrow-band kernel against a
+    /// BVH; when one exists this is where it goes.
     pub fn compute_distance_field(
-        _gpu: &crate::gpu::GpuContext,
         mesh_vertices: &[Point3<f32>],
         mesh_faces: &[[u32; 3]],
         grid_origin: Point3<f32>,
         grid_size: (u32, u32, u32),
         voxel_size: f32,
     ) -> crate::Result<Vec<f32>> {
-        if mesh_vertices.is_empty() || mesh_faces.is_empty() {
+        if mesh_vertices.is_empty() || mesh_faces.is_empty() || voxel_size <= 0.0 {
             return Ok(vec![]);
         }
 
         let (gx, gy, gz) = grid_size;
+        if gx == 0 || gy == 0 || gz == 0 {
+            return Ok(vec![]);
+        }
         let total_voxels = (gx * gy * gz) as usize;
         let mut distance_field = vec![f32::MAX; total_voxels];
 
-        // For each grid point, find distance to nearest mesh face
-        // This is a simplified brute-force implementation
-        // A proper implementation would use spatial acceleration structures
-
         let inv_voxel = 1.0 / voxel_size;
+        // Narrow-band radius in voxels. Faces are hashed into a dilated AABB
+        // of this radius so each query only probes its own cell.
+        let search_radius = 2i32;
 
-        // Build a simple spatial index using voxel hashing
-        let mut voxel_map: std::collections::HashMap<(u32, u32, u32), Vec<usize>> =
+        let mut voxel_map: std::collections::HashMap<(i32, i32, i32), Vec<usize>> =
             std::collections::HashMap::new();
 
         for (face_idx, face) in mesh_faces.iter().enumerate() {
-            let v0 = mesh_vertices[face[0] as usize];
-            let v1 = mesh_vertices[face[1] as usize];
-            let v2 = mesh_vertices[face[2] as usize];
+            let i0 = face[0] as usize;
+            let i1 = face[1] as usize;
+            let i2 = face[2] as usize;
+            if i0 >= mesh_vertices.len() || i1 >= mesh_vertices.len() || i2 >= mesh_vertices.len() {
+                continue;
+            }
+            let v0 = mesh_vertices[i0];
+            let v1 = mesh_vertices[i1];
+            let v2 = mesh_vertices[i2];
 
-            // Find voxel bounds for this face
-            let min_x = ((v0.x.min(v1.x).min(v2.x) - grid_origin.x) * inv_voxel).floor() as i32;
-            let max_x = ((v0.x.max(v1.x).max(v2.x) - grid_origin.x) * inv_voxel).ceil() as i32;
-            let min_y = ((v0.y.min(v1.y).min(v2.y) - grid_origin.y) * inv_voxel).floor() as i32;
-            let max_y = ((v0.y.max(v1.y).max(v2.y) - grid_origin.y) * inv_voxel).ceil() as i32;
-            let min_z = ((v0.z.min(v1.z).min(v2.z) - grid_origin.z) * inv_voxel).floor() as i32;
-            let max_z = ((v0.z.max(v1.z).max(v2.z) - grid_origin.z) * inv_voxel).ceil() as i32;
+            let min_x = ((v0.x.min(v1.x).min(v2.x) - grid_origin.x) * inv_voxel).floor() as i32
+                - search_radius;
+            let max_x = ((v0.x.max(v1.x).max(v2.x) - grid_origin.x) * inv_voxel).ceil() as i32
+                + search_radius;
+            let min_y = ((v0.y.min(v1.y).min(v2.y) - grid_origin.y) * inv_voxel).floor() as i32
+                - search_radius;
+            let max_y = ((v0.y.max(v1.y).max(v2.y) - grid_origin.y) * inv_voxel).ceil() as i32
+                + search_radius;
+            let min_z = ((v0.z.min(v1.z).min(v2.z) - grid_origin.z) * inv_voxel).floor() as i32
+                - search_radius;
+            let max_z = ((v0.z.max(v1.z).max(v2.z) - grid_origin.z) * inv_voxel).ceil() as i32
+                + search_radius;
 
             for z in min_z..=max_z {
                 for y in min_y..=max_y {
                     for x in min_x..=max_x {
-                        let key = (x as u32, y as u32, z as u32);
-                        voxel_map.entry(key).or_insert_with(Vec::new).push(face_idx);
+                        voxel_map.entry((x, y, z)).or_default().push(face_idx);
                     }
                 }
             }
         }
 
-        // For each voxel, compute distance to nearest face in its neighborhood
-        let search_radius = 2i32; // voxels
+        for z in 0..gz as i32 {
+            for y in 0..gy as i32 {
+                for x in 0..gx as i32 {
+                    let idx = ((z as u32 * gy + y as u32) * gx + x as u32) as usize;
+                    let p = Point3::new(
+                        grid_origin.x + x as f32 * voxel_size,
+                        grid_origin.y + y as f32 * voxel_size,
+                        grid_origin.z + z as f32 * voxel_size,
+                    );
 
-        for z in 0..gz {
-            for y in 0..gy {
-                for x in 0..gx {
-                    let idx = ((z * gy + y) * gx + x) as usize;
+                    let Some(face_indices) = voxel_map.get(&(x, y, z)) else {
+                        continue;
+                    };
 
-                    // Check nearby voxels for faces
-                    let mut min_dist = f32::MAX;
+                    let mut best_dist_sq = f32::MAX;
+                    let mut best_signed = f32::MAX;
 
-                    for dz in -search_radius..=search_radius {
-                        for dy in -search_radius..=search_radius {
-                            for dx in -search_radius..=search_radius {
-                                let key = (
-                                    (x as i32 + dx) as u32,
-                                    (y as i32 + dy) as u32,
-                                    (z as i32 + dz) as u32,
-                                );
-
-                                if let Some(faces_in_voxel) = voxel_map.get(&key) {
-                                    for &face_idx in faces_in_voxel {
-                                        let face = mesh_faces[face_idx];
-                                        let v0 = mesh_vertices[face[0] as usize];
-                                        let v1 = mesh_vertices[face[1] as usize];
-                                        let v2 = mesh_vertices[face[2] as usize];
-
-                                        // Compute distance to triangle (simplified: distance to closest vertex)
-                                        let px = grid_origin.x + x as f32 * voxel_size;
-                                        let py = grid_origin.y + y as f32 * voxel_size;
-                                        let pz = grid_origin.z + z as f32 * voxel_size;
-
-                                        let d0 = ((v0.x - px).powi(2)
-                                            + (v0.y - py).powi(2)
-                                            + (v0.z - pz).powi(2))
-                                        .sqrt();
-                                        let d1 = ((v1.x - px).powi(2)
-                                            + (v1.y - py).powi(2)
-                                            + (v1.z - pz).powi(2))
-                                        .sqrt();
-                                        let d2 = ((v2.x - px).powi(2)
-                                            + (v2.y - py).powi(2)
-                                            + (v2.z - pz).powi(2))
-                                        .sqrt();
-
-                                        let d = d0.min(d1).min(d2);
-                                        min_dist = min_dist.min(d);
-                                    }
-                                }
-                            }
+                    for &face_idx in face_indices {
+                        let face = mesh_faces[face_idx];
+                        let v0 = mesh_vertices[face[0] as usize];
+                        let v1 = mesh_vertices[face[1] as usize];
+                        let v2 = mesh_vertices[face[2] as usize];
+                        let Some((closest, normal)) = closest_point_on_triangle(p, v0, v1, v2)
+                        else {
+                            continue;
+                        };
+                        let delta = p - closest;
+                        let dist_sq = delta.norm_squared();
+                        if dist_sq < best_dist_sq {
+                            best_dist_sq = dist_sq;
+                            let dist = dist_sq.sqrt();
+                            // Positive on the face-normal side; zero on the surface.
+                            best_signed = if delta.dot(&normal) >= 0.0 {
+                                dist
+                            } else {
+                                -dist
+                            };
                         }
                     }
 
-                    distance_field[idx] = min_dist;
+                    if best_dist_sq < f32::MAX {
+                        distance_field[idx] = best_signed;
+                    }
                 }
             }
         }

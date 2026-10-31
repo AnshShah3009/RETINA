@@ -36,9 +36,23 @@ use crate::Result;
 /// only to build a descriptive error message; the token itself is trimmed
 /// before parsing.
 pub(crate) fn parse_f64(field: &str, ctx: &str) -> Result<f64> {
-    field.trim().parse::<f64>().map_err(|e| {
+    let value: f64 = field.trim().parse().map_err(|e| {
         cv_core::Error::ParseError(format!("{ctx}: cannot parse {field:?} as f64: {e}"))
-    })
+    })?;
+    // `f64::from_str` accepts "inf", "infinity", "NaN" and their signed forms -
+    // they are valid IEEE-754 spellings, not syntax errors. Every dataset reader
+    // routes through here, so a single malformed column carrying one of them
+    // produced a pose or a timestamp of `inf` and it propagated all the way into
+    // the trajectory, where it silently poisons every metric computed from it.
+    //
+    // A dataset that legitimately contains a non-finite value has no use for it:
+    // there is no finite result to derive from one.
+    if !value.is_finite() {
+        return Err(cv_core::Error::ParseError(format!(
+            "{ctx}: {field:?} is not a finite number (NaN and infinity are rejected)"
+        )));
+    }
+    Ok(value)
 }
 
 /// Parse a single (already whitespace-split) token as `i64`.

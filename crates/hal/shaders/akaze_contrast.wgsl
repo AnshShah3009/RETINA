@@ -29,6 +29,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let lx = input_data[y * w + x + 1] - input_data[y * w + x - 1];
     let ly = input_data[(y + 1) * w + x] - input_data[(y - 1) * w + x];
     let mag = sqrt(lx * lx + ly * ly);
+    // OpenCV's compute_k_percentile ignores zero gradients. Counting them put
+    // the 70th percentile in bin 0 on mostly flat images, so k = 0 and the
+    // diffusion's g = 1 / (1 + |grad|^2 / k^2) became 0 / 0.
+    if (mag <= 0.0) {
+        return;
+    }
 
     let bin = u32(clamp(mag / params.max_mag * f32(params.num_bins), 0.0, f32(params.num_bins - 1u)));
     atomicAdd(&histogram[bin], 1u);

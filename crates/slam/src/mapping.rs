@@ -31,6 +31,44 @@ impl MapExt for WorldMap {
     }
 }
 
+/// Whether a cached descriptor buffer still describes `points`.
+///
+/// The length check alone is not enough, and the difference is not academic.
+/// `WorldMap::points` is a **public** field of `Arc<RwLock<MapPoint>>` with
+/// `MapPoint::descriptor` also public, so any in-place edit - loop closure,
+/// descriptor re-estimation, map point refinement - changes a descriptor without
+/// changing the length. The tracker then binds a buffer that no longer matches
+/// the map, and `match.train_idx`, which is an index *into that buffer*, silently
+/// identifies a different landmark: the wrong world point goes into
+/// `solve_pnp_ransac` and the pose comes back wrong with no error anywhere.
+///
+/// Measured: with one descriptor overwritten in place, the cache returned the
+/// stale bytes unchanged. This compares the content, which costs an O(n) pass
+/// over bytes rather than a clone of every descriptor - the rebuild it replaces
+/// was O(total map points) with a `Vec` allocation each.
+fn cached_matches_points(cached: &[u8], points: &[Arc<RwLock<MapPoint>>]) -> bool {
+    if cached.len() != points.len() * 32 {
+        return false;
+    }
+    for (i, p) in points.iter().enumerate() {
+        let d = p
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .descriptor
+            .clone();
+        let len = d.len().min(32);
+        let slot = &cached[i * 32..i * 32 + 32];
+        if &slot[..len] != &d[..len] {
+            return false;
+        }
+        // The padding must be zero too: a stale tail would otherwise pass.
+        if slot[len..].iter().any(|b| *b != 0) {
+            return false;
+        }
+    }
+    true
+}
+
 impl WorldMap {
     /// Flattened descriptors for every map point, in `points` order.
     ///
@@ -41,8 +79,14 @@ impl WorldMap {
     pub fn descriptor_bytes(&mut self) -> Arc<Vec<u8>> {
         let n = self.points.len();
         if self.descriptor_cache_len == n {
-            if let Some(cached) = &self.descriptor_cache {
-                return Arc::clone(cached);
+            // Not a let-chain: this crate is on an edition that predates them.
+            let valid = self
+                .descriptor_cache
+                .as_ref()
+                .map(|c| cached_matches_points(c, &self.points))
+                .unwrap_or(false);
+            if valid {
+                return Arc::clone(self.descriptor_cache.as_ref().expect("just checked"));
             }
         }
         let mut flat: Vec<u8> = Vec::with_capacity(n * 32);

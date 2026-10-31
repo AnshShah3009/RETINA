@@ -118,9 +118,16 @@ pub fn qr_solve(a: &DMatrix<f64>, b: &DVector<f64>) -> Result<DVector<f64>, Stri
     let r_top = r.rows(0, n).clone_owned();
     let qt_b_top = qt_b.rows(0, n).clone_owned();
 
-    // Check for zero diagonal (rank-deficient)
+    // Check for (numerically) zero pivots. The test is RELATIVE to R[0,0]: R's
+    // diagonal scales with the input, so an absolute 1e-14 cutoff declared a
+    // perfectly well-conditioned system rank-deficient merely for being scaled
+    // down (e.g. every entry of A multiplied by 1e-14).
+    let r0 = r_top[(0, 0)].abs();
+    if r0 == 0.0 {
+        return Err("QR solve failed: rank-deficient matrix".into());
+    }
     for i in 0..n {
-        if r_top[(i, i)].abs() < 1e-14 {
+        if r_top[(i, i)].abs() <= f64::EPSILON * r0 {
             return Err("QR solve failed: rank-deficient matrix".into());
         }
     }
@@ -138,9 +145,50 @@ pub fn qr_solve(a: &DMatrix<f64>, b: &DVector<f64>) -> Result<DVector<f64>, Stri
     Ok(x)
 }
 
+/// Whether every entry of a matrix is finite.
+///
+/// The load-bearing question before any LAPACK call: nalgebra's SVD
+/// bidiagonalisation decides convergence by *comparison*, and every comparison
+/// against NaN is false. So one NaN makes the iteration unable to terminate -
+/// the call does not return, and nothing reports it. Measured on the current
+/// nalgebra 0.33: a 3x3 with one NaN returns (with NaN singular values), but a
+/// 4x4 with one NaN had to be killed at 200 s.
+///
+/// A hang is worse than a wrong answer, so this must be checked before the call
+/// rather than after.
+pub fn is_finite(a: &DMatrix<f64>) -> bool {
+    a.iter().all(|v| v.is_finite())
+}
+
+/// Guarded singular value decomposition.
+///
+/// Returns `(U, sigma, Vt)` where `A = U * diag(sigma) * Vt`, or an error if the
+/// input is empty or holds any non-finite entry.
+///
+/// This exists because [svd] - and every direct `.svd(true, true)` call - hangs
+/// forever on non-finite input rather than failing. Callers that build a design
+/// matrix from user data should prefer this.
+pub fn try_svd(a: &DMatrix<f64>) -> Result<(DMatrix<f64>, DVector<f64>, DMatrix<f64>), String> {
+    let (m, n) = a.shape();
+    if m == 0 || n == 0 {
+        return Err("Matrix must be non-empty".into());
+    }
+    if !is_finite(a) {
+        return Err(
+            "SVD input holds a non-finite entry; LAPACK would not                      terminate"
+                .into(),
+        );
+    }
+    svd(a)
+}
+
 /// Singular Value Decomposition.
 ///
 /// Returns `(U, sigma, Vt)` where `A = U * diag(sigma) * Vt`.
+///
+/// **Unguarded.** Passes non-finite input straight to LAPACK, which does not
+/// terminate - see [is_finite]. Prefer [try_svd] for any matrix built from
+/// external data.
 #[allow(clippy::type_complexity)]
 pub fn svd(a: &DMatrix<f64>) -> Result<(DMatrix<f64>, DVector<f64>, DMatrix<f64>), String> {
     let (m, n) = a.shape();
@@ -292,7 +340,18 @@ where
 /// General eigendecomposition (eigenvalues may be complex).
 ///
 /// Returns `(eigenvalue_pairs, eigenvector_matrix)` where each eigenvalue pair
-/// is `(real_part, imaginary_part)`. Uses the real Schur decomposition.
+/// is `(real_part, imaginary_part)`. Eigenvalues come from the real Schur
+/// decomposition; column `j` of the matrix is a unit eigenvector for
+/// eigenvalue `j`, packed like LAPACK's `dgeev`: for a complex-conjugate pair
+/// at `j, j+1` the eigenvector of `λ_j` is `V[:, j] + i·V[:, j+1]` (and its
+/// conjugate belongs to `λ_{j+1}`).
+///
+/// The eigenvectors used to be the Schur vectors `Q` themselves. Those are
+/// eigenvectors only for normal matrices: for `[[1, 1], [0, 2]]` the column
+/// returned for `λ = 2` was `[0, 1]`, with `‖Av − λv‖ = 1`. Each eigenvector is
+/// now the null vector of `A − λI` (smallest right singular vector of a
+/// complex SVD); a repeated eigenvalue takes successive singular vectors, so a
+/// non-defective repeated eigenvalue gets independent vectors.
 #[allow(clippy::type_complexity)]
 pub fn eig(a: &DMatrix<f64>) -> Result<(Vec<(f64, f64)>, DMatrix<f64>), String> {
     let (m, n) = a.shape();
@@ -300,8 +359,7 @@ pub fn eig(a: &DMatrix<f64>) -> Result<(Vec<(f64, f64)>, DMatrix<f64>), String> 
         return Err(format!("Matrix must be square, got {}x{}", m, n));
     }
 
-    let schur = a.clone().schur();
-    let (q_schur, t) = schur.clone().unpack();
+    let (_, t) = a.clone().schur().unpack();
 
     // Extract eigenvalues from the quasi-upper-triangular T.
     // 1x1 diagonal blocks are real eigenvalues; 2x2 blocks give complex pairs.
@@ -334,7 +392,62 @@ pub fn eig(a: &DMatrix<f64>) -> Result<(Vec<(f64, f64)>, DMatrix<f64>), String> 
         }
     }
 
-    Ok((eigenvalues, q_schur))
+    let vectors = eigenvectors_from_eigenvalues(a, &eigenvalues);
+    Ok((eigenvalues, vectors))
+}
+
+/// Unit null vectors of `A − λI` for each eigenvalue, packed `dgeev`-style
+/// (see [`eig`]).
+fn eigenvectors_from_eigenvalues(a: &DMatrix<f64>, eigenvalues: &[(f64, f64)]) -> DMatrix<f64> {
+    use nalgebra::Complex;
+    let n = a.nrows();
+    let ac: DMatrix<Complex<f64>> = a.map(|x| Complex::new(x, 0.0));
+    let scale = a.norm().max(1.0);
+    let mut out = DMatrix::<f64>::zeros(n, n);
+    let mut j = 0;
+    while j < n {
+        let (re, im) = eigenvalues[j];
+        let lambda = Complex::new(re, im);
+        // Earlier eigenvalues equal to this one: take the next singular
+        // vector down so a repeated eigenvalue gets independent vectors.
+        let tol = 1e-8 * scale;
+        let rank_in_group = eigenvalues[..j]
+            .iter()
+            .filter(|&&(r, i)| (Complex::new(r, i) - lambda).norm() <= tol)
+            .count();
+        let shifted = &ac - DMatrix::<Complex<f64>>::identity(n, n) * lambda;
+        let svd = shifted.svd(false, true);
+        let vt = svd.v_t.expect("v_t requested");
+        // Singular values are sorted descending: the null space is at the end.
+        let row = n - 1 - rank_in_group.min(n - 1);
+        let mut v: Vec<Complex<f64>> = (0..n).map(|k| vt[(row, k)].conj()).collect();
+        // Fix the arbitrary complex phase: make the largest component real
+        // and positive, which also makes real eigenvectors exactly real.
+        let (kmax, _) = v.iter().enumerate().fold((0, -1.0), |acc, (k, c)| {
+            if c.norm() > acc.1 {
+                (k, c.norm())
+            } else {
+                acc
+            }
+        });
+        let phase = v[kmax] / v[kmax].norm();
+        for c in &mut v {
+            *c /= phase;
+        }
+        if im != 0.0 && j + 1 < n {
+            for k in 0..n {
+                out[(k, j)] = v[k].re;
+                out[(k, j + 1)] = v[k].im;
+            }
+            j += 2;
+        } else {
+            for k in 0..n {
+                out[(k, j)] = v[k].re;
+            }
+            j += 1;
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -377,7 +490,16 @@ pub fn cond(a: &DMatrix<f64>) -> f64 {
     }
     let max_sv = sv.iter().cloned().fold(0.0_f64, f64::max);
     let min_sv = sv.iter().cloned().fold(f64::INFINITY, f64::min);
-    if min_sv.abs() < 1e-15 {
+    // The singularity cutoff must be RELATIVE to the largest singular value.
+    // Singular values scale with A, so the previous ABSOLUTE test
+    // `min_sv.abs() < 1e-15` reported INFINITY for diag(1, 1e-16), whose true
+    // condition number is 1e16 - a value f64 represents exactly. The relative
+    // rule below declares singular only when `min_sv <= max_sv * MIN_POSITIVE`,
+    // i.e. exactly when the ratio `max_sv/min_sv` is not representable as a
+    // finite f64 (it overflows past 1/MIN_POSITIVE ~ 4.5e307). An exactly
+    // rank-deficient matrix comes out of the SVD with min_sv == 0 and is still
+    // reported as INFINITY.
+    if max_sv == 0.0 || min_sv <= max_sv * f64::MIN_POSITIVE {
         f64::INFINITY
     } else {
         max_sv / min_sv
@@ -473,6 +595,18 @@ pub fn pinv(a: &DMatrix<f64>, tol: f64) -> Result<DMatrix<f64>, String> {
 /// Returns a matrix whose columns form an orthonormal basis for the null
 /// space of `a`. Singular values <= `tol` are treated as zero.
 pub fn null_space(a: &DMatrix<f64>, tol: f64) -> DMatrix<f64> {
+    // nalgebra's SVD is thin: for a wide `m x n` matrix `v_t` has only
+    // `min(m, n)` rows, so the `n - m` directions with no singular value at
+    // all were never available and `null_space([[1, 0, 0]])` came back 3x0.
+    // Padding with zero rows to `n x n` adds zero singular values whose right
+    // singular vectors are exactly those missing directions.
+    let a = if a.nrows() < a.ncols() {
+        let mut padded = DMatrix::zeros(a.ncols(), a.ncols());
+        padded.rows_mut(0, a.nrows()).copy_from(a);
+        padded
+    } else {
+        a.clone()
+    };
     let decomp = a.clone().svd(false, true);
     let vt = decomp.v_t.unwrap();
     let sv = &decomp.singular_values;

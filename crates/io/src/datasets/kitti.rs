@@ -76,8 +76,40 @@ pub fn read_poses<P: AsRef<Path>>(path: P) -> Result<Vec<Pose>> {
         //   m4  m5  m6  m7   (ty)
         //   m8  m9  m10 m11  (tz)
         let rotation = Matrix3::new(m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]);
+
+        // A pose's rotation must be a rotation. A singular matrix - an all-zero
+        // row, a truncated file, a header read at the wrong offset - has no
+        // inverse and cannot be decomposed into a rotation. This branch is kept
+        // purely to name that failure, which is more specific than the general
+        // one below.
+        let det = rotation.determinant();
+        if !det.is_finite() || det.abs() < 1e-12 {
+            return Err(Error::ParseError(format!(
+                "{}: line {}: the 3x3 block is singular (determinant {det}), \
+                 so it is not a rotation",
+                path.display(),
+                line_no
+            )));
+        }
+
+        // Non-singular is not the same as being a rotation. `2 * I`, a
+        // reflection, and a 1e6-scaled block all have a perfectly good
+        // determinant, and `Pose::new` runs them through
+        // `from_rotation_matrix_unchecked`, which silently re-orthonormalises
+        // them into some *other* rotation: `2 * I` came back as
+        // `diag(1.75, 1.75, 1.75)`. Every KITTI trajectory metric computed from
+        // such a pose is then wrong with no error anywhere. `Pose::try_new`
+        // checks both `det == +1` and orthonormality, which together reject
+        // scale, shear and reflection.
         let translation = Vector3::new(m[3], m[7], m[11]);
-        poses.push(Pose::new(rotation, translation));
+        let pose = Pose::try_new(rotation, translation).map_err(|why| {
+            Error::ParseError(format!(
+                "{}: line {}: the 3x3 block is not a proper rotation (det {det}): {why}",
+                path.display(),
+                line_no
+            ))
+        })?;
+        poses.push(pose);
     }
 
     Ok(poses)

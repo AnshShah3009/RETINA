@@ -115,17 +115,29 @@ pub const COLORS: &[&str] = &[
 /// Plot styling
 #[derive(Debug, Clone)]
 pub struct Style {
+    /// The series' colour, or empty for "pick the next palette entry".
+    ///
+    /// An empty colour is what `Style::default()` and the `Series`
+    /// constructors produce, and the exporter resolves it through
+    /// [`COLORS`] so that consecutive series in a figure come out in different
+    /// colours, like matplotlib's default colour cycle. This used to be
+    /// pre-filled with `COLORS[0]`, which made the exporter's auto-colour
+    /// branch unreachable and every default-styled series in a figure the same
+    /// blue. Use [`Style::new`] for an explicit colour.
     pub color: String,
     pub line_width: f64,
     pub marker_size: f64,
+    /// Marker shape for scatter series: `o` (default), `s`, `^`, `v`, `+`, `x`.
+    /// Any other value falls back to the default circle.
     pub marker: String,
+    /// Opacity, `0.0`-`1.0`, applied to whatever the series is drawn with.
     pub fill_alpha: f64,
 }
 
 impl Default for Style {
     fn default() -> Self {
         Self {
-            color: COLORS[0].to_string(),
+            color: String::new(),
             line_width: 2.0,
             marker_size: 6.0,
             marker: "o".to_string(),

@@ -122,6 +122,9 @@ fn dilate_once_into(
     if output.width() != src.width() || output.height() != src.height() {
         *output = GrayImage::new(src.width(), src.height());
     }
+    if width == 0 || height == 0 {
+        return;
+    }
 
     output
         .as_mut()
@@ -160,6 +163,9 @@ fn erode_once_into(
     let src_data = src.as_raw();
     if output.width() != src.width() || output.height() != src.height() {
         *output = GrayImage::new(src.width(), src.height());
+    }
+    if width == 0 || height == 0 {
+        return;
     }
 
     output

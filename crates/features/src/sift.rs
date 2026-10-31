@@ -250,7 +250,14 @@ impl Sift {
                 let cand_slice = match candidates.storage.as_slice() {
                     Some(slice) => slice,
                     None => {
-                        eprintln!("Warning: Failed to get candidate slice");
+                        // A GPU tensor whose storage is not host-visible. Not
+                        // an error condition for this loop — say so with
+                        // tracing rather than writing to stderr, which this
+                        // path used to do once per pyramid octave per frame.
+                        tracing::debug!(
+                            "SIFT extrema candidates are not host-visible; \
+                             skipping this octave"
+                        );
                         continue;
                     }
                 };
@@ -849,7 +856,6 @@ mod tests {
         let tensor = create_test_image().unwrap();
         let sift = Sift::new();
         let (kps, _) = sift.detect_and_refine(&device, &tensor).unwrap();
-        println!("Detected {} refined SIFT keypoints", kps.len());
         assert!(kps.len() > 0);
     }
 
@@ -860,11 +866,6 @@ mod tests {
         let tensor = create_test_image().unwrap();
         let sift = Sift::new();
         let (kps, descs) = sift.detect_and_compute(&device, &tensor).unwrap();
-        println!(
-            "Extracted {} SIFT keypoints and {} descriptors",
-            kps.len(),
-            descs.len()
-        );
         assert_eq!(kps.len(), descs.len());
         if !descs.descriptors.is_empty() {
             assert_eq!(descs.descriptors[0].data.len(), 128);

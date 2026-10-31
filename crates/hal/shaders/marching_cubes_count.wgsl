@@ -25,6 +25,24 @@ fn get_val(x: u32, y: u32, z: u32) -> f32 {
     return voxels[idx].tsdf;
 }
 
+// True when all eight corners of the cell at (x, y, z) have been observed.
+// An unobserved voxel (weight 0) holds a placeholder, not a distance; meshing
+// a sign change against it emitted a phantom back surface wherever the band
+// behind a wall met the never-observed voxels further behind it.
+fn cell_observed(x: u32, y: u32, z: u32) -> bool {
+    let sx = params.vol_x;
+    let sxy = params.vol_x * params.vol_y;
+    let i = z * sxy + y * sx + x;
+    return voxels[i].weight > 0.0
+        && voxels[i + 1u].weight > 0.0
+        && voxels[i + 1u + sx].weight > 0.0
+        && voxels[i + sx].weight > 0.0
+        && voxels[i + sxy].weight > 0.0
+        && voxels[i + sxy + 1u].weight > 0.0
+        && voxels[i + sxy + 1u + sx].weight > 0.0
+        && voxels[i + sxy + sx].weight > 0.0;
+}
+
 @compute @workgroup_size(8, 8, 4)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let x = gid.x;
@@ -34,6 +52,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let voxel_idx = z * (params.vol_x - 1u) * (params.vol_y - 1u) + y * (params.vol_x - 1u) + x;
 
     if (x >= params.vol_x - 1u || y >= params.vol_y - 1u || z >= params.vol_z - 1u) {
+        return;
+    }
+
+    if (!cell_observed(x, y, z)) {
+        counts[voxel_idx] = 0u;
         return;
     }
 

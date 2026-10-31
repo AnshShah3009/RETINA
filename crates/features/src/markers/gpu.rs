@@ -417,7 +417,9 @@ impl MarkerGpuContext {
 
             compute_pass.set_pipeline(&self.pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
-            compute_pass.dispatch_workgroups(candidates.len() as u32, 1, 1);
+            // One workgroup per candidate; split past wgpu's 65535-per-axis limit.
+            let (wx, wy, wz) = cv_hal::gpu_kernels::dispatch_groups_1d(candidates.len() as u32);
+            compute_pass.dispatch_workgroups(wx, wy, wz);
         }
 
         // Copy results to staging buffer

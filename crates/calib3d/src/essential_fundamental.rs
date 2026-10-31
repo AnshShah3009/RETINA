@@ -60,15 +60,43 @@ use cv_core::{Ransac, RobustConfig, RobustModel};
 
 pub struct EssentialEstimator;
 
+/// Minimal samples are Nistér 5-point plus one point to choose among its up
+/// to ten roots - the minimal solver OpenCV's `findEssentialMat` uses. Larger
+/// sets (RANSAC's final consensus refit) use the linear 8-point fit.
+///
+/// The minimal sample used to be 8-point. With noise it is badly conditioned
+/// whenever the scene is close to a plane or the motion is mostly forward -
+/// ordinary for a camera moving into a room - and RANSAC then never found a
+/// good hypothesis: on a wall-dominated forward-motion scene (0.5 px noise,
+/// 20% outliers) it returned fewer than 5 inliers.
 impl RobustModel<(Point2<f64>, Point2<f64>)> for EssentialEstimator {
     type Model = Matrix3<f64>;
     fn min_sample_size(&self) -> usize {
-        8
+        6
     }
     fn estimate(&self, data: &[&(Point2<f64>, Point2<f64>)]) -> Option<Self::Model> {
-        let pts1: Vec<Point2<f64>> = data.iter().map(|p| p.0).collect();
-        let pts2: Vec<Point2<f64>> = data.iter().map(|p| p.1).collect();
-        estimate_essential_8_point(&pts1, &pts2).ok()
+        if data.len() >= 8 {
+            let pts1: Vec<Point2<f64>> = data.iter().map(|p| p.0).collect();
+            let pts2: Vec<Point2<f64>> = data.iter().map(|p| p.1).collect();
+            return estimate_essential_8_point(&pts1, &pts2).ok();
+        }
+        if data.len() < 5 {
+            return None;
+        }
+        let a: Vec<[f64; 2]> = data[..5].iter().map(|p| [p.0.x, p.0.y]).collect();
+        let b: Vec<[f64; 2]> = data[..5].iter().map(|p| [p.1.x, p.1.y]).collect();
+        let candidates = crate::essential::EssentialSolver::estimate_5point(&a, &b).ok()?;
+        // Pick the root that best explains every point in the sample (the
+        // sixth disambiguates; the first five fit every root exactly).
+        candidates
+            .into_iter()
+            .map(|e| {
+                let err: f64 = data.iter().map(|p| sampson_error(&e, &p.0, &p.1)).sum();
+                (e, err)
+            })
+            .filter(|(_, err)| err.is_finite())
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+            .map(|(e, _)| e)
     }
     fn compute_error(&self, model: &Self::Model, data: &(Point2<f64>, Point2<f64>)) -> f64 {
         sampson_error(model, &data.0, &data.1)
@@ -109,7 +137,8 @@ pub fn find_essential_mat_ransac(
     let config = RobustConfig {
         threshold: thresh_norm * thresh_norm,
         max_iterations: max_iters,
-        confidence: 0.99,
+        // OpenCV's findEssentialMat default.
+        confidence: 0.999,
     };
 
     let ransac = Ransac::new(config);
@@ -177,6 +206,28 @@ fn normalize_with_intrinsics(
 
 /// Estimate Essential matrix using the 8-point algorithm.
 ///
+/// Reject non-finite correspondences before they reach an SVD.
+///
+/// Both 8-point solvers build an `n x 9` design matrix and decompose it with
+/// `.svd(true, true)`, which does not return on non-finite input: nalgebra's
+/// bidiagonalisation decides convergence by comparison, and every comparison
+/// against NaN is false. Measured: `find_essential_mat` with one NaN
+/// correspondence among ten hangs indefinitely and has to be killed.
+///
+/// Checked in the shared solver rather than at each public entry point, so the
+/// RANSAC wrappers that reach these internals are covered too.
+fn require_finite_pairs(pts1: &[Point2<f64>], pts2: &[Point2<f64>]) -> Result<()> {
+    for (i, (a, b)) in pts1.iter().zip(pts2.iter()).enumerate() {
+        if [a.x, a.y, b.x, b.y].iter().any(|v| !v.is_finite()) {
+            return Err(cv_core::Error::InvalidInput(format!(
+                "correspondence {i} is not finite ({}, {}, {}, {})",
+                a.x, a.y, b.x, b.y
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Solves the linear system and applies rank-2 constraint enforcement
 /// (two equal singular values, third is zero).
 fn estimate_essential_8_point(pts1: &[Point2<f64>], pts2: &[Point2<f64>]) -> Result<Matrix3<f64>> {
@@ -185,6 +236,7 @@ fn estimate_essential_8_point(pts1: &[Point2<f64>], pts2: &[Point2<f64>]) -> Res
             "estimate_essential_8_point needs >=8 paired points".to_string(),
         ));
     }
+    require_finite_pairs(pts1, pts2)?;
 
     let n = pts1.len();
     let mut a = DMatrix::<f64>::zeros(n, 9);
@@ -204,21 +256,32 @@ fn estimate_essential_8_point(pts1: &[Point2<f64>], pts2: &[Point2<f64>]) -> Res
         a[(i, 8)] = 1.0;
     }
 
-    let svd = a.svd(true, true);
-    let vt = svd.v_t.ok_or_else(|| {
+    // Via the shared helper, not `v_t.row(v_t.nrows() - 1)` directly.
+    //
+    // nalgebra returns a *thin* `v_t` of shape `min(m, 9)`, so with exactly 8
+    // correspondences - the documented minimum, accepted by the guard above - the
+    // null vector the 8-point algorithm needs is row 8 and simply is not among
+    // the 8 rows returned. Row 7 is an arbitrary vector with a strictly positive
+    // `‖A v‖`, and `enforce_essential_constraints` then projects it onto the
+    // rank-2 manifold, producing a well-formed, plausible, wrong `E`.
+    //
+    // Measured on noise-free correspondences from a known relative pose, worst
+    // Sampson residual in pixels at f = 800:
+    //
+    //     n =  8: 21.71 px     <- the minimal sample, the only broken case
+    //     n =  9:  4.01e-12 px
+    //     n = 12:  1.50e-12 px
+    //     n = 16:  3.35e-13 px
+    //
+    // This matters beyond the direct call: `EssentialEstimator::min_sample_size()`
+    // is 8, and `find_essential_mat_ransac` drives it with `Ransac::run`, which
+    // samples exactly that many - so *every* minimal sample in RANSAC was drawn
+    // from a solver returning a wrong `E`.
+    let evec = crate::dlt::smallest_right_singular_vector(a).ok_or_else(|| {
         cv_core::Error::AlgorithmError("SVD failed in estimate_essential_8_point".to_string())
     })?;
-    let evec = vt.row(vt.nrows() - 1);
     let e = Matrix3::new(
-        evec[(0, 0)],
-        evec[(0, 1)],
-        evec[(0, 2)],
-        evec[(0, 3)],
-        evec[(0, 4)],
-        evec[(0, 5)],
-        evec[(0, 6)],
-        evec[(0, 7)],
-        evec[(0, 8)],
+        evec[0], evec[1], evec[2], evec[3], evec[4], evec[5], evec[6], evec[7], evec[8],
     );
     enforce_essential_constraints(&e)
 }
@@ -273,23 +336,6 @@ fn sampson_error(e: &Matrix3<f64>, p1: &Point2<f64>, p2: &Point2<f64>) -> f64 {
     } else {
         (x2tex1 * x2tex1) / denom
     }
-}
-
-/// Sample unique random indices for RANSAC.
-#[allow(dead_code)]
-fn sample_unique_indices(n: usize, k: usize, seed: u64) -> Vec<usize> {
-    let mut out = Vec::with_capacity(k);
-    let mut used = vec![false; n];
-    let mut state = seed ^ 0x9E3779B97F4A7C15;
-    while out.len() < k {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let idx = (state as usize) % n;
-        if !used[idx] {
-            used[idx] = true;
-            out.push(idx);
-        }
-    }
-    out
 }
 
 #[cfg(test)]

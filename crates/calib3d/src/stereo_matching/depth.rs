@@ -36,6 +36,22 @@ pub fn disparity_to_pointcloud(
     left_image: &image::GrayImage,
     params: &StereoParams,
 ) -> cv_core::Result<PointCloud> {
+    // The loop below indexes `left_image` with coordinates taken from
+    // `disparity`, so a mismatch between the two would walk `get_pixel` off the
+    // end of the image and panic. That mismatch is an ordinary caller mistake
+    // (a matcher and an image from different captures), so it is reported as an
+    // error instead. Validated up front, before any indexing happens.
+    if left_image.width() != disparity.width || left_image.height() != disparity.height {
+        return Err(Error::InvalidInput(format!(
+            "disparity map is {}x{} but the left image is {}x{}; \
+             they must have identical dimensions",
+            disparity.width,
+            disparity.height,
+            left_image.width(),
+            left_image.height()
+        )));
+    }
+
     let estimated_capacity = (disparity.width * disparity.height / 4) as usize;
     let mut points = Vec::with_capacity(estimated_capacity);
     let mut colors = Vec::with_capacity(estimated_capacity);
@@ -145,7 +161,26 @@ pub fn filter_pointcloud_by_depth(
 
 /// Compute depth statistics
 pub fn compute_depth_stats(depths: &[Option<f64>]) -> Option<(f64, f64, f64)> {
-    let valid_depths: Vec<f64> = depths.iter().filter_map(|&d| d).collect();
+    // **Non-finite depths must be dropped, not merely unwrapped.**
+    //
+    // `filter_map(|&d| d)` keeps `Some(NaN)` and `Some(inf)` because `Option` is
+    // populated - they are not `None`. Measured on `[Some(1.0), Some(NaN),
+    // Some(inf)]`, this returned:
+    //
+    //     Some((1.0, inf, NaN))
+    //
+    // A plausible-looking triple carrying NaN in the mean, and the failure is
+    // **silent in a way that is easy to miss**: `f64::min` and `f64::max` return
+    // the *non-NaN* operand, so `min` survives as a clean `1.0` while only the
+    // mean is destroyed. Every component looked plausible individually.
+    //
+    // A depth of NaN or infinity is not a measurement, so it is excluded on the
+    // same grounds as `None`.
+    let valid_depths: Vec<f64> = depths
+        .iter()
+        .filter_map(|&d| d)
+        .filter(|d| d.is_finite())
+        .collect();
 
     if valid_depths.is_empty() {
         return None;

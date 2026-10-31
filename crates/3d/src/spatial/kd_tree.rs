@@ -222,7 +222,10 @@ impl<T: Clone> KDTree<T> {
         if let Some(ref child) = first {
             Self::radius_recursive(child, query, radius_sq, results);
         }
-        if diff * diff < radius_sq {
+        // `<=`, matching the inclusive accept test: with `<` a point exactly
+        // on the sphere in the far subtree (e.g. a duplicate of a boundary
+        // point) was pruned while its twin in the near subtree was returned.
+        if diff * diff <= radius_sq {
             if let Some(ref child) = second {
                 Self::radius_recursive(child, query, radius_sq, results);
             }

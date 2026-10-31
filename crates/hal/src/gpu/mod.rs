@@ -115,7 +115,7 @@ impl GpuContext {
             "match_template" => include_str!("../../shaders/match_template.wgsl"),
             "stereo_match" => include_str!("../../shaders/stereo_match.wgsl"),
             "hough" => include_str!("../../shaders/hough.wgsl"),
-            "hough_f32" => include_str!("../../shaders/hough_f32.wgsl"),
+            "hough_f32" => include_str!("../../shaders/hough.wgsl"),
             "hough_circles" => include_str!("../../shaders/hough_circles.wgsl"),
             "subtract" => include_str!("../../shaders/subtract.wgsl"),
             "spmv" => include_str!("../../shaders/spmv.wgsl"),
@@ -244,8 +244,8 @@ impl GpuContext {
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            let x = (num_kps as u32).div_ceil(64);
-            pass.dispatch_workgroups(x, 1, 1);
+            let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_kps as u32, 64);
+            pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         }
         self.submit(encoder);
 

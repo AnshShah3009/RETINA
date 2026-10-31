@@ -73,12 +73,13 @@ fn get_pixel_lanczos_with_border(img: &GrayImage, x: f32, y: f32, border: Border
     let tx = x - x0 as f32;
     let ty = y - y0 as f32;
 
-    // 6 taps per axis: floor(c) - 2 ..= floor(c) + 3, normalized to unit sum.
-    let mut wx = [0.0f32; 6];
-    let mut wy = [0.0f32; 6];
-    for k in 0..6 {
-        wx[k] = lanczos_kernel(k as f32 - 2.0 - tx);
-        wy[k] = lanczos_kernel(k as f32 - 2.0 - ty);
+    // 8 taps per axis: floor(c) - 3 ..= floor(c) + 4 (the `INTER_LANCZOS4`
+    // window), normalized to unit sum.
+    let mut wx = [0.0f32; 8];
+    let mut wy = [0.0f32; 8];
+    for k in 0..8 {
+        wx[k] = lanczos_kernel(k as f32 - 3.0 - tx);
+        wy[k] = lanczos_kernel(k as f32 - 3.0 - ty);
     }
     let (sx, sy) = (wx.iter().sum::<f32>(), wy.iter().sum::<f32>());
     if sx != 0.0 {
@@ -95,7 +96,7 @@ fn get_pixel_lanczos_with_border(img: &GrayImage, x: f32, y: f32, border: Border
     let mut sum = 0.0;
     for (j, &wyj) in wy.iter().enumerate() {
         for (i, &wxi) in wx.iter().enumerate() {
-            sum += wxi * wyj * sample_pixel(img, x0 + i as isize - 2, y0 + j as isize - 2, border);
+            sum += wxi * wyj * sample_pixel(img, x0 + i as isize - 3, y0 + j as isize - 3, border);
         }
     }
     sum
@@ -191,14 +192,38 @@ pub fn warp_perspective_ex(
     interpolation: Interpolation,
     border: BorderMode,
 ) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback: use CPU registry if available
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     warp_perspective_ex_ctx(src, matrix, width, height, interpolation, border, &runner)
+}
+
+/// Output for a warp/remap whose source or destination is empty: an empty
+/// image for an empty destination, otherwise the destination filled with the
+/// border constant (every sample falls outside an empty source).
+fn degenerate_warp_output(
+    src: &GrayImage,
+    width: u32,
+    height: u32,
+    border: BorderMode,
+) -> Option<GrayImage> {
+    if width == 0 || height == 0 {
+        return Some(GrayImage::new(width, height));
+    }
+    if src.width() == 0 || src.height() == 0 {
+        let fill = match border {
+            BorderMode::Constant(v) => v,
+            _ => 0,
+        };
+        return Some(GrayImage::from_pixel(width, height, image::Luma([fill])));
+    }
+    None
 }
 
 pub fn warp_perspective_ex_ctx(
@@ -215,6 +240,9 @@ pub fn warp_perspective_ex_ctx(
     // the caller's matrix once here. `warp_affine_ex_ctx` delegates to this
     // function and therefore passes its forward matrix uninverted.
     let inv = matrix.try_inverse().unwrap_or(*matrix);
+    if let Some(out) = degenerate_warp_output(src, width, height, border) {
+        return out;
+    }
 
     // Check for GPU acceleration
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
@@ -243,7 +271,7 @@ pub fn warp_perspective_ex_ctx(
                 let pt = Point2::new(x as f32, y as f32);
                 let src_pt = transform_point(&inv, &pt);
                 let val = interpolate_sample(src, src_pt.x, src_pt.y, interpolation, border);
-                row[x as usize] = val.clamp(0.0, 255.0) as u8;
+                row[x as usize] = val.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });
 
@@ -290,7 +318,7 @@ fn warp_gpu(
         .as_slice()
         .unwrap()
         .iter()
-        .map(|&v| v.clamp(0.0, 255.0) as u8)
+        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
 
     GrayImage::from_raw(width, height, res_data)
@@ -319,13 +347,15 @@ pub fn warp_affine(
     width: u32,
     height: u32,
 ) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback: use CPU registry if available
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     warp_affine_ctx(src, matrix_2x3, width, height, &runner)
 }
 
@@ -355,13 +385,15 @@ pub fn warp_affine_ex(
     interpolation: Interpolation,
     border: BorderMode,
 ) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        // Fallback: use CPU registry if available
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            // Fallback: use CPU registry if available
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     warp_affine_ex_ctx(
         src,
         matrix_2x3,
@@ -427,12 +459,14 @@ pub fn remap_ex(
     interpolation: Interpolation,
     border: BorderMode,
 ) -> GrayImage {
-    let runner = cv_runtime::best_runner().unwrap_or_else(|_| {
-        cv_runtime::registry()
-            .ok()
-            .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
-            .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
-    });
+    let runner = cv_runtime::best_runner()
+        .map(|(r, _)| r)
+        .unwrap_or_else(|_| {
+            cv_runtime::registry()
+                .ok()
+                .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
+                .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
+        });
     remap_ex_ctx(
         src,
         map_x,
@@ -467,6 +501,9 @@ pub fn remap_ex_ctx(
         (width * height) as usize,
         "map_y size must equal width*height"
     );
+    if let Some(out) = degenerate_warp_output(src, width, height, border) {
+        return out;
+    }
 
     // Check for GPU acceleration
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
@@ -488,7 +525,7 @@ pub fn remap_ex_ctx(
                 let sx = map_x[idx];
                 let sy = map_y[idx];
                 let val = interpolate_sample(src, sx, sy, interpolation, border);
-                row[x as usize] = val.clamp(0.0, 255.0) as u8;
+                row[x as usize] = val.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });
 
@@ -558,7 +595,7 @@ fn remap_gpu(
         .as_slice()
         .ok_or_else(|| cv_hal::Error::MemoryError("Failed to get CPU slice".into()))?
         .iter()
-        .map(|v: &f32| v.clamp(0.0, 255.0) as u8)
+        .map(|v: &f32| v.round_ties_even().clamp(0.0, 255.0) as u8)
         .collect();
 
     GrayImage::from_raw(width, height, res_data)
@@ -584,6 +621,9 @@ pub fn remap(
         (width * height) as usize,
         "map_y size must equal width*height"
     );
+    if let Some(out) = degenerate_warp_output(src, width, height, border) {
+        return out;
+    }
 
     let mut dst = GrayImage::new(width, height);
 
@@ -597,7 +637,7 @@ pub fn remap(
                 let sx = map_x[idx];
                 let sy = map_y[idx];
                 let val = interpolate_sample(src, sx, sy, interpolation, border);
-                row[x as usize] = val.clamp(0.0, 255.0) as u8;
+                row[x as usize] = val.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });
 
@@ -797,7 +837,9 @@ mod tests {
         let cubic = sample(Interpolation::Cubic);
         let lanczos = sample(Interpolation::Lanczos);
 
-        assert_eq!(linear.get_pixel(1, 0)[0], 127);
+        // The linear sample at x = 1.5 lands on 127.5; quantisation rounds to
+        // nearest (ties-even, `cvRound` semantics) rather than truncating.
+        assert_eq!(linear.get_pixel(1, 0)[0], 128);
         assert_ne!(cubic.get_pixel(1, 0)[0], linear.get_pixel(1, 0)[0]);
         assert_ne!(lanczos.get_pixel(1, 0)[0], linear.get_pixel(1, 0)[0]);
         // Cubic and Lanczos are interpolating kernels with different support.

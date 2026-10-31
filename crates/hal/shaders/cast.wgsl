@@ -8,8 +8,14 @@
 @group(0) @binding(3) var<storage, read_write> output_u8: array<u32>;
 
 @compute @workgroup_size(256)
-fn u8_to_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+fn u8_to_f32(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let idx = gid.x + gid.y * num_wg.x * 256u;
     let num_pixels = arrayLength(&output_f32);
     if (idx >= num_pixels) {
         return;
@@ -23,8 +29,14 @@ fn u8_to_f32(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 @compute @workgroup_size(256)
-fn f32_to_u8(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x; // Word index (4 pixels)
+fn f32_to_u8(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // 1-D range dispatched as a 2-D grid so no axis exceeds 65535
+    // workgroups (see gpu_kernels::dispatch_1d); surplus tail invocations
+    // fall out at the bounds check below.
+    let idx = gid.x + gid.y * num_wg.x * 256u; // Word index (4 pixels)
     let num_words = arrayLength(&output_u8);
     let num_pixels = arrayLength(&input_f32);
     

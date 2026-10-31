@@ -13,9 +13,22 @@ var<workgroup> shared_min: array<vec3<f32>, 256>;
 var<workgroup> shared_max: array<vec3<f32>, 256>;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>, @builtin(workgroup_id) group_id: vec3<u32>) {
-    let gid = global_id.x;
+fn main(
+    @builtin(local_invocation_id) local_id: vec3<u32>,
+    @builtin(workgroup_id) group_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // Workgroups are spread over a 2-D grid so neither axis exceeds 65535
+    // (see gpu_kernels::dispatch_groups_1d). Surplus tail workgroups own no
+    // points and must not write a partial: the slot past the last real one
+    // is out of bounds. The test is workgroup-uniform, so returning before
+    // the barriers is allowed.
+    let wg = group_id.x + group_id.y * num_wg.x;
+    if (wg * 256u >= num_points) {
+        return;
+    }
     let tid = local_id.x;
+    let gid = wg * 256u + tid;
     
     var local_min = vec3<f32>(1e20);
     var local_max = vec3<f32>(-1e20);
@@ -39,7 +52,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(local_invo
     }
 
     if (tid == 0u) {
-        partial_bounds[group_id.x].min_pt = vec4<f32>(shared_min[0], 0.0);
-        partial_bounds[group_id.x].max_pt = vec4<f32>(shared_max[0], 0.0);
+        partial_bounds[wg].min_pt = vec4<f32>(shared_min[0], 0.0);
+        partial_bounds[wg].max_pt = vec4<f32>(shared_max[0], 0.0);
     }
 }

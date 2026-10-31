@@ -12,7 +12,7 @@ fn main() {
     println!("--- Numerical Integration ---");
 
     // Integrate x^2 from 0 to 1 (should be 1/3 ≈ 0.333)
-    let result = integrate::quad(|x| x * x, 0.0, 1.0);
+    let result = integrate::quad(|x| x * x, 0.0, 1.0).expect("x^2 is integrable");
     println!("∫x² dx from 0 to 1 = {:.6}", result.0);
     println!(
         "  Expected: 0.333333, Error: {:.6}",
@@ -20,7 +20,8 @@ fn main() {
     );
 
     // Integrate sin(x) from 0 to π (should be 2)
-    let result = integrate::quad(|x| x.sin(), 0.0, std::f64::consts::PI);
+    let result =
+        integrate::quad(|x| x.sin(), 0.0, std::f64::consts::PI).expect("sin is integrable");
     println!("∫sin(x) dx from 0 to π = {:.6}", result.0);
     println!("  Expected: 2.0, Error: {:.6}", (result.0 - 2.0).abs());
 

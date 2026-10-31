@@ -74,35 +74,6 @@ fn copy_to_gpu(ctx: &GpuContext, tensor: &Tensor<f32, CpuStorage<f32>>) -> GpuTe
     }
 }
 
-fn read_from_gpu(ctx: &GpuContext, gpu_tensor: &GpuTensor<f32>) -> Vec<f32> {
-    let buffer = gpu_tensor.storage.buffer();
-    let byte_size = (gpu_tensor.storage.len * std::mem::size_of::<f32>()) as u64;
-
-    let read_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Perf Read Buffer"),
-        size: byte_size,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-
-    let mut encoder = ctx
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    encoder.copy_buffer_to_buffer(&buffer, 0, &read_buffer, 0, byte_size);
-    ctx.queue.submit(std::iter::once(encoder.finish()));
-
-    pollster::block_on(async {
-        let slice = read_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |res| {
-            tx.send(res).ok();
-        });
-        rx.recv().unwrap().unwrap();
-        let data = slice.get_mapped_range();
-        bytemuck::cast_slice(&data).to_vec()
-    })
-}
-
 fn time_fn<F, R>(name: &str, f: F) -> Duration
 where
     F: FnOnce() -> R,
@@ -112,17 +83,6 @@ where
     let elapsed = start.elapsed();
     println!("  {}: {:?}", name, elapsed);
     elapsed
-}
-
-fn time_fn_with_result<F, R>(name: &str, f: F) -> (Duration, R)
-where
-    F: FnOnce() -> R,
-{
-    let start = Instant::now();
-    let result = f();
-    let elapsed = start.elapsed();
-    println!("  {}: {:?}", name, elapsed);
-    (elapsed, result)
 }
 
 mod resize_perf {

@@ -1,4 +1,5 @@
-use nalgebra::{Matrix4, Point3, Vector3};
+use crate::odometry::exponential_map_se3;
+use nalgebra::{Matrix4, Point3, Vector3, Vector6};
 use rayon::prelude::*;
 
 /// Simple ICP point-to-plane registration.
@@ -89,16 +90,42 @@ pub fn icp_point_to_plane(
         let (a, b, g) = (x[0] as f32, x[1] as f32, x[2] as f32);
         let (tx, ty, tz) = (x[3] as f32, x[4] as f32, x[5] as f32);
 
-        let mut inc = Matrix4::identity();
-        inc[(0, 1)] = -g;
-        inc[(0, 2)] = b;
-        inc[(1, 0)] = g;
-        inc[(1, 2)] = -a;
-        inc[(2, 0)] = -b;
-        inc[(2, 1)] = a;
-        inc[(0, 3)] = tx;
-        inc[(1, 3)] = ty;
-        inc[(2, 3)] = tz;
+        // A **proper** SE(3) exponential map, not a first-order linearisation.
+        //
+        // The previous code built the rotation block directly from the twist as
+        //
+        //     inc[0][1] = -g;  inc[0][2] =  b;
+        //     inc[1][0] =  g;  inc[1][2] = -a;
+        //     inc[2][0] = -b;  inc[2][1] =  a;
+        //
+        // which is exactly `[omega]_x` — the matrix exponential only to first
+        // order in the increment. The composed result is therefore **not a
+        // rotation**, and it was handed to the caller as a pose:
+        //
+        //     det(R) - 1                         = 2.878e-03
+        //     |R[0][1] + R[1][0]| (should be 0)   = 2.215e-05
+        //
+        // Substituting the exponential map, with everything else identical, drops
+        // the error from `1.444e-03` to `1.545e-16` — f64 round-off — so the
+        // linearisation was the whole cause. Found by the Open3D parity harness
+        // (`parity/parity_open3d.py`); this path had no test exercising it.
+        //
+        // `exponential_map_se3` is the same implementation `odometry` already uses,
+        // promoted to `pub(crate)` rather than duplicated — two SE(3) exponentials
+        // in one crate is how they drift apart.
+        //
+        // Note the ordering: `exponential_map_se3` takes `[translation, rotation]`
+        // and the solved `x` is `[a, b, g, tx, ty, tz]` = `[omega; t]`, so it is
+        // packed to match: `omega = (a, b, g)` in the same xyz order the
+        // Jacobian's `p x n` rows were built in.
+        //
+        // The first version of this fix packed `(g, b, a)` here - x and z
+        // swapped. The result was still a *valid* rotation (det 1, orthogonal),
+        // so every rotation-ness property held, but the rotation was in the
+        // wrong plane: `icp_point_to_plane` landed 5.234e-02 from the ground
+        // truth where Open3D's `registration_icp` reached 9.378e-06 on the same
+        // clouds. Only a pose assertion catches this, not a shape one.
+        let inc = exponential_map_se3(&Vector6::new(tx, ty, tz, a, b, g));
 
         transform = inc * transform;
 

@@ -110,9 +110,26 @@ impl Polygon {
 
     /// Basic validity check: at least 3 distinct vertices and no self-intersection
     /// of the exterior ring.
+    ///
+    /// Closure-independent, like [`Polygon::area`]: an exterior ring with three
+    /// distinct vertices is the same triangle whether or not it carries the
+    /// repeated closing vertex, so both forms are judged identically.
+    /// [`Polygon::area`] follows.
+    ///
+    /// A ring of three or more vertices that encloses no area (three or more
+    /// collinear vertices) is *not* valid: it has three distinct vertices but
+    /// every angle in it is zero or straight, which cannot bound a region. The
+    /// count alone reported it as valid - a zero-area ring is not a polygon.
+    /// (GEOS agrees: `Polygon([(0,0),(1,0),(2,0),(3,0)]).is_valid` is `False`.)
     pub fn is_valid(&self) -> bool {
-        if self.exterior.len() < 4 {
-            // Need at least 3 distinct + closing vertex
+        if self.exterior.len() < 3 {
+            return false;
+        }
+        // Zero area means every vertex is collinear with the first two
+        // distinct ones; decided with the exact orientation sign. Comparing
+        // the (length²) area against an absolute EPS called every ring
+        // smaller than ~1e-5 on a side degenerate.
+        if !ring_has_turn(&self.exterior) {
             return false;
         }
         !ring_self_intersects(&self.exterior)
@@ -147,11 +164,30 @@ fn ring_signed_area(ring: &[Point2D]) -> f64 {
     sum * 0.5
 }
 
+/// Whether a ring has three vertices that are not collinear (exact test).
+fn ring_has_turn(ring: &[Point2D]) -> bool {
+    let a = &ring[0];
+    let Some(b) = ring.iter().find(|p| *p != a) else {
+        return false;
+    };
+    ring.iter().any(|c| cross2d(a, b, c) != 0.0)
+}
+
 fn ring_perimeter(ring: &[Point2D]) -> f64 {
     if ring.len() < 2 {
         return 0.0;
     }
-    ring.windows(2).map(|w| w[0].distance(&w[1])).sum()
+    let mut total: f64 = ring.windows(2).map(|w| w[0].distance(&w[1])).sum();
+    // A ring that is not explicitly closed still has a closing edge. Every
+    // other ring helper wraps (`ring_signed_area` uses `(i + 1) % n`,
+    // `close_ring` appends the first point), so without this the same ring
+    // reported its full area but a perimeter short by one edge — e.g. a unit
+    // square with an open ring measured 3.0 instead of 4.0.
+    let (first, last) = (&ring[0], ring.last().unwrap());
+    if (first.x - last.x).abs() > EPS || (first.y - last.y).abs() > EPS {
+        total += first.distance(last);
+    }
+    total
 }
 
 fn ring_centroid(ring: &[Point2D]) -> Point2D {
@@ -230,17 +266,25 @@ fn ring_self_intersects(ring: &[Point2D]) -> bool {
 
 // ─── Low-level geometry helpers ──────────────────────────────────────────────
 
-/// 2D cross product of vectors (b-a) x (c-a).
+/// 2D cross product of vectors (b-a) x (c-a), with an exact sign.
+///
+/// Shewchuk's adaptive `orient2d`: the magnitude is the usual cross product
+/// (to rounding), the sign is exact. Every caller only uses the sign, so the
+/// result does not depend on the units of the coordinates - an absolute
+/// `EPS` on this length² quantity used to drop hull vertices once the input
+/// was scaled by 1e-3 and collapse the hull at 1e-5.
 fn cross2d(a: &Point2D, b: &Point2D, c: &Point2D) -> f64 {
-    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+    robust::orient2d(coord(a), coord(b), coord(c))
 }
 
-/// Whether point p lies on segment (a, b).
+fn coord(p: &Point2D) -> robust::Coord<f64> {
+    robust::Coord { x: p.x, y: p.y }
+}
+
+/// Whether point p, already known to be collinear with (a, b), lies on the
+/// closed segment (a, b).
 fn on_segment(a: &Point2D, p: &Point2D, b: &Point2D) -> bool {
-    p.x <= a.x.max(b.x) + EPS
-        && p.x >= a.x.min(b.x) - EPS
-        && p.y <= a.y.max(b.y) + EPS
-        && p.y >= a.y.min(b.y) - EPS
+    p.x <= a.x.max(b.x) && p.x >= a.x.min(b.x) && p.y <= a.y.max(b.y) && p.y >= a.y.min(b.y)
 }
 
 /// Properly-intersecting segments (excludes shared endpoints / collinear overlaps).
@@ -250,8 +294,8 @@ fn segments_intersect_proper(a1: &Point2D, a2: &Point2D, b1: &Point2D, b2: &Poin
     let d3 = cross2d(a1, a2, b1);
     let d4 = cross2d(a1, a2, b2);
 
-    if ((d1 > EPS && d2 < -EPS) || (d1 < -EPS && d2 > EPS))
-        && ((d3 > EPS && d4 < -EPS) || (d3 < -EPS && d4 > EPS))
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
     {
         return true;
     }
@@ -267,23 +311,30 @@ pub fn segments_intersect(a1: &Point2D, a2: &Point2D, b1: &Point2D, b2: &Point2D
     let d3 = cross2d(a1, a2, b1);
     let d4 = cross2d(a1, a2, b2);
 
-    if ((d1 > EPS && d2 < -EPS) || (d1 < -EPS && d2 > EPS))
-        && ((d3 > EPS && d4 < -EPS) || (d3 < -EPS && d4 > EPS))
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
     {
         return true;
     }
 
-    // Collinear / touching cases
-    if d1.abs() <= EPS && on_segment(a1, b1, a2) {
+    // Collinear / touching cases. Each `d` says which segment's *line* the
+    // other segment's endpoint lies on, so the bounding-box test must be run
+    // against that line's own segment: `d1 == 0` means `a1` is on the line
+    // through `b`, so it is on segment `b` exactly when it falls inside `b`'s
+    // bounding box. The arguments used to be crossed (`d1` tested against
+    // `a`'s box and `d3` against `b`'s box), which reported
+    // `(0,0)-(6,3)` vs `(5,0)-(10,0)` as intersecting and missed both shared
+    // endpoints and T-touches.
+    if d1 == 0.0 && on_segment(b1, a1, b2) {
         return true;
     }
-    if d2.abs() <= EPS && on_segment(a1, b2, a2) {
+    if d2 == 0.0 && on_segment(b1, a2, b2) {
         return true;
     }
-    if d3.abs() <= EPS && on_segment(b1, a1, b2) {
+    if d3 == 0.0 && on_segment(a1, b1, a2) {
         return true;
     }
-    if d4.abs() <= EPS && on_segment(b1, a2, b2) {
+    if d4 == 0.0 && on_segment(a1, b2, a2) {
         return true;
     }
     false
@@ -353,6 +404,17 @@ fn point_in_ring(point: &Point2D, ring: &[Point2D]) -> bool {
 }
 
 /// Whether any edges of the two polygons cross, or one contains the other.
+///
+/// Edge pairs come from [`ring_edges`], which closes an *open* ring: `0..len-1`
+/// skips the edge between the last and the first vertex, so a ring written
+/// without its repeated closing vertex - a form this crate accepts everywhere,
+/// since `area` and `perimeter` both close it - had that edge missing from the
+/// sweep. Only then could the containment fallbacks decide the answer, and they
+/// inspect a single vertex each: measured on an open 4x4 square against a
+/// triangle meeting it exactly across the omitted edge, the two polygons
+/// returned `false` here while the closed forms returned `true` (and the two
+/// reported intersection areas differed). GEOS: `Polygon([(0,0),(4,0),(4,4),(0,4)])
+/// .intersects(Polygon([(-1,1),(-1,3),(0,2)]))` is `True`.
 pub fn polygons_intersect(a: &Polygon, b: &Polygon) -> bool {
     // Quick AABB rejection
     let ba = a.bbox();
@@ -361,12 +423,21 @@ pub fn polygons_intersect(a: &Polygon, b: &Polygon) -> bool {
         return false;
     }
 
-    // Edge-edge intersection
-    let ea = &a.exterior;
-    let eb = &b.exterior;
-    for i in 0..ea.len().saturating_sub(1) {
-        for j in 0..eb.len().saturating_sub(1) {
-            if segments_intersect(&ea[i], &ea[i + 1], &eb[j], &eb[j + 1]) {
+    // Edge-edge intersection, over every edge of both rings (holes included).
+    // Pairs are formed across the two polygons only: a polygon's own adjacent
+    // edges share an endpoint, and `segments_intersect` counts touching, so
+    // pairing a ring with itself reports every polygon as self-intersecting.
+    let a_edges: Vec<(&Point2D, &Point2D)> = ring_edges(&a.exterior)
+        .into_iter()
+        .chain(a.holes.iter().flat_map(|h| ring_edges(h)))
+        .collect();
+    let b_edges: Vec<(&Point2D, &Point2D)> = ring_edges(&b.exterior)
+        .into_iter()
+        .chain(b.holes.iter().flat_map(|h| ring_edges(h)))
+        .collect();
+    for (p, q) in &a_edges {
+        for (c, d) in &b_edges {
+            if segments_intersect(p, q, c, d) {
                 return true;
             }
         }
@@ -383,13 +454,87 @@ pub fn polygons_intersect(a: &Polygon, b: &Polygon) -> bool {
 }
 
 /// Whether `outer` completely contains `inner`.
+///
+/// A vertices-only test is not a containment test: a polygon whose vertices are
+/// all inside can still bulge out through a concavity, and it can also swallow a
+/// hole of `outer` — both measured before this was fixed (an 8x8 ring covering a
+/// 4x4 hole was reported contained). So, in addition to the vertex test, no edge
+/// of `inner` may *properly* cross `outer`'s boundary (touching is allowed) and
+/// no hole of `outer` may lie inside `inner`.
+///
+/// There is nothing to contain when `inner` has no vertices: with the loop
+/// below vacuously satisfied, an *empty* ring was reported as contained by any
+/// polygon (and by itself). Containment of nothing is not true.
 pub fn polygon_contains_polygon(outer: &Polygon, inner: &Polygon) -> bool {
+    if inner.exterior.is_empty() {
+        return false;
+    }
     for p in &inner.exterior {
-        if !point_in_polygon(p, outer) {
+        if !point_in_polygon(p, outer) && !point_on_boundary(p, outer) {
             return false;
         }
     }
+    let outer_edges: Vec<(&Point2D, &Point2D)> = ring_edges(&outer.exterior)
+        .into_iter()
+        .chain(outer.holes.iter().flat_map(|h| ring_edges(h)))
+        .collect();
+    for (a, b) in ring_edges(&inner.exterior) {
+        for (c, d) in &outer_edges {
+            if segments_intersect_proper(a, b, c, d) {
+                return false;
+            }
+        }
+    }
+    for hole in &outer.holes {
+        if let Some(h) = hole.first() {
+            if point_in_polygon(h, inner) {
+                return false;
+            }
+        }
+    }
     true
+}
+
+/// The edges of a ring, whether or not it is explicitly closed (first == last).
+fn ring_edges(ring: &[Point2D]) -> Vec<(&Point2D, &Point2D)> {
+    let n = ring.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let open = if (ring[0].x - ring[n - 1].x).abs() < EPS && (ring[0].y - ring[n - 1].y).abs() < EPS
+    {
+        n - 1
+    } else {
+        n
+    };
+    if open < 2 {
+        return Vec::new();
+    }
+    (0..open)
+        .map(|i| (&ring[i], &ring[(i + 1) % open]))
+        .collect()
+}
+
+/// Distance from `p` to the segment `(a, b)`.
+fn distance_to_segment(p: &Point2D, a: &Point2D, b: &Point2D) -> f64 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < EPS * EPS {
+        return p.distance(a);
+    }
+    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len_sq).clamp(0.0, 1.0);
+    p.distance(&Point2D::new(a.x + t * dx, a.y + t * dy))
+}
+
+/// Whether `p` lies exactly on the boundary of `poly` (exterior or a hole).
+fn point_on_boundary(p: &Point2D, poly: &Polygon) -> bool {
+    let on = |ring: &[Point2D]| {
+        ring_edges(ring)
+            .iter()
+            .any(|(a, b)| distance_to_segment(p, a, b) <= EPS)
+    };
+    on(&poly.exterior) || poly.holes.iter().any(|h| on(h))
 }
 
 // ─── Boolean Operations ──────────────────────────────────────────────────────
@@ -527,14 +672,24 @@ pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
 }
 
 /// Convex hull using Andrew's monotone chain algorithm.  O(n log n).
+///
+/// Non-finite points are dropped. A NaN coordinate has no position, so it cannot
+/// be inside or outside any hull; including one made the cross-product test below
+/// compare against NaN, and every such comparison is false, so the hull silently
+/// gained or dropped a vertex depending on the input order. Measured on eight
+/// points where one carried a NaN x: the hull came back with nine vertices,
+/// more than the seven for the same input without it.
 pub fn convex_hull(points: &[Point2D]) -> Polygon {
-    let mut pts: Vec<Point2D> = points.to_vec();
-    pts.sort_by(|a, b| {
-        a.x.partial_cmp(&b.x)
-            .unwrap()
-            .then(a.y.partial_cmp(&b.y).unwrap())
-    });
-    pts.dedup_by(|a, b| (a.x - b.x).abs() < EPS && (a.y - b.y).abs() < EPS);
+    let mut pts: Vec<Point2D> = points
+        .iter()
+        .cloned()
+        .filter(|p: &Point2D| p.x.is_finite() && p.y.is_finite())
+        .collect();
+    // `total_cmp` rather than `partial_cmp(..).unwrap()`: it orders every bit
+    // pattern, so this line cannot panic even if a non-finite value is ever
+    // reintroduced upstream. Before the fix, one NaN coordinate panicked here.
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    pts.dedup_by(|a, b| a.x == b.x && a.y == b.y);
 
     let n = pts.len();
     if n == 0 {
@@ -552,7 +707,7 @@ pub fn convex_hull(points: &[Point2D]) -> Polygon {
     let mut lower = Vec::new();
     for p in &pts {
         while lower.len() >= 2
-            && cross2d(&lower[lower.len() - 2], &lower[lower.len() - 1], p) <= EPS
+            && cross2d(&lower[lower.len() - 2], &lower[lower.len() - 1], p) <= 0.0
         {
             lower.pop();
         }
@@ -562,7 +717,7 @@ pub fn convex_hull(points: &[Point2D]) -> Polygon {
     let mut upper = Vec::new();
     for p in pts.iter().rev() {
         while upper.len() >= 2
-            && cross2d(&upper[upper.len() - 2], &upper[upper.len() - 1], p) <= EPS
+            && cross2d(&upper[upper.len() - 2], &upper[upper.len() - 1], p) <= 0.0
         {
             upper.pop();
         }
@@ -683,11 +838,20 @@ pub fn buffer_polygon(polygon: &Polygon, distance: f64, segments: usize) -> Poly
 }
 
 /// Douglas-Peucker line simplification.
+///
+/// `tolerance` is a length, so it must be non-negative; a negative one is
+/// clamped to `0.0` (keep only the points that lie exactly on the line through
+/// the first and the last). Left unchecked it was an unbounded recursion: the
+/// loop below starts at index 1, and with a negative tolerance even a fully
+/// collinear input satisfies `max_dist > tolerance` at the initial index 0, so
+/// the split returned the whole slice and the next level recursed forever -
+/// measured as `fatal runtime error: stack overflow` and a SIGABRT, not a
+/// catchable unwind.
 pub fn simplify(coords: &[Point2D], tolerance: f64) -> Vec<Point2D> {
     if coords.len() <= 2 {
         return coords.to_vec();
     }
-    dp_simplify(coords, tolerance)
+    dp_simplify(coords, tolerance.max(0.0))
 }
 
 #[allow(clippy::needless_range_loop)]
@@ -725,139 +889,130 @@ fn dp_simplify(coords: &[Point2D], tolerance: f64) -> Vec<Point2D> {
 fn perpendicular_distance(p: &Point2D, a: &Point2D, b: &Point2D) -> f64 {
     let dx = b.x - a.x;
     let dy = b.y - a.y;
-    let len_sq = dx * dx + dy * dy;
-    if len_sq < EPS {
+    // Only an exactly zero-length chord has no direction. Comparing the
+    // squared length against an absolute 1e-10 made every chord shorter than
+    // 1e-5 measure the distance to its start point instead.
+    let len = dx.hypot(dy);
+    if len == 0.0 {
         return p.distance(a);
     }
-    ((dy * p.x - dx * p.y + b.x * a.y - b.y * a.x).abs()) / len_sq.sqrt()
+    // Relative to `a`, so a chord far from the origin does not cancel.
+    (dy * (p.x - a.x) - dx * (p.y - a.y)).abs() / len
 }
 
 /// Bowyer-Watson incremental Delaunay triangulation.
 ///
 /// Returns a list of triangles, each represented as three indices into the input
-/// `points` slice.
+/// `points` slice, in counter-clockwise order. The triangles tile the convex
+/// hull of the input exactly: for `n` points in general position with `h` on the
+/// hull there are `2n - h - 2` of them, as from `scipy.spatial.Delaunay`.
+///
+/// Non-finite points and exact duplicates are skipped (their indices appear in
+/// no triangle). Fewer than three distinct non-collinear points give an empty
+/// result. Co-circular points (e.g. the four corners of a square) are split by
+/// whichever diagonal the insertion order produces.
+///
+/// The predicates are Shewchuk's adaptive exact `orient2d` / `incircle`, so the
+/// result does not depend on the scale or offset of the coordinates. Hull edges
+/// are closed off by "ghost" triangles through a vertex at infinity rather than
+/// by a finite super-triangle. The old version compared the length⁴ in-circle
+/// determinant against an absolute `1e-10` and used a `20 x` super-triangle:
+/// 40 random points gave 2 triangles at scale 1e-3, none at 1e-5, and even at
+/// unit scale lost hull triangles to the super-triangle's vertices.
 pub fn delaunay_triangulation(points: &[Point2D]) -> Vec<[usize; 3]> {
-    let n = points.len();
-    if n < 3 {
+    const GHOST: usize = usize::MAX;
+
+    let finite: Vec<usize> = (0..points.len())
+        .filter(|&i| points[i].x.is_finite() && points[i].y.is_finite())
+        .collect();
+    if finite.len() < 3 {
         return vec![];
     }
 
-    // Compute bounding box and create super-triangle
-    let (min_x, min_y, max_x, max_y) = {
-        let mut mnx = f64::INFINITY;
-        let mut mny = f64::INFINITY;
-        let mut mxx = f64::NEG_INFINITY;
-        let mut mxy = f64::NEG_INFINITY;
-        for p in points {
-            if p.x < mnx {
-                mnx = p.x;
-            }
-            if p.y < mny {
-                mny = p.y;
-            }
-            if p.x > mxx {
-                mxx = p.x;
-            }
-            if p.y > mxy {
-                mxy = p.y;
-            }
+    // Seed triangle: the first point, the first point different from it, and
+    // the first point not collinear with both.
+    let i0 = finite[0];
+    let Some(&i1) = finite.iter().find(|&&i| points[i] != points[i0]) else {
+        return vec![];
+    };
+    let Some(&i2) = finite
+        .iter()
+        .find(|&&i| cross2d(&points[i0], &points[i1], &points[i]) != 0.0)
+    else {
+        return vec![];
+    };
+    let (a, b) = if cross2d(&points[i0], &points[i1], &points[i2]) > 0.0 {
+        (i1, i2)
+    } else {
+        (i2, i1)
+    };
+    // Solid triangles are counter-clockwise. A ghost triangle `[u, v, GHOST]`
+    // stands for the hull edge `u -> v` seen from outside: the outside of the
+    // hull is to the left of `u -> v`.
+    let mut triangles: Vec<[usize; 3]> =
+        vec![[i0, a, b], [a, i0, GHOST], [b, a, GHOST], [i0, b, GHOST]];
+
+    let conflicts = |tri: &[usize; 3], p: &Point2D| -> bool {
+        if tri[2] == GHOST {
+            let (u, v) = (&points[tri[0]], &points[tri[1]]);
+            let o = cross2d(u, v, p);
+            // The circumcircle of a ghost triangle is the open half-plane
+            // outside its edge plus the open edge itself.
+            o > 0.0 || (o == 0.0 && on_segment(u, p, v) && p != u && p != v)
+        } else {
+            let (a, b, c) = (&points[tri[0]], &points[tri[1]], &points[tri[2]]);
+            robust::incircle(coord(a), coord(b), coord(c), coord(p)) > 0.0
         }
-        (mnx, mny, mxx, mxy)
     };
 
-    let dx = max_x - min_x;
-    let dy = max_y - min_y;
-    let d_max = dx.max(dy);
-    let mid_x = (min_x + max_x) * 0.5;
-    let mid_y = (min_y + max_y) * 0.5;
-
-    // Super-triangle vertices (indices n, n+1, n+2)
-    let st0 = Point2D::new(mid_x - 20.0 * d_max, mid_y - d_max);
-    let st1 = Point2D::new(mid_x, mid_y + 20.0 * d_max);
-    let st2 = Point2D::new(mid_x + 20.0 * d_max, mid_y - d_max);
-
-    let mut all_pts: Vec<Point2D> = points.to_vec();
-    all_pts.push(st0);
-    all_pts.push(st1);
-    all_pts.push(st2);
-
-    // Each triangle stores 3 vertex indices
-    let mut triangles: Vec<[usize; 3]> = vec![[n, n + 1, n + 2]];
-
-    // Insert each point
-    for i in 0..n {
-        let p = &all_pts[i];
-        let mut bad_triangles = Vec::new();
-
-        for (ti, tri) in triangles.iter().enumerate() {
-            if in_circumcircle(p, &all_pts[tri[0]], &all_pts[tri[1]], &all_pts[tri[2]]) {
-                bad_triangles.push(ti);
-            }
+    for &i in &finite {
+        if i == i0 || i == a || i == b {
+            continue;
+        }
+        let p = &points[i];
+        let bad: Vec<usize> = (0..triangles.len())
+            .filter(|&ti| conflicts(&triangles[ti], p))
+            .collect();
+        // A duplicate of an existing vertex lies strictly inside no
+        // circumcircle and on no open hull edge: nothing to do.
+        if bad.is_empty() {
+            continue;
         }
 
-        // Find boundary polygon of the bad triangles
         let mut boundary = Vec::new();
-        for &ti in &bad_triangles {
-            let tri = &triangles[ti];
-            for edge_idx in 0..3 {
-                let e0 = tri[edge_idx];
-                let e1 = tri[(edge_idx + 1) % 3];
-                let mut shared = false;
-                for &tj in &bad_triangles {
-                    if tj == ti {
-                        continue;
-                    }
-                    let other = &triangles[tj];
-                    if triangle_has_edge(other, e0, e1) {
-                        shared = true;
-                        break;
-                    }
-                }
+        for &ti in &bad {
+            let tri = triangles[ti];
+            for k in 0..3 {
+                let (e0, e1) = (tri[k], tri[(k + 1) % 3]);
+                let shared = bad
+                    .iter()
+                    .any(|&tj| tj != ti && triangle_has_edge(&triangles[tj], e0, e1));
                 if !shared {
                     boundary.push((e0, e1));
                 }
             }
         }
 
-        // Remove bad triangles (in reverse order to keep indices valid)
-        let mut bad_sorted = bad_triangles.clone();
-        bad_sorted.sort_unstable();
-        for &ti in bad_sorted.iter().rev() {
+        for &ti in bad.iter().rev() {
             triangles.swap_remove(ti);
         }
 
-        // Create new triangles
-        for (e0, e1) in &boundary {
-            triangles.push([i, *e0, *e1]);
+        // `p` is on the inner side of every cavity edge `e0 -> e1`, so
+        // `[e0, e1, p]` keeps the orientation; rotate ghosts so GHOST is last.
+        for (e0, e1) in boundary {
+            let t = if e0 == GHOST {
+                [e1, i, GHOST]
+            } else if e1 == GHOST {
+                [i, e0, GHOST]
+            } else {
+                [e0, e1, i]
+            };
+            triangles.push(t);
         }
     }
 
-    // Remove triangles that share vertices with the super-triangle
-    triangles.retain(|tri| tri[0] < n && tri[1] < n && tri[2] < n);
-
+    triangles.retain(|t| t[2] != GHOST);
     triangles
-}
-
-fn in_circumcircle(p: &Point2D, a: &Point2D, b: &Point2D, c: &Point2D) -> bool {
-    let ax = a.x - p.x;
-    let ay = a.y - p.y;
-    let bx = b.x - p.x;
-    let by = b.y - p.y;
-    let cx = c.x - p.x;
-    let cy = c.y - p.y;
-
-    let det = ax * (by * (cx * cx + cy * cy) - cy * (bx * bx + by * by))
-        - bx * (ay * (cx * cx + cy * cy) - cy * (ax * ax + ay * ay))
-        + cx * (ay * (bx * bx + by * by) - by * (ax * ax + ay * ay));
-
-    // Positive det means inside circumcircle (for CCW triangle)
-    // We need to handle both orientations
-    let orient = cross2d(a, b, c);
-    if orient > 0.0 {
-        det > EPS
-    } else {
-        det < -EPS
-    }
 }
 
 fn triangle_has_edge(tri: &[usize; 3], e0: usize, e1: usize) -> bool {
@@ -1021,7 +1176,7 @@ impl STRtree {
                 let cy = (b.2 + b.4) * 0.5;
                 (cx - x).powi(2) + (cy - y).powi(2)
             };
-            da.partial_cmp(&db).unwrap()
+            da.total_cmp(&db)
         });
         all.into_iter().take(k).map(|item| item.0).collect()
     }
@@ -1040,17 +1195,19 @@ fn str_build(mut items: Vec<(usize, f64, f64, f64, f64)>, capacity: usize) -> ST
     items.sort_by(|a, b| {
         let ca = (a.1 + a.3) * 0.5;
         let cb = (b.1 + b.3) * 0.5;
-        ca.partial_cmp(&cb).unwrap()
+        ca.total_cmp(&cb)
     });
 
     let mut children = Vec::new();
     for slice in items.chunks(slice_size) {
         let mut s = slice.to_vec();
-        // Sort slice by y-center
+        // Sort slice by y-center. `total_cmp` rather than
+        // `partial_cmp(..).unwrap()`, which panics on a NaN centre (a NaN
+        // coordinate in an item's y-range makes the centre NaN).
         s.sort_by(|a, b| {
             let ca = (a.2 + a.4) * 0.5;
             let cb = (b.2 + b.4) * 0.5;
-            ca.partial_cmp(&cb).unwrap()
+            ca.total_cmp(&cb)
         });
         for chunk in s.chunks(capacity) {
             children.push(str_build(chunk.to_vec(), capacity));
@@ -1262,6 +1419,17 @@ fn parse_ring(s: &str) -> Result<Vec<Point2D>, String> {
         let y: f64 = coords[1]
             .parse()
             .map_err(|_| format!("Invalid y: '{}'", coords[1]))?;
+        // `f64::from_str` accepts `inf`, `infinity` and `NaN` (in any case), and
+        // overflows `1e400` to `+inf`. A ring could therefore be parsed whose
+        // vertices have no position: measured, `POLYGON((nan 0, 1 0, 1 1, 0 1,
+        // 0 0))` parsed `Ok`, its `area()` came back `NaN`, and its `bbox()`
+        // silently dropped the NaN vertex and reported a finite box.
+        if !x.is_finite() || !y.is_finite() {
+            return Err(format!(
+                "Non-finite coordinate in WKT: '{} {}'",
+                coords[0], coords[1]
+            ));
+        }
         points.push(Point2D::new(x, y));
     }
     Ok(points)

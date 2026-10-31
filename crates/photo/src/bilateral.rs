@@ -57,7 +57,9 @@ pub fn bilateral_filter(src: &GrayImage, d: i32, sigma_color: f32, sigma_space: 
             dst.put_pixel(
                 x as u32,
                 y as u32,
-                Luma([(sum_val / sum_weight).min(255.0) as u8]),
+                // Round, as OpenCV's saturate_cast does; truncation biased
+                // every output ~0.5 grey level dark (127.9 -> 127).
+                Luma([(sum_val / sum_weight).round().clamp(0.0, 255.0) as u8]),
             );
         }
     }

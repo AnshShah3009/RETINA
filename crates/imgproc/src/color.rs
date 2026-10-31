@@ -83,7 +83,7 @@ pub fn adjust_brightness_in_pool(
     let run = || {
         let mut output = src.clone();
         output.as_mut().par_iter_mut().for_each(|p| {
-            *p = (*p as f32 * factor).clamp(0.0, 255.0) as u8;
+            *p = (*p as f32 * factor).round_ties_even().clamp(0.0, 255.0) as u8;
         });
         output
     };
@@ -108,7 +108,9 @@ pub fn adjust_contrast_in_pool(
         let mut output = src.clone();
         let mean = compute_mean_intensity(src);
         output.as_mut().par_iter_mut().for_each(|p| {
-            *p = ((*p as f32 - mean) * factor + mean).clamp(0.0, 255.0) as u8;
+            *p = ((*p as f32 - mean) * factor + mean)
+                .round_ties_even()
+                .clamp(0.0, 255.0) as u8;
         });
         output
     };

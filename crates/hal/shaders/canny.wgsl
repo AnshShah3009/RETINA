@@ -1,179 +1,149 @@
+// Canny, bit-exact with `cv::Canny` (aperture 3) on an 8-bit image - the same
+// integer algorithm as the CPU reference in `cpu/canny_opencv.rs`:
+//
+//   * input rounded (ties to even) and saturated to 0..=255, NaN -> 0;
+//   * 3x3 Sobel with BORDER_REPLICATE, no pre-blur;
+//   * magnitude |dx| + |dy| (L1) or dx² + dy² (L2, thresholds squared on the
+//     host); pixels outside the image have magnitude 0;
+//   * NMS with OpenCV's fixed-point tan(22.5°) test: strict towards left/up
+//     (`>`), non-strict towards right/down (`>=`), strict on both diagonal
+//     neighbours;
+//   * thresholds strict: m > low is a candidate, m > high is strong.
+//
+// Everything is i32 arithmetic (|dx|,|dy| <= 1020, so dx² + dy² <= 2080800
+// and |dy| << 15 <= 33423360 fit), hence exact on any GPU. The output is the
+// NMS state map (0 none / 1 weak / 2 strong); the host runs the 8-connected
+// hysteresis flood fill, shared with the CPU path.
+//
+// Both passes index pixels linearly over a 2-D grid of workgroups (see
+// gpu_kernels::dispatch_1d) so no dispatch axis exceeds 65535.
+
 struct Params {
     width: u32,
     height: u32,
-    low_threshold: f32,
-    high_threshold: f32,
+    low: i32,
+    high: i32,
+    l2: u32,
+    tg22: i32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
-// The host uploads the image as f32 (`canny_gpu` in cv-imgproc converts u8
-// pixels to f32 before dispatch, because the gradient stage needs float
-// arithmetic). It was declared `array<u32>` and read four packed bytes per word,
-// which is not the layout it receives: the low byte of an f32 is 0x00 for every
-// whole-number value, so essentially every pixel read as 0, every Sobel sample
-// was 0, and the whole edge map came back black with no error raised.
-@group(0) @binding(0) var<storage, read> input_data: array<f32>;
-@group(0) @binding(1) var<storage, read_write> mag_data: array<f32>;
-@group(0) @binding(2) var<storage, read_write> dir_data: array<u32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
-fn get_pixel(x: i32, y: i32) -> f32 {
-    let w = i32(params.width);
-    let h = i32(params.height);
-    let ix = clamp(x, 0, w - 1);
-    let iy = clamp(y, 0, h - 1);
-    let idx = u32(iy * w + ix);
-    return input_data[idx];
+// ---- Pass 1: Sobel -----------------------------------------------------------
+
+@group(0) @binding(0) var<storage, read> input_data: array<f32>;
+// dx in the low 16 bits, dy in the high 16 bits (two's complement).
+@group(0) @binding(1) var<storage, read_write> grad_out: array<u32>;
+
+fn pixel(x: i32, y: i32) -> i32 {
+    let ix = clamp(x, 0, i32(params.width) - 1);
+    let iy = clamp(y, 0, i32(params.height) - 1);
+    let v = input_data[u32(iy) * params.width + u32(ix)];
+    // NaN check on the bits: float comparisons may assume finite math.
+    if ((bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u) {
+        return 0;
+    }
+    return i32(clamp(round(v), 0.0, 255.0));
 }
 
-// The host blurs before dispatching this shader, matching the CPU backend, which
-// runs `gaussian_blur(sigma = 1.4, ksize = 5)` and then takes gradients of the
-// blurred image. Skipping it made the two backends disagree on any noisy input -
-// Sobel on raw pixels amplifies sensor noise into gradients, so the GPU returned
-// edges the CPU did not, and a threshold tuned against the CPU failed silently
-// on the GPU.
-
-// Pass 1: Gradients and Directions
-@compute @workgroup_size(16, 16)
-fn gradients(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = i32(global_id.x);
-    let y = i32(global_id.y);
-
-    if (u32(x) >= params.width || u32(y) >= params.height) {
+@compute @workgroup_size(256)
+fn sobel(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    let i = gid.x + gid.y * num_wg.x * 256u;
+    if (i >= params.width * params.height) {
         return;
     }
+    let x = i32(i % params.width);
+    let y = i32(i / params.width);
 
-    let p00 = get_pixel(x - 1, y - 1);
-    let p01 = get_pixel(x,     y - 1);
-    let p02 = get_pixel(x + 1, y - 1);
-    let p10 = get_pixel(x - 1, y);
-    let p12 = get_pixel(x + 1, y);
-    let p20 = get_pixel(x - 1, y + 1);
-    let p21 = get_pixel(x,     y + 1);
-    let p22 = get_pixel(x + 1, y + 1);
+    let p00 = pixel(x - 1, y - 1);
+    let p01 = pixel(x, y - 1);
+    let p02 = pixel(x + 1, y - 1);
+    let p10 = pixel(x - 1, y);
+    let p12 = pixel(x + 1, y);
+    let p20 = pixel(x - 1, y + 1);
+    let p21 = pixel(x, y + 1);
+    let p22 = pixel(x + 1, y + 1);
 
-    let gx = (p02 + 2.0 * p12 + p22) - (p00 + 2.0 * p10 + p20);
-    let gy = (p20 + 2.0 * p21 + p22) - (p00 + 2.0 * p01 + p02);
-
-    let mag = sqrt(gx * gx + gy * gy);
-    let idx = u32(y) * params.width + u32(x);
-    mag_data[idx] = mag;
-
-    // Direction quantization: 0, 45, 90, 135
-    let abs_gx = abs(gx);
-    let abs_gy = abs(gy);
-    let tan_22_5 = 0.41421356;
-    
-    var dir = 0u;
-    if (abs_gy <= abs_gx * tan_22_5) {
-        dir = 0u;
-    } else if (abs_gx <= abs_gy * tan_22_5) {
-        dir = 2u;
-    } else if (gx * gy > 0.0) {
-        dir = 1u;
-    } else {
-        dir = 3u;
-    }
-    dir_data[idx] = dir;
+    let dx = (p02 - p00) + 2 * (p12 - p10) + (p22 - p20);
+    let dy = (p20 + 2 * p21 + p22) - (p00 + 2 * p01 + p02);
+    grad_out[i] = (bitcast<u32>(dx) & 0xffffu) | (bitcast<u32>(dy) << 16u);
 }
 
-// Pass 2: Non-Maximum Suppression
-@group(0) @binding(0) var<storage, read> mag_in: array<f32>;
-@group(0) @binding(1) var<storage, read> dir_in: array<u32>;
-@group(0) @binding(2) var<storage, read_write> nms_out: array<f32>;
+// ---- Pass 2: magnitude + NMS + double threshold ------------------------------
 
-@compute @workgroup_size(16, 16)
-fn nms(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = i32(global_id.x);
-    let y = i32(global_id.y);
-    let w = i32(params.width);
-    let h = i32(params.height);
+@group(0) @binding(1) var<storage, read> grad_in: array<u32>;
+// Four 8-bit states per word, pixel 4k + j in byte j (little-endian bytes).
+@group(0) @binding(2) var<storage, read_write> state_out: array<u32>;
 
-    if (u32(x) >= params.width || u32(y) >= params.height) {
-        return;
-    }
-
-    if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
-        nms_out[u32(y) * params.width + u32(x)] = 0.0;
-        return;
-    }
-
-    let idx = u32(y) * params.width + u32(x);
-    let m = mag_in[idx];
-    let dir = dir_in[idx];
-
-    var m1 = 0.0;
-    var m2 = 0.0;
-
-    if (dir == 0u) {
-        m1 = mag_in[idx - 1u];
-        m2 = mag_in[idx + 1u];
-    } else if (dir == 1u) {
-        m1 = mag_in[u32(y - 1) * params.width + u32(x - 1)];
-        m2 = mag_in[u32(y + 1) * params.width + u32(x + 1)];
-    } else if (dir == 2u) {
-        m1 = mag_in[u32(y - 1) * params.width + u32(x)];
-        m2 = mag_in[u32(y + 1) * params.width + u32(x)];
-    } else {
-        m1 = mag_in[u32(y - 1) * params.width + u32(x + 1)];
-        m2 = mag_in[u32(y + 1) * params.width + u32(x - 1)];
-    }
-
-    if (m >= m1 && m >= m2) {
-        nms_out[idx] = m;
-    } else {
-        nms_out[idx] = 0.0;
-    }
+fn grad_at(i: u32) -> vec2<i32> {
+    let g = bitcast<i32>(grad_in[i]);
+    return vec2<i32>((g << 16u) >> 16u, g >> 16u);
 }
 
-// Pass 3: Hysteresis (Simplified: Double Thresholding)
-// Connectivity is tricky on GPU without multiple passes or atomic flags.
-// For now, we'll do double thresholding + 1-level connectivity check.
-@group(0) @binding(0) var<storage, read> nms_in: array<f32>;
-@group(0) @binding(1) var<storage, read_write> final_out: array<u32>;
-
-@compute @workgroup_size(16, 16)
-fn hysteresis(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let u32_x = global_id.x; // Process 4 pixels
-    let y = i32(global_id.y);
-    let w = i32(params.width);
-
-    if (u32_x * 4u >= params.width || u32(y) >= params.height) {
-        return;
+fn mag_of(g: vec2<i32>) -> i32 {
+    if (params.l2 != 0u) {
+        return g.x * g.x + g.y * g.y;
     }
+    return abs(g.x) + abs(g.y);
+}
 
-    var result_packed = 0u;
+fn mag_at(x: i32, y: i32) -> i32 {
+    if (x < 0 || y < 0 || x >= i32(params.width) || y >= i32(params.height)) {
+        return 0;
+    }
+    return mag_of(grad_at(u32(y) * params.width + u32(x)));
+}
 
-    for (var i = 0u; i < 4u; i++) {
-        let x = i32(u32_x * 4u + i);
-        if (u32(x) >= params.width) { break; }
-
-        let idx = u32(y) * params.width + u32(x);
-        let v = nms_in[idx];
-
-        var pixel_val = 0u;
-        if (v >= params.high_threshold) {
-            pixel_val = 255u;
-        } else if (v >= params.low_threshold) {
-            // Check 8-neighbors for strong edges
-            var has_strong_neighbor = false;
-            for (var ny = -1; ny <= 1; ny++) {
-                for (var nx = -1; nx <= 1; nx++) {
-                    let nix = clamp(x + nx, 0, w - 1);
-                    let niy = clamp(y + ny, 0, i32(params.height) - 1);
-                    if (nms_in[u32(niy) * params.width + u32(nix)] >= params.high_threshold) {
-                        has_strong_neighbor = true;
-                        break;
-                    }
-                }
-                if (has_strong_neighbor) { break; }
-            }
-            if (has_strong_neighbor) {
-                pixel_val = 255u;
-            }
+fn nms_state(i: u32) -> u32 {
+    let g = grad_at(i);
+    let m = mag_of(g);
+    if (m <= params.low) {
+        return 0u;
+    }
+    let x = i32(i % params.width);
+    let y = i32(i / params.width);
+    let ax = abs(g.x);
+    let ay = abs(g.y) << 15u;
+    let tg22x = ax * params.tg22;
+    var is_max = false;
+    if (ay < tg22x) {
+        is_max = m > mag_at(x - 1, y) && m >= mag_at(x + 1, y);
+    } else {
+        let tg67x = tg22x + (ax << 16u);
+        if (ay > tg67x) {
+            is_max = m > mag_at(x, y - 1) && m >= mag_at(x, y + 1);
+        } else {
+            let s = select(1, -1, (g.x ^ g.y) < 0);
+            is_max = m > mag_at(x - s, y - 1) && m > mag_at(x + s, y + 1);
         }
-
-        result_packed = result_packed | (pixel_val << (i * 8u));
     }
+    if (!is_max) {
+        return 0u;
+    }
+    return select(1u, 2u, m > params.high);
+}
 
-    final_out[u32_x + u32(y) * ((params.width + 3u) / 4u)] = result_packed;
+@compute @workgroup_size(256)
+fn nms(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    let word = gid.x + gid.y * num_wg.x * 256u;
+    let n = params.width * params.height;
+    if (word * 4u >= n) {
+        return;
+    }
+    var packed = 0u;
+    for (var j = 0u; j < 4u; j++) {
+        let i = word * 4u + j;
+        if (i < n) {
+            packed = packed | (nms_state(i) << (8u * j));
+        }
+    }
+    state_out[word] = packed;
 }

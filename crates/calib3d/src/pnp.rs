@@ -9,6 +9,43 @@ use cv_runtime::RuntimeRunner;
 use nalgebra::{DMatrix, Matrix3, Matrix3x4, Matrix4, Point2, Point3, Rotation3, Vector3};
 use rayon::prelude::*;
 
+/// Reject non-finite correspondence input before it reaches an SVD.
+///
+/// Every solve below assembles a design matrix and decomposes it with
+/// `.svd(true, true)`, and that call does not return on non-finite input:
+/// nalgebra's bidiagonalisation decides convergence by comparison, and every
+/// comparison against NaN is false. Measured: `solve_pnp_dlt` with one NaN
+/// image point among twelve never returns and has to be killed.
+///
+/// A hang is worse than a wrong answer, because nothing reports it. So the
+/// check is here, at the boundary where caller data enters, rather than
+/// repeated at each of the eight SVD call sites below - a guard that has to be
+/// remembered at each site is a guard that will be missed at the ninth.
+fn require_finite_correspondences(
+    object_points: &[Point3<f64>],
+    image_points: &[Point2<f64>],
+) -> Result<()> {
+    let bad_object = object_points
+        .iter()
+        .position(|p| !p.coords.iter().all(|v| v.is_finite()));
+    if let Some(i) = bad_object {
+        return Err(cv_core::Error::InvalidInput(format!(
+            "object_points[{i}] is not finite: {:?}",
+            object_points[i].coords
+        )));
+    }
+    let bad_image = image_points
+        .iter()
+        .position(|p| !p.x.is_finite() || !p.y.is_finite());
+    if let Some(i) = bad_image {
+        return Err(cv_core::Error::InvalidInput(format!(
+            "image_points[{i}] is not finite: ({}, {})",
+            image_points[i].x, image_points[i].y
+        )));
+    }
+    Ok(())
+}
+
 /// Solves the Perspective-n-Point problem using Direct Linear Transform (DLT)
 ///
 /// Object points are Hartley-normalized before assembly. Planar inputs (the
@@ -30,8 +67,17 @@ pub fn solve_pnp_dlt(
             "solve_pnp_dlt needs at least 6 correspondences".to_string(),
         ));
     }
+    require_finite_correspondences(object_points, image_points)?;
 
-    let k_inv = intrinsics.inverse_matrix();
+    // A zero focal length makes the intrinsic matrix singular. Falling back to
+    // the identity would silently treat every pixel as already normalised, which
+    // is a wrong answer rather than a visible failure.
+    let k_inv = intrinsics.try_inverse_matrix().ok_or_else(|| {
+        cv_core::Error::InvalidInput(format!(
+            "solve_pnp_dlt: intrinsics are singular (fx={}, fy={})",
+            intrinsics.fx, intrinsics.fy
+        ))
+    })?;
 
     // Normalized image coordinates (K^-1 applied once up front).
     let norm_image: Vec<(f64, f64)> = image_points
@@ -359,56 +405,73 @@ pub fn solve_pnp_ransac(
     reprojection_threshold_px: f64,
     max_iters: usize,
 ) -> Result<(Pose, Vec<bool>)> {
-    if object_points.len() != image_points.len() || object_points.len() < 6 {
+    if object_points.len() != image_points.len() || object_points.len() < 4 {
         return Err(cv_core::Error::AlgorithmError(
-            "solve_pnp_ransac needs >=6 paired points".to_string(),
+            "solve_pnp_ransac needs >=4 paired points".to_string(),
         ));
     }
+    require_finite_correspondences(object_points, image_points)?;
 
     let n = object_points.len();
-    let sample_k = 6usize;
+    let sample_k = 3usize;
     let iters = max_iters.max(64);
     let mut best_pose = None;
     let mut best_inliers = vec![false; n];
     let mut best_count = 0usize;
     let mut best_error = f64::INFINITY;
 
+    let model = cv_core::PinholeModel::new(
+        *intrinsics,
+        distortion
+            .cloned()
+            .unwrap_or_else(cv_core::Distortion::none),
+    );
     for i in 0..iters {
         let idx = sample_unique_indices(n, sample_k, i as u64 + 11);
-        let sample_obj: Vec<Point3<f64>> = idx.iter().map(|&j| object_points[j]).collect();
-        let sample_img: Vec<Point2<f64>> = idx.iter().map(|&j| image_points[j]).collect();
+        let sample_obj: [nalgebra::Vector3<f64>; 3] = [
+            object_points[idx[0]].coords,
+            object_points[idx[1]].coords,
+            object_points[idx[2]].coords,
+        ];
+        let sample_img: [[f64; 2]; 3] = [
+            [image_points[idx[0]].x, image_points[idx[0]].y],
+            [image_points[idx[1]].x, image_points[idx[1]].y],
+            [image_points[idx[2]].x, image_points[idx[2]].y],
+        ];
 
-        let pose = match solve_pnp_dlt(&sample_obj, &sample_img, intrinsics) {
+        let poses = match PnpSolver::estimate_p3p(&sample_obj, &sample_img, &model) {
             Ok(v) => v,
             Err(_) => continue,
         };
 
-        let mut inliers = vec![false; n];
-        let mut count = 0usize;
-        let mut sum_err = 0.0f64;
-        for j in 0..n {
-            let err = reprojection_error_px_dist(
-                &pose,
-                intrinsics,
-                distortion,
-                &object_points[j],
-                &image_points[j],
-            );
-            if err.is_finite() && err <= reprojection_threshold_px {
-                inliers[j] = true;
-                count += 1;
-                sum_err += err;
+        for pose in poses {
+            let mut inliers = vec![false; n];
+            let mut count = 0usize;
+            let mut sum_err = 0.0f64;
+            for j in 0..n {
+                let err = reprojection_error_px_dist(
+                    &pose,
+                    intrinsics,
+                    distortion,
+                    &object_points[j],
+                    &image_points[j],
+                );
+                if err.is_finite() && err <= reprojection_threshold_px {
+                    inliers[j] = true;
+                    count += 1;
+                    sum_err += err;
+                }
             }
-        }
-        if count == 0 {
-            continue;
-        }
-        let mean_err = sum_err / count as f64;
-        if count > best_count || (count == best_count && mean_err < best_error) {
-            best_pose = Some(pose);
-            best_inliers = inliers;
-            best_count = count;
-            best_error = mean_err;
+            if count == 0 {
+                continue;
+            }
+            let mean_err = sum_err / count as f64;
+            if count > best_count || (count == best_count && mean_err < best_error) {
+                best_pose = Some(pose);
+                best_inliers = inliers.clone();
+                best_count = count;
+                best_error = mean_err;
+            }
         }
     }
 
@@ -427,16 +490,30 @@ pub fn solve_pnp_ransac(
         .filter_map(|(p, &m)| if m { Some(*p) } else { None })
         .collect();
 
-    let refined_pose = if inlier_obj.len() >= 6 {
-        solve_pnp_refine(
+    // Refine on the inliers whenever the refinement is over-determined
+    // (>= 4 points). It used to require 6, so a 4- or 5-inlier result was
+    // returned as the raw minimal-sample P3P pose. The refined pose is kept
+    // only if it fits the inliers no worse.
+    let mean_inlier_error = |pose: &Pose| {
+        inlier_obj
+            .iter()
+            .zip(&inlier_img)
+            .map(|(o, i)| reprojection_error_px_dist(pose, intrinsics, distortion, o, i))
+            .sum::<f64>()
+            / inlier_obj.len().max(1) as f64
+    };
+    let refined_pose = if inlier_obj.len() >= 4 {
+        match solve_pnp_refine(
             &best_pose,
             &inlier_obj,
             &inlier_img,
             intrinsics,
             distortion,
             20,
-        )
-        .unwrap_or(best_pose)
+        ) {
+            Ok(p) if mean_inlier_error(&p) <= mean_inlier_error(&best_pose) => p,
+            _ => best_pose,
+        }
     } else {
         best_pose
     };
@@ -451,6 +528,14 @@ fn reprojection_error_px_dist(
     object_point: &Point3<f64>,
     image_point: &Point2<f64>,
 ) -> f64 {
+    // A point behind the camera is not an inlier, whatever pixel it would
+    // mirror to. `project_point_dist` maps such points to (0, 0), so an
+    // observation near the image origin used to score a behind-camera pose
+    // as a good fit.
+    let z = (extrinsics.rotation * object_point.coords + extrinsics.translation).z;
+    if z <= 0.0 {
+        return f64::INFINITY;
+    }
     let pred = project_point_dist(intrinsics, distortion, extrinsics, object_point);
     ((pred.x - image_point.x).powi(2) + (pred.y - image_point.y).powi(2)).sqrt()
 }
@@ -488,11 +573,14 @@ pub fn solve_pnp_refine_ctx(
     max_iters: usize,
     group: &RuntimeRunner,
 ) -> Result<Pose> {
-    if object_points.len() != image_points.len() || object_points.len() < 6 {
+    // Six pose parameters, two residuals per point: four points already
+    // over-determine the refinement (OpenCV's solvePnPRefineLM needs 3).
+    if object_points.len() != image_points.len() || object_points.len() < 4 {
         return Err(cv_core::Error::AlgorithmError(
-            "solve_pnp_refine needs >=6 paired points".to_string(),
+            "solve_pnp_refine needs >=4 paired points".to_string(),
         ));
     }
+    require_finite_correspondences(object_points, image_points)?;
 
     let mut params = extrinsics_to_params(initial);
     let mut lambda = 0.001;
@@ -651,6 +739,21 @@ fn project_point_dist(
 /// Perspective-n-Point (PnP) solver for absolute pose estimation.
 pub struct PnpSolver;
 
+/// Convolution of two dense polynomials, low-degree coefficient first.
+///
+/// Public only so the Grunert quartic assembly can be checked directly by
+/// `tests/p3p_quartic_scaling_regression.rs`; it is not part of the PnP API
+/// and no solver outside this module calls it.
+pub fn pmul(a: &[f64], b: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0; a.len() + b.len() - 1];
+    for (i, &x) in a.iter().enumerate() {
+        for (j, &y) in b.iter().enumerate() {
+            out[i + j] += x * y;
+        }
+    }
+    out
+}
+
 impl PnpSolver {
     /// Estimate absolute camera pose from 3 3D-2D correspondences using the
     /// P3P algorithm (Grunert's distance parametrization).
@@ -707,25 +810,6 @@ impl PnpSolver {
         let dpoly = [1.0, -2.0 * ca, 1.0];
         let npoly = [m * dpoly[0] - sa * sa, m * dpoly[1], m * dpoly[2] + sa * sa];
         let dpoly_d = [-2.0 * sa * sa * cb, 2.0 * sa * sa * cg];
-
-        fn pmul(a: &[f64], b: &[f64]) -> Vec<f64> {
-            let mut out = vec![0.0; a.len() + b.len() - 1];
-            for (i, &x) in a.iter().enumerate() {
-                for (j, &y) in b.iter().enumerate() {
-                    out[i + j] += x * y;
-                }
-            }
-            out
-        }
-        fn padd(mut a: Vec<f64>, b: &[f64]) -> Vec<f64> {
-            if a.len() < b.len() {
-                a.resize(b.len(), 0.0);
-            }
-            for (i, &v) in b.iter().enumerate() {
-                a[i] += v;
-            }
-            a
-        }
 
         let t1 = pmul(&npoly, &npoly); // scaled by a² below
         let t2 = pmul(&npoly, &dpoly_d); // scaled by −2a²cb below
@@ -818,6 +902,11 @@ impl PnpSolver {
                 continue;
             }
             let p = (m * d + sa * sa * (q * q - 1.0)) / denom;
+            // The law-of-cosines system is satisfied by a negative distance
+            // ratio too; that solution puts point A behind the camera.
+            if p <= 1e-8 || !p.is_finite() {
+                continue;
+            }
 
             let cam_a = rays[0] * (p * w);
             let cam_b = rays[1] * (q * w);
@@ -860,9 +949,14 @@ impl PnpSolver {
                 .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed in P3P".to_string()))?;
             let mut r_rot = vt.transpose() * u.transpose();
             if r_rot.determinant() < 0.0 {
-                let mut vt_fix = vt.clone();
-                for rr in 0..3 {
-                    vt_fix[(rr, 2)] = -vt_fix[(rr, 2)];
+                // R = V diag(1, 1, -1) U^T: flip V's last *column*, which is
+                // row 2 of V^T. Flipping column 2 of V^T instead gave a matrix
+                // that maps none of the points, so on three points (rank-2
+                // covariance, this branch about half the time) the true pose
+                // was discarded by the check below.
+                let mut vt_fix = vt;
+                for cc in 0..3 {
+                    vt_fix[(2, cc)] = -vt_fix[(2, cc)];
                 }
                 r_rot = vt_fix.transpose() * u.transpose();
             }
@@ -967,15 +1061,81 @@ impl PnpSolver {
             }
         }
 
-        // 4. Solve Mx = 0 using SVD to find the nullspace
-        let svd_m = m.svd(false, true);
+        // 4. Solve Mx = 0 using SVD to find the nullspace.
+        //
+        // `M` is `2n x 12`, so the null vector is row 11 of `V^T` - but nalgebra's
+        // *thin* SVD returns a `v_t` of shape `min(2n, 12) x 12`, so for n = 4
+        // (8 rows) and n = 5 (10 rows) row 11 does not exist and `row(11)`
+        // panicked with "Matrix slicing out of bounds". The guard at the top of
+        // this function only rejects `n < 4`, so the documented minimum *was*
+        // the panic case. Same defect class as the `m x 9` DLT systems in
+        // `crate::dlt::smallest_right_singular_vector`; same fix: pad the system
+        // with zero rows up to 12 x 12 so the smallest right singular vector is
+        // always among the rows `V^T` contains. Zero rows add no constraint, so
+        // the null space - and the answer - are unchanged. Above `n = 6` the
+        // system is already at least 12 rows tall and needs no padding.
+        let m_padded = if m.nrows() < 12 {
+            let mut padded = nalgebra::DMatrix::<f64>::zeros(12, 12);
+            padded.view_mut((0, 0), (m.nrows(), 12)).copy_from(&m);
+            padded
+        } else {
+            m
+        };
+        let svd_m = m_padded.svd(false, true);
         let v_t_m = svd_m
             .v_t
             .ok_or_else(|| cv_core::Error::AlgorithmError("SVD failed for M matrix".into()))?;
-
-        // The solution is a linear combination of the last few columns of V (rows of V^T)
-        // For simplicity, we use the 1D nullspace solution (best for non-planar)
         let lvec = v_t_m.row(11);
+
+        // 4b. **The non-planar case is not solved here, and the honest answer is
+        // to say so.** The old comment claimed "we use the 1D nullspace solution
+        // (best for non-planar)"; that is wrong. The null space of this system
+        // is not one-dimensional for the sample sizes this function accepts.
+        // Measured singular values of `M` (padded to 12 x 12):
+        //
+        // | n | dim of null space |
+        // | --: | --: |
+        // | 4 | 4 |
+        // | 5 | 2 |
+        // | 6 | 1 |
+        // | 8 | 1 |
+        //
+        // A 12-unknown projection has a 4-dimensional null space for *any*
+        // input (12 - 8 = 4); adding a non-coplanar point only adds equations,
+        // and it takes 8 points before there are enough of them. The null
+        // vector the old code picked is one arbitrary member of that space -
+        // the one minimising `‖M x‖` alone, with nothing in the objective
+        // preferring an actual rigid pose. Extracting that is EPnP's `Dx = 0`
+        // gauge constraint (Moreno-Noguer et al. 2007, Sec. 4), and it is not
+        // implemented anywhere in this workspace.
+        //
+        // So: n < 6 is not a pose, and returning one is worse than refusing.
+        // Refuse, and name the reason.
+        let sigma_min = svd_m
+            .singular_values
+            .iter()
+            .fold(f64::INFINITY, |a, b| a.min(*b));
+        let sigma_max = svd_m.singular_values.iter().fold(0.0f64, |a, b| a.max(*b));
+        let nullity = svd_m
+            .singular_values
+            .iter()
+            .filter(|s| **s <= 1e-10 * sigma_max)
+            .count();
+        if nullity > 1 {
+            return Err(cv_core::Error::AlgorithmError(format!(
+                "estimate_epnp: {} correspondences give a {}-dimensional null space \
+                 for the 12-unknown projection system, so no unique pose exists; \
+                 the 1-D nullspace solution this function implements requires at \
+                 least 6 correspondences",
+                n, nullity
+            )));
+        }
+        if !(sigma_min <= 1e-8 * sigma_max) || sigma_max <= 0.0 {
+            return Err(cv_core::Error::AlgorithmError(format!(
+                "estimate_epnp: degenerate system (sigma_min/sigma_max = {:.3e})",
+                sigma_min / sigma_max
+            )));
+        }
 
         // 5. Recover control points in camera coordinates
         let mut cc = [Vector3::zeros(); 4];
@@ -1050,7 +1210,11 @@ fn sample_unique_indices(n: usize, k: usize, seed: u64) -> Vec<usize> {
     let mut state = seed ^ 0x9E3779B97F4A7C15;
     while out.len() < k {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        let idx = (state as usize) % n;
+        // The low bits of a power-of-two-modulus LCG have short periods: with
+        // `state % n` and n = 2^m the whole sample was a function of
+        // `seed mod n`, so RANSAC drew only n distinct samples however many
+        // iterations it ran. The high bits are well mixed.
+        let idx = ((state >> 33) as usize) % n;
         if !used[idx] {
             used[idx] = true;
             out.push(idx);

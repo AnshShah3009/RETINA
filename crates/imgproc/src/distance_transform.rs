@@ -28,6 +28,13 @@ pub enum DistanceType {
 ///
 /// # Returns
 /// A `CpuTensor<f32>` of the same spatial dimensions containing distances.
+///
+/// # Errors
+/// Returns an error if the input is not single-channel or has a zero spatial
+/// dimension. Multi-channel input used to be accepted and silently reduced to
+/// its first plane (the whole buffer was indexed as `y * width + x`), so every
+/// channel past the first was ignored while the output still claimed
+/// `channels: 1`.
 pub fn distance_transform<T: Float>(
     binary: &CpuTensor<T>,
     dist_type: DistanceType,
@@ -36,6 +43,13 @@ pub fn distance_transform<T: Float>(
     let height = shape.height;
     let width = shape.width;
 
+    if shape.channels != 1 {
+        return Err(cv_core::Error::InvalidInput(format!(
+            "Distance transform requires a single-channel image, got {} channels. \
+             Only channel 0 would have been processed before.",
+            shape.channels
+        )));
+    }
     if height == 0 || width == 0 {
         return Err(cv_core::Error::DimensionMismatch(
             "Image dimensions must be non-zero".into(),
@@ -57,6 +71,10 @@ pub fn distance_transform<T: Float>(
 /// # Returns
 /// `(distance_map, label_map)` where `label_map[i]` is the flat index of the
 /// nearest zero pixel to pixel `i`. Background pixels map to themselves.
+///
+/// # Errors
+/// Same as [`distance_transform`]: the input must be single-channel with
+/// non-zero spatial dimensions.
 pub fn distance_transform_with_labels<T: Float>(
     binary: &CpuTensor<T>,
     dist_type: DistanceType,
@@ -65,6 +83,13 @@ pub fn distance_transform_with_labels<T: Float>(
     let height = shape.height;
     let width = shape.width;
 
+    if shape.channels != 1 {
+        return Err(cv_core::Error::InvalidInput(format!(
+            "Distance transform requires a single-channel image, got {} channels. \
+             Only channel 0 would have been processed before.",
+            shape.channels
+        )));
+    }
     if height == 0 || width == 0 {
         return Err(cv_core::Error::DimensionMismatch(
             "Image dimensions must be non-zero".into(),

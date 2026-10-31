@@ -1,4 +1,3 @@
-use crate::BorderMode;
 use image::GrayImage;
 use wide::*;
 
@@ -24,6 +23,9 @@ pub fn threshold(src: &GrayImage, thresh: u8, max_value: u8, typ: ThresholdType)
 pub fn threshold_cpu(src: &GrayImage, thresh: u8, max_value: u8, typ: ThresholdType) -> GrayImage {
     use rayon::prelude::*;
     let mut dst = GrayImage::new(src.width(), src.height());
+    if src.width() == 0 || src.height() == 0 {
+        return dst;
+    }
     let width = src.width() as usize;
     let src_raw = src.as_raw();
     let dst_raw = dst.as_mut();
@@ -130,6 +132,17 @@ pub fn threshold_otsu(src: &GrayImage, max_value: u8, typ: ThresholdType) -> (u8
     (best_threshold, dst)
 }
 
+/// Adaptive threshold, `cv2.adaptiveThreshold(src, max_value, method, typ,
+/// block_size, c)`.
+///
+/// The local mean is a `block_size` x `block_size` box mean (`MeanC`) or
+/// Gaussian-weighted mean (`GaussianC`, `getGaussianKernel(block_size, 0)`,
+/// computed in f32) with BORDER_REPLICATE, rounded to u8. The comparison is
+/// integer, as in OpenCV: `Binary` sets `max_value` where
+/// `src - mean > -ceil(c)`, `BinaryInv` where `src - mean <= -floor(c)`.
+///
+/// # Panics
+/// If `block_size` is not odd and >= 3, or `typ` is not `Binary`/`BinaryInv`.
 pub fn adaptive_threshold(
     src: &GrayImage,
     max_value: u8,
@@ -138,6 +151,7 @@ pub fn adaptive_threshold(
     block_size: u32,
     c: f32,
 ) -> GrayImage {
+    use rayon::prelude::*;
     assert!(block_size >= 3, "block_size must be >= 3");
     assert!(block_size % 2 == 1, "block_size must be odd");
     assert!(
@@ -145,73 +159,35 @@ pub fn adaptive_threshold(
         "adaptive threshold supports Binary or BinaryInv types"
     );
 
+    let (w, h) = (src.width() as usize, src.height() as usize);
     let mut dst = GrayImage::new(src.width(), src.height());
-    let local = match method {
-        AdaptiveMethod::MeanC => local_mean_image(src, block_size),
-        AdaptiveMethod::GaussianC => local_gaussian_image(src, block_size),
+    if w == 0 || h == 0 {
+        return dst;
+    }
+    let mean = match method {
+        AdaptiveMethod::MeanC => local_mean_replicate(src, block_size as usize),
+        AdaptiveMethod::GaussianC => local_gaussian_replicate(src, block_size as usize),
     };
 
-    let len = src.as_raw().len();
+    // OpenCV: idelta = BINARY ? cvCeil(delta) : cvFloor(delta), then a table
+    // on src - mean.
+    let binary = typ == ThresholdType::Binary;
+    let idelta = if binary {
+        (c as f64).ceil() as i32
+    } else {
+        (c as f64).floor() as i32
+    };
     let src_raw = src.as_raw();
-    let local_raw = local.as_raw();
-    let dst_raw = dst.as_mut();
-
-    let c_v = f32x8::splat(c);
-    let max_v = f32x8::splat(max_value as f32);
-    let zero_v = f32x8::ZERO;
-
-    for i in (0..len).step_by(8) {
-        let end = (i + 8).min(len);
-        if i + 8 <= len {
-            let s_v = f32x8::from([
-                src_raw[i] as f32,
-                src_raw[i + 1] as f32,
-                src_raw[i + 2] as f32,
-                src_raw[i + 3] as f32,
-                src_raw[i + 4] as f32,
-                src_raw[i + 5] as f32,
-                src_raw[i + 6] as f32,
-                src_raw[i + 7] as f32,
-            ]);
-            let l_v = f32x8::from([
-                local_raw[i] as f32,
-                local_raw[i + 1] as f32,
-                local_raw[i + 2] as f32,
-                local_raw[i + 3] as f32,
-                local_raw[i + 4] as f32,
-                local_raw[i + 5] as f32,
-                local_raw[i + 6] as f32,
-                local_raw[i + 7] as f32,
-            ]);
-
-            let thresh_v = l_v - c_v;
-            let res = match typ {
-                ThresholdType::Binary => s_v.cmp_gt(thresh_v).blend(max_v, zero_v),
-                ThresholdType::BinaryInv => s_v.cmp_gt(thresh_v).blend(zero_v, max_v),
-                _ => zero_v,
-            };
-
-            let res_arr: [f32; 8] = res.into();
-            for j in 0..8 {
-                dst_raw[i + j] = res_arr[j] as u8;
+    dst.as_mut()
+        .par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for (x, out) in row.iter_mut().enumerate() {
+                let d = src_raw[y * w + x] as i32 - mean[y * w + x] as i32;
+                let on = if binary { d > -idelta } else { d <= -idelta };
+                *out = if on { max_value } else { 0 };
             }
-        } else {
-            for idx in i..end {
-                let value = src_raw[idx] as f32;
-                let threshold = local_raw[idx] as f32 - c;
-                dst_raw[idx] = if match typ {
-                    ThresholdType::Binary => value > threshold,
-                    ThresholdType::BinaryInv => value <= threshold,
-                    _ => false,
-                } {
-                    max_value
-                } else {
-                    0
-                };
-            }
-        }
-    }
-
+        });
     dst
 }
 
@@ -257,53 +233,110 @@ fn histogram(src: &GrayImage) -> [u32; 256] {
     hist
 }
 
-fn local_mean_image(src: &GrayImage, block_size: u32) -> GrayImage {
-    let width = src.width() as usize;
-    let height = src.height() as usize;
-    let radius = (block_size / 2) as i32;
-    let stride = width + 1;
+/// Box mean over a `block` x `block` window with BORDER_REPLICATE, rounded
+/// to nearest (`cv::boxFilter(.., normalize = true)` on u8).
+fn local_mean_replicate(src: &GrayImage, block: usize) -> Vec<u8> {
+    use rayon::prelude::*;
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let r = block / 2;
+    let data = src.as_raw();
+    let clamp = |i: isize, n: usize| i.clamp(0, n as isize - 1) as usize;
 
-    let integral_size = (width + 1) * (height + 1);
-    // u64: 255·W·H overflows u32 beyond ~16.9 Mpixel.
-    let mut integral: Vec<u64> = vec![0u64; integral_size];
-
-    for y in 0..height {
-        let mut row_sum = 0u64;
-        for x in 0..width {
-            row_sum += src.as_raw()[y * width + x] as u64;
-            let idx = (y + 1) * stride + (x + 1);
-            integral[idx] = integral[idx - stride] + row_sum;
+    // Horizontal window sums (u32: 255 * block fits easily).
+    let mut rows = vec![0u32; w * h];
+    rows.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+        let src_row = &data[y * w..(y + 1) * w];
+        let mut s: u32 = (0..block)
+            .map(|i| src_row[clamp(i as isize - r as isize, w)] as u32)
+            .sum();
+        for (x, o) in out.iter_mut().enumerate() {
+            *o = s;
+            let add = src_row[clamp((x + r + 1) as isize, w)] as u32;
+            let sub = src_row[clamp(x as isize - r as isize, w)] as u32;
+            s = s + add - sub;
         }
-    }
+    });
 
-    let mut out = GrayImage::new(src.width(), src.height());
-    for y in 0..height {
-        for x in 0..width {
-            let x0 = (x as i32 - radius).max(0) as usize;
-            let y0 = (y as i32 - radius).max(0) as usize;
-            let x1 = (x as i32 + radius + 1).min(width as i32) as usize;
-            let y1 = (y as i32 + radius + 1).min(height as i32) as usize;
-
-            let sum = integral[y1 * stride + x1] + integral[y0 * stride + x0]
-                - integral[y0 * stride + x1]
-                - integral[y1 * stride + x0];
-            let area = ((x1 - x0) * (y1 - y0)) as u32;
-            out.as_mut()[y * width + x] = (sum / area as u64).min(255) as u8;
+    let n = (block * block) as u64;
+    let mut out = vec![0u8; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, o)| {
+        for (x, v) in o.iter_mut().enumerate() {
+            let s: u64 = (0..block)
+                .map(|i| rows[clamp(y as isize + i as isize - r as isize, h) * w + x] as u64)
+                .sum();
+            // round(s / n); n = block^2 is odd, so there are no ties.
+            *v = ((2 * s + n) / (2 * n)).min(255) as u8;
         }
-    }
-
+    });
     out
 }
 
-fn local_gaussian_image(src: &GrayImage, block_size: u32) -> GrayImage {
-    // OpenCV's ADAPTIVE_THRESH_GAUSSIAN_C builds getGaussianKernel(block_size,
-    // sigma) and filters with exactly that window using BORDER_REPLICATE.
-    // Deriving the kernel size from sigma (ceil(6 * sigma)|1) widened the
-    // window and Reflect101 filled the borders with reflected samples, so the
-    // local mean disagreed with OpenCV's.
-    let sigma = 0.3 * (((block_size as f32) - 1.0) * 0.5 - 1.0) + 0.8;
-    let kernel_1d = crate::gaussian_kernel_1d(sigma, block_size as usize);
-    crate::separable_convolve(src, &kernel_1d, BorderMode::Replicate)
+/// `cv::getGaussianKernel(n, 0, CV_32F)`: the fixed tables for n <= 9, else
+/// sigma = 0.3 * ((n - 1) / 2 - 1) + 0.8.
+fn opencv_gaussian_kernel(n: usize) -> Vec<f32> {
+    match n {
+        1 => return vec![1.0],
+        3 => return vec![0.25, 0.5, 0.25],
+        5 => return vec![0.0625, 0.25, 0.375, 0.25, 0.0625],
+        7 => {
+            return vec![
+                0.03125, 0.109375, 0.21875, 0.28125, 0.21875, 0.109375, 0.03125,
+            ]
+        }
+        9 => {
+            return [4.0, 13.0, 30.0, 51.0, 60.0, 51.0, 30.0, 13.0, 4.0]
+                .iter()
+                .map(|v| v / 256.0)
+                .collect()
+        }
+        _ => {}
+    }
+    let sigma = ((n as f64 - 1.0) * 0.5 - 1.0) * 0.3 + 0.8;
+    let scale2x = -0.5 / (sigma * sigma);
+    let k: Vec<f64> = (0..n)
+        .map(|i| {
+            let x = i as f64 - (n as f64 - 1.0) * 0.5;
+            (scale2x * x * x).exp()
+        })
+        .collect();
+    let sum: f64 = k.iter().sum();
+    k.iter().map(|v| (v / sum) as f32).collect()
+}
+
+/// Gaussian-weighted local mean as OpenCV's ADAPTIVE_THRESH_GAUSSIAN_C
+/// computes it: the u8 image converted to f32, `GaussianBlur(block, block)`
+/// with BORDER_REPLICATE (row pass, then column pass, f32 accumulation), and
+/// the result rounded half to even back to u8.
+fn local_gaussian_replicate(src: &GrayImage, block: usize) -> Vec<u8> {
+    use rayon::prelude::*;
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let k = opencv_gaussian_kernel(block);
+    let r = block / 2;
+    let data = src.as_raw();
+    let clamp = |i: isize, n: usize| i.clamp(0, n as isize - 1) as usize;
+
+    let mut tmp = vec![0f32; w * h];
+    tmp.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+        let row = &data[y * w..(y + 1) * w];
+        for (x, o) in out.iter_mut().enumerate() {
+            let mut s = 0f32;
+            for (i, &kv) in k.iter().enumerate() {
+                s += kv * row[clamp(x as isize + i as isize - r as isize, w)] as f32;
+            }
+            *o = s;
+        }
+    });
+    let mut out = vec![0u8; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, o)| {
+        for (x, v) in o.iter_mut().enumerate() {
+            let mut s = 0f32;
+            for (i, &kv) in k.iter().enumerate() {
+                s += kv * tmp[clamp(y as isize + i as isize - r as isize, h) * w + x];
+            }
+            *v = s.round_ties_even().clamp(0.0, 255.0) as u8;
+        }
+    });
+    out
 }
 
 #[cfg(test)]

@@ -1766,7 +1766,10 @@ fn sample_unique_indices(n: usize, k: usize, seed: u64) -> Vec<usize> {
         state = state
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
-        let idx = (state as usize) % n;
+        // High bits: the low bits of a power-of-two LCG have short periods,
+        // so `state % n` drew only n distinct samples for n = 2^m (the
+        // same defect as calib3d's PnP sampler, g-c3).
+        let idx = ((state >> 33) as usize) % n;
         if !used[idx] {
             used[idx] = true;
             out.push(idx);
@@ -2533,7 +2536,12 @@ fn triangulate_track(
     let triangulated =
         triangulate_points(&projection_a, &projection_b, &[point_a], &[point_b]).ok()?;
     let point = *triangulated.first()?;
-    if !point_is_finite(&point) || point.z <= 0.0 {
+    // Cheirality in camera A's frame. Testing `point.z` checked depth in the
+    // *world* (= seed camera) frame, so once the trajectory turned more than
+    // ~90 deg from the seed no point behind the seed's image plane was ever
+    // triangulated: a 36-view orbit registered 19 views.
+    let depth_in_a = pose_a.rotation * point.coords + pose_a.translation;
+    if !point_is_finite(&point) || depth_in_a[2] <= 0.0 {
         return None;
     }
     let depth_in_b = pose_b.rotation * point.coords + pose_b.translation;
@@ -3457,5 +3465,65 @@ mod tests {
                 est.track_obs[0].len()
             );
         }
+    }
+
+    /// A full orbit must register: triangulation's cheirality test has to
+    /// use depth in the triangulating camera, not world z. With world z, no
+    /// point behind the seed camera's image plane was ever triangulated, so
+    /// every view facing the back half of the orbit failed to register
+    /// (19/36 here).
+    #[test]
+    fn an_orbit_registers_views_facing_away_from_the_seed() {
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        let mut rng = 0x0DDB_A11u64;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // Points on a cylinder wall (radius 3) around the cameras.
+        let points: Vec<Point3<f64>> = (0..1800)
+            .map(|_| {
+                let a = next() * std::f64::consts::TAU;
+                Point3::new(3.0 * a.sin(), next() * 1.6 - 0.8, 3.0 * a.cos())
+            })
+            .collect();
+        let n_views = 36;
+        let mut views = Vec::new();
+        for v in 0..n_views {
+            let phi = v as f64 * std::f64::consts::TAU / n_views as f64;
+            let rot = nalgebra::UnitQuaternion::from_axis_angle(&Vector3::y_axis(), phi);
+            let centre = Vector3::new(0.4 * phi.sin(), 0.0, 0.4 * phi.cos());
+            let pose_cw = Pose::from_quat_translation(rot, centre).inverse();
+            let mut keypoints = Vec::new();
+            let mut descriptors = Descriptors::with_capacity(points.len());
+            for (id, point) in points.iter().enumerate() {
+                let camera = pose_cw.rotation * point.coords + pose_cw.translation;
+                if camera[2] <= 0.1 {
+                    continue;
+                }
+                let px = intrinsics.project(&Point3::from(camera));
+                if !(0.0..640.0).contains(&px.x) || !(0.0..480.0).contains(&px.y) {
+                    continue;
+                }
+                let mut data = vec![0u8; 32];
+                data[0] = (id & 0xFF) as u8;
+                data[1] = ((id >> 8) & 0xFF) as u8;
+                keypoints.push(KeyPoint::new(px.x, px.y));
+                descriptors.push(Descriptor::new(data, KeyPoint::new(px.x, px.y)));
+            }
+            views.push(View::new(keypoints, descriptors, 640, 480));
+        }
+        let config = MapperConfig {
+            seed_pair: Some((0, 1)),
+            ..MapperConfig::default()
+        };
+        let mapping = map_views(&views, &intrinsics, &config);
+        assert!(
+            mapping.report.registered >= n_views - 2,
+            "registered {}/{n_views}",
+            mapping.report.registered
+        );
     }
 }

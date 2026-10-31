@@ -10,7 +10,7 @@ fn test_device_detection_report() {
     println!("========================================");
 
     // Try to get the best runner
-    match best_runner() {
+    match best_runner().map(|(r, _)| r) {
         Ok(runner) => {
             println!("\n📱 Best Runner Device ID: {:?}", runner.device_id());
 

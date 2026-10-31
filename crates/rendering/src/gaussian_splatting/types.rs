@@ -42,6 +42,26 @@
 
 use nalgebra::{Matrix3, Matrix3x4, Point3, Vector2, Vector3, Vector4};
 
+/// Real spherical-harmonics basis constants for bands 1-3, as in the 3DGS
+/// reference implementation.
+const SH_C1: f32 = 0.488_602_5;
+const SH_C2: [f32; 5] = [
+    1.092_548_4,
+    -1.092_548_4,
+    0.315_391_57,
+    -1.092_548_4,
+    0.546_274_2,
+];
+const SH_C3: [f32; 7] = [
+    -0.590_043_6,
+    2.890_611_4,
+    -0.457_045_8,
+    0.373_176_33,
+    -0.457_045_8,
+    1.445_305_7,
+    -0.590_043_6,
+];
+
 /// Spherical Harmonics (SH) coefficients for view-dependent color
 ///
 /// SH provides a compact representation of view-dependent lighting effects.
@@ -84,11 +104,24 @@ impl SphericalHarmonics {
         }
     }
 
+    /// The degree-0 (DC) colour, or black when no DC coefficient is present.
+    ///
+    /// `coeffs` is a public `Vec`, so it can be empty; indexing `[0..3]` into an
+    /// empty vector is a panic. A descriptor with no DC term evaluates to black,
+    /// which is what an all-zero histogram means too, so the fallback is the same
+    /// answer rather than a fabricated one.
     pub fn dc(&self) -> Vector3<f32> {
-        Vector3::new(self.coeffs[0], self.coeffs[1], self.coeffs[2])
+        Vector3::new(
+            self.coeffs.first().copied().unwrap_or(0.0),
+            self.coeffs.get(1).copied().unwrap_or(0.0),
+            self.coeffs.get(2).copied().unwrap_or(0.0),
+        )
     }
 
     pub fn eval(&self, view_dir: Vector3<f32>) -> Vector3<f32> {
+        if self.coeffs.is_empty() {
+            return Vector3::zeros();
+        }
         if self.degree == 0 {
             return self.dc();
         }
@@ -103,19 +136,85 @@ impl SphericalHarmonics {
         result.y += self.coeffs[1];
         result.z += self.coeffs[2];
 
-        if self.degree >= 1 {
-            result.x += self.coeffs[3] * y;
-            result.y += self.coeffs[4] * z;
-            result.z += self.coeffs[5] * x;
-            result.x += self.coeffs[6] * x * y;
-            result.y += self.coeffs[7] * y * z;
-            result.z += self.coeffs[8] * z * x;
-            result.x += self.coeffs[9] * (3.0 * z * z - 1.0);
-            result.y += self.coeffs[10] * x * z;
-            result.z += self.coeffs[11] * (x * x - y * y);
+        // `degree` is a public field and the coefficient buffer is sized
+        // separately, so the two can disagree. `from_dc` allocates exactly the
+        // 3 DC coefficients; setting `degree = 1` afterwards - a one-line field
+        // write on a public struct, and `PartialEq`/`Clone`/`Debug` all leave the
+        // fields open - left `eval` reading `coeffs[3..12]` out of a 3-element
+        // vector. Measured: `index out of bounds: the len is 3 but the index is 3`,
+        // i.e. a panic on ordinary malformed input from a public method.
+        //
+        // Which coefficients are *available* is a fact about the buffer, so the
+        // available degree is derived from the length rather than trusted from
+        // the field. `SphericalHarmonics::new(n)` stores `3 * (n + 1)^2`
+        // coefficients, and the evaluation of degrees up to `n` reads exactly
+        // that many, so `available` is the largest `n` whose allocation fits in
+        // `coeffs.len()`. A caller that declares a degree it did not supply gets
+        // the DC term and whatever the buffer really holds, which is the true
+        // answer for the data given.
+        let available = if self.coeffs.is_empty() {
+            0
+        } else {
+            ((self.coeffs.len() as f64) / 3.0).sqrt().floor() as usize - 1
+        };
+        let degree = self.degree.min(available);
+
+        // Real SH basis in the 3DGS reference's order and sign convention
+        // (`eval_sh` in gaussian-splatting / `forward.cu`), evaluated on the
+        // normalised view direction. Coefficients are interleaved per basis
+        // function ([R_k, G_k, B_k]); the DC term above is already stored as
+        // a colour (0.5 + C0 * f_dc, see `io.rs`), so the higher bands add to
+        // it directly. This used to mix basis functions across channels (the
+        // R channel got y, x*y and 3z^2-1 terms; G and B others), with no
+        // basis constants and no band 3.
+        let n = view_dir.norm();
+        let (x, y, z) = if n > 0.0 && n.is_finite() {
+            (view_dir.x / n, view_dir.y / n, view_dir.z / n)
+        } else {
+            (x, y, z)
+        };
+        let (xx, yy, zz) = (x * x, y * y, z * z);
+        let mut basis: Vec<f32> = Vec::with_capacity(16);
+        if degree >= 1 {
+            basis.extend([-SH_C1 * y, SH_C1 * z, -SH_C1 * x]);
+        }
+        if degree >= 2 {
+            basis.extend([
+                SH_C2[0] * x * y,
+                SH_C2[1] * y * z,
+                SH_C2[2] * (2.0 * zz - xx - yy),
+                SH_C2[3] * x * z,
+                SH_C2[4] * (xx - yy),
+            ]);
+        }
+        if degree >= 3 {
+            basis.extend([
+                SH_C3[0] * y * (3.0 * xx - yy),
+                SH_C3[1] * x * y * z,
+                SH_C3[2] * y * (4.0 * zz - xx - yy),
+                SH_C3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy),
+                SH_C3[4] * x * (4.0 * zz - xx - yy),
+                SH_C3[5] * z * (xx - yy),
+                SH_C3[6] * x * (xx - 3.0 * yy),
+            ]);
+        }
+        for (k, b) in basis.iter().enumerate() {
+            let i = 3 * (k + 1);
+            result.x += b * self.coeffs[i];
+            result.y += b * self.coeffs[i + 1];
+            result.z += b * self.coeffs[i + 2];
         }
 
         result
+    }
+}
+
+pub(crate) fn unit_quaternion(q: &Vector4<f32>) -> Vector4<f32> {
+    let n = q.norm();
+    if n.is_finite() && n > 0.0 {
+        q / n
+    } else {
+        Vector4::new(0.0, 0.0, 0.0, 1.0)
     }
 }
 
@@ -140,7 +239,9 @@ impl Gaussian {
         Self {
             position,
             scale: scale.map(|s| s.max(0.0001)),
-            rotation: rotation.normalize(),
+            // Not `rotation.normalize()`: that divides by zero for a zero
+            // quaternion and stores NaN in a public field. See `unit_quaternion`.
+            rotation: unit_quaternion(&rotation),
             opacity,
             spherical_harmonics: SphericalHarmonics::from_dc(color),
             features: Vector3::zeros(),
@@ -161,8 +262,40 @@ impl Gaussian {
         Matrix3::from_diagonal(&self.scale)
     }
 
+    /// The stored rotation as a unit quaternion, or the identity when it specifies
+    /// no rotation.
+    ///
+    /// **`rotation` is a public field**, so a non-unit quaternion is reachable
+    /// without going through `Gaussian::new` — a deserialised file, or a field
+    /// overwritten directly, which is the same reachability argument
+    /// `inverse_covariance` documents. The matrix formula below is the *unit* form:
+    /// fed a quaternion of norm 2 it produced a matrix of determinant **10.08**
+    /// instead of 1, and a covariance 16x too large, with nothing to indicate it. A
+    /// slightly denormalised quaternion (norm 0.9999) is benign by comparison, which
+    /// is why this survived: the error grows as the square of the norm.
+    ///
+    /// Normalising is not a repair of bad input. A quaternion and any positive
+    /// multiple of it denote the **same** rotation, so the normalised value is what
+    /// the caller meant, and this is a derivation rather than a guess.
+    ///
+    /// A quaternion of norm zero denotes no rotation at all, and `normalize()` on it
+    /// divides by zero and returns NaN — which propagates through the covariance into
+    /// the tile. There is no rotation to derive from it, so the identity is used.
+    /// That one *is* a choice rather than a derivation, and it is the only such
+    /// substitution here.
+    ///
+    /// The body lives at module scope as [`unit_quaternion`] so that
+    /// `optimize::GaussianOptimizer::step` reaches the same decision for the same
+    /// reason rather than re-deriving it.
+    fn unit_quaternion(&self) -> Vector4<f32> {
+        unit_quaternion(&self.rotation)
+    }
+
     pub fn rotation_matrix(&self) -> Matrix3<f32> {
-        let q = &self.rotation;
+        // Normalised here, not merely in the constructor: `rotation` is public, and
+        // the formula below is only a rotation for a unit quaternion. See
+        // `unit_quaternion`.
+        let q = self.unit_quaternion();
         let x = q[0];
         let y = q[1];
         let z = q[2];
@@ -187,8 +320,18 @@ impl Gaussian {
         r * s * s * r.transpose()
     }
 
-    pub fn inverse_covariance(&self) -> Matrix3<f32> {
-        self.covariance().try_inverse().unwrap_or(Matrix3::zeros())
+    /// Inverse covariance, or `None` when the covariance is singular.
+    ///
+    /// This was `try_inverse().unwrap_or(Matrix3::zeros())`, and the zero matrix
+    /// is not a neutral fallback - it is read as "this splat has no extent", so
+    /// the conic evaluation collapses it. `Gaussian::new` clamps scale to
+    /// `>= 1e-4`, so a singular covariance only arises from a splat built outside
+    /// that constructor - a deserialised file, or a field overwritten directly.
+    ///
+    /// Reporting absence lets the caller skip the splat, which is right: a splat
+    /// with no invertible covariance has no defined footprint.
+    pub fn inverse_covariance(&self) -> Option<Matrix3<f32>> {
+        self.covariance().try_inverse()
     }
 
     pub fn project(
@@ -236,7 +379,37 @@ impl Gaussian {
             1.0 / depth,
         );
 
-        let screen_cov = jw * cov * jw.transpose();
+        // The covariance must be brought into the CAMERA frame before `jw` is applied.
+        //
+        // `cov` is `self.covariance()`, which is the world-space covariance
+        // `R S Sᵀ Rᵀ`, while `jw` is the Jacobian of camera-space -> screen: it is
+        // built from `view_pos`, which is in camera coordinates. Composing the two
+        // directly mixes frames, and the symptom is that the projected splat depends
+        // on the world frame rather than only on the relative geometry.
+        //
+        // Measured: rotating the world *and the camera together* - which must leave
+        // the image identical - changed the screen-space covariance by `3.517874e3`
+        // while leaving the centre exact. The centre was already frame-independent
+        // because it goes through the full view matrix; only the covariance skipped
+        // the rotation.
+        //
+        // With `R_view` applied the result is invariant: under a world rotation `A`
+        // the covariance becomes `A C Aᵀ` and the view rotation becomes `R Aᵀ`, so
+        // `R Aᵀ (A C Aᵀ) A Rᵀ = R C Rᵀ`, unchanged.
+        let r_view = Matrix3::new(
+            view_matrix[(0, 0)],
+            view_matrix[(0, 1)],
+            view_matrix[(0, 2)],
+            view_matrix[(1, 0)],
+            view_matrix[(1, 1)],
+            view_matrix[(1, 2)],
+            view_matrix[(2, 0)],
+            view_matrix[(2, 1)],
+            view_matrix[(2, 2)],
+        );
+        let cov_camera = r_view * cov * r_view.transpose();
+
+        let screen_cov = jw * cov_camera * jw.transpose();
 
         ProjectedGaussian {
             center: Vector2::new(px, py),
@@ -281,7 +454,21 @@ impl ProjectedGaussian {
         self.depth > 0.0 && self.depth < f32::MAX && self.opacity > 0.001
     }
 
-    pub fn inv_cov_2d(&self) -> Matrix3<f32> {
+    /// Inverse of the 2-D screen-space covariance, or `None` when singular.
+    ///
+    /// The zero-matrix fallback this replaces was actively wrong rather than
+    /// merely uninformative. The rasterizer reads the inverse to evaluate
+    ///
+    /// ```text
+    /// mahalanobis = a·dx² + 2b·dx·dy + c·dy²
+    /// ```
+    ///
+    /// and every coefficient of a zero matrix is 0, so `mahalanobis` was 0 at
+    /// **every** pixel, and `alpha = exp(-0.5·0)·opacity` came out at full
+    /// opacity across the splat's whole tile - measured 0.8 at pixel offsets of
+    /// (0,0), (10,10), (100,100) and (1000,1000) alike. A splat with no defined
+    /// footprint painted the entire tile instead of vanishing.
+    pub fn inv_cov_2d(&self) -> Option<Matrix3<f32>> {
         let cov_2d = Matrix3::new(
             self.covariance[(0, 0)],
             self.covariance[(0, 1)],
@@ -293,7 +480,7 @@ impl ProjectedGaussian {
             0.0,
             1.0,
         );
-        cov_2d.try_inverse().unwrap_or(Matrix3::zeros())
+        cov_2d.try_inverse()
     }
 }
 
@@ -325,7 +512,17 @@ impl GaussianCloud {
         idx
     }
 
+    /// Removes the Gaussian at `idx`.
+    ///
+    /// Out-of-range indices are ignored rather than passed to `Vec::swap_remove`,
+    /// which panics. Measured on a one-element cloud: `remove(5)` aborted with
+    /// `swap_remove index (is 5) should be < len (is 1)`. A stale index after
+    /// someone else's edit to `gaussians` is ordinary input for a public method
+    /// that takes a bare `usize`, and it took the whole process down.
     pub fn remove(&mut self, idx: usize) {
+        if idx >= self.gaussians.len() {
+            return;
+        }
         // `swap_remove` moves the last element into slot `idx`; remember its
         // old index so we can re-register it in `active_indices`.
         let last = self.gaussians.len() - 1;

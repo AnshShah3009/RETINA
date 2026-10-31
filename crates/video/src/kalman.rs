@@ -95,6 +95,57 @@ impl<const N: usize> KalmanFilterState<N> {
     }
 }
 
+/// Inverse of the innovation covariance `S = H P Hᵀ + R`.
+///
+/// **The pseudo-inverse, not `try_inverse().unwrap_or(zeros)`.**
+///
+/// `S` is singular whenever `R` is and `H P Hᵀ` is rank-deficient, which a
+/// caller reaches by asking for perfect trust in its measurements - the
+/// documented `utils::constant_velocity_2d(dt, q, 0.0)`. Measured with
+/// `R = 0`, `P = diag(1, 0, 0, 0)` and `H` observing `(x, y)`:
+///
+/// ```text
+/// S = [[1, 0], [0, 0]]
+/// try_inverse() -> None,  so the old code substituted K = 0
+/// ```
+///
+/// `K = 0` is not a neutral value: it means *ignore the measurement*. The state
+/// did not move and the covariance did not shrink - `0.000e0` for both, on a
+/// measurement that should have been taken exactly, since `x` is perfectly
+/// observable and the correct gain there is 1.0. The caller sees a filter that
+/// looks maximally confident and perfectly consistent, with nothing to indicate
+/// it stopped listening.
+///
+/// The correct limit of a Kalman gain as `S` becomes singular is the
+/// pseudo-inverse, which for that same input gives `S⁺ = [[1, 0], [0, 0]]` and
+/// therefore a gain of 1.0 on `x` - the measurement is taken. The pseudo-inverse
+/// also agrees with the true inverse to numerical precision whenever `S` is
+/// invertible, so this is not a special case: it is the general answer, and it
+/// is what `DynamicKalmanFilter::correct` in this same module already used.
+///
+/// The epsilon is relative to the largest singular value, so one value is valid
+/// across all problem scales.
+fn innovation_covariance_inverse<const M: usize>(s: &SMatrix<f64, M, M>) -> SMatrix<f64, M, M> {
+    // Via `DMatrix` because `SMatrix::pseudo_inverse` is not callable for a
+    // *generic* const dimension: this nalgebra version bounds it on
+    // `Const<M>: ToTypenum`, which is only implemented for concrete sizes, so
+    // the same call compiles for `Matrix6` (a literal 6) and not for `SMatrix<f64,
+    // M, M>`. `DMatrix` has no such bound. `M` is the measurement dimension -
+    // 2 to 6 in practice - so the allocation is negligible, and the dynamic
+    // filter in this module takes the same route.
+    let dense = DMatrix::from_row_slice(M, M, s.as_slice());
+    // `pseudo_inverse` returns `Ok` for every input that can reach here,
+    // including singular and non-finite matrices - measured for `[[1,0],[0,0]]`,
+    // the zero matrix, and NaN. `Err` means the SVD itself failed to converge,
+    // and then there is no usable inverse to fabricate. Propagating NaN keeps
+    // the failure visible in the state the caller reads, rather than
+    // substituting a plausible matrix that hides it.
+    match dense.pseudo_inverse(1e-6) {
+        Ok(inv) => SMatrix::from_row_slice(inv.as_slice()),
+        Err(_) => SMatrix::from_element(f64::NAN),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct KalmanFilter<const N: usize, const M: usize> {
     pub f: SMatrix<f64, N, N>,
@@ -123,7 +174,7 @@ impl<const N: usize, const M: usize> KalmanFilter<N, M> {
     pub fn update(&self, state: &mut KalmanFilterState<N>, z: &SVector<f64, M>) {
         let y = z - self.h * state.x;
         let s = self.h * state.p * self.h.transpose() + self.r;
-        let k = state.p * self.h.transpose() * s.try_inverse().unwrap_or(SMatrix::zeros());
+        let k = state.p * self.h.transpose() * innovation_covariance_inverse(&s);
         state.x += k * y;
         let i = SMatrix::<f64, N, N>::identity();
         let i_kh = i - k * self.h;
@@ -165,7 +216,7 @@ impl<const N: usize, const M: usize> ExtendedKalmanFilter<N, M> {
     ) {
         let y = z - h(&state.x);
         let s = jacobian_h * state.p * jacobian_h.transpose() + self.r;
-        let k = state.p * jacobian_h.transpose() * s.try_inverse().unwrap_or(SMatrix::zeros());
+        let k = state.p * jacobian_h.transpose() * innovation_covariance_inverse(&s);
         state.x += k * y;
         let i = SMatrix::<f64, N, N>::identity();
         let i_kh = i - k * jacobian_h;

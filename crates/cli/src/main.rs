@@ -71,8 +71,8 @@ fn print_usage() {
     println!("  --ground-truth <FILE>        ground-truth trajectory (required)");
     println!("  --format <tum|kitti|euroc>   input format (required)");
     println!("  --align <none|se3|sim3>      alignment before ATE (default: se3)");
-    println!("  --rpe-delta <N>              RPE frame gap (default: 1)");
-    println!("  --max-dt <SECONDS>           TUM association tolerance (default: 0.02)\n");
+    println!("  --rpe-delta <N>              RPE frame gap, at least 1 (default: 1)");
+    println!("  --max-dt <SECONDS>           TUM association tolerance, >= 0 (default: 0.02)\n");
     println!("model options:");
     println!("  --images <FILE>              COLMAP images.txt (required)");
     println!("  --points3d <FILE>            COLMAP points3D.txt (optional)");
@@ -249,41 +249,53 @@ fn kitti_tolerance(longer: usize) -> usize {
     (longer / 100).max(1)
 }
 
-/// EuRoC ground-truth states are index-aligned here; a length mismatch is
-/// truncated to the shorter with a warning.
+/// EuRoC states are paired by **timestamp** (nearest within `--max-dt`), as
+/// TUM is. They used to be paired by index, which is only right when the two
+/// files are sampled at the same instants: EuRoC ground truth is 200 Hz and an
+/// estimate is typically 20-30 Hz, so index pairing compared pose k of the
+/// estimate with the pose 0.005 k s into the ground truth. Two identical
+/// trajectories (x = t) sampled at 200 Hz and 20 Hz reported ATE 0.5 m.
 fn load_euroc(opts: &TrajectoryArgs) -> Result<LoadedPair, String> {
     let estimate = euroc::read_groundtruth(&opts.estimate).map_err(|e| e.to_string())?;
     let ground_truth = euroc::read_groundtruth(&opts.ground_truth).map_err(|e| e.to_string())?;
     if estimate.is_empty() || ground_truth.is_empty() {
         return Err("a EuRoC trajectory contains no poses (empty file?)".to_string());
     }
-    if estimate.len() != ground_truth.len() {
-        eprintln!(
-            "cv-bench: warning: EuRoC state counts differ (estimate {}, ground truth {}); \
-             truncating to the shorter ({})",
+
+    let index = |states: &[euroc::GroundTruthState]| -> Vec<IndexEntry> {
+        states
+            .iter()
+            .map(|state| IndexEntry {
+                timestamp: state.timestamp_ns as f64 * 1e-9,
+                filename: String::new(),
+            })
+            .collect()
+    };
+    let matches = tum::associate(&index(&estimate), &index(&ground_truth), opts.max_dt);
+    if matches.is_empty() {
+        return Err(format!(
+            "no EuRoC states could be associated within --max-dt = {} s \
+             (estimate has {} states, ground truth has {})",
+            opts.max_dt,
             estimate.len(),
-            ground_truth.len(),
-            estimate.len().min(ground_truth.len())
-        );
+            ground_truth.len()
+        ));
     }
 
-    let n = estimate.len().min(ground_truth.len());
-    let estimate_poses: Vec<Pose> = estimate[..n].iter().map(|state| state.pose).collect();
-    let estimate_times: Vec<f64> = estimate[..n]
+    let time = |state: &euroc::GroundTruthState| state.timestamp_ns as f64 * 1e-9;
+    let estimate_poses: Vec<Pose> = matches.iter().map(|(i, _)| estimate[*i].pose).collect();
+    let estimate_times: Vec<f64> = matches.iter().map(|(i, _)| time(&estimate[*i])).collect();
+    let truth_poses: Vec<Pose> = matches.iter().map(|(_, j)| ground_truth[*j].pose).collect();
+    let truth_times: Vec<f64> = matches
         .iter()
-        .map(|state| state.timestamp_ns as f64 * 1e-9)
-        .collect();
-    let truth_poses: Vec<Pose> = ground_truth[..n].iter().map(|state| state.pose).collect();
-    let truth_times: Vec<f64> = ground_truth[..n]
-        .iter()
-        .map(|state| state.timestamp_ns as f64 * 1e-9)
+        .map(|(_, j)| time(&ground_truth[*j]))
         .collect();
 
     Ok(LoadedPair {
         estimate: build_trajectory(&estimate_poses, &estimate_times),
         ground_truth: build_trajectory(&truth_poses, &truth_times),
-        paired: n,
-        method: "index alignment (EuRoC)".to_string(),
+        paired: matches.len(),
+        method: format!("timestamp association (EuRoC), max_dt = {} s", opts.max_dt),
     })
 }
 

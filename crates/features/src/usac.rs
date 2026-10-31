@@ -31,7 +31,15 @@ pub enum LocalOptimMethod {
     InnerAndIterLo,
 }
 
-/// Scoring method
+/// Scoring method — the family a scorer implements.
+///
+/// Not consumed by [`estimate_usac`]: which family a scorer belongs to is the
+/// caller's choice, expressed by which closure they pass. The variant list is
+/// kept because it names the four score measures the crate's scorers implement
+/// ([`scorers::score_ransac`], `score_msac`, [`scorers::score_magsac`] and LMedS,
+/// which has no scorer here) and a caller selecting one by name needs the set to
+/// be closed and documented. It was previously stored in a `UsacParams::score`
+/// field that nothing read.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ScoreMethod {
     /// Classic RANSAC: count inliers with hard threshold
@@ -45,26 +53,38 @@ pub enum ScoreMethod {
 }
 
 /// USAC parameters
+///
+/// # Three parameters are deliberately absent
+///
+/// `threshold`, `score` (a [`ScoreMethod`]) and `magsac_sigma_max` used to sit
+/// here as documented public fields. They were never read: [`estimate_usac`]
+/// delegates inlier classification and model ranking entirely to the
+/// caller-supplied `scorer` closure, which returns `(inliers, score, mask)`, so
+/// a threshold or a σ bound set here had no effect on anything and read as
+/// configuration that worked. They are removed rather than wired up, because
+/// threading a second, conflicting source of inlier definitions through the
+/// scorer API would reintroduce the same ambiguity in a harder-to-spot place.
+///
+/// The practical consequence for a caller: build the scorer from the values you
+/// want and pass `UsacParams` with only the sampling and iteration controls.
+/// [`scorers::score_magsac`] and [`scorers::score_ransac`] take the threshold
+/// (and σ bound) as arguments for exactly this reason.
 #[derive(Clone)]
 pub struct UsacParams {
-    /// Maximum iterations
+    /// Iteration budget. `0` selects the adaptive count derived from
+    /// `confidence` and the best model's inlier ratio (capped at 10 000);
+    /// any other value runs exactly that many iterations.
     pub max_iterations: usize,
     /// Confidence level (probability of sampling all-inlier set)
     pub confidence: f64,
-    /// Inlier threshold (pixels)
-    pub threshold: f64,
     /// Sampling method
     pub sampling: UsacSampling,
     /// Local optimization method
     pub local_optim: LocalOptimMethod,
-    /// Scoring method
-    pub score: ScoreMethod,
     /// NAPSAC neighborhood size
     pub neighbor_count: usize,
     /// Minimum inlier ratio to trigger LO
     pub lo_inlier_ratio: f64,
-    /// MAGSAC: maximum σ for margin
-    pub magsac_sigma_max: f64,
 }
 
 impl Default for UsacParams {
@@ -72,13 +92,10 @@ impl Default for UsacParams {
         Self {
             max_iterations: 2000,
             confidence: 0.999,
-            threshold: 2.0,
             sampling: UsacSampling::ProgressiveNapsac,
             local_optim: LocalOptimMethod::InnerLo,
-            score: ScoreMethod::Magsac,
             neighbor_count: 8,
             lo_inlier_ratio: 0.1,
-            magsac_sigma_max: 10.0,
         }
     }
 }
@@ -127,33 +144,48 @@ where
         vec![Vec::new(); n]
     };
 
-    // Adaptive iteration count: N = ln(1 - confidence) / ln(1 - eps^s).
-    // The true inlier ratio eps is unknown before scoring, so assume a
-    // conservative 50% — the bound is refined implicitly by the fixed cap.
-    let max_iters = if params.max_iterations == 0 {
-        let confidence = params.confidence.clamp(0.0, 0.999_999);
-        let p_good = 0.5f64.powi(sample_size.min(64) as i32);
-        if p_good <= 0.0 || p_good >= 1.0 {
-            1000
-        } else {
-            (((1.0 - confidence).ln() / (1.0 - p_good).ln()).ceil() as usize).max(1)
-        }
+    // `max_iterations == 0` selects the adaptive count, as OpenCV's RANSAC
+    // computes it: start from a cap and, whenever the best model improves,
+    // lower the bound to N = ln(1 - confidence) / ln(1 - w^s) for that
+    // model's inlier ratio w. A nonzero `max_iterations` is a fixed budget.
+    //
+    // The adaptive mode used to fix N once from an *assumed* 50% inlier ratio
+    // and never revisit it: at a true 30% ratio with s = 4 that is 107
+    // iterations and P(success) = 1 - (1 - 0.3^4)^107 ~= 0.58, not the 0.999
+    // asked for.
+    const ADAPTIVE_CAP: usize = 10_000;
+    let cap = if params.max_iterations == 0 {
+        ADAPTIVE_CAP
     } else {
         params.max_iterations
     };
+    let confidence = params.confidence.clamp(0.0, 0.999_999);
+    let required = |inliers: usize| -> usize {
+        let p_good = (inliers as f64 / n as f64).powi(sample_size.min(64) as i32);
+        if p_good >= 1.0 - 1e-12 {
+            1
+        } else if p_good <= 0.0 {
+            usize::MAX
+        } else {
+            (((1.0 - confidence).ln() / (1.0 - p_good).ln()).ceil() as usize).max(1)
+        }
+    };
+    let mut bound = cap;
+    let mut iter = 0;
 
-    for iter in 0..max_iters {
+    while iter < bound {
         let sample = match params.sampling {
             UsacSampling::Uniform => sample_uniform(&mut rng, n, sample_size),
             UsacSampling::Napsac => sample_napsac(&mut rng, &neighbors, n, sample_size),
             UsacSampling::ProgressiveNapsac => {
-                if iter < max_iters / 2 {
+                if iter < bound / 2 {
                     sample_uniform(&mut rng, n, sample_size)
                 } else {
                     sample_napsac(&mut rng, &neighbors, n, sample_size)
                 }
             }
         };
+        iter += 1;
 
         // Skip degenerate samples (e.g. duplicate/collinear points); they
         // must not abort the whole search.
@@ -178,6 +210,9 @@ where
             best_inliers = inliers;
             best_score = score;
             best_mask = mask;
+            if params.max_iterations == 0 {
+                bound = bound.min(required(best_inliers)).max(iter);
+            }
         }
     }
 
@@ -186,7 +221,7 @@ where
         inliers: best_inliers,
         score: best_score,
         mask: best_mask,
-        iterations: max_iters,
+        iterations: iter,
     })
 }
 
@@ -295,67 +330,103 @@ fn refine_local<M: Clone>(
 pub mod scorers {
     use super::*;
 
-    /// MSAC scoring: robust M-estimator with soft threshold
+    /// MSAC scoring: the truncated quadratic cost `sum(min(d^2, t^2))`,
+    /// minimized, with the hard-threshold inlier count alongside it.
     ///
-    /// **Not implemented.** A correct score requires a per-model residual
-    /// metric (`residual(model, point)`), but this generic API only receives an
-    /// opaque `M: Clone` and no way to measure how far a point lies from the
-    /// model, so no meaningful score can be computed here. This previously
-    /// returned `(0, 0.0, vec![false; n])`, which silently reported zero
-    /// inliers for *every* model; it now fails loudly instead of lying.
-    ///
-    /// # Panics
-    ///
-    /// Always panics until a model-distance trait is introduced and threaded
-    /// through the scorer API.
-    pub fn score_msac<M>(
-        _model: &M,
-        _points: &[Point2<f64>],
-        _threshold: f64,
-    ) -> (usize, f64, Vec<bool>)
-    where
-        M: Clone,
-    {
-        unimplemented!(
-            "score_msac: no model residual metric is available for a generic \
-             `M: Clone`; the previous stub silently returned zero inliers"
-        )
-    }
-
-    /// MAGSAC scoring: σ-consensus with adaptive margin
-    pub fn score_magsac<M: Clone>(
+    /// The `residual` closure is the model-distance metric this API always
+    /// needed: a generic `M: Clone` carries no way to measure how far a point
+    /// lies from a model. Before it existed this function could not work - it
+    /// first returned `(0, 0.0, mask)` for *every* model (silently zero
+    /// inliers), then panicked - so no working caller can be broken by the
+    /// signature.
+    pub fn score_msac<M, F>(
         model: &M,
         points: &[Point2<f64>],
         threshold: f64,
-        sigma_max: f64,
+        residual: F,
     ) -> (usize, f64, Vec<bool>)
     where
-        M: Clone,
+        F: Fn(&M, &Point2<f64>) -> f64,
     {
-        let mut best_inliers = 0;
-        let mut best_score = f64::MAX;
-        let mut best_mask = vec![false; points.len()];
+        let t2 = threshold * threshold;
+        let mut inliers = 0;
+        let mut score = 0.0;
+        let mut mask = vec![false; points.len()];
+        for (i, p) in points.iter().enumerate() {
+            let d = residual(model, p);
+            let d2 = d * d;
+            if d < threshold {
+                inliers += 1;
+                mask[i] = true;
+            }
+            score += if d2 < t2 { d2 } else { t2 };
+        }
+        (inliers, score, mask)
+    }
 
-        for s in (1..=sigma_max as usize).rev() {
-            let t = s as f64;
-            let (inliers, score, mask) = score_msac(model, points, t);
-            if inliers > best_inliers || (inliers == best_inliers && score < best_score) {
-                best_inliers = inliers;
-                best_score = score;
-                best_mask = mask;
+    /// MAGSAC-style scoring: the MSAC truncated-quadratic cost marginalised
+    /// over noise levels, rather than evaluated at one threshold. The cost is
+    /// averaged over `K = 10` thresholds `sigma_max * k / K`, each term
+    /// normalised by its threshold squared so every level contributes on the
+    /// same scale; inliers and the mask are those within `sigma_max`.
+    ///
+    /// This is a marginalised MSAC in the spirit of MAGSAC (Barath et al.
+    /// 2019), not MAGSAC++'s chi-distribution weighting. It replaces an
+    /// integer sweep `1..=sigma_max as usize` that never ran for
+    /// `sigma_max < 1` - every model scored `(0, f64::MAX)`, so
+    /// `estimate_usac` returned `None` on a perfect line at `sigma_max = 0.5`
+    /// - and that, because inlier counts only grow with the threshold, always
+    /// picked the largest integer sigma: plain MSAC at `floor(sigma_max)`.
+    pub fn score_magsac<M, F>(
+        model: &M,
+        points: &[Point2<f64>],
+        sigma_max: f64,
+        residual: F,
+    ) -> (usize, f64, Vec<bool>)
+    where
+        F: Fn(&M, &Point2<f64>) -> f64,
+    {
+        if !(sigma_max > 0.0) || !sigma_max.is_finite() {
+            return (0, f64::MAX, vec![false; points.len()]);
+        }
+        const K: usize = 10;
+        let mut cost = 0.0;
+        for k in 1..=K {
+            let t = sigma_max * k as f64 / K as f64;
+            let (_, s, _) = score_msac(model, points, t, &residual);
+            cost += s / (t * t);
+        }
+        let (inliers, _, mask) = score_msac(model, points, sigma_max, &residual);
+        (inliers, cost / K as f64, mask)
+    }
+
+    /// RANSAC hard-threshold scoring: the inlier count decides, and the score
+    /// is the **outlier** count so the caller's `score < best_score` minimizer
+    /// ranks more-inlier models first.
+    ///
+    /// This used to delegate to [`score_msac`] and therefore panicked exactly
+    /// as it did, while its documentation called it "the usable scorer".
+    pub fn score_ransac<M, F>(
+        model: &M,
+        points: &[Point2<f64>],
+        threshold: f64,
+        residual: F,
+    ) -> (usize, f64, Vec<bool>)
+    where
+        F: Fn(&M, &Point2<f64>) -> f64,
+    {
+        let mut inliers = 0;
+        let mut score = 0.0;
+        let mut mask = vec![false; points.len()];
+        for (i, p) in points.iter().enumerate() {
+            if residual(model, p) < threshold {
+                inliers += 1;
+                mask[i] = true;
+            } else {
+                score += 1.0;
             }
         }
-
-        (best_inliers, best_score, best_mask)
-    }
-
-    /// RANSAC hard-threshold scoring
-    pub fn score_ransac<M: Clone>(
-        model: &M,
-        points: &[Point2<f64>],
-        threshold: f64,
-    ) -> (usize, f64, Vec<bool>) {
-        score_msac(model, points, threshold)
+        (inliers, score, mask)
     }
 }
 
@@ -398,6 +469,42 @@ mod tests {
         (inliers, score, mask)
     }
 
+    /// The residual metric the `scorers` functions take.
+    fn line_residual(model: &(f64, f64), p: &Point2<f64>) -> f64 {
+        (p.y - (model.0 * p.x + model.1)).abs()
+    }
+
+    /// The scorers are real functions now, so they are tested like any other:
+    /// each must rank a true model above a wrong one, and report the same
+    /// inlier set. (They previously panicked unconditionally - `score_ransac`
+    /// included, despite its docs - so there was nothing to test.)
+    #[test]
+    fn scorers_rank_the_true_model_first() {
+        let pts: Vec<Point2<f64>> = (0..20)
+            .map(|i| Point2::new(i as f64, 2.0 * i as f64 + 1.0))
+            .collect();
+        let good = (2.0, 1.0);
+        let bad = (0.0, 10.0);
+
+        let (gi, gs, gm) = scorers::score_ransac(&good, &pts, 0.1, line_residual);
+        let (bi, bs, _bm) = scorers::score_ransac(&bad, &pts, 0.1, line_residual);
+        assert_eq!(gi, 20, "the true model fits every point");
+        assert_eq!(bi, 0, "the wrong model fits none");
+        assert!(gs < bs, "outlier count must decrease with quality");
+        assert!(gm.iter().all(|&m| m));
+
+        let (mi, ms, _) = scorers::score_msac(&good, &pts, 0.1, line_residual);
+        assert_eq!(mi, 20);
+        assert!(
+            ms < scorers::score_msac(&bad, &pts, 0.1, line_residual).1,
+            "MSAC cost must rank the true model lower"
+        );
+
+        let (ai, _, am) = scorers::score_magsac(&good, &pts, 3.0, line_residual);
+        assert_eq!(ai, 20);
+        assert_eq!(am.len(), pts.len());
+    }
+
     #[test]
     fn test_usac_line_fit() {
         use rand::Rng;
@@ -419,10 +526,9 @@ mod tests {
             ));
         }
 
-        let params = UsacParams {
-            threshold: 0.3,
-            ..Default::default()
-        };
+        // The inlier threshold lives in the scorer, not in `UsacParams` — it
+        // used to be duplicated as a field that nothing read.
+        let params = UsacParams::default();
 
         let result = estimate_usac(&pts, &params, &line_model, &line_score, 2);
         assert!(result.is_some());
@@ -443,7 +549,6 @@ mod tests {
         }
 
         let params = UsacParams {
-            threshold: 0.1,
             max_iterations: 0,
             ..Default::default()
         };
@@ -455,12 +560,66 @@ mod tests {
         assert!(res.inliers >= 40);
     }
 
+    /// `score_magsac` must work below sigma 1 and rank models by fit.
     #[test]
-    #[should_panic(expected = "score_msac")]
-    fn msac_scorer_is_not_a_silent_stub() {
-        // The generic scorer cannot compute a residual, so it must fail
-        // loudly rather than silently reporting zero inliers for every model.
-        let pts = [Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)];
-        let _ = scorers::score_ransac(&(1.0f64, 0.0f64), &pts, 1.0);
+    fn magsac_scores_below_unit_sigma() {
+        let pts: Vec<Point2<f64>> = (0..30)
+            .map(|i| Point2::new(i as f64, 2.0 * i as f64 + 1.0))
+            .collect();
+        let (inl, score, _) = scorers::score_magsac(&(2.0, 1.0), &pts, 0.5, line_residual);
+        assert_eq!(inl, 30);
+        assert!(score < 1e-12, "{score}");
+        let near = scorers::score_magsac(&(2.0, 1.2), &pts, 0.5, line_residual).1;
+        let far = scorers::score_magsac(&(2.0, 3.0), &pts, 0.5, line_residual).1;
+        assert!(score < near && near < far, "{score} {near} {far}");
+    }
+
+    /// Adaptive iterations follow the best model's inlier ratio: an all-inlier
+    /// problem stops after a handful, and a 30%-inlier problem still meets
+    /// the requested confidence (it used to run a fixed 107 iterations).
+    #[test]
+    fn adaptive_iterations_track_the_inlier_ratio() {
+        let line = |x: f64| 3.0 * x + 1.0;
+        let clean: Vec<Point2<f64>> = (0..50)
+            .map(|x| Point2::new(x as f64, line(x as f64)))
+            .collect();
+        let params = UsacParams {
+            max_iterations: 0,
+            sampling: UsacSampling::Uniform,
+            local_optim: LocalOptimMethod::Null,
+            ..Default::default()
+        };
+        let res = estimate_usac(&clean, &params, &line_model, &line_score, 2).unwrap();
+        assert!(
+            res.iterations <= 5,
+            "all-inlier run took {} iterations",
+            res.iterations
+        );
+
+        let mut s: u64 = 1;
+        let mut rnd = || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut found = 0;
+        for _ in 0..40 {
+            let mut pts: Vec<Point2<f64>> = (0..30)
+                .map(|x| Point2::new(x as f64, line(x as f64)))
+                .collect();
+            for _ in 0..70 {
+                pts.push(Point2::new(rnd() * 30.0, rnd() * 100.0));
+            }
+            if let Some(r) = estimate_usac(&pts, &params, &line_model, &line_score, 2) {
+                if r.inliers >= 30 {
+                    found += 1;
+                }
+            }
+        }
+        // At confidence 0.999 per run, 38/40 fails with probability ~1e-4.
+        // The old fixed count (24 iterations here, from an assumed 50% ratio)
+        // succeeds ~90% per run, i.e. ~36/40.
+        assert!(found >= 38, "30%-inlier problems solved {found}/40");
     }
 }

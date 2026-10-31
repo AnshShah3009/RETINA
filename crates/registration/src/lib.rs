@@ -65,7 +65,7 @@
 //! ## Evaluation
 //!
 //! - [`evaluate_registration`]: Evaluate registration quality
-//! - [`get_information_matrix_from_point_clouds`]: Compute information matrix for uncertainty
+//! - [`get_information_matrix_from_point_clouds`]: Open3D-style information matrix (`sum G^T G`, `G = [-[q]x | I]`) for pose-graph edges
 
 /// Use cv_core::Error as the standard error type
 pub use cv_core::Error as RegistrationError;

@@ -600,12 +600,13 @@ impl ComputeContext for GpuContext {
                 &kernel_gpu,
                 iterations,
             )?;
-            // Safety: we know T is compatible here if we reached this point with GpuStorage<u8>
-            // but this is tricky with the generic T.
-            // Given the HAL structure, we'll likely only call this with T=f32 or u8.
-            // If it's f32 and we have u8 storage, we have a problem.
-            // Let's assume for now morphology on GPU is f32-compatible or we use casts.
-            // Actually, the previous code used GpuStorage<u8>.
+            // The first downcast pinned `S` to `GpuStorage<u8>` and the kernel
+            // returns `GpuStorage<u8>`, so this cast cannot fail for a caller
+            // that got past the check - a previous comment here "assumed for
+            // now morphology on GPU is f32-compatible", which the `Tensor<u8, _>`
+            // signature had already made impossible. The message stays because
+            // `S` is still a runtime type and an invariant broken elsewhere in
+            // the HAL should say so, not panic.
             let storage_any = result_gpu.storage.as_any();
             if let Some(storage_s) = storage_any.downcast_ref::<S>() {
                 Ok(Tensor {
@@ -615,13 +616,18 @@ impl ComputeContext for GpuContext {
                     _phantom: PhantomData,
                 })
             } else {
-                Err(crate::Error::InvalidInput(
-                    "Failed to downcast GPU result".into(),
+                Err(crate::Error::RuntimeError(
+                    "GPU morphology result storage is not the caller's S \
+                     (GpuStorage<u8> was expected end to end)"
+                        .into(),
                 ))
             }
         } else {
             Err(crate::Error::InvalidInput(
-                "Morphology requires GpuStorage<u8>".into(),
+                "GPU morphology requires GPU-resident u8 tensors: the input or \
+                 kernel storage is not GpuStorage<u8>. Upload to the GPU first, \
+                 or run the CPU backend"
+                    .into(),
             ))
         }
     }
@@ -1491,7 +1497,9 @@ impl ComputeContext for GpuContext {
                 _phantom: PhantomData,
             })
         } else {
-            Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+            Err(crate::Error::InvalidInput(
+                "Failed to downcast GPU result".into(),
+            ))
         }
     }
 
@@ -1893,8 +1901,9 @@ impl ComputeContext for GpuContext {
                     });
                     pass.set_pipeline(&pipeline);
                     pass.set_bind_group(0, &bind_group, &[]);
-                    let x = (kp_data.len() as u32).div_ceil(64);
-                    pass.dispatch_workgroups(x, 1, 1);
+                    let (wg_x, wg_y, wg_z) =
+                        crate::gpu_kernels::dispatch_1d(kp_data.len() as u32, 64);
+                    pass.dispatch_workgroups(wg_x, wg_y, wg_z);
                 }
                 self.submit(encoder);
 
@@ -1913,7 +1922,7 @@ impl ComputeContext for GpuContext {
                     let start = i * 128;
                     let data: Vec<u8> = raw_descs[start..start + 128]
                         .iter()
-                        .map(|&v| (v * 512.0).min(255.0) as u8)
+                        .map(|&v| (v * 512.0).round().clamp(0.0, 255.0) as u8)
                         .collect();
                     descs.push(cv_core::Descriptor::new(data, keypoints.keypoints[i]));
                 }
