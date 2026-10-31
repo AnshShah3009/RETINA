@@ -3,7 +3,6 @@ use cv_hal::compute::ComputeDevice;
 use cv_hal::tensor_ext::TensorToGpu;
 use cv_runtime::orchestrator::{scheduler, ResourceGroup};
 use image::GrayImage;
-use rand::Rng;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -81,6 +80,14 @@ fn nms_circles(circles: &mut Vec<cv_core::HoughCircle>, min_dist: f32) {
     *circles = accepted;
 }
 
+/// Gradient Hough circle transform on a **grayscale** image.
+///
+/// Like `cv2.HoughCircles(.., HOUGH_GRADIENT, ..)`, and unlike
+/// [`hough_lines`] / [`hough_lines_p`], this takes the intensity image and
+/// runs [`canny`] internally (low 50, high 150); the Sobel gradient direction
+/// of the intensity image steers the votes. The parameters and the voting
+/// scheme are this crate's own (one accumulator per integer radius,
+/// `threshold` votes, centres closer than 10 px suppressed), not OpenCV's.
 pub fn hough_circles(
     src: &GrayImage,
     min_radius: f32,
@@ -132,7 +139,8 @@ pub fn hough_circles(
     all_circles
 }
 
-/// Optimized Hough Circle Transform using gradient direction
+/// [`hough_circles`] with an explicit resource group. Takes a grayscale image
+/// and runs [`canny`] internally.
 pub fn hough_circles_ctx(
     src: &GrayImage,
     min_radius: f32,
@@ -255,13 +263,145 @@ pub fn validate_hough_resolutions(rho_res: f32, theta_res: f32) -> crate::Result
     Ok(())
 }
 
-/// Standard Hough line transform.
+/// `cvRound` on a float: round half to even, saturating.
+#[inline]
+fn cv_round(v: f32) -> i32 {
+    v.round_ties_even() as i32
+}
+
+/// `cv::RNG` (multiply-with-carry), so the probabilistic transform visits
+/// edge points in the same order as OpenCV.
+struct CvRng(u64);
+
+impl CvRng {
+    fn next(&mut self) -> u32 {
+        self.0 = (self.0 as u32 as u64)
+            .wrapping_mul(4_164_903_690)
+            .wrapping_add(self.0 >> 32);
+        self.0 as u32
+    }
+
+    fn uniform(&mut self, a: i32, b: i32) -> i32 {
+        if a == b {
+            a
+        } else {
+            (self.next() % (b - a) as u32) as i32 + a
+        }
+    }
+}
+
+/// OpenCV `HoughLinesStandard` on a binary edge map (nonzero = edge).
+fn hough_lines_cpu(edges: &GrayImage, rho: f32, theta: f32, threshold: u32) -> Vec<Line> {
+    let w = edges.width() as usize;
+    let h = edges.height() as usize;
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let irho = 1.0f32 / rho;
+    let mut num_angle = ((std::f64::consts::PI) / theta as f64).floor() as usize + 1;
+    if num_angle > 1
+        && (std::f64::consts::PI - ((num_angle - 1) as f32 * theta) as f64).abs()
+            < (theta / 2.0) as f64
+    {
+        num_angle -= 1;
+    }
+    let num_rho = cv_round(((w + h) * 2 + 1) as f32 / rho).max(1) as usize;
+    let rho_offset = ((num_rho - 1) / 2) as i32;
+
+    // createTrigTable: the angle is accumulated in f32.
+    let mut tab_cos = Vec::with_capacity(num_angle);
+    let mut tab_sin = Vec::with_capacity(num_angle);
+    let mut ang = 0.0f32;
+    for _ in 0..num_angle {
+        tab_sin.push(((ang as f64).sin() * irho as f64) as f32);
+        tab_cos.push(((ang as f64).cos() * irho as f64) as f32);
+        ang += theta;
+    }
+
+    let src = edges.as_raw();
+    let acc = (0..h)
+        .into_par_iter()
+        .fold(
+            || vec![0u32; num_angle * num_rho],
+            |mut acc, y| {
+                for x in 0..w {
+                    if src[y * w + x] == 0 {
+                        continue;
+                    }
+                    for n in 0..num_angle {
+                        let r =
+                            cv_round(x as f32 * tab_cos[n] + y as f32 * tab_sin[n]) + rho_offset;
+                        if r >= 0 && (r as usize) < num_rho {
+                            acc[n * num_rho + r as usize] += 1;
+                        }
+                    }
+                }
+                acc
+            },
+        )
+        .reduce(
+            || vec![0u32; num_angle * num_rho],
+            |mut a, b| {
+                a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+                a
+            },
+        );
+
+    // findLocalMaximums: `>` the lower and `>=` the upper neighbour in rho and
+    // theta; out-of-range neighbours are 0. Scan order is rho-major as in
+    // OpenCV, but ties are broken by accumulator index (theta-major).
+    let at = |n: usize, r: usize| acc[n * num_rho + r];
+    let mut peaks: Vec<(u32, usize, usize)> = Vec::new();
+    for r in 0..num_rho {
+        for n in 0..num_angle {
+            let v = at(n, r);
+            if v <= threshold {
+                continue;
+            }
+            let r_lo = if r > 0 { at(n, r - 1) } else { 0 };
+            let r_hi = if r + 1 < num_rho { at(n, r + 1) } else { 0 };
+            let n_lo = if n > 0 { at(n - 1, r) } else { 0 };
+            let n_hi = if n + 1 < num_angle { at(n + 1, r) } else { 0 };
+            if v > r_lo && v >= r_hi && v > n_lo && v >= n_hi {
+                peaks.push((v, n, r));
+            }
+        }
+    }
+    // hough_cmp_gt: more votes first, then smaller accumulator index.
+    peaks.sort_by(|a, b| b.0.cmp(&a.0).then((a.1, a.2).cmp(&(b.1, b.2))));
+    peaks
+        .into_iter()
+        .map(|(score, n, r)| Line {
+            // Bin r holds rho = (r - offset) * rho_res. OpenCV 4.13 reports
+            // that value also when num_rho is even (where the textbook
+            // `(r - (num_rho - 1) * 0.5) * rho` would be half a bin off).
+            rho: (r as i32 - rho_offset) as f32 * rho,
+            theta: n as f32 * theta,
+            score,
+        })
+        .collect()
+}
+
+/// Standard Hough line transform, `cv2.HoughLines(edges, rho_res, theta_res,
+/// threshold)`.
+///
+/// `edges` is a binary edge map: every nonzero pixel votes. Run [`canny`] (or
+/// any other edge detector) first; this function does not. (It used to run
+/// `canny(src, 50, 150)` internally, which turned an edge map into the edges
+/// of its edges.)
+///
+/// Accumulator, peak test and ordering follow OpenCV's `HoughLinesStandard`:
+/// `round(((w + h) * 2 + 1) / rho_res)` rho bins, bin `k` centred on
+/// `(k - (num_rho - 1) / 2) * rho_res`, `floor(pi / theta_res) + 1` angles minus a duplicate of 0, a
+/// line is a bin with **more than** `threshold` votes that beats its rho and
+/// theta neighbours, strongest first. `Line::score` is the vote count
+/// (`cv2.HoughLinesWithAccumulator`).
 ///
 /// # Errors
 /// Returns [`crate::ImgprocError::InvalidInput`] if `rho_res` or `theta_res` is
 /// not finite and positive.
 pub fn hough_lines(
-    src: &GrayImage,
+    edges: &GrayImage,
     rho_res: f32,
     theta_res: f32,
     threshold: u32,
@@ -269,129 +409,56 @@ pub fn hough_lines(
     validate_hough_resolutions(rho_res, theta_res)?;
     if let Ok(s) = scheduler() {
         if let Ok(group) = s.get_default_group() {
-            return hough_lines_ctx(src, rho_res, theta_res, threshold, &group);
+            return hough_lines_ctx(edges, rho_res, theta_res, threshold, &group);
         }
     }
-    // Deep fallback
-    Ok(Vec::new())
+    Ok(hough_lines_cpu(edges, rho_res, theta_res, threshold))
 }
 
-/// Standard Hough line transform with an explicit resource group.
+/// [`hough_lines`] with an explicit resource group. On a GPU group the
+/// `hough.wgsl` kernel is tried first; it is not bit-exact with OpenCV.
 ///
 /// # Errors
 /// Returns [`crate::ImgprocError::InvalidInput`] if `rho_res` or `theta_res` is
 /// not finite and positive.
 pub fn hough_lines_ctx(
-    src: &GrayImage,
+    edges: &GrayImage,
     rho_res: f32,
     theta_res: f32,
     threshold: u32,
     group: &ResourceGroup,
 ) -> crate::Result<Vec<Line>> {
     validate_hough_resolutions(rho_res, theta_res)?;
+    if edges.width() == 0 || edges.height() == 0 {
+        return Ok(Vec::new());
+    }
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(res) = hough_lines_gpu(gpu, src, rho_res, theta_res, threshold) {
+        if let Ok(res) = hough_lines_gpu(gpu, edges, rho_res, theta_res, threshold) {
             return Ok(res);
         }
     }
-
-    let edges = canny(src, 50, 150);
-    let width = src.width();
-    let height = src.height();
-
-    let max_rho = (width as f32 * width as f32 + height as f32 * height as f32).sqrt();
-    let num_rho = (2.0 * max_rho / rho_res).ceil() as usize + 1;
-    let num_theta = (std::f32::consts::PI / theta_res) as usize;
-
-    let acc_atomic: Vec<AtomicU32> = std::iter::repeat_with(|| AtomicU32::new(0))
-        .take(num_rho * num_theta)
-        .collect();
-
-    group.run(|| {
-        edges.as_raw().par_iter().enumerate().for_each(|(i, &e)| {
-            if e > 0 {
-                let x = (i % width as usize) as f32;
-                let y = (i / width as usize) as f32;
-
-                for t_idx in 0..num_theta {
-                    let theta = t_idx as f32 * theta_res;
-                    let rho = x * theta.cos() + y * theta.sin();
-                    let rho_idx = ((rho + max_rho) / rho_res) as usize;
-
-                    if rho_idx < num_rho {
-                        acc_atomic[rho_idx * num_theta + t_idx].fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-            }
-        });
-    });
-
-    // Collect accumulator into a plain Vec for NMS
-    let acc: Vec<u32> = acc_atomic.into_iter().map(|a| a.into_inner()).collect();
-
-    // Local-maximum suppression: only keep cells that are strictly greater
-    // than all 8 neighbors in a 3x3 window in (rho, theta) accumulator space.
-    let mut lines = Vec::new();
-    for r_idx in 0..num_rho {
-        for t_idx in 0..num_theta {
-            let score = acc[r_idx * num_theta + t_idx];
-            if score < threshold {
-                continue;
-            }
-            let mut is_max = true;
-            'nms: for dr in [-1i32, 0, 1] {
-                for dt in [-1i32, 0, 1] {
-                    if dr == 0 && dt == 0 {
-                        continue;
-                    }
-                    let nr = r_idx as i32 + dr;
-                    let nt = t_idx as i32 + dt;
-                    if nr >= 0
-                        && nr < num_rho as i32
-                        && nt >= 0
-                        && nt < num_theta as i32
-                        && acc[nr as usize * num_theta + nt as usize] >= score
-                    {
-                        is_max = false;
-                        break 'nms;
-                    }
-                }
-            }
-            if is_max {
-                lines.push(Line {
-                    rho: r_idx as f32 * rho_res - max_rho,
-                    theta: t_idx as f32 * theta_res,
-                    score,
-                });
-            }
-        }
-    }
-
-    Ok(lines)
+    Ok(group.run(|| hough_lines_cpu(edges, rho_res, theta_res, threshold)))
 }
 
 fn hough_lines_gpu(
     gpu: &cv_hal::gpu::GpuContext,
-    src: &GrayImage,
+    edges: &GrayImage,
     rho_res: f32,
     theta_res: f32,
     threshold: u32,
 ) -> cv_hal::Result<Vec<Line>> {
     use cv_hal::context::ComputeContext;
-    let edges = canny(src, 50, 150);
     let edges_f32: Vec<f32> = edges.as_raw().iter().map(|&p| p as f32).collect();
 
     let input_tensor = cv_core::CpuTensor::from_vec(
         edges_f32,
-        cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
+        cv_core::TensorShape::new(1, edges.height() as usize, edges.width() as usize),
     )
     .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
     let input_gpu = input_tensor
         .to_gpu_ctx(gpu)
         .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
 
-    // hough_lines threshold must be u32, but underlying GPU kernel takes f32 or u32 depending on signature
-    // In context.rs: fn hough_lines(..., threshold: u32)
     let res_hal = gpu.hough_lines(&input_gpu, rho_res, theta_res, threshold)?;
 
     Ok(res_hal
@@ -404,45 +471,28 @@ fn hough_lines_gpu(
         .collect())
 }
 
-/// Unvote a single pixel from the accumulator: for each theta bin, compute which
-/// rho bin it would have voted for and decrement.
-#[allow(clippy::too_many_arguments)]
-fn ppht_unvote(
-    x: usize,
-    y: usize,
-    acc: &mut [u32],
-    num_rho: usize,
-    num_theta: usize,
-    rho_res: f32,
-    theta_res: f32,
-    max_rho: f32,
-) {
-    for t_idx in 0..num_theta {
-        let theta = t_idx as f32 * theta_res;
-        let rho = x as f32 * theta.cos() + y as f32 * theta.sin();
-        let rho_idx = ((rho + max_rho) / rho_res) as usize;
-        if rho_idx < num_rho {
-            let aidx = rho_idx * num_theta + t_idx;
-            acc[aidx] = acc[aidx].saturating_sub(1);
-        }
-    }
-}
-
-/// Progressive Probabilistic Hough Transform for line segment detection
+/// Progressive probabilistic Hough transform, `cv2.HoughLinesP(edges,
+/// rho_res, theta_res, threshold, min_line_length, max_line_gap)`.
 ///
-/// Implements the Matas et al. 2000 PPHT algorithm. The key invariant is that
-/// the accumulator only contains votes from unprocessed edge points. When a
-/// line is detected, all supporting pixels along the segment are removed and
-/// their votes decremented.
+/// `edges` is a binary edge map: every nonzero pixel is a candidate. Run
+/// [`canny`] first if needed; this function does not (it used to run
+/// `canny(src, 50, 150)` internally).
+///
+/// A port of OpenCV's `HoughLinesProbabilistic`, including its `cv::RNG`
+/// seeded with `u64::MAX`, so the segments and their order are the ones
+/// OpenCV returns: points are drawn at random, a point whose best bin
+/// reaches `threshold` votes seeds a walk along that line in both directions
+/// (fixed-point, stopping after more than `max_line_gap` consecutive missing
+/// pixels), the walked pixels are removed, and the segment is kept if its x or
+/// y extent is at least `min_line_length`. `min_line_length` and
+/// `max_line_gap` are rounded to integers as OpenCV does. Endpoints are
+/// integer pixel coordinates.
 ///
 /// # Errors
 /// Returns [`crate::ImgprocError::InvalidInput`] if `rho_res` or `theta_res` is
-/// not finite and positive. `theta_res == 0.0` previously panicked with an
-/// overflowing accumulator allocation and `rho_res == 0.0` silently returned an
-/// empty segment list.
-#[allow(clippy::needless_range_loop)]
+/// not finite and positive.
 pub fn hough_lines_p(
-    src: &GrayImage,
+    edges: &GrayImage,
     rho_res: f32,
     theta_res: f32,
     threshold: u32,
@@ -450,157 +500,151 @@ pub fn hough_lines_p(
     max_line_gap: f32,
 ) -> crate::Result<Vec<LineSegment>> {
     validate_hough_resolutions(rho_res, theta_res)?;
-    let edges = canny(src, 50, 150);
-    let width = src.width() as usize;
-    let height = src.height() as usize;
+    let width = edges.width() as usize;
+    let height = edges.height() as usize;
+    if width == 0 || height == 0 {
+        return Ok(Vec::new());
+    }
+    let threshold = threshold.min(i32::MAX as u32) as i32;
+    let line_length = cv_round(min_line_length);
+    let line_gap = cv_round(max_line_gap);
 
-    let mut edge_points = Vec::new();
-    let edge_data = edges.as_raw();
-    for i in 0..edge_data.len() {
-        if edge_data[i] > 0 {
-            edge_points.push((i % width, i / width));
+    let irho = 1.0f32 / rho_res;
+    let num_angle = (std::f64::consts::PI / theta_res as f64).floor().max(1.0) as usize;
+    let num_rho = cv_round(((width + height) * 2 + 1) as f32 / rho_res).max(1) as usize;
+    let rho_offset = ((num_rho - 1) / 2) as i32;
+    let mut trig = Vec::with_capacity(num_angle * 2);
+    for n in 0..num_angle {
+        let a = n as f64 * theta_res as f64;
+        trig.push((a.cos() * irho as f64) as f32);
+        trig.push((a.sin() * irho as f64) as f32);
+    }
+    let rbin = |x: i32, y: i32, n: usize| -> usize {
+        let r = cv_round(x as f32 * trig[2 * n] + y as f32 * trig[2 * n + 1]) + rho_offset;
+        r.clamp(0, num_rho as i32 - 1) as usize
+    };
+
+    let mut accum = vec![0i32; num_angle * num_rho];
+    let mut mask = vec![0u8; width * height];
+    let mut nzloc: Vec<(i32, i32)> = Vec::new();
+    for (i, &v) in edges.as_raw().iter().enumerate() {
+        if v != 0 {
+            mask[i] = 1;
+            nzloc.push(((i % width) as i32, (i / width) as i32));
         }
     }
 
-    if edge_points.is_empty() {
-        return Ok(Vec::new());
-    }
+    const SHIFT: i32 = 16;
+    let mut rng = CvRng(u64::MAX);
+    let mut lines = Vec::new();
+    let mut count = nzloc.len() as i32;
+    while count > 0 {
+        let idx = rng.uniform(0, count) as usize;
+        let (j, i) = nzloc[idx];
+        nzloc[idx] = nzloc[count as usize - 1];
+        count -= 1;
 
-    let max_rho = ((width * width + height * height) as f32).sqrt();
-    let num_rho = (2.0 * max_rho / rho_res).ceil() as usize + 1;
-    let num_theta = (std::f32::consts::PI / theta_res) as usize;
-
-    let mut acc = vec![0u32; num_rho * num_theta];
-    let mut line_segments = Vec::new();
-    let mut rng = rand::rng();
-
-    // Track which pixels are still active (not yet processed).
-    let mut active = vec![false; width * height];
-    for &(x, y) in &edge_points {
-        active[y * width + x] = true;
-    }
-
-    while !edge_points.is_empty() {
-        // 1. Pick a random edge point
-        let idx = rng.random_range(0..edge_points.len());
-        let (x, y) = edge_points.swap_remove(idx);
-
-        // Skip if already processed
-        if !active[y * width + x] {
+        if mask[i as usize * width + j as usize] == 0 {
             continue;
         }
 
-        // 2. Vote this point into the accumulator, and check each cell immediately.
-        let mut found_t_idx = 0;
-        let mut found_line = false;
+        let mut max_val = threshold - 1;
+        let mut max_n = 0usize;
+        for n in 0..num_angle {
+            let cell = &mut accum[n * num_rho + rbin(j, i, n)];
+            *cell += 1;
+            if max_val < *cell {
+                max_val = *cell;
+                max_n = n;
+            }
+        }
+        if max_val < threshold {
+            continue;
+        }
 
-        for t_idx in 0..num_theta {
-            let theta = t_idx as f32 * theta_res;
-            let rho = x as f32 * theta.cos() + y as f32 * theta.sin();
-            let rho_idx = ((rho + max_rho) / rho_res) as usize;
+        let a = -trig[2 * max_n + 1];
+        let b = trig[2 * max_n];
+        let (mut x0, mut y0) = (j, i);
+        let (xflag, dx0, dy0);
+        if a.abs() > b.abs() {
+            xflag = true;
+            dx0 = if a > 0.0 { 1 } else { -1 };
+            dy0 = cv_round(b * (1 << SHIFT) as f32 / a.abs());
+            y0 = (y0 << SHIFT) + (1 << (SHIFT - 1));
+        } else {
+            xflag = false;
+            dy0 = if b > 0.0 { 1 } else { -1 };
+            dx0 = cv_round(a * (1 << SHIFT) as f32 / b.abs());
+            x0 = (x0 << SHIFT) + (1 << (SHIFT - 1));
+        }
+        let pixel = |x: i32, y: i32| -> (i32, i32) {
+            if xflag {
+                (x, y >> SHIFT)
+            } else {
+                (x >> SHIFT, y)
+            }
+        };
 
-            if rho_idx < num_rho {
-                let aidx = rho_idx * num_theta + t_idx;
-                acc[aidx] += 1;
-                // Check threshold immediately after incrementing
-                if acc[aidx] >= threshold {
-                    found_t_idx = t_idx;
-                    found_line = true;
-                    // Finish voting all theta bins before proceeding
+        let mut line_end = [(j, i); 2];
+        for (k, end) in line_end.iter_mut().enumerate() {
+            let (dx, dy) = if k == 0 { (dx0, dy0) } else { (-dx0, -dy0) };
+            let (mut x, mut y) = (x0, y0);
+            let mut gap = 0;
+            loop {
+                let (j1, i1) = pixel(x, y);
+                if j1 < 0 || j1 >= width as i32 || i1 < 0 || i1 >= height as i32 {
+                    break;
                 }
+                if mask[i1 as usize * width + j1 as usize] != 0 {
+                    gap = 0;
+                    *end = (j1, i1);
+                } else {
+                    gap += 1;
+                    if gap > line_gap {
+                        break;
+                    }
+                }
+                x += dx;
+                y += dy;
             }
         }
 
-        // 3. If any bin crossed threshold, extract the line segment
-        if found_line {
-            let theta = found_t_idx as f32 * theta_res;
+        let good_line = (line_end[1].0 - line_end[0].0).abs() >= line_length
+            || (line_end[1].1 - line_end[0].1).abs() >= line_length;
 
-            // Direction along the line (perpendicular to rho direction)
-            let line_dx = -theta.sin();
-            let line_dy = theta.cos();
-
-            let mut p1 = (x as f32, y as f32);
-            let mut p2 = (x as f32, y as f32);
-
-            // Trace in both directions to find endpoints
-            for dir in [-1.0f32, 1.0] {
-                let mut last_valid = (x as f32, y as f32);
-                let mut gap = 0.0;
-                let mut dist = 1.0;
-
-                while gap <= max_line_gap {
-                    let cur_x = (x as f32 + dir * dist * line_dx).round() as i32;
-                    let cur_y = (y as f32 + dir * dist * line_dy).round() as i32;
-
-                    if cur_x >= 0 && cur_x < width as i32 && cur_y >= 0 && cur_y < height as i32 {
-                        let pix_idx = cur_y as usize * width + cur_x as usize;
-                        if active[pix_idx] {
-                            last_valid = (cur_x as f32, cur_y as f32);
-                            gap = 0.0;
-                        } else {
-                            gap += 1.0;
+        for (k, end) in line_end.iter().enumerate() {
+            let (dx, dy) = if k == 0 { (dx0, dy0) } else { (-dx0, -dy0) };
+            let (mut x, mut y) = (x0, y0);
+            loop {
+                let (j1, i1) = pixel(x, y);
+                let m = i1 as usize * width + j1 as usize;
+                if mask[m] != 0 {
+                    if good_line {
+                        for n in 0..num_angle {
+                            accum[n * num_rho + rbin(j1, i1, n)] -= 1;
                         }
-                    } else {
-                        break;
                     }
-                    dist += 1.0;
+                    mask[m] = 0;
                 }
-
-                if dir < 0.0 {
-                    p1 = last_valid;
-                } else {
-                    p2 = last_valid;
+                if (j1, i1) == *end {
+                    break;
                 }
+                x += dx;
+                y += dy;
             }
+        }
 
-            let len = ((p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2)).sqrt();
-
-            if len >= min_line_length {
-                line_segments.push(LineSegment {
-                    x1: p1.0,
-                    y1: p1.1,
-                    x2: p2.0,
-                    y2: p2.1,
-                });
-            }
-
-            // Whether the segment met min_line_length or not, walk the full
-            // segment between p1 and p2 and remove all active edge pixels on it.
-            let seg_len = len.max(1.0);
-            let steps = seg_len.ceil() as usize;
-            let sx = (p2.0 - p1.0) / seg_len;
-            let sy = (p2.1 - p1.1) / seg_len;
-
-            for s in 0..=steps {
-                let px = (p1.0 + s as f32 * sx).round() as i32;
-                let py = (p1.1 + s as f32 * sy).round() as i32;
-                if px >= 0 && px < width as i32 && py >= 0 && py < height as i32 {
-                    let pi = py as usize * width + px as usize;
-                    if active[pi] {
-                        active[pi] = false;
-                        // Unvote this pixel's contributions from the accumulator
-                        ppht_unvote(
-                            px as usize,
-                            py as usize,
-                            &mut acc,
-                            num_rho,
-                            num_theta,
-                            rho_res,
-                            theta_res,
-                            max_rho,
-                        );
-                    }
-                }
-            }
-        } else {
-            // No line found for this seed: keep its votes in the accumulator
-            // so future seeds can accumulate to the threshold.  Only mark
-            // the point as processed so it won't be picked as seed again.
-            active[y * width + x] = false;
+        if good_line {
+            lines.push(LineSegment {
+                x1: line_end[0].0 as f32,
+                y1: line_end[0].1 as f32,
+                x2: line_end[1].0 as f32,
+                y2: line_end[1].1 as f32,
+            });
         }
     }
 
-    Ok(line_segments)
+    Ok(lines)
 }
 
 #[cfg(test)]
@@ -683,14 +727,15 @@ mod tests {
 
     #[test]
     fn test_hough_lines_p_detects_segment() {
-        // Draw a white rectangle on a black background. Canny (called
-        // internally) will produce edges at the rectangle boundary.
+        // A white rectangle on black; hough_lines_p wants an edge map, so
+        // run Canny first.
         let mut img = GrayImage::new(200, 200);
         for y in 80..120 {
             for x in 20..180 {
                 img.put_pixel(x, y, Luma([255]));
             }
         }
+        let img = canny(&img, 50, 150);
 
         let segments = hough_lines_p(
             &img,
