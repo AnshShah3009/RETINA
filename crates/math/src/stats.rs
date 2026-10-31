@@ -529,29 +529,52 @@ pub struct LinregressResult {
 /// Compute a histogram of the data.
 ///
 /// Returns `(bin_edges, counts)` where `bin_edges` has length `bins + 1`
-/// and `counts` has length `bins`.
+/// and `counts` has length `bins`, like `numpy.histogram(data, bins)`: equal
+/// bins over `[min, max]`, each half-open except the last, which includes
+/// `max`; constant data get the range `[v - 0.5, v + 0.5]`.
+///
+/// Non-finite values (NaN, ±inf) are not counted - NaN used to land in bin 0
+/// because `NaN as usize` is 0. With no finite values the result is empty.
+/// (numpy raises for NaN/inf with an automatic range.) The constant-data test
+/// is exact; it was an absolute `1e-30`, which treated `[1e-40, 3e-40]` as a
+/// single value.
 pub fn histogram(data: &[f64], bins: usize) -> (Vec<f64>, Vec<usize>) {
-    if data.is_empty() || bins == 0 {
+    let finite = data.iter().copied().filter(|v| v.is_finite());
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for v in finite.clone() {
+        min = min.min(v);
+        max = max.max(v);
+    }
+    if bins == 0 || min > max {
         return (Vec::new(), Vec::new());
     }
+    if min == max {
+        min -= 0.5;
+        max += 0.5;
+    }
 
-    let min = data.iter().copied().fold(f64::INFINITY, f64::min);
-    let max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-
-    let range = if (max - min).abs() < 1e-30 {
-        1.0
-    } else {
-        max - min
-    };
-
+    let range = max - min;
     let bin_width = range / bins as f64;
-    let edges: Vec<f64> = (0..=bins).map(|i| min + i as f64 * bin_width).collect();
+    let edges: Vec<f64> = (0..=bins)
+        .map(|i| {
+            if i == bins {
+                max
+            } else {
+                min + i as f64 * bin_width
+            }
+        })
+        .collect();
     let mut counts = vec![0usize; bins];
 
-    for &v in data {
-        let mut idx = ((v - min) / bin_width) as usize;
-        if idx >= bins {
-            idx = bins - 1;
+    // numpy's binning: scaled index, then corrected against the actual
+    // edges so a value equal to an edge always lands in the bin it opens.
+    let norm = bins as f64 / range;
+    for v in finite {
+        let mut idx = (((v - min) * norm) as usize).min(bins - 1);
+        if v < edges[idx] {
+            idx -= 1;
+        } else if idx + 1 < bins && v >= edges[idx + 1] {
+            idx += 1;
         }
         counts[idx] += 1;
     }

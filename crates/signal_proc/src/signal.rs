@@ -365,8 +365,13 @@ pub fn butter_bandpass(
     let a = poly_from_roots(&digital_poles);
     let b_raw = poly_from_roots(&digital_zeros);
 
-    // Normalise gain at center frequency
-    let w_center = 2.0 * PI * (low + high) / 2.0 / sample_rate;
+    // Normalise to unit gain where the analog prototype has it: the
+    // geometric centre w0 of the prewarped band, mapped back through the
+    // bilinear transform (w = 2 atan(w0)). The arithmetic centre
+    // (low + high) / 2 used before is not that point, so every b
+    // coefficient was off by a constant factor (b0 0.206585 vs SciPy
+    // 0.206572 for order 2, [100, 300] Hz at 1 kHz).
+    let w_center = 2.0 * w0.atan();
     let ejw = Complex::new(0.0, w_center).exp();
     let num: Complex<f64> = b_raw
         .iter()
