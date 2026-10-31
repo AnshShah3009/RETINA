@@ -416,11 +416,17 @@ impl Plot3D {
             1.0
         };
 
+        // The eye sits along the view axis of `project`: the cross product of
+        // its screen axes x = (cos a, 0, -sin a) and y = (-sin a sin e, cos e,
+        // -cos a sin e) is (sin a cos e, sin e, cos a cos e), y up. This used
+        // to treat z as up and elevation as a polar angle, so at elevation 0,
+        // azimuth 90 the HTML opened looking down +z while the SVG looked
+        // along x, and at the default (30, 45) the two views were ~22 deg apart.
         let distance = radius * 2.5;
         (
-            distance * elev_rad.sin() * azim_rad.sin(),
-            distance * elev_rad.sin() * azim_rad.cos(),
-            distance * elev_rad.cos(),
+            distance * elev_rad.cos() * azim_rad.sin(),
+            distance * elev_rad.sin(),
+            distance * elev_rad.cos() * azim_rad.cos(),
         )
     }
 
@@ -785,5 +791,48 @@ mod tests {
         pc.colorize_by_depth();
 
         assert!(pc.points[0].color.r() < pc.points[2].color.r());
+    }
+}
+
+#[cfg(test)]
+mod camera_convention_tests {
+    use super::*;
+
+    /// The HTML camera must look along the SVG projection's view axis: the
+    /// eye direction is orthogonal to both screen axes of `project` and on
+    /// the viewer's side of the screen (`x_screen × y_screen`).
+    #[test]
+    fn html_camera_matches_the_svg_projection() {
+        for (elev, azim) in [(30.0, 45.0), (0.0, 90.0), (60.0, -120.0), (-20.0, 10.0)] {
+            let mut plot = Plot3D::new();
+            plot.camera_angle = (elev, azim);
+            let (cx, cy, cz) = plot.camera_position();
+            let n = (cx * cx + cy * cy + cz * cz).sqrt();
+            let eye = [cx / n, cy / n, cz / n];
+            // Screen axes are project() applied to the unit vectors.
+            let (ax, ay) = plot.project(1.0, 0.0, 0.0);
+            let (bx, by) = plot.project(0.0, 1.0, 0.0);
+            let (ccx, ccy) = plot.project(0.0, 0.0, 1.0);
+            let sx = [ax, bx, ccx];
+            let sy = [ay, by, ccy];
+            let dot = |u: [f64; 3], v: [f64; 3]| u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+            assert!(
+                dot(eye, sx).abs() < 1e-12,
+                "({elev}, {azim}): eye . x_screen"
+            );
+            assert!(
+                dot(eye, sy).abs() < 1e-12,
+                "({elev}, {azim}): eye . y_screen"
+            );
+            let cross = [
+                sx[1] * sy[2] - sx[2] * sy[1],
+                sx[2] * sy[0] - sx[0] * sy[2],
+                sx[0] * sy[1] - sx[1] * sy[0],
+            ];
+            assert!(
+                dot(eye, cross) > 0.99,
+                "({elev}, {azim}): camera behind the screen"
+            );
+        }
     }
 }
