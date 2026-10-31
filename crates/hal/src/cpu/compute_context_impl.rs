@@ -2680,13 +2680,15 @@ impl ComputeContext for CpuBackend {
         let vs = voxel_size.to_f32();
         let iso = iso_level.to_f32();
 
-        // Helper to get TSDF value at integer voxel coordinates
-        let get_tsdf = |ix: usize, iy: usize, iz: usize| -> f32 {
+        // TSDF value at integer voxel coordinates, or `None` if the voxel has
+        // never been observed (weight zero) or lies outside the volume. An
+        // unobserved voxel's value is a placeholder, not a distance.
+        let get_tsdf = |ix: usize, iy: usize, iz: usize| -> Option<f32> {
             if ix >= vx || iy >= vy || iz >= vz {
-                return 1.0;
+                return None;
             }
             let idx = iz * (vx * vy * 2) + (iy * vx + ix) * 2;
-            vol_data[idx].to_f32()
+            (vol_data[idx + 1].to_f32() > 0.0).then(|| vol_data[idx].to_f32())
         };
 
         // Standard marching cubes corner offsets (Paul Bourke numbering):
@@ -3034,10 +3036,24 @@ impl ComputeContext for CpuBackend {
         for iz in 0..vz.saturating_sub(1) {
             for iy in 0..vy.saturating_sub(1) {
                 for ix in 0..vx.saturating_sub(1) {
-                    // Get TSDF values at 8 corners
+                    // Get TSDF values at 8 corners. A cell with any
+                    // unobserved corner is skipped: meshing against the
+                    // zero-weight placeholder emitted a phantom back surface
+                    // wherever the observed band behind a wall met the
+                    // never-observed voxels further behind it.
                     let mut corners = [0.0f32; 8];
+                    let mut observed = true;
                     for (ci, &(dx, dy, dz)) in corner_offsets.iter().enumerate() {
-                        corners[ci] = get_tsdf(ix + dx, iy + dy, iz + dz);
+                        match get_tsdf(ix + dx, iy + dy, iz + dz) {
+                            Some(t) => corners[ci] = t,
+                            None => {
+                                observed = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !observed {
+                        continue;
                     }
 
                     // Determine cube index
@@ -3053,13 +3069,16 @@ impl ComputeContext for CpuBackend {
                         continue;
                     }
 
-                    // Compute world-space positions of the 8 corners
+                    // World-space positions of the 8 corners: voxel centres,
+                    // `(i + 0.5) * vs`, which is where `tsdf_integrate`
+                    // evaluated the distances. `i * vs` shifted every vertex
+                    // half a voxel toward the origin.
                     let positions: [[f32; 3]; 8] = core::array::from_fn(|i| {
                         let (dx, dy, dz) = corner_offsets[i];
                         [
-                            (ix + dx) as f32 * vs,
-                            (iy + dy) as f32 * vs,
-                            (iz + dz) as f32 * vs,
+                            ((ix + dx) as f32 + 0.5) * vs,
+                            ((iy + dy) as f32 + 0.5) * vs,
+                            ((iz + dz) as f32 + 0.5) * vs,
                         ]
                     });
 
