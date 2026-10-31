@@ -250,11 +250,15 @@ impl GaussianOptimizer {
         cloud.active_indices = (0..cloud.gaussians.len()).collect();
     }
 
+    /// 3DGS opacity reset (Kerbl et al. 2023, §5.2): *cap* every opacity at
+    /// `target` so that floaters must re-earn their opacity and the ones that
+    /// cannot are pruned. This used to *raise* opacities below the target and
+    /// leave opaque ones alone - the opposite: `[0.9, 0.001]` became
+    /// `[0.9, 0.01]`, reviving near-dead splats and resetting nothing.
     pub fn reset_opacity(&self, cloud: &mut GaussianCloud) {
+        let target = self.config.opacity_reset.target;
         for gaussian in &mut cloud.gaussians {
-            if gaussian.opacity < self.config.opacity_reset.target {
-                gaussian.opacity = self.config.opacity_reset.target;
-            }
+            gaussian.opacity = gaussian.opacity.min(target);
         }
     }
 
@@ -377,25 +381,31 @@ mod tests {
 
     #[test]
     fn test_gaussian_optimizer_reset_opacity() {
+        // Opacity reset caps opacities at the target; it does not raise them.
         let mut cloud = GaussianCloud::new();
+        for opacity in [0.9, 0.001] {
+            cloud.push(
+                Gaussian::new(
+                    Point3::new(1.0, 0.0, 0.0),
+                    Vector3::new(0.1, 0.1, 0.1),
+                    Vector4::new(0.0, 0.0, 0.0, 1.0),
+                    Vector3::new(0.5, 0.5, 0.5),
+                )
+                .with_opacity(opacity),
+            );
+        }
 
-        let g1 = Gaussian::new(
-            Point3::new(1.0, 0.0, 0.0),
-            Vector3::new(0.1, 0.1, 0.1),
-            Vector4::new(0.0, 0.0, 0.0, 1.0),
-            Vector3::new(0.5, 0.5, 0.5),
-        )
-        .with_opacity(0.001);
-
-        cloud.push(g1);
-
-        let config = TrainingConfig::default();
-        let optimizer = GaussianOptimizer::new(config);
+        let optimizer = GaussianOptimizer::new(TrainingConfig::default());
+        let target = optimizer.config.opacity_reset.target;
         optimizer.reset_opacity(&mut cloud);
 
-        assert!(
-            cloud.gaussians[0].opacity >= optimizer.config.opacity_reset.target,
-            "Opacity should be reset to at least the target value"
+        assert_eq!(
+            cloud.gaussians[0].opacity, target,
+            "opaque splat must drop to the target"
+        );
+        assert_eq!(
+            cloud.gaussians[1].opacity, 0.001,
+            "faint splat must not be revived"
         );
     }
 }

@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (60 open, was 77)
+## (g) Second review, 2026-10-31 — findings (59 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -329,7 +329,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
 Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` uses it as the match threshold. Doc fix only.
 
-### (g4) slam / rendering / plot / cli / dnn / python (11 open, was 11)
+### (g4) slam / rendering / plot / cli / dnn / python (10 open, was 11)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -340,7 +340,7 @@ Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` u
 | g-m5 | `cli/src/main.rs` EuRoC | GT/estimate paired by index not timestamp: identical 200 Hz vs 20 Hz trajectories give ATE 0.5 m | HIGH | CONFIRMED |
 | g-m6 | `dnn/src/lib.rs` preprocess | HWC data labelled NCHW → RGB models see a garbled image | HIGH | ARGUED |
 | g-m7 | `slam/src/tracking.rs` `refine_pose_with_icp` | relative translation applied twice | MED | ARGUED |
-| g-m8 | `rendering/.../optimize.rs` `reset_opacity` | raises low opacities instead of capping at 0.01 | MED | CONFIRMED |
+| g-m8 | `rendering/.../optimize.rs` `reset_opacity` | **CLOSED.** Opacities capped at the target (3DGS §5.2); the unit test that pinned raising now pins capping. Was: raises low opacities instead of capping at 0.01 | was MED — fixed | CONFIRMED |
 | g-m9 | `plot/src/export.rs` `format_tick_value` | decimals from value, not step → duplicate labels `0,0,0.001,…` | MED | CONFIRMED |
 | g-m10 | `plot/src/export.rs` bars | drawn from axis min, not 0 | MED | CONFIRMED |
 | g-m11 | `plot/src/three_d.rs` `camera_position` | HTML camera convention disagrees with SVG `project` (~22° at defaults) | LOW-MED | CONFIRMED |
