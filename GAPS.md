@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (17 open, was 87)
+## (g) Second review, 2026-10-31 — findings (16 open, was 87)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -293,7 +293,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | **CLOSED.** CPU renormalises after the 0.2 clamp (as the GPU shader already did); both backends round when quantising. Step-edge descriptor norm 204 → 512 (`tests/second_review_cpu_fixes.rs`). Was: not renormalised after the 0.2 clamp | was LOW — fixed | ARGUED |
 | g-h12 | AKAZE Scharr derivatives (CPU + WGSL) | **CLOSED.** `[3, 10, 3]/32` taps on CPU and in the WGSL shader: unit gain (was 0.3125). Same test file. Was: taps `[1,3,1]/32` give gain 0.3125 on a unit ramp; should be `[3,10,3]/32` | was LOW — fixed | ARGUED |
 
-### (g2) features / imgproc (3 open, was 12)
+### (g2) features / imgproc (2 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -302,7 +302,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f3 | `imgproc/src/histogram.rs` `clahe` | **CLOSED.** OpenCV's LUT (`cdf·255/area`), clip-limit residual spreading and tile interpolation; 5 cases bit-exact vs cv2 (`tests/clahe_opencv_parity.rs`). Was: equalizeHist-style LUT instead of OpenCV's `cdf*255/area`; constant 100 → 255 | was HIGH — fixed | CONFIRMED |
 | g-f4 | `imgproc/src/hough.rs` | **CLOSED.** Takes an edge map, OpenCV binning, `> threshold`; HoughLinesP ported incl. its RNG; bit-exact incl. order (`tests/hough_opencv_parity.rs`). Was: runs Canny on its input (edges of an edge map), rho binned with floor → one line returns two at 48.58/50.58 | was HIGH — fixed | CONFIRMED |
 | g-f5 | `imgproc/src/edges.rs` Canny NMS | **CLOSED.** No implicit blur, L1 default, OpenCV NMS; 7 images bit-exact vs `cv2.Canny`; `CannyOptions` for L2/blur (`tests/canny_opencv_parity.rs`). Was: `>=` on both sides keeps 2-px edges; L2 default and implicit σ=1 blur differ from OpenCV | was MED — fixed | CONFIRMED |
-| g-f6 | `imgproc/src/threshold.rs` `adaptive_threshold` | truncated mean, shrinking-window border, fractional `c` comparison | MED | CONFIRMED |
+| g-f6 | `imgproc/src/threshold.rs` `adaptive_threshold` | **CLOSED.** Rounded mean, BORDER_REPLICATE, OpenCV's integer delta rule; 56/56 cases exact (`tests/adaptive_threshold_opencv_parity.rs`). Was: truncated mean, shrinking-window border, fractional `c` comparison | was MED — fixed | CONFIRMED |
 | g-f7 | `features/src/usac.rs` `score_magsac` | **CLOSED.** Marginalised MSAC over 10 sigmas in `(0, σ_max]`; works below 1 and ranks by fit. Pinned by `magsac_scores_below_unit_sigma`. Was: `1..=sigma_max as usize` never runs for `sigma_max < 1` → no model | was MED — fixed | CONFIRMED |
 | g-f8 | `features/src/usac.rs` adaptive iterations | **CLOSED.** `max_iterations = 0` now adapts N from the best model's inlier ratio (cap 10 000); nonzero stays a fixed budget, as documented. Pinned by `adaptive_iterations_track_the_inlier_ratio`. Was: count fixed at 50% inlier assumption, never updated from the best model | was MED — fixed | ARGUED |
 | g-f9 | `imgproc/src/resize.rs` `pyr_down`/`pyr_up` | bilinear resize to `w/2` instead of 5-tap Gaussian + `(w+1)/2`; 1x10 → black 1x1 | MED | CONFIRMED |
