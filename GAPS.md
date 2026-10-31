@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (1 open, was 96)
+## (g) Second review, 2026-10-31 — findings (0 open, was 96)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -310,7 +310,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f11 | `features/src/orb.rs` rBRIEF | **CLOSED.** Rotated offsets rounded (OpenCV's `cvRound`); pinned by `steered_sampling_is_symmetric_under_half_turns` (fails at 30° with truncation). Was: rotated taps floored, OpenCV rounds | was LOW — fixed | ARGUED |
 | g-f12 | `imgproc` `par_chunks_mut(width)` sites | **CLOSED.** 64 function/shape pairs no longer panic on 0×N / N×0 (`tests/zero_sized_images.rs`). Was: zero-width image panics `chunk_size must not be zero` | was LOW — fixed | CONFIRMED |
 
-### (g3) io / runtime / distributed / video / photo / videoio (1 open, was 12)
+### (g3) io / runtime / distributed / video / photo / videoio (0 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -324,7 +324,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-i8 | `distributed/.../shared_memory.rs` `acquire_slot` | **CLOSED.** Slots adopted only on pid **and** a random 64-bit per-process token (`SHM_VERSION` 4 → 5). Was: slot adopted by PID alone (PID namespaces, PID reuse) | was MED — fixed | ARGUED |
 | g-i9 | `distributed/.../shared_memory.rs` | **CLOSED.** All pointers from one `NonNull` taken via `as_mut_ptr()`; both reapers share a saturating subtract (was wrapping to 4294966884). Miri not run (no nightly). Was: atomics written through `as_ptr()` of a shared slice (Stacked Borrows UB); reapers' non-saturating `fetch_sub` | was LOW — fixed | ARGUED |
 | g-i10 | `runtime/src/pipeline/allocator.rs` | **CLOSED.** `trim` truncates free lists; re-`allocate` releases the old buffer (accounting 4000 → 3000). Was: `trim` uses `shrink_to` (frees nothing); re-`allocate` leaks accounting | was LOW — fixed | ARGUED |
-| g-i11 | `videoio/src/backends/ffmpeg.rs` `grab` | one frame per packet; multi-frame packets → EAGAIN → stream dies — **BLOCKED locally**: `cargo check -p cv-videoio --features ffmpeg` fails building `ffmpeg-sys-next 7.1.3` against the system FFmpeg 8 (libavcodec 63), so a fix cannot be compiled or tested here; left open rather than edited blind | LOW | ARGUED |
+| g-i11 | `videoio/src/backends/ffmpeg.rs` `grab` | **CLOSED (argued; failure not reproduced).** ffmpeg-next 7.1 → 9.0, so the `ffmpeg` feature builds against FFmpeg 8 again (it did not compile on this machine); `grab` is now FFmpeg's send/receive loop (drain, feed on EAGAIN, flush at EOF). Both B-frame fixtures (H.264 mp4, MPEG-4 avi) decode all 30 frames in `tests/ffmpeg_decode_all_frames.rs` - but so does the old loop, because the failing case needs packets carrying several frames (old DivX/Xvid packed bitstreams), which FFmpeg cannot produce. Was: one frame per packet; multi-frame packets → EAGAIN → stream dies — **BLOCKED locally**: `cargo check -p cv-videoio --features ffmpeg` fails building `ffmpeg-sys-next 7.1.3` against the system FFmpeg 8 (libavcodec 63), so a fix cannot be compiled or tested here; left open rather than edited blind | was LOW — fixed | ARGUED |
 | g-i12 | `photo/src/bilateral.rs` | **CLOSED.** Rounded and clamped; pinned by `tests/bilateral_rounding.rs` (uniform images now fixed points; step-edge mean 100.18 → within 0.1 of 100.5). Was: output truncated not rounded | was LOW — fixed | ARGUED |
 
 Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` uses it as the match threshold. Doc fix only.
