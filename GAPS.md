@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (41 open, was 86)
+## (g) Second review, 2026-10-31 — findings (40 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -310,12 +310,12 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f11 | `features/src/orb.rs` rBRIEF | rotated taps floored, OpenCV rounds | LOW | ARGUED |
 | g-f12 | `imgproc` `par_chunks_mut(width)` sites | zero-width image panics `chunk_size must not be zero` | LOW | CONFIRMED |
 
-### (g3) io / runtime / distributed / video / photo / videoio (8 open, was 12)
+### (g3) io / runtime / distributed / video / photo / videoio (7 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-i1 | `runtime/src/pipeline/` | CPU-only pipeline cannot run two chained ops (`TransientBufferPool only supports GPU`); GPU↔CPU op hand-off never copies data | HIGH | CONFIRMED (CPU) / ARGUED (GPU) |
-| g-i2 | `video/src/optical_flow.rs` `track_point` | template sampled at `floor(lx)`: a static sub-pixel point (60.5, 60.5) tracks to (60, 60) | HIGH | CONFIRMED |
+| g-i2 | `video/src/optical_flow.rs` `track_point` | **CLOSED.** Template and gradients sampled bilinearly at the fractional feature position, OpenCV-style f32 pyramid, pyramids built once per call: static sub-pixel points stay put, 3-level (9.6, −4.3) shift recovered to 0.004 px (was 0.81 px off). Was: template sampled at `floor(lx)`: a static sub-pixel point (60.5, 60.5) tracks to (60, 60) | was HIGH — fixed | CONFIRMED |
 | g-i3 | `io/src/pcd.rs` | **CLOSED.** Reader accepts up to LZF's worst-case growth (`n + n/32 + 16`). Pinned by `tests/second_review_io_parsing.rs`. Was: reader rejects `compressed > uncompressed`, so the crate's own LZF writer output on random data is unreadable | was MED-HIGH — fixed | CONFIRMED |
 | g-i4 | `io/src/pcd.rs` ASCII | **CLOSED.** Column offsets are cumulative COUNTs. Same test file. Was: column index ignores `COUNT > 1` | was MED — fixed | CONFIRMED |
 | g-i5 | `io/src/pcd.rs` ASCII rgb | **CLOSED.** `TYPE U`/`I` packed colour parsed as an integer token. Same test file. Was: `TYPE U` packed rgb parsed as f32 then `to_bits()` → pure red reads `[0.498,0,0]` | was MED — fixed | CONFIRMED |
