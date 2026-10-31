@@ -315,65 +315,35 @@ impl Orb {
         }
     }
 
-    /// Detect keypoints using FAST at multiple scales with acceleration
+    /// Detect keypoints with the same pyramid, FAST, non-max suppression and
+    /// Harris scoring as [`Orb::detect`].
+    ///
+    /// The context is how a GPU-resident image is brought back to the host.
+    /// The previous body resized with the device's bilinear `resize` and ran
+    /// the device FAST score map, skipping suppression and Harris, so the
+    /// keypoints were not the ones [`Orb::detect`] would have returned on the
+    /// same pixels. GPU upload failure in [`detect_and_compute_ctx`] falls
+    /// through to here, and that is the path the tracker uses without a GPU.
     pub fn detect_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
     ) -> KeyPoints {
-        let mut all_keypoints = Vec::new();
-        let mut scale = 1.0f32;
-
-        for level in 0..self.n_levels {
-            let scaled_f32 = if level == 0 {
-                convert_to_f32_cpu(ctx, image).expect("Failed to convert image to f32")
-            } else {
-                let new_w = (image.shape.width as f32 / scale) as usize;
-                let new_h = (image.shape.height as f32 / scale) as usize;
-                let img_f32 =
-                    convert_to_f32_cpu(ctx, image).expect("Failed to convert image to f32");
-                let resized = ctx.resize(&img_f32, (new_w, new_h)).unwrap();
-
-                let cpu_u8 = resized.to_cpu().unwrap();
-                let img_h_w = cpu_u8.shape;
-                let data: Vec<f32> = cpu_u8.storage.as_slice().unwrap().to_vec();
-                let tensor_f32: Tensor<f32, cv_core::storage::CpuStorage<f32>> =
-                    Tensor::from_vec(data, img_h_w).unwrap();
-                tensor_f32
+        let cpu = convert_to_cpu_image(ctx, image);
+        let (h, w) = cpu.shape.hw();
+        let bytes = cpu
+            .storage
+            .as_slice()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+        if w == 0 || h == 0 || bytes.len() != w * h {
+            return KeyPoints {
+                keypoints: Vec::new(),
             };
-
-            // `scaled_f32` is normalized to [0, 1] (see `convert_to_f32_cpu`),
-            // so the FAST threshold must use the same units. Feeding the 0..255
-            // threshold here made every intensity comparison fail, yielding no
-            // corners.
-            let score_map = ctx
-                .fast_detect(&scaled_f32, self.fast_threshold as f32 / 255.0, true)
-                .unwrap();
-            let kps = extract_keypoints_from_score_map(ctx, &score_map, self.n_features * 2)
-                .expect("Failed to extract keypoints from score map");
-
-            for kp in kps.keypoints {
-                let scaled_kp = KeyPoint::new(kp.x * scale as f64, kp.y * scale as f64)
-                    .with_size(self.patch_size as f64 * scale as f64)
-                    .with_octave(level as i32)
-                    .with_response(kp.response);
-
-                all_keypoints.push(scaled_kp);
-            }
-
-            scale *= self.scale_factor;
         }
-
-        all_keypoints.sort_by(|a, b| {
-            b.response
-                .partial_cmp(&a.response)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        all_keypoints.truncate(self.n_features);
-
-        KeyPoints {
-            keypoints: all_keypoints,
-        }
+        let gray = image::GrayImage::from_raw(w as u32, h as u32, bytes)
+            .unwrap_or_else(|| image::GrayImage::new(w as u32, h as u32));
+        self.detect(&gray)
     }
 
     /// Compute orientations for keypoints using intensity centroid (Parallelized)
@@ -1698,6 +1668,33 @@ mod tests {
             "detect_ctx must find keypoints on a checkerboard"
         );
         assert!(kps.keypoints.len() <= 100);
+    }
+
+    /// The context path is the CPU detector on the same pixels.
+    ///
+    /// It used to resize with bilinear sampling and a device FAST score map,
+    /// so the keypoints were a different set from [`Orb::detect`].
+    #[test]
+    fn detect_ctx_matches_detect() {
+        use cv_core::{storage::CpuStorage, TensorShape};
+        use cv_hal::cpu::CpuBackend;
+
+        let img = create_checkerboard(96, 12);
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let tensor: Tensor<u8, CpuStorage<u8>> =
+            Tensor::from_vec(img.as_raw().clone(), TensorShape::new(1, h, w)).unwrap();
+        let cpu = CpuBackend::new().unwrap();
+        let device = ComputeDevice::Cpu(&cpu);
+        let orb = Orb::new().with_n_features(80).with_n_levels(3);
+
+        let cpu_kps = orb.detect(&img);
+        let ctx_kps = orb.detect_ctx(&device, &tensor);
+        assert_eq!(cpu_kps.keypoints.len(), ctx_kps.keypoints.len());
+        for (a, b) in cpu_kps.keypoints.iter().zip(&ctx_kps.keypoints) {
+            assert_eq!((a.x, a.y, a.octave), (b.x, b.y, b.octave));
+            assert_eq!(a.response, b.response);
+            assert_eq!(a.size, b.size);
+        }
     }
 
     #[test]

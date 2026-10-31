@@ -2,14 +2,30 @@
 pub use cv_3d as d3;
 pub use cv_calib3d as calib3d;
 pub use cv_core as core;
+pub use cv_distributed as distributed;
+pub use cv_dnn as dnn;
+pub use cv_eval as eval;
 pub use cv_features as features;
+pub use cv_geometry2d as geometry2d;
 pub use cv_hal as hal;
 pub use cv_imgproc as imgproc;
+pub use cv_io as io;
+pub use cv_localization as localization;
+pub use cv_math as math;
 pub use cv_optimize as optimize;
+pub use cv_photo as photo;
+pub use cv_plot as plot;
+pub use cv_pointcloud as pointcloud;
+pub use cv_registration as registration;
+pub use cv_rendering as rendering;
 pub use cv_runtime as runtime;
+pub use cv_scientific as scientific;
 pub use cv_sfm as sfm;
+pub use cv_signal as signal;
 pub use cv_slam as slam;
 pub use cv_video as video;
+pub use cv_videoio as videoio;
+pub use cv_viewer as viewer;
 
 /// Initialize the entire cv-native library.
 ///
