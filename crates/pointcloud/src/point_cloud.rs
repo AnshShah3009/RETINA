@@ -46,6 +46,12 @@ pub fn voxel_down_sample(pc: &PointCloud, voxel_size: f32) -> PointCloud {
     // 1. Compute indices
     for i in 0..n {
         let p = pc.points[i];
+        // `(NaN / vs).floor() as i32` saturates to 0, so a point without a
+        // position joined voxel (0, 0, 0) and turned a real point's centroid
+        // into NaN. Skip it, as the rest of this module does.
+        if !has_position(&p) {
+            continue;
+        }
         let hx = (p.x / voxel_size).floor() as i32;
         let hy = (p.y / voxel_size).floor() as i32;
         let hz = (p.z / voxel_size).floor() as i32;
