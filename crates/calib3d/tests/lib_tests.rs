@@ -511,9 +511,18 @@ fn stereo_rectify_matrices_has_expected_projection_shape() {
     let rect = stereo_rectify_matrices(&k1, &k2, &left, &right).unwrap();
     assert!(rect.r1.determinant() > 0.0);
     assert!(rect.r2.determinant() > 0.0);
-    assert!(rect.p2[(0, 3)] < 0.0);
+    // T = (+0.2, 0, 0) puts the right camera's centre at x = -0.2, i.e. to
+    // the *left*. OpenCV keeps the rig unrotated and carries the sign in P2:
+    // P2[0][3] = T'x * f > 0. (This asserted < 0 while the baseline was
+    // forced onto +x by a 180 deg rotation of both images.)
+    assert!(rect.p2[(0, 3)] > 0.0);
     assert!(rect.q[(3, 2)].is_finite());
     assert!(rect.q[(3, 2)].abs() > 0.0);
+
+    // The conventional rig, right camera to the right: P2[0][3] < 0.
+    let right = Pose::new(Matrix3::identity(), Vector3::new(-0.2, 0.0, 0.0));
+    let rect = stereo_rectify_matrices(&k1, &k2, &left, &right).unwrap();
+    assert!(rect.p2[(0, 3)] < 0.0);
 }
 
 #[test]

@@ -308,40 +308,41 @@ pub fn stereo_rectify_matrices(
     let r_left = left_extrinsics.rotation_matrix();
     let r_right = right_extrinsics.rotation_matrix();
 
-    // Relative rotation mapping left-camera coordinates to right-camera
-    // coordinates: X_right = M · X_left.
+    // Relative pose: X_right = M · X_left + T.
     let m = r_right * r_left.transpose();
-
-    // Camera centers under the world→camera convention (X_c = R·X_w + t ⇒ C = −Rᵀ·t).
-    let c_left = -r_left.transpose() * &left_extrinsics.translation;
-    let c_right = -r_right.transpose() * &right_extrinsics.translation;
-
-    // Baseline direction (left → right) expressed in each camera's frame.
-    let b_left = r_left * (c_right - c_left);
-    let baseline = b_left.norm();
-    if baseline <= 1e-12 {
+    let t_rel = right_extrinsics.translation - m * left_extrinsics.translation;
+    if t_rel.norm() <= 1e-12 {
         return Err(cv_core::Error::AlgorithmError(
             "stereo_rectify_matrices requires non-zero baseline".to_string(),
         ));
     }
 
-    // Rectifying rotation for the left camera: its ROWS form the new basis so
-    // that R₁·b̂ = x̂ (epipole at infinity on the x-axis) while keeping the old
-    // optical direction as the new +z (scene stays in front).
-    let ex_l = b_left / baseline;
-    let k = Vector3::<f64>::new(0.0, 0.0, 1.0);
-    let mut ey_l = k.cross(&ex_l);
-    if ey_l.norm() < 1e-6 {
-        // Baseline nearly parallel to the optical axis; fall back to +y.
-        ey_l = Vector3::<f64>::new(0.0, 1.0, 0.0).cross(&ex_l);
-    }
-    let ey_l = ey_l.normalize();
-    let ez_l = ex_l.cross(&ey_l).normalize();
-    let r1 = Matrix3::from_columns(&[ex_l, ey_l, ez_l]).transpose();
-
-    // Right camera shares the same world-frame axes expressed through M:
-    // O_right = R₂·R_right = R₁·Mᵀ·R_right = R₁·R_left = O_left ⇒ parallel axes.
-    let r2 = r1 * m.transpose();
+    // Bouguet's method as OpenCV's `cvStereoRectify` implements it: split the
+    // relative rotation in half between the cameras, then apply one common
+    // rotation that turns the baseline onto the coordinate axis it is already
+    // closest to (x for side-by-side rigs, y for vertical ones), *keeping its
+    // sign*. The previous construction always turned the baseline onto +x, so
+    // a right camera mounted to the left came out rotated 180 deg
+    // (R1 = diag(-1, -1, 1)) and a vertical rig 90 deg, where OpenCV leaves
+    // both unrotated and moves the sign into P2.
+    let half = nalgebra::Rotation3::from_matrix_unchecked(m).scaled_axis() * -0.5;
+    let r_r = nalgebra::Rotation3::from_scaled_axis(half).into_inner();
+    let t = r_r * t_rel;
+    let idx = if t.x.abs() > t.y.abs() { 0 } else { 1 };
+    let c = t[idx];
+    let mut uu = Vector3::<f64>::zeros();
+    uu[idx] = if c > 0.0 { 1.0 } else { -1.0 };
+    let ww = t.cross(&uu);
+    let nw = ww.norm();
+    let w_r = if nw > 0.0 {
+        let angle = (c.abs() / t.norm()).clamp(-1.0, 1.0).acos();
+        nalgebra::Rotation3::from_scaled_axis(ww * (angle / nw)).into_inner()
+    } else {
+        Matrix3::identity()
+    };
+    let r1 = w_r * r_r.transpose();
+    let r2 = w_r * r_r;
+    let t_new = r2 * t_rel;
 
     let fx = 0.5 * (left_intrinsics.fx + right_intrinsics.fx);
     let fy = 0.5 * (left_intrinsics.fy + right_intrinsics.fy);
@@ -354,33 +355,26 @@ pub fn stereo_rectify_matrices(
         0.0, fy, cy, 0.0, //
         0.0, 0.0, 1.0, 0.0,
     );
-    let p2 = Matrix3x4::new(
-        fx,
-        0.0,
-        cx2,
-        -fx * baseline, //
-        0.0,
-        fy,
-        cy,
-        0.0, //
-        0.0,
-        0.0,
-        1.0,
-        0.0,
+    let mut p2 = Matrix3x4::new(
+        fx, 0.0, cx2, 0.0, //
+        0.0, fy, cy, 0.0, //
+        0.0, 0.0, 1.0, 0.0,
     );
+    // OpenCV puts the baseline in the row of the axis it lies on, scaled by
+    // the focal length: P2[idx][3] = T'[idx] * f.
+    p2[(idx, 3)] = t_new[idx] * if idx == 0 { fx } else { fy };
 
-    // Disparity-to-depth: Z = fx·baseline / d. Following OpenCV,
-    //   Tx = P2[0][3]/P2[0][0] (physical baseline, negative),
-    //   Q(3,2) = −1/Tx,  Q(3,3) = (cx1−cx2)/Tx.
-    let tx_physical = -fx * baseline / fx;
+    // Disparity-to-depth, OpenCV's layout: Q(3,2) = -1/T'[idx],
+    // Q(3,3) = (c1 - c2)/T'[idx] along the baseline's axis.
+    let tb = t_new[idx];
     let mut q = Matrix4::<f64>::zeros();
     q[(0, 0)] = 1.0;
     q[(0, 3)] = -cx1;
     q[(1, 1)] = 1.0;
     q[(1, 3)] = -cy;
     q[(2, 3)] = fx;
-    q[(3, 2)] = -1.0 / tx_physical;
-    q[(3, 3)] = (cx1 - cx2) / tx_physical;
+    q[(3, 2)] = -1.0 / tb;
+    q[(3, 3)] = if idx == 0 { (cx1 - cx2) / tb } else { 0.0 };
 
     Ok(StereoRectifyMatrices { r1, r2, p1, p2, q })
 }
