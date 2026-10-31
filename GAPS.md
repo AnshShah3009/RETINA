@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (72 open, was 77)
+## (g) Second review, 2026-10-31 — findings (71 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -293,11 +293,11 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | not renormalised after the 0.2 clamp | LOW | ARGUED |
 | g-h12 | AKAZE Scharr derivatives (CPU + WGSL) | taps `[1,3,1]/32` give gain 0.3125 on a unit ramp; should be `[3,10,3]/32` | LOW | ARGUED |
 
-### (g2) features / imgproc (11 open, was 12)
+### (g2) features / imgproc (10 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
-| g-f1 | `features/src/brief.rs` | `kp.angle` (degrees everywhere else) fed to `cos`/`sin` as radians; negative angles treated as "unset" | HIGH | CONFIRMED: hamming(0°,360°)=124 |
+| g-f1 | `features/src/brief.rs` | **CLOSED.** Angle converted with `to_radians`; only exactly `-1.0` means unset. Pinned by `tests/brief_angle_degrees.rs`. Was: `kp.angle` (degrees everywhere else) fed to `cos`/`sin` as radians; negative angles treated as "unset" | was HIGH — fixed | CONFIRMED: hamming(0°,360°)=124 |
 | g-f2 | `imgproc/src/geometry.rs` `get_pixel_lanczos_with_border` | **CLOSED.** Taps read at offset `k - 3` to match their weights; pinned by `tests/lanczos_tap_alignment.rs` (identity remap and warp return the input). Was: tap index off by one: Lanczos warp/remap shifted 1 px | was HIGH — fixed | CONFIRMED |
 | g-f3 | `imgproc/src/histogram.rs` `clahe` | equalizeHist-style LUT instead of OpenCV's `cdf*255/area`; constant 100 → 255 | HIGH | CONFIRMED |
 | g-f4 | `imgproc/src/hough.rs` | runs Canny on its input (edges of an edge map), rho binned with floor → one line returns two at 48.58/50.58 | HIGH | CONFIRMED |
