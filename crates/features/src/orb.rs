@@ -906,10 +906,14 @@ fn compute_orb_descriptor(
         let rx2 = cos_a * sx2 - sin_a * sy2;
         let ry2 = sin_a * sx2 + cos_a * sy2;
 
-        let px1 = (cx as f32 + rx1) as i32;
-        let py1 = (cy as f32 + ry1) as i32;
-        let px2 = (cx as f32 + rx2) as i32;
-        let py2 = (cy as f32 + ry2) as i32;
+        // Round the rotated offset, as OpenCV's ORB does (`cvRound`). Casting
+        // `cx + rx` truncated instead, which is direction-dependent: at 90 deg
+        // a pattern offset of 3 lands at -3.0000000001 and snapped a whole
+        // pixel away, so a rotated patch no longer reproduced its descriptor.
+        let px1 = cx + rx1.round() as i32;
+        let py1 = cy + ry1.round() as i32;
+        let px2 = cx + rx2.round() as i32;
+        let py2 = cy + ry2.round() as i32;
 
         let in_bounds = px1 >= 0
             && px1 < width
@@ -1797,5 +1801,37 @@ mod tests {
              came from the same cluster and non-max suppression had nothing to \
              choose between"
         );
+    }
+
+    /// A patch steered by theta on an image, and by theta + 180 deg on that
+    /// image rotated 180 deg about the keypoint, samples the same pixels -
+    /// provided rotated offsets are *rounded* (`round(-r) = -round(r)`).
+    /// Truncating `cx + rx` acts as floor for positive coordinates, which is
+    /// not odd-symmetric, so every fractional offset (any angle that is not a
+    /// multiple of 90 deg) sampled a different pixel after the rotation.
+    #[test]
+    fn steered_sampling_is_symmetric_under_half_turns() {
+        // Odd size so the rotation about the centre stays in bounds.
+        let n = 65u32;
+        let c = 32i32;
+        let mut s: u32 = 99;
+        let base = GrayImage::from_fn(n, n, |_, _| {
+            s = s.wrapping_mul(1103515245).wrapping_add(12345);
+            image::Luma([(s >> 16) as u8])
+        });
+        let turned = GrayImage::from_fn(n, n, |x, y| {
+            *base.get_pixel((2 * c - x as i32) as u32, (2 * c - y as i32) as u32)
+        });
+        let pattern = generate_steered_brief_pattern(31);
+        for theta in [30.0, 47.0, 113.0] {
+            let kp = KeyPoint::new(c as f64, c as f64).with_size(31.0);
+            let d0 =
+                compute_orb_descriptor(&base, &kp.clone().with_angle(theta), &pattern, 31, false)
+                    .unwrap();
+            let d1 =
+                compute_orb_descriptor(&turned, &kp.with_angle(theta + 180.0), &pattern, 31, false)
+                    .unwrap();
+            assert_eq!(d0.data, d1.data, "theta = {theta}");
+        }
     }
 }
