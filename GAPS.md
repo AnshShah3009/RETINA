@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (26 open, was 86)
+## (g) Second review, 2026-10-31 — findings (27 open, was 87)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -345,11 +345,11 @@ Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` u
 | g-m10 | `plot/src/export.rs` bars | **CLOSED.** Matplotlib `bar`: 0.8 data units wide, from y = 0, bar extents in the autoscale with y = 0 sticky; pinned against matplotlib's limits in `tests/svg_geometry.rs`. Was: drawn from axis min, not 0 | was MED — fixed | CONFIRMED |
 | g-m11 | `plot/src/three_d.rs` `camera_position` | **CLOSED.** Eye along `project`'s view axis `(sin a cos e, sin e, cos a cos e)`; pinned by `camera_convention_tests`. Was: HTML camera convention disagrees with SVG `project` (~22° at defaults) | was LOW-MED — fixed | CONFIRMED |
 
-Minor (LOW): python `pose.matrix()` flattened column-major (numpy gets the transpose);
-python `sparse_solve_cg` checks `ncols` not `nrows`; `slam` returns `Ok(last pose)` when PnP fails;
+Minor (LOW): python `pose.matrix()` flattened column-major (numpy gets the transpose) — **CLOSED** (`1c888fd`);
+python `sparse_solve_cg` checks `ncols` not `nrows`; `slam` returns `Ok(last pose)` when PnP fails — **CLOSED** with g-m1;
 `SphericalHarmonics::eval` mixes channels (unused).
 
-### (g5) calib3d / sfm (1 open, was 6)
+### (g5) calib3d / sfm (2 open, was 7)
 
 Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrappers,
 `cv_core::robust::Ransac`. Triangulation, distortion, calibration and `crates/sfm` are covered by (g8).
@@ -362,6 +362,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-c4 | `calib3d/src/pnp.rs` P3P roots | **CLOSED.** Candidates with distance ratio `p <= 0` are skipped; the same test asserts no candidate puts a point behind the camera. Was: distance ratio `p` not checked positive → behind-camera poses accepted; scoring ignores `z <= 0` | was MED — fixed | ARGUED |
 | g-c5 | `calib3d/src/pnp.rs` PnP RANSAC | final refinement only with ≥ 6 inliers; 4–5 return the raw P3P pose | MED | ARGUED |
 | g-c6 | `core/src/robust.rs` adaptive iterations | **CLOSED.** All-inlier best model ends the search; sampling shuffles only k indices. Pinned by `ransac_stops_at_once_when_every_point_is_an_inlier`. Was: all-inlier case never lowers the iteration bound | was LOW — fixed | ARGUED |
+| g-c7 | `calib3d` `find_essential_mat_ransac` | 8-point essential RANSAC recovered a translation direction ~55° wrong on the SLAM bootstrap scene (rendered wall/floor/boxes), where a 5-point RANSAC on `EssentialSolver::estimate_5point` succeeds; found while fixing g-m1. Re-measure after `229914c` (consensus refit) | MED | CONFIRMED (by the g-m1 fix's author) |
 
 ### (g6) 3d / registration / pointcloud (1 open, was 12)
 
