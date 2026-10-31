@@ -23,10 +23,11 @@ const DEVICE_REGION_OFFSET: usize = HEADER_SIZE; // 64
 const SLOT_REGION_OFFSET: usize = DEVICE_REGION_OFFSET + MAX_DEVICES * DEVICE_STATE_SIZE; // 2112
 
 const SHM_MAGIC: u32 = 0x52455449; // "RETI"
-/// Bumped to 4 when `ProcessSlot` gained its per-device `load_count` array:
-/// the slot layout changed, so a region written by an older process must be
-/// re-initialized instead of being reinterpreted.
-const SHM_VERSION: u32 = 4;
+/// Bumped to 4 when `ProcessSlot` gained its per-device `load_count` array,
+/// and to 5 when it gained `owner_token`: the slot layout changed, so a
+/// region written by an older process must be re-initialized instead of being
+/// reinterpreted.
+const SHM_VERSION: u32 = 5;
 
 // --- Slot states ---
 
@@ -96,6 +97,11 @@ struct ProcessSlot {
     heartbeat_ns: AtomicU64,
     start_time_ms: AtomicU64,
     device_mask: AtomicU64,
+    /// Random per-process token of the owner (see [`process_token`]). A slot
+    /// is ours only if both `pid` and `owner_token` match: the PID alone is
+    /// not unique across PID namespaces sharing `/dev/shm` (every container
+    /// has a PID 1) or over time (PID reuse).
+    owner_token: AtomicU64,
     memory_budget_mb: [AtomicU32; MAX_DEVICES],
     compute_budget_pct: [AtomicU32; MAX_DEVICES],
     affinity_group: AtomicU32,
@@ -140,6 +146,22 @@ pub struct ShmCoordinator {
     path: std::path::PathBuf,
     heartbeat_stop: Arc<AtomicU32>,
     heartbeat_thread: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+/// A random, non-zero 64-bit token identifying this process for slot
+/// ownership, fixed for the process lifetime.
+///
+/// Seeded from `RandomState` (OS randomness) mixed with the PID and clocks.
+fn process_token() -> u64 {
+    static TOKEN: OnceLock<u64> = OnceLock::new();
+    *TOKEN.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(std::process::id());
+        h.write_u64(ShmCoordinator::monotonic_ns());
+        h.write_u64(ShmCoordinator::current_timestamp_ms());
+        h.finish().max(1)
+    })
 }
 
 /// Per-process reference counts keyed by `(shm path, slot_index)`.
@@ -313,7 +335,7 @@ impl ShmCoordinator {
         }
 
         let pid = std::process::id();
-        let slot_index = Self::acquire_slot(&mmap, pid)?;
+        let slot_index = Self::acquire_slot(&mmap, pid, process_token())?;
 
         // Increment the region refcount BEFORE releasing the lock: `Drop`
         // decrements and unlinks under the same lock, so it can never see a
@@ -439,16 +461,22 @@ impl ShmCoordinator {
 
     // --- Slot acquisition (lock-free CAS state machine) ---
 
-    fn acquire_slot(mmap: &memmap2::MmapMut, pid: u32) -> io::Result<usize> {
+    fn acquire_slot(mmap: &memmap2::MmapMut, pid: u32, token: u64) -> io::Result<usize> {
         let now_ns = ShmCoordinator::monotonic_ns();
         let now_ms = Self::current_timestamp_ms();
 
-        // First pass: check if we already own a slot (process restart with same PID)
+        // First pass: share the slot another coordinator of THIS process
+        // already holds. Ownership is (pid, token), never the PID alone: a
+        // slot with our PID but another token belongs to a process in another
+        // PID namespace, or to a dead process whose PID we inherited.
         for i in 0..MAX_SLOTS {
             let slot =
                 Self::slot_ptr(mmap, i).ok_or_else(|| io::Error::other("Invalid slot offset"))?;
             let state = slot.state.load(Ordering::Acquire);
-            if state == SLOT_ACTIVE && slot.pid.load(Ordering::Relaxed) == pid {
+            if state == SLOT_ACTIVE
+                && slot.pid.load(Ordering::Relaxed) == pid
+                && slot.owner_token.load(Ordering::Relaxed) == token
+            {
                 // Refresh heartbeat
                 slot.heartbeat_ns.store(now_ns, Ordering::Release);
                 return Ok(i);
@@ -475,6 +503,7 @@ impl ShmCoordinator {
                 slot.generation
                     .store(gen.wrapping_add(1), Ordering::Relaxed);
                 slot.pid.store(pid, Ordering::Relaxed);
+                slot.owner_token.store(token, Ordering::Relaxed);
                 slot.heartbeat_ns.store(now_ns, Ordering::Relaxed);
                 slot.start_time_ms.store(now_ms, Ordering::Relaxed);
                 slot.device_mask.store(0, Ordering::Relaxed);
@@ -918,6 +947,7 @@ impl ShmCoordinator {
 
             // Zero the slot
             slot.pid.store(0, Ordering::Relaxed);
+            slot.owner_token.store(0, Ordering::Relaxed);
             slot.device_mask.store(0, Ordering::Relaxed);
             slot.heartbeat_ns.store(0, Ordering::Relaxed);
             slot.start_time_ms.store(0, Ordering::Relaxed);
@@ -970,6 +1000,7 @@ impl ShmCoordinator {
                     if let Some(slot) = Self::slot_ptr(&mmap, slot_index) {
                         // Only write if slot still belongs to us
                         if slot.pid.load(Ordering::Relaxed) == pid
+                            && slot.owner_token.load(Ordering::Relaxed) == process_token()
                             && slot.state.load(Ordering::Acquire) == SLOT_ACTIVE
                         {
                             slot.heartbeat_ns
@@ -1025,6 +1056,7 @@ impl ShmCoordinator {
                             slot.load_count[d].store(0, Ordering::Release);
                         }
                         slot.pid.store(0, Ordering::Relaxed);
+                        slot.owner_token.store(0, Ordering::Relaxed);
                         slot.device_mask.store(0, Ordering::Relaxed);
                         slot.heartbeat_ns.store(0, Ordering::Relaxed);
                         slot.start_time_ms.store(0, Ordering::Relaxed);
@@ -1233,6 +1265,7 @@ impl LoadCoordinator for ShmCoordinator {
             .is_ok()
         {
             slot.pid.store(0, Ordering::Relaxed);
+            slot.owner_token.store(0, Ordering::Relaxed);
             slot.device_mask.store(0, Ordering::Relaxed);
             slot.heartbeat_ns.store(0, Ordering::Relaxed);
             slot.affinity_group.store(0, Ordering::Relaxed);
@@ -1363,6 +1396,53 @@ mod tests {
 
     fn unique_name(suffix: &str) -> String {
         format!("test_shm_v2_{}_{}", std::process::id(), suffix)
+    }
+
+    #[test]
+    fn test_active_slot_with_our_pid_but_foreign_owner_is_not_adopted() {
+        // Containers sharing /dev/shm each have a PID 1, and PIDs get
+        // recycled: an ACTIVE slot whose pid equals ours can belong to a
+        // different, live process. Adopting it would share (and on drop,
+        // release) that process's reservations.
+        let name = unique_name("foreign_same_pid");
+        let x = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        x.init_device(0, 4096).unwrap();
+        // Keep `x` attached (so the region survives) but out of the way.
+        x.my_slot().pid.store(u32::MAX - 2, Ordering::Release);
+
+        // A slot written by a foreign process that happens to have our PID.
+        let f = (x.slot_index + 1) % MAX_SLOTS;
+        let foreign = ShmCoordinator::slot_ptr(&x.mmap, f).unwrap();
+        foreign.pid.store(std::process::id(), Ordering::Release);
+        foreign
+            .heartbeat_ns
+            .store(ShmCoordinator::monotonic_ns(), Ordering::Release);
+        foreign.memory_budget_mb[0].store(1024, Ordering::Release);
+        foreign.state.store(SLOT_ACTIVE, Ordering::Release);
+        ShmCoordinator::device_ptr(&x.mmap, 0)
+            .unwrap()
+            .used_memory_mb
+            .store(1024, Ordering::Release);
+
+        let y = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        assert_ne!(
+            y.slot_index, f,
+            "adopted a foreign process's slot by PID alone"
+        );
+        drop(y);
+        assert_eq!(
+            foreign.state.load(Ordering::Acquire),
+            SLOT_ACTIVE,
+            "dropping our coordinator released the foreign slot"
+        );
+        assert_eq!(
+            x.device_memory_usage()[0].1,
+            1024,
+            "the foreign slot's reservation was released"
+        );
+
+        foreign.state.store(SLOT_EMPTY, Ordering::Release);
+        x.my_slot().pid.store(std::process::id(), Ordering::Release);
     }
 
     #[test]
