@@ -435,3 +435,44 @@ fn help_and_no_arguments_print_usage() {
         }
     }
 }
+
+/// EuRoC poses are associated by timestamp, not by index. Ground truth is
+/// 200 Hz and estimates are usually 20 Hz; index pairing compared estimate
+/// pose k with the ground truth 5 ms * k later, so two identical x = t
+/// trajectories reported ATE 0.5 m.
+#[test]
+fn euroc_pairs_by_timestamp_across_sampling_rates() {
+    let dir = TempDir::new("euroc");
+    let row = |t_ns: i64| {
+        let x = t_ns as f64 * 1e-9;
+        format!("{t_ns},{x:.9},0,0,1,0,0,0,0,0,0,0,0,0,0,0,0\n")
+    };
+    let header =
+        "#timestamp,p_x,p_y,p_z,q_w,q_x,q_y,q_z,v_x,v_y,v_z,b_w_x,b_w_y,b_w_z,b_a_x,b_a_y,b_a_z\n";
+    let mut gt = String::from(header);
+    for k in 0..200 {
+        gt.push_str(&row(k * 5_000_000)); // 200 Hz over 1 s
+    }
+    let mut est = String::from(header);
+    for k in 0..20 {
+        est.push_str(&row(k * 50_000_000)); // 20 Hz
+    }
+    let gt_path = dir.write("gt.csv", &gt);
+    let est_path = dir.write("est.csv", &est);
+
+    let output = run(&[
+        "trajectory",
+        "--estimate",
+        path_str(&est_path),
+        "--ground-truth",
+        path_str(&gt_path),
+        "--format",
+        "euroc",
+        "--align",
+        "none",
+    ]);
+    let out = stdout_of(&output);
+    assert!(output.status.success(), "{}\n{}", out, stderr_of(&output));
+    let ate = value_after(&out, "ATE rmse");
+    assert!(ate < 1e-6, "ATE {ate} for identical trajectories\n{out}");
+}

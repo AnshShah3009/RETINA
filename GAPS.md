@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (43 open, was 77)
+## (g) Second review, 2026-10-31 — findings (42 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -329,7 +329,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
 Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` uses it as the match threshold. Doc fix only.
 
-### (g4) slam / rendering / plot / cli / dnn / python (6 open, was 11)
+### (g4) slam / rendering / plot / cli / dnn / python (5 open, was 11)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -337,7 +337,7 @@ Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` u
 | g-m2 | `rendering/.../rasterize.rs` `backward` | returns all-zero gradients; trainer never fits | HIGH | CONFIRMED |
 | g-m3 | `rendering/.../optimize.rs` `densify` | every small Gaussian doubled each call (exponential growth); `grad_threshold` unread | HIGH | CONFIRMED |
 | g-m4 | `rendering/.../io.rs` | Gaussian PLY columns read by position, header ignored; binary → `Ok(empty)`; `rot_0` read as x not w | HIGH | CONFIRMED |
-| g-m5 | `cli/src/main.rs` EuRoC | GT/estimate paired by index not timestamp: identical 200 Hz vs 20 Hz trajectories give ATE 0.5 m | HIGH | CONFIRMED |
+| g-m5 | `cli/src/main.rs` EuRoC | **CLOSED.** Paired by timestamp via `tum::associate` and `--max-dt`; pinned by `euroc_pairs_by_timestamp_across_sampling_rates` (ATE 0.500087 → ~0). Was: GT/estimate paired by index not timestamp: identical 200 Hz vs 20 Hz trajectories give ATE 0.5 m | was HIGH — fixed | CONFIRMED |
 | g-m6 | `dnn/src/lib.rs` preprocess | **CLOSED.** Luma plane repeated per channel (planar CHW); pinned by `test_preprocess_is_planar_chw`. Was: HWC data labelled NCHW → RGB models see a garbled image | was HIGH — fixed | ARGUED |
 | g-m7 | `slam/src/tracking.rs` `refine_pose_with_icp` | relative translation applied twice | MED | ARGUED |
 | g-m8 | `rendering/.../optimize.rs` `reset_opacity` | **CLOSED.** Opacities capped at the target (3DGS §5.2); the unit test that pinned raising now pins capping. Was: raises low opacities instead of capping at 0.01 | was MED — fixed | CONFIRMED |

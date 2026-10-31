@@ -74,7 +74,7 @@ pub struct TrajectoryArgs {
     pub align: Alignment,
     /// RPE frame gap (default [`DEFAULT_RPE_DELTA`]).
     pub rpe_delta: usize,
-    /// TUM association tolerance in seconds (default [`DEFAULT_MAX_DT`]).
+    /// TUM/EuRoC association tolerance in seconds (default [`DEFAULT_MAX_DT`]).
     pub max_dt: f64,
 }
 
