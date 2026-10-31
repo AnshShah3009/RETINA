@@ -42,12 +42,14 @@ pub struct GlobalRegistrationResult {
 pub struct GlobalRegistrationEstimator<'a> {
     source: &'a PointCloud,
     target: &'a PointCloud,
+    /// Correspondences per hypothesis (Open3D's `ransac_n`, at least 3).
+    sample_size: usize,
 }
 
 impl<'a> RobustModel<(usize, usize, f32)> for GlobalRegistrationEstimator<'a> {
     type Model = Matrix4<f32>;
     fn min_sample_size(&self) -> usize {
-        3
+        self.sample_size
     }
     fn estimate(&self, data: &[&(usize, usize, f32)]) -> Option<Self::Model> {
         let correspondences: Vec<(usize, usize, f32)> = data.iter().map(|&&c| c).collect();
@@ -91,11 +93,14 @@ pub fn registration_ransac_based_on_feature_matching(
                     min_idx = j;
                 }
             }
-            if min_dist < max_correspondence_distance {
-                Some((i, min_idx, min_dist))
-            } else {
-                None
-            }
+            // Every source feature gets its nearest target feature, as in
+            // Open3D. The match used to be gated by `max_correspondence_
+            // distance` - a *metric* distance in the point cloud's units,
+            // applied to a distance between 33-D FPFH histograms (which sum
+            // to ~100 per sub-histogram). The two scales are unrelated, so the
+            // gate kept or dropped matches arbitrarily. Geometric consistency
+            // is RANSAC's job, using that distance as its inlier threshold.
+            (min_dist.is_finite()).then_some((i, min_idx, min_dist))
         })
         .collect();
 
@@ -114,7 +119,12 @@ pub fn registration_ransac_based_on_feature_matching(
         confidence: 0.99,
     };
 
-    let estimator = GlobalRegistrationEstimator { source, target };
+    let estimator = GlobalRegistrationEstimator {
+        source,
+        target,
+        // `ransac_n` was accepted and then ignored (always 3).
+        sample_size: ransac_n.max(3),
+    };
     let ransac = Ransac::new(config);
     let res = ransac.run(&estimator, &top_correspondences);
 

@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (21 open, was 87)
+## (g) Second review, 2026-10-31 — findings (20 open, was 87)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -364,7 +364,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-c6 | `core/src/robust.rs` adaptive iterations | **CLOSED.** All-inlier best model ends the search; sampling shuffles only k indices. Pinned by `ransac_stops_at_once_when_every_point_is_an_inlier`. Was: all-inlier case never lowers the iteration bound | was LOW — fixed | ARGUED |
 | g-c7 | `calib3d` `find_essential_mat_ransac` | **CLOSED.** RANSAC minimal sample is Nistér 5-point + 1 disambiguating point (OpenCV's choice), 8-point kept for the consensus refit, confidence 0.999 (OpenCV default). On a forward-motion, plane-dominated scene with 20% outliers the 8-point sample left < 5 inliers; now on par with `cv2.findEssentialMat` (worst 6.9–10.2° vs cv2 7.76°). Pinned by `tests/essential_ransac_forward_motion.rs`. Was: 8-point essential RANSAC recovered a translation direction ~55° wrong on the SLAM bootstrap scene (rendered wall/floor/boxes), where a 5-point RANSAC on `EssentialSolver::estimate_5point` succeeds; found while fixing g-m1. Re-measure after `229914c` (consensus refit) | was MED — fixed | CONFIRMED (by the g-m1 fix's author) |
 
-### (g6) 3d / registration / pointcloud (1 open, was 12)
+### (g6) 3d / registration / pointcloud (0 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -378,7 +378,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-d8 | `pointcloud/src/point_cloud.rs` `voxel_down_sample` | **CLOSED.** Non-finite points skipped before bucketing. Pinned by `cv-pointcloud/tests/voxel_down_sample_nan.rs`. Was: NaN point joins voxel (0,0,0) and poisons a real point's centroid | was MED — fixed | CONFIRMED |
 | g-d9 | `3d/src/spatial/kd_tree.rs` `search_radius` | **CLOSED.** Radius prune is inclusive (`<=`) like the accept test. Pinned by `cv-3d/tests/kd_tree_radius_boundary.rs`. Was: strict prune vs inclusive accept: 2 of 3 points at exactly r returned | was LOW — fixed | CONFIRMED |
 | g-d10 | `3d/src/spatial/octree.rs` `insert` | **CLOSED.** `insert` returns `false` for out-of-bounds points. Was: out-of-bounds points dropped silently | was LOW — fixed | CONFIRMED |
-| g-d11 | `registration/.../global/ransac.rs` | one distance gates FPFH feature space and metric space; `ransac_n` ignored | LOW | ARGUED |
+| g-d11 | `registration/.../global/ransac.rs` | **CLOSED.** Nearest-feature matching without a metric gate (Open3D); `ransac_n` sets the sample size. Pinned by `tests/global_ransac_feature_gate.rs` (3 mm noise: error 2.83 → < 0.15). Was: one distance gates FPFH feature space and metric space; `ransac_n` ignored | was LOW — fixed | ARGUED |
 | g-d12 | `pointcloud/src/point_cloud.rs` `cluster_dbscan` | **CLOSED.** Each point queued at most once; noise points reached become border points directly. Pinned by `tests/dbscan_queue.rs`. Was: visited neighbours re-queued → O(N²) seed memory | was LOW — fixed | ARGUED |
 
 ### (g7) core / math / optimize / geometry2d / signal_proc / scientific (7 open, was 12)
