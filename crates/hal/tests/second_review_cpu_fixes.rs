@@ -208,3 +208,22 @@ fn multi_plane_tensors_are_processed_per_plane() {
         );
     }
 }
+
+/// g-x1: with an even number of rho bins (rho resolution 2 on a 63x50
+/// image: 114 bins) cv2 4.13 still reports rho on whole multiples of the
+/// resolution: [[20, pi/2]] for the line y = 20.
+#[test]
+fn hough_lines_rho_with_an_even_bin_count_matches_opencv() {
+    let (w, h) = (63usize, 50usize);
+    let mut data = vec![0.0f32; w * h];
+    for x in 0..w {
+        data[20 * w + x] = 255.0;
+    }
+    let img: Tensor<f32, CpuStorage<f32>> =
+        Tensor::from_vec(data, TensorShape::new(1, h, w)).unwrap();
+    let lines = cpu()
+        .hough_lines(&img, 2.0, std::f32::consts::PI / 180.0, 40)
+        .unwrap();
+    assert!((lines[0].rho - 20.0).abs() < 1e-4, "{:?}", lines[0]);
+    assert!((lines[0].theta - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+}

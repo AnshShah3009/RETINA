@@ -402,7 +402,10 @@ impl ComputeContext for CpuBackend {
                 let t_hi = if t + 1 < num_theta { at(t + 1, r) } else { 0 };
                 if votes > r_lo && votes >= r_hi && votes > t_lo && votes >= t_hi {
                     lines.push(cv_core::HoughLine {
-                        rho: (r as f32 - (num_rho - 1) as f32 * 0.5) * rho_f,
+                        // Bin r holds rho = (r - (num_rho - 1) / 2) * rho with *integer*
+                        // division - what cv2 4.13 reports, also when num_rho is
+                        // even (where `(num_rho - 1) * 0.5` is half a bin off).
+                        rho: (r as f32 - rho_center) * rho_f,
                         theta: t as f32 * theta_f,
                         score: votes,
                     });
