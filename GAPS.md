@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (46 open, was 47)
+## (g) Second review, 2026-10-31 — findings (76 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -349,7 +349,54 @@ Minor (LOW): python `pose.matrix()` flattened column-major (numpy gets the trans
 python `sparse_solve_cg` checks `ncols` not `nrows`; `slam` returns `Ok(last pose)` when PnP fails;
 `SphericalHarmonics::eval` mixes channels (unused).
 
-Pending: calib3d/sfm, 3d/registration/pointcloud, core/math/optimize/geometry2d/signal_proc/scientific.
+### (g5) calib3d / sfm (6 open, was 6)
+
+Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrappers,
+`cv_core::robust::Ransac`. **Not yet reviewed:** triangulation, distortion/undistort,
+calibration, all of `crates/sfm`.
+
+| id | location | defect | severity | evidence |
+|---|---|---|---|---|
+| g-c1 | `calib3d/src/essential.rs` (ca4ca75) | Nistér 5-point: true E among solutions in 0/200 synthetic scenes; returned matrices fit the 5 points but violate `2EEᵀE − tr(EEᵀ)E = 0` and `det E = 0`. Null-space buffer laid out 9x4 row-major where OpenCV's `getCoeffMat` expects 4x9 basis-major — and fixing that alone is not enough | HIGH | CONFIRMED |
+| g-c2 | `calib3d/src/pnp.rs` P3P Kabsch (4d6fcd2) | reflection fix negates column 2 of Vᵀ instead of row 2 → true pose found in 500/1000 exact problems | HIGH | CONFIRMED |
+| g-c3 | `calib3d/src/pnp.rs` `sample_unique_indices` | `state % n` uses an LCG's low bits: for n = 2^m only n distinct samples ever drawn | MED | CONFIRMED |
+| g-c4 | `calib3d/src/pnp.rs` P3P roots | distance ratio `p` not checked positive → behind-camera poses accepted; scoring ignores `z <= 0` | MED | ARGUED |
+| g-c5 | `calib3d/src/pnp.rs` PnP RANSAC | final refinement only with ≥ 6 inliers; 4–5 return the raw P3P pose | MED | ARGUED |
+| g-c6 | `core/src/robust.rs` adaptive iterations | all-inlier case never lowers the iteration bound | LOW | ARGUED |
+
+### (g6) 3d / registration / pointcloud (12 open, was 12)
+
+| id | location | defect | severity | evidence |
+|---|---|---|---|---|
+| g-d1 | `3d/src/tsdf/mod.rs` `integrate_ctx` / `extract_mesh` | free space negative while untouched voxels are +1 (phantom surface at the band edge), z-depth used as ray range, block-seam cells never meshed: 8153/12921 vertices > 3 cm off a z=1 plane | HIGH | CONFIRMED |
+| g-d2 | `registration/.../colored.rs` | unsigned residuals, Jacobian at the untransformed point, ad-hoc photometric term: 0.01 offset not recovered (point-to-plane recovers it) | HIGH | CONFIRMED |
+| g-d3 | `registration/.../gnc.rs` | schedule read from the already-updated loss → μ grows to 2.7e12; loss state leaks across calls | HIGH | CONFIRMED |
+| g-d4 | `registration/mod.rs` `get_information_matrix_from_point_clouds` | not Open3D's `Σ GᵀG`, `G = [-[q]x │ I]`: zero rotation information at perfect alignment, origin-dependent | HIGH | CONFIRMED |
+| g-d5 | `3d/src/raycasting/mod.rs` `point_inside_mesh_bvh` | shared-edge hits counted twice: cube centre reported outside | MED | CONFIRMED |
+| g-d6 | `3d/src/gpu/mod.rs` `compute_normals_cpu` | 27-voxel neighbourhood with a global voxel size; sparse regions silently get `(0,0,1)` | MED | CONFIRMED |
+| g-d7 | `registration/mod.rs` point-to-plane ICP | rmse/fitness measured before the update but reported with it; no relative convergence | MED | CONFIRMED |
+| g-d8 | `pointcloud/src/point_cloud.rs` `voxel_down_sample` | NaN point joins voxel (0,0,0) and poisons a real point's centroid | MED | CONFIRMED |
+| g-d9 | `3d/src/spatial/kd_tree.rs` `search_radius` | strict prune vs inclusive accept: 2 of 3 points at exactly r returned | LOW | CONFIRMED |
+| g-d10 | `3d/src/spatial/octree.rs` `insert` | out-of-bounds points dropped silently | LOW | CONFIRMED |
+| g-d11 | `registration/.../global/ransac.rs` | one distance gates FPFH feature space and metric space; `ransac_n` ignored | LOW | ARGUED |
+| g-d12 | `pointcloud/src/point_cloud.rs` `cluster_dbscan` | visited neighbours re-queued → O(N²) seed memory | LOW | ARGUED |
+
+### (g7) core / math / optimize / geometry2d / signal_proc / scientific (12 open, was 12)
+
+| id | location | defect | severity | evidence |
+|---|---|---|---|---|
+| g-n1 | `geometry2d` `in_circumcircle` / `delaunay_triangulation` | absolute EPS on a length⁴ determinant: same 40 points scaled 1e-5 → 0 triangles | HIGH | CONFIRMED |
+| g-n2 | `geometry2d` `convex_hull` / `is_valid` / `perpendicular_distance` | absolute EPS on length² quantities: hull loses vertices at 1e-3, degenerate at 1e-5 | MED | CONFIRMED |
+| g-n3 | `math/src/linalg.rs` `null_space` | thin SVD: `null_space([[1,0,0]])` is 3x0 (should be 3x2) | HIGH | CONFIRMED |
+| g-n4 | `math/src/linalg.rs` `eig` | returns Schur vectors as eigenvectors: `[[1,1],[0,2]]` residual 1.0 | HIGH | CONFIRMED |
+| g-n5 | `optimize/src/brent.rs` `brentq` | `tol` also gates \|f\| (returns 2.0 for root 1.5); stale `fc` → 81 evals vs SciPy's 8 | HIGH | CONFIRMED |
+| g-n6 | `optimize/src/lbfgsb.rs` | direction ignores the active set; failed line search accepted: f = 1.0135 vs SciPy 1.0 | HIGH | CONFIRMED |
+| g-n7 | `math/src/sparse.rs` `gmres_solve` / `cg_solve` | lucky breakdown skips Givens; absolute thresholds; `Ok` when not converged | MED | CONFIRMED |
+| g-n8 | `signal_proc` `resample` | even-length Nyquist bin halved, not folded | MED | CONFIRMED vs SciPy |
+| g-n9 | `signal_proc` `welch` / `stft` / `spectrogram` | no constant detrend, symmetric Hann: PSD[0] 249.9 vs SciPy 0.175 | MED | CONFIRMED vs SciPy |
+| g-n10 | `signal_proc` `find_peaks` | plateau peaks never found | MED | CONFIRMED vs SciPy |
+| g-n11 | `math/src/stats.rs` normal cdf/ppf, p-values | lower-tail cancellation (`cdf(-10)` = 0), unrefined `ppf`, `1 - cdf` p-values | MED | CONFIRMED vs SciPy |
+| g-n12 | `math/src/integrate.rs` | `quad` is a fixed trapezoid with error 0 and evaluates endpoints; `ode_solve` overshoots `t_end` and stops silently at 10k steps | MED | ARGUED |
 
 ---
 
