@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (35 open, was 86)
+## (g) Second review, 2026-10-31 — findings (34 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -363,7 +363,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-c5 | `calib3d/src/pnp.rs` PnP RANSAC | final refinement only with ≥ 6 inliers; 4–5 return the raw P3P pose | MED | ARGUED |
 | g-c6 | `core/src/robust.rs` adaptive iterations | **CLOSED.** All-inlier best model ends the search; sampling shuffles only k indices. Pinned by `ransac_stops_at_once_when_every_point_is_an_inlier`. Was: all-inlier case never lowers the iteration bound | was LOW — fixed | ARGUED |
 
-### (g6) 3d / registration / pointcloud (4 open, was 12)
+### (g6) 3d / registration / pointcloud (3 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -376,7 +376,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-d7 | `registration/mod.rs` point-to-plane ICP | **CLOSED.** Metrics measured after the update (point-to-point rmse) and Open3D's 1e-6 relative stop. Pinned by `tests/icp_reports_open3d_metrics.rs`. Was: rmse/fitness measured before the update but reported with it; no relative convergence | was MED — fixed | CONFIRMED |
 | g-d8 | `pointcloud/src/point_cloud.rs` `voxel_down_sample` | **CLOSED.** Non-finite points skipped before bucketing. Pinned by `cv-pointcloud/tests/voxel_down_sample_nan.rs`. Was: NaN point joins voxel (0,0,0) and poisons a real point's centroid | was MED — fixed | CONFIRMED |
 | g-d9 | `3d/src/spatial/kd_tree.rs` `search_radius` | **CLOSED.** Radius prune is inclusive (`<=`) like the accept test. Pinned by `cv-3d/tests/kd_tree_radius_boundary.rs`. Was: strict prune vs inclusive accept: 2 of 3 points at exactly r returned | was LOW — fixed | CONFIRMED |
-| g-d10 | `3d/src/spatial/octree.rs` `insert` | out-of-bounds points dropped silently | LOW | CONFIRMED |
+| g-d10 | `3d/src/spatial/octree.rs` `insert` | **CLOSED.** `insert` returns `false` for out-of-bounds points. Was: out-of-bounds points dropped silently | was LOW — fixed | CONFIRMED |
 | g-d11 | `registration/.../global/ransac.rs` | one distance gates FPFH feature space and metric space; `ransac_n` ignored | LOW | ARGUED |
 | g-d12 | `pointcloud/src/point_cloud.rs` `cluster_dbscan` | **CLOSED.** Each point queued at most once; noise points reached become border points directly. Pinned by `tests/dbscan_queue.rs`. Was: visited neighbours re-queued → O(N²) seed memory | was LOW — fixed | ARGUED |
 
