@@ -258,14 +258,26 @@ fn local_mean_replicate(src: &GrayImage, block: usize) -> Vec<u8> {
     });
 
     let n = (block * block) as u64;
-    let mut out = vec![0u8; w * h];
-    out.par_chunks_mut(w).enumerate().for_each(|(y, o)| {
-        for (x, v) in o.iter_mut().enumerate() {
-            let s: u64 = (0..block)
-                .map(|i| rows[clamp(y as isize + i as isize - r as isize, h) * w + x] as u64)
-                .sum();
+    // Vertical window is the same 1D running sum as the rows above, one
+    // column at a time. Summing `block` row-sums per pixel was the remaining
+    // O(block) term. Column-major so each column is written by one thread.
+    let mut cols = vec![0u8; w * h];
+    cols.par_chunks_mut(h).enumerate().for_each(|(x, col)| {
+        let mut s: u64 = (0..block)
+            .map(|i| rows[clamp(i as isize - r as isize, h) * w + x] as u64)
+            .sum();
+        for (y, v) in col.iter_mut().enumerate() {
             // round(s / n); n = block^2 is odd, so there are no ties.
             *v = ((2 * s + n) / (2 * n)).min(255) as u8;
+            let add = rows[clamp(y as isize + r as isize + 1, h) * w + x] as u64;
+            let sub = rows[clamp(y as isize - r as isize, h) * w + x] as u64;
+            s = s + add - sub;
+        }
+    });
+    let mut out = vec![0u8; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        for (x, v) in row.iter_mut().enumerate() {
+            *v = cols[x * h + y];
         }
     });
     out
@@ -575,5 +587,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn time_mean_window() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+        let (w, h, block) = (640usize, 480usize, 75usize);
+        let mut s = 1u64;
+        let mut img = GrayImage::new(w as u32, h as u32);
+        for p in img.pixels_mut() {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *p = Luma([(s >> 33) as u8]);
+        }
+        let t0 = Instant::now();
+        let _ = adaptive_threshold(
+            &img,
+            255,
+            AdaptiveMethod::MeanC,
+            ThresholdType::Binary,
+            block as u32,
+            2.0,
+        );
+        let neu = t0.elapsed();
+        let r = block / 2;
+        let data = img.as_raw();
+        let clamp = |i: isize, n: usize| i.clamp(0, n as isize - 1) as usize;
+        let mut rows = vec![0u32; w * h];
+        rows.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
+            let src_row = &data[y * w..(y + 1) * w];
+            let mut acc: u32 = (0..block)
+                .map(|i| src_row[clamp(i as isize - r as isize, w)] as u32)
+                .sum();
+            for (x, o) in out.iter_mut().enumerate() {
+                *o = acc;
+                acc = acc + src_row[clamp((x + r + 1) as isize, w)] as u32
+                    - src_row[clamp(x as isize - r as isize, w)] as u32;
+            }
+        });
+        let t1 = Instant::now();
+        let mut out = vec![0u8; w * h];
+        out.par_chunks_mut(w).enumerate().for_each(|(y, o)| {
+            for (x, v) in o.iter_mut().enumerate() {
+                let acc: u64 = (0..block)
+                    .map(|i| rows[clamp(y as isize + i as isize - r as isize, h) * w + x] as u64)
+                    .sum();
+                *v = ((2 * acc + (block * block) as u64) / (2 * (block * block) as u64)) as u8;
+            }
+        });
+        let old = t1.elapsed();
+        let _ = out;
+        eprintln!("640x480 block {block}: vertical scan {old:?}, full mean {neu:?}");
     }
 }
