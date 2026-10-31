@@ -269,14 +269,14 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (22 open, was 87)
+## (g) Second review, 2026-10-31 — findings (21 open, was 87)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
 features/imgproc, `g-i` io/runtime/distributed/video/photo/videoio, `g-m` slam/rendering/
 plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
-### (g1) hal (2 open, was 12)
+### (g1) hal (1 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -287,7 +287,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-h5 | `cpu/compute_context_impl.rs` `hough_lines` | **CLOSED.** rayon `fold`/`reduce`: one accumulator per task, not per row. Was: one full accumulator allocated per image row (~3.4 GB at 1080p) | was HIGH — fixed | ARGUED |
 | g-h6 | `cpu/compute_context_impl.rs` `hough_lines` | **CLOSED.** OpenCV `HoughLinesStandard` binning + `findLocalMaximums` 4-neighbour test, sorted by votes; matches `cv2.HoughLines` exactly on the pinned case (`tests/second_review_cpu_fixes.rs`). Was: no peak suppression (GPU path has 3x3 NMS): one line returns 3 | was MED — fixed | CONFIRMED |
 | g-h7 | `cpu/compute_context_impl.rs` `optical_flow_lk` | **CLOSED.** Bouguet pyramidal LK on CPU and GPU (template at the feature's level coordinates, next frame bilinear at x + g + v, g = 2(g + v)); 2.3 px shift error 0.0042 px and stable over iterations (was oscillating 0.22–0.52). GPU kernel had the same defect, worse. Pinned by `tests/lk_subpixel_bouguet.rs`. Was: sub-pixel part applied twice; 2.3 px shift oscillates 2.15…2.76 and does not converge | was MED — fixed | CONFIRMED |
-| g-h8 | `cpu/compute_context_impl.rs` `convolve_2d`, `morphology`, `warp`, `nms`, `stereo` | interleaved multi-channel input treated as `c*h` rows → scrambled output | MED | CONFIRMED |
+| g-h8 | `cpu/compute_context_impl.rs` `convolve_2d`, `morphology`, `warp`, `nms`, `stereo` | **CLOSED.** Tensors are planar CHW (`core/tensor/types.rs`), so the defect was planes 1.. being folded onto plane 0 by an `h`-relative border map; `convolve_2d`, `morphology` and `warp` now process each plane (warp keeps the channel count), `nms`/`stereo_match` reject c ≠ 1. Pinned by `multi_plane_tensors_are_processed_per_plane`. Was: interleaved multi-channel input treated as `c*h` rows → scrambled output | was MED — fixed | CONFIRMED |
 | g-h9 | `cpu/compute_context_impl.rs` `stereo_match` | **CLOSED.** Best disparity starts at the NO_MATCH sentinel. Same test file. Was: pixels with no testable disparity report 0 (valid) instead of the no-match marker | was MED — fixed | CONFIRMED |
 | g-h10 | `cpu/compute_context_impl.rs` `match_descriptors` | **CLOSED.** Queries with no candidate are skipped. Same test file. Was: empty train set + ratio ≥ 1 fabricates a match to index 0 | was LOW — fixed | CONFIRMED |
 | g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | **CLOSED.** CPU renormalises after the 0.2 clamp (as the GPU shader already did); both backends round when quantising. Step-edge descriptor norm 204 → 512 (`tests/second_review_cpu_fixes.rs`). Was: not renormalised after the 0.2 clamp | was LOW — fixed | ARGUED |

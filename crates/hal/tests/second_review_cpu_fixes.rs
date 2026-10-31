@@ -143,3 +143,68 @@ fn sift_descriptors_are_renormalised_after_clamping() {
         .sqrt();
     assert!((norm - 512.0).abs() < 8.0, "descriptor norm {norm}");
 }
+
+/// g-h8: CHW multi-channel tensors are processed plane by plane. Rows were
+/// indexed across all `c * h` rows with the border mapped against `h`, so
+/// planes 1.. were folded back onto plane 0.
+#[test]
+fn multi_plane_tensors_are_processed_per_plane() {
+    use cv_hal::context::{BorderMode, MorphologyType, WarpType};
+    let (w, h) = (8usize, 6usize);
+    let plane = |p: usize| -> Vec<f32> { (0..w * h).map(|i| (i * (p + 2) % 17) as f32).collect() };
+    let planes: Vec<Vec<f32>> = (0..3).map(plane).collect();
+    let stacked: Vec<f32> = planes.concat();
+    let backend = cpu();
+    let img: Tensor<f32, CpuStorage<f32>> =
+        Tensor::from_vec(stacked.clone(), TensorShape::new(3, h, w)).unwrap();
+
+    // Convolution: 3x3 box per plane == single-plane result.
+    let k: Tensor<f32, CpuStorage<f32>> =
+        Tensor::from_vec(vec![1.0 / 9.0; 9], TensorShape::new(1, 3, 3)).unwrap();
+    let out = backend
+        .convolve_2d(&img, &k, BorderMode::Replicate)
+        .unwrap();
+    for (p, pl) in planes.iter().enumerate() {
+        let single: Tensor<f32, CpuStorage<f32>> =
+            Tensor::from_vec(pl.clone(), TensorShape::new(1, h, w)).unwrap();
+        let want = backend
+            .convolve_2d(&single, &k, BorderMode::Replicate)
+            .unwrap();
+        assert_eq!(
+            &out.as_slice().unwrap()[p * w * h..(p + 1) * w * h],
+            want.as_slice().unwrap(),
+            "conv plane {p}"
+        );
+    }
+
+    // Warp: identity keeps every plane.
+    let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let warped = backend.warp(&img, &id, (w, h), WarpType::Affine).unwrap();
+    assert_eq!(warped.shape.channels, 3);
+    assert_eq!(warped.as_slice().unwrap(), stacked.as_slice());
+
+    // Morphology on u8 planes.
+    let u8planes: Vec<u8> = stacked.iter().map(|&v| v as u8 * 10).collect();
+    let img8: Tensor<u8, CpuStorage<u8>> =
+        Tensor::from_vec(u8planes.clone(), TensorShape::new(3, h, w)).unwrap();
+    let k8: Tensor<u8, CpuStorage<u8>> =
+        Tensor::from_vec(vec![1; 9], TensorShape::new(1, 3, 3)).unwrap();
+    let eroded = backend
+        .morphology(&img8, MorphologyType::Erode, &k8, 1)
+        .unwrap();
+    for p in 0..3 {
+        let single: Tensor<u8, CpuStorage<u8>> = Tensor::from_vec(
+            u8planes[p * w * h..(p + 1) * w * h].to_vec(),
+            TensorShape::new(1, h, w),
+        )
+        .unwrap();
+        let want = backend
+            .morphology(&single, MorphologyType::Erode, &k8, 1)
+            .unwrap();
+        assert_eq!(
+            &eroded.as_slice().unwrap()[p * w * h..(p + 1) * w * h],
+            want.as_slice().unwrap(),
+            "erode plane {p}"
+        );
+    }
+}

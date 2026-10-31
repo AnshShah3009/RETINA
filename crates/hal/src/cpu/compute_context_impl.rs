@@ -40,26 +40,36 @@ impl ComputeContext for CpuBackend {
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-        dst.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-            for x in 0..w {
-                let mut sum = T::ZERO;
-                for ky in 0..kh {
-                    for kx in 0..kw {
-                        let src_y = y as isize + ky as isize - (kh / 2) as isize;
-                        let src_x = x as isize + kx as isize - (kw / 2) as isize;
-                        let val = match border::map_border_coord(src_x, src_y, w, h, &border_mode) {
-                            Some((ix, iy)) => src[iy * w + ix],
-                            None => match border_mode {
-                                BorderMode::Constant(v) => v,
-                                _ => T::ZERO,
-                            },
-                        };
-                        sum += val * k_data[ky * kw + kx];
+        // CHW: each channel plane is convolved on its own. Rows were indexed
+        // across all `c * h` of them while the border was mapped against `h`,
+        // so every row of planes 1.. was folded back into plane 0: a 1x1
+        // identity kernel on a 3-plane 2x2 image returned plane 0's rows in
+        // planes 1 and 2.
+        dst.par_chunks_mut(w)
+            .enumerate()
+            .for_each(|(row_idx, row)| {
+                let (plane, y) = (row_idx / h, row_idx % h);
+                let src = &src[plane * h * w..(plane + 1) * h * w];
+                for x in 0..w {
+                    let mut sum = T::ZERO;
+                    for ky in 0..kh {
+                        for kx in 0..kw {
+                            let src_y = y as isize + ky as isize - (kh / 2) as isize;
+                            let src_x = x as isize + kx as isize - (kw / 2) as isize;
+                            let val =
+                                match border::map_border_coord(src_x, src_y, w, h, &border_mode) {
+                                    Some((ix, iy)) => src[iy * w + ix],
+                                    None => match border_mode {
+                                        BorderMode::Constant(v) => v,
+                                        _ => T::ZERO,
+                                    },
+                                };
+                            sum += val * k_data[ky * kw + kx];
+                        }
                     }
+                    row[x] = sum;
                 }
-                row[x] = sum;
-            }
-        });
+            });
 
         Ok(Tensor {
             storage: output_storage,
@@ -836,6 +846,11 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Right image not on CPU".into()))?;
 
+        if left.shape.channels != 1 || right.shape.channels != 1 {
+            return Err(crate::Error::InvalidInput(
+                "stereo_match expects single-channel (grayscale) images".into(),
+            ));
+        }
         let (h, w) = left.shape.hw();
         let (rh, rw) = right.shape.hw();
         if h != rh || w != rw {
@@ -1616,85 +1631,89 @@ impl ComputeContext for CpuBackend {
         let mut next = vec![0u8; src_data.len()];
 
         for _ in 0..iterations {
-            let src = &current;
-            next.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
-                let y = y as isize;
-                let mut x = 0;
+            // CHW planes are eroded/dilated independently (see convolve_2d).
+            next.par_chunks_mut(w)
+                .enumerate()
+                .for_each(|(row_idx, row_out)| {
+                    let plane = row_idx / h;
+                    let src = &current[plane * h * w..(plane + 1) * h * w];
+                    let y = (row_idx % h) as isize;
+                    let mut x = 0;
 
-                // SIMD path (32 pixels at a time)
-                while x + 32 <= w {
-                    let mut res_v = u8x32::splat(identity);
+                    // SIMD path (32 pixels at a time)
+                    while x + 32 <= w {
+                        let mut res_v = u8x32::splat(identity);
 
-                    for ky in 0..kh {
-                        let sy_raw = y + ky as isize - cy as isize;
+                        for ky in 0..kh {
+                            let sy_raw = y + ky as isize - cy as isize;
 
-                        for kx in 0..kw {
-                            if k_data[ky * kw + kx] == 0 {
-                                continue;
-                            }
+                            for kx in 0..kw {
+                                if k_data[ky * kw + kx] == 0 {
+                                    continue;
+                                }
 
-                            // If the source row is out of bounds, use identity element
-                            if sy_raw < 0 || sy_raw >= h as isize {
-                                // identity element: no effect on min/max
-                                continue;
-                            }
-                            let sy = sy_raw as usize;
-                            let row_src = &src[sy * w..(sy + 1) * w];
-                            let sx_base = x as isize + kx as isize - cx as isize;
+                                // If the source row is out of bounds, use identity element
+                                if sy_raw < 0 || sy_raw >= h as isize {
+                                    // identity element: no effect on min/max
+                                    continue;
+                                }
+                                let sy = sy_raw as usize;
+                                let row_src = &src[sy * w..(sy + 1) * w];
+                                let sx_base = x as isize + kx as isize - cx as isize;
 
-                            // Load 32 bytes, using identity for out-of-bounds columns
-                            let mut bytes = [identity; 32];
-                            for i in 0..32 {
-                                let sx = sx_base + i as isize;
-                                if sx >= 0 && sx < w as isize {
-                                    bytes[i] = row_src[sx as usize];
+                                // Load 32 bytes, using identity for out-of-bounds columns
+                                let mut bytes = [identity; 32];
+                                for i in 0..32 {
+                                    let sx = sx_base + i as isize;
+                                    if sx >= 0 && sx < w as isize {
+                                        bytes[i] = row_src[sx as usize];
+                                    }
+                                }
+
+                                let v = u8x32::from(bytes);
+                                if typ == MorphologyType::Erode {
+                                    res_v = res_v.min(v);
+                                } else {
+                                    res_v = res_v.max(v);
                                 }
                             }
-
-                            let v = u8x32::from(bytes);
-                            if typ == MorphologyType::Erode {
-                                res_v = res_v.min(v);
-                            } else {
-                                res_v = res_v.max(v);
-                            }
                         }
+
+                        let res_arr: [u8; 32] = res_v.into();
+                        row_out[x..x + 32].copy_from_slice(&res_arr);
+                        x += 32;
                     }
 
-                    let res_arr: [u8; 32] = res_v.into();
-                    row_out[x..x + 32].copy_from_slice(&res_arr);
-                    x += 32;
-                }
-
-                // Scalar tail
-                for cx_idx in x..w {
-                    let mut val = identity;
-                    for ky in 0..kh {
-                        let sy_raw = y + ky as isize - cy as isize;
-                        for kx in 0..kw {
-                            if k_data[ky * kw + kx] == 0 {
-                                continue;
-                            }
-                            let sx_raw = cx_idx as isize + kx as isize - cx as isize;
-                            // Use identity element for out-of-bounds pixels
-                            let v = if sy_raw < 0
-                                || sy_raw >= h as isize
-                                || sx_raw < 0
-                                || sx_raw >= w as isize
-                            {
-                                identity
-                            } else {
-                                src[sy_raw as usize * w + sx_raw as usize]
-                            };
-                            if typ == MorphologyType::Erode {
-                                val = val.min(v);
-                            } else {
-                                val = val.max(v);
+                    // Scalar tail
+                    for cx_idx in x..w {
+                        let mut val = identity;
+                        for ky in 0..kh {
+                            let sy_raw = y + ky as isize - cy as isize;
+                            for kx in 0..kw {
+                                if k_data[ky * kw + kx] == 0 {
+                                    continue;
+                                }
+                                let sx_raw = cx_idx as isize + kx as isize - cx as isize;
+                                // Use identity element for out-of-bounds pixels
+                                let v = if sy_raw < 0
+                                    || sy_raw >= h as isize
+                                    || sx_raw < 0
+                                    || sx_raw >= w as isize
+                                {
+                                    identity
+                                } else {
+                                    src[sy_raw as usize * w + sx_raw as usize]
+                                };
+                                if typ == MorphologyType::Erode {
+                                    val = val.min(v);
+                                } else {
+                                    val = val.max(v);
+                                }
                             }
                         }
+                        row_out[cx_idx] = val;
                     }
-                    row_out[cx_idx] = val;
-                }
-            });
+                });
             std::mem::swap(&mut current, &mut next);
         }
 
@@ -1722,61 +1741,69 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
         let (nw, nh) = (new_shape.0, new_shape.1);
-        let mut output_storage = S::new(nw * nh, T::ZERO).map_err(crate::Error::MemoryError)?;
+        // Every CHW plane is warped; the output keeps the channel count. Only
+        // a single `nw * nh` plane was produced before, sampled from rows of
+        // the whole `c * h` buffer as if it were one plane.
+        let c = input.shape.channels.max(1);
+        let mut output_storage = S::new(c * nw * nh, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-        dst.par_chunks_mut(nw).enumerate().for_each(|(y, row_out)| {
-            for x in 0..nw {
-                let fx = T::from_f32(x as f32);
-                let fy = T::from_f32(y as f32);
+        dst.par_chunks_mut(nw)
+            .enumerate()
+            .for_each(|(row_idx, row_out)| {
+                let (plane, y) = (row_idx / nh, row_idx % nh);
+                let src = &src[plane * h * w..(plane + 1) * h * w];
+                for x in 0..nw {
+                    let fx = T::from_f32(x as f32);
+                    let fy = T::from_f32(y as f32);
 
-                let sw = matrix[2][0] * fx + matrix[2][1] * fy + matrix[2][2];
-                let sx = (matrix[0][0] * fx + matrix[0][1] * fy + matrix[0][2]) / sw;
-                let sy = (matrix[1][0] * fx + matrix[1][1] * fy + matrix[1][2]) / sw;
+                    let sw = matrix[2][0] * fx + matrix[2][1] * fy + matrix[2][2];
+                    let sx = (matrix[0][0] * fx + matrix[0][1] * fy + matrix[0][2]) / sw;
+                    let sy = (matrix[1][0] * fx + matrix[1][1] * fy + matrix[1][2]) / sw;
 
-                // The bound is inclusive of the last valid column/row. It was
-                // `sx < w - 1`, which excluded column `w - 1` entirely, so the
-                // final column of every destination row was never written and
-                // kept the zero it was initialised with - while the GPU shader
-                // sampled it correctly. On a 53-wide identity warp that is 89 of
-                // 1961 pixels wrong, and the CPU is the wrong one.
-                //
-                // `x1`/`y1` are then clamped rather than trusted: with `sx`
-                // reaching `w - 1` the naive `x0 + 1` would index one past the
-                // end of the row.
-                if sx >= T::ZERO
-                    && sx <= T::from_f32((w - 1) as f32)
-                    && sy >= T::ZERO
-                    && sy <= T::from_f32((h - 1) as f32)
-                {
-                    // Bilinear interpolation
-                    let x0 = sx.to_f32() as usize;
-                    let y0 = sy.to_f32() as usize;
-                    let x1 = (x0 + 1).min(w - 1);
-                    let y1 = (y0 + 1).min(h - 1);
-                    let dx = sx - T::from_f32(x0 as f32);
-                    let dy = sy - T::from_f32(y0 as f32);
-                    let one = T::ONE;
+                    // The bound is inclusive of the last valid column/row. It was
+                    // `sx < w - 1`, which excluded column `w - 1` entirely, so the
+                    // final column of every destination row was never written and
+                    // kept the zero it was initialised with - while the GPU shader
+                    // sampled it correctly. On a 53-wide identity warp that is 89 of
+                    // 1961 pixels wrong, and the CPU is the wrong one.
+                    //
+                    // `x1`/`y1` are then clamped rather than trusted: with `sx`
+                    // reaching `w - 1` the naive `x0 + 1` would index one past the
+                    // end of the row.
+                    if sx >= T::ZERO
+                        && sx <= T::from_f32((w - 1) as f32)
+                        && sy >= T::ZERO
+                        && sy <= T::from_f32((h - 1) as f32)
+                    {
+                        // Bilinear interpolation
+                        let x0 = sx.to_f32() as usize;
+                        let y0 = sy.to_f32() as usize;
+                        let x1 = (x0 + 1).min(w - 1);
+                        let y1 = (y0 + 1).min(h - 1);
+                        let dx = sx - T::from_f32(x0 as f32);
+                        let dy = sy - T::from_f32(y0 as f32);
+                        let one = T::ONE;
 
-                    let v00 = src[y0 * w + x0];
-                    let v10 = src[y0 * w + x1];
-                    let v01 = src[y1 * w + x0];
-                    let v11 = src[y1 * w + x1];
+                        let v00 = src[y0 * w + x0];
+                        let v10 = src[y0 * w + x1];
+                        let v01 = src[y1 * w + x0];
+                        let v11 = src[y1 * w + x1];
 
-                    let val = v00 * (one - dx) * (one - dy)
-                        + v10 * dx * (one - dy)
-                        + v01 * (one - dx) * dy
-                        + v11 * dx * dy;
-                    row_out[x] = val;
+                        let val = v00 * (one - dx) * (one - dy)
+                            + v10 * dx * (one - dy)
+                            + v01 * (one - dx) * dy
+                            + v11 * dx * dy;
+                        row_out[x] = val;
+                    }
                 }
-            }
-        });
+            });
 
         Ok(Tensor {
             storage: output_storage,
-            shape: TensorShape::new(1, nh, nw),
+            shape: TensorShape::new(c, nh, nw),
             dtype: input.dtype,
             _phantom: std::marker::PhantomData,
         })
@@ -1792,6 +1819,12 @@ impl ComputeContext for CpuBackend {
             .storage
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
+        if input.shape.channels != 1 {
+            return Err(crate::Error::InvalidInput(format!(
+                "nms expects a single-channel response map, got {} channels",
+                input.shape.channels
+            )));
+        }
         let (h, w) = input.shape.hw();
         let mut output_storage =
             S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
