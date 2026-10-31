@@ -833,8 +833,8 @@ fn the_whole_shader_corpus_is_covered() {
     let files = all_wgsl_files();
     assert_eq!(
         files.len(),
-        105,
-        "expected 105 .wgsl files across shaders/ and src/gpu_kernels/"
+        104,
+        "expected 104 .wgsl files across shaders/ and src/gpu_kernels/"
     );
     let kernels = files
         .iter()

@@ -6,7 +6,9 @@ use image::GrayImage;
 use rayon::prelude::*;
 use tracing::{info, warn};
 
-use crate::convolve::{convolve_with_border_into_ctx, gaussian_blur_ctx, BorderMode, Kernel};
+use crate::convolve::{
+    convolve_with_border_into_ctx, gaussian_blur_with_border_into_ctx, BorderMode, Kernel,
+};
 
 fn sobel_kernels_1d(ksize: usize) -> Option<(Vec<f32>, Vec<f32>)> {
     match ksize {
@@ -349,136 +351,18 @@ pub struct CannyOptions {
     pub blur_sigma: Option<f32>,
 }
 
-/// 3x3 Sobel with BORDER_REPLICATE, as `cv::Canny` computes it.
-fn sobel3_replicate(src: &GrayImage) -> (Vec<i32>, Vec<i32>) {
-    let w = src.width() as usize;
-    let h = src.height() as usize;
-    let data = src.as_raw();
-    let mut dx = vec![0i32; w * h];
-    let mut dy = vec![0i32; w * h];
-    dx.par_chunks_mut(w)
-        .zip(dy.par_chunks_mut(w))
-        .enumerate()
-        .for_each(|(y, (dx_row, dy_row))| {
-            let r0 = &data[y.saturating_sub(1) * w..][..w];
-            let r1 = &data[y * w..][..w];
-            let r2 = &data[(y + 1).min(h - 1) * w..][..w];
-            for x in 0..w {
-                let xm = x.saturating_sub(1);
-                let xp = (x + 1).min(w - 1);
-                let p = |r: &[u8], i: usize| r[i] as i32;
-                dx_row[x] =
-                    (p(r0, xp) - p(r0, xm)) + 2 * (p(r1, xp) - p(r1, xm)) + (p(r2, xp) - p(r2, xm));
-                dy_row[x] =
-                    (p(r2, xm) + 2 * p(r2, x) + p(r2, xp)) - (p(r0, xm) + 2 * p(r0, x) + p(r0, xp));
-            }
-        });
-    (dx, dy)
-}
-
 /// OpenCV's Canny on an 8-bit image: Sobel 3x3 (BORDER_REPLICATE), integer
 /// L1 or squared-L2 magnitude, NMS strict towards left/up (`>`) and
 /// non-strict towards right/down (`>=`), strict on both diagonal neighbours,
 /// thresholds strict, 8-connected hysteresis. Pixels outside the image have
-/// magnitude 0.
+/// magnitude 0. The implementation lives in cv-hal
+/// (`cv_hal::cpu::canny_opencv`) so the GPU kernel shares its thresholds and
+/// hysteresis.
 fn canny_cpu(src: &GrayImage, low: f64, high: f64, l2: bool) -> GrayImage {
-    let w = src.width() as usize;
-    let h = src.height() as usize;
-    if w == 0 || h == 0 {
-        return GrayImage::new(src.width(), src.height());
-    }
-
-    let (mut lo, mut hi) = (low, high);
-    if lo > hi {
-        std::mem::swap(&mut lo, &mut hi);
-    }
-    if l2 {
-        lo = lo.min(32767.0);
-        hi = hi.min(32767.0);
-        if lo > 0.0 {
-            lo *= lo;
-        }
-        if hi > 0.0 {
-            hi *= hi;
-        }
-    }
-    let lo = lo.floor() as i64;
-    let hi = hi.floor() as i64;
-
-    let (dx, dy) = sobel3_replicate(src);
-    let mag: Vec<i64> = dx
-        .par_iter()
-        .zip(dy.par_iter())
-        .map(|(&gx, &gy)| {
-            let (gx, gy) = (gx as i64, gy as i64);
-            if l2 {
-                gx * gx + gy * gy
-            } else {
-                gx.abs() + gy.abs()
-            }
-        })
-        .collect();
-    let at = |x: isize, y: isize| -> i64 {
-        if x < 0 || y < 0 || x >= w as isize || y >= h as isize {
-            0
-        } else {
-            mag[y as usize * w + x as usize]
-        }
-    };
-
-    // 0 = not an edge, 1 = weak (low < m <= high), 2 = strong.
-    const SHIFT: i64 = 15;
-    let tg22: i64 = (0.414_213_562_373_095_05 * (1i64 << SHIFT) as f64 + 0.5) as i64;
-    let mut state = vec![0u8; w * h];
-    state.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-        let yi = y as isize;
-        for (x, st) in row.iter_mut().enumerate() {
-            let j = y * w + x;
-            let m = mag[j];
-            if m <= lo {
-                continue;
-            }
-            let xi = x as isize;
-            let (xs, ys) = (dx[j] as i64, dy[j] as i64);
-            let ax = xs.abs();
-            let ay = ys.abs() << SHIFT;
-            let tg22x = ax * tg22;
-            let is_max = if ay < tg22x {
-                m > at(xi - 1, yi) && m >= at(xi + 1, yi)
-            } else {
-                let tg67x = tg22x + (ax << (SHIFT + 1));
-                if ay > tg67x {
-                    m > at(xi, yi - 1) && m >= at(xi, yi + 1)
-                } else {
-                    let s: isize = if (xs ^ ys) < 0 { -1 } else { 1 };
-                    m > at(xi - s, yi - 1) && m > at(xi + s, yi + 1)
-                }
-            };
-            if is_max {
-                *st = if m > hi { 2 } else { 1 };
-            }
-        }
-    });
-
-    let mut stack: Vec<usize> = (0..w * h).filter(|&i| state[i] == 2).collect();
-    while let Some(i) = stack.pop() {
-        let (x, y) = (i % w, i / w);
-        for ny in y.saturating_sub(1)..=(y + 1).min(h - 1) {
-            for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
-                let n = ny * w + nx;
-                if state[n] == 1 {
-                    state[n] = 2;
-                    stack.push(n);
-                }
-            }
-        }
-    }
-
-    let out: Vec<u8> = state
-        .par_iter()
-        .map(|&s| if s == 2 { 255 } else { 0 })
-        .collect();
-    GrayImage::from_raw(src.width(), src.height(), out).expect("buffer sized w*h")
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let out = cv_hal::cpu::canny_opencv::canny_u8(src.as_raw(), w, h, low, high, l2);
+    GrayImage::from_raw(src.width(), src.height(), out)
+        .unwrap_or_else(|| GrayImage::new(src.width(), src.height()))
 }
 
 /// Canny edge detector, `cv2.Canny(src, low_threshold, high_threshold)`.
@@ -535,9 +419,12 @@ pub fn canny_ctx(
 
 /// [`canny_with_options`] on a given runner.
 ///
-/// On a GPU runner with default options the `canny.wgsl` kernel is tried
-/// first; that kernel is not bit-exact with OpenCV (L2 magnitude, `>=` NMS).
-/// The CPU path is.
+/// On a GPU runner the `canny.wgsl` kernel runs Sobel, NMS and the double
+/// threshold (integer arithmetic, bit-exact with the CPU path and with
+/// OpenCV, L1 or L2); hysteresis runs on the host. The optional pre-blur
+/// always uses the CPU Gaussian, because the GPU Gaussian ignores the border
+/// mode (BORDER_REFLECT_101 here) and would change the edges. On any GPU
+/// error the CPU path runs instead.
 pub fn canny_with_options_ctx(
     src: &GrayImage,
     low_threshold: f32,
@@ -548,9 +435,25 @@ pub fn canny_with_options_ctx(
     if src.width() == 0 || src.height() == 0 {
         return GrayImage::new(src.width(), src.height());
     }
-    if *options == CannyOptions::default() {
-        if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-            if let Ok(res) = canny_gpu(gpu, src, low_threshold, high_threshold) {
+
+    let blurred;
+    let input = match options.blur_sigma {
+        Some(sigma) if sigma > 0.0 => {
+            blurred = gaussian_blur_with_border_into_ctx(src, sigma, BorderMode::Reflect101, group);
+            &blurred
+        }
+        _ => src,
+    };
+
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+        match canny_gpu(
+            gpu,
+            input,
+            low_threshold,
+            high_threshold,
+            options.l2_gradient,
+        ) {
+            Ok(res) => {
                 info!(
                     "GPU canny: executed on GPU ({}x{})",
                     src.width(),
@@ -558,18 +461,10 @@ pub fn canny_with_options_ctx(
                 );
                 return res;
             }
-            warn!("GPU canny failed, falling back to CPU");
+            Err(e) => warn!("GPU canny failed ({e}), falling back to CPU"),
         }
     }
 
-    let blurred;
-    let input = match options.blur_sigma {
-        Some(sigma) if sigma > 0.0 => {
-            blurred = gaussian_blur_ctx(src, sigma, BorderMode::Reflect101, group);
-            &blurred
-        }
-        _ => src,
-    };
     group.run(|| {
         canny_cpu(
             input,
@@ -580,40 +475,18 @@ pub fn canny_with_options_ctx(
     })
 }
 
-// NOTE: GPU Canny shader (canny.wgsl) expects packed u8-in-u32 input but the Rust host
-// side uploads f32 tensors.  The `canny_gpu()` helper works around this by converting
-// to f32 before dispatch and converting back after readback.  A proper fix requires
-// either (a) rewriting the WGSL shader to accept f32 storage buffers, or (b) packing
-// u8 pixels into u32 on the host before upload.  If the GPU path fails for any reason,
-// `canny_ctx` silently falls back to the CPU implementation above.
 fn canny_gpu(
     gpu: &cv_hal::gpu::GpuContext,
     src: &GrayImage,
     low: f32,
     high: f32,
+    l2: bool,
 ) -> cv_hal::Result<GrayImage> {
-    use cv_hal::context::ComputeContext;
-    let src_f32: Vec<f32> = src.as_raw().iter().map(|&p| p as f32).collect();
-    let input_tensor = cv_core::CpuTensor::from_vec(
-        src_f32,
-        cv_core::TensorShape::new(1, src.height() as usize, src.width() as usize),
-    )
-    .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
-    let input_gpu = input_tensor.to_gpu_ctx(gpu)?;
-
-    let res_gpu = gpu.canny(&input_gpu, low, high)?;
-
-    let res_cpu: Tensor<f32, cv_core::CpuStorage<f32>> = res_gpu.to_cpu()?;
-    let res_data: Vec<u8> = res_cpu
-        .storage
-        .as_slice()
-        .unwrap()
-        .iter()
-        .map(|&v| v.round_ties_even().clamp(0.0, 255.0) as u8)
-        .collect();
-
-    GrayImage::from_raw(src.width(), src.height(), res_data)
-        .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from tensor".into()))
+    let (w, h) = (src.width() as usize, src.height() as usize);
+    let out =
+        cv_hal::gpu_kernels::canny::canny_u8(gpu, src.as_raw(), w, h, low as f64, high as f64, l2)?;
+    GrayImage::from_raw(src.width(), src.height(), out)
+        .ok_or_else(|| cv_hal::Error::MemoryError("Failed to create image from mask".into()))
 }
 
 #[cfg(test)]

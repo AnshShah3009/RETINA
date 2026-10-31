@@ -170,128 +170,39 @@ impl ComputeContext for CpuBackend {
         low_threshold: T,
         high_threshold: T,
     ) -> Result<Tensor<T, S>> {
+        // `cv::Canny` on an 8-bit image (see `cpu::canny_opencv`): the input is
+        // rounded and saturated to 0..=255. No pre-blur, 3x3 Sobel, L1
+        // magnitude. The GPU backend runs the same integer algorithm.
         let (h, w) = input.shape.hw();
-        if h < 3 || w < 3 {
+        if input.shape.channels != 1 {
             return Err(crate::Error::InvalidInput(
-                "Canny requires image at least 3x3".into(),
+                "Canny requires a single-channel image".into(),
             ));
         }
-
-        // Step 1: Gaussian blur (sigma=1.4, ksize=5)
-        let blurred = self.gaussian_blur(input, T::from_f32(1.4), 5)?;
-
-        // Step 2: Sobel gradients
-        let (gx_tensor, gy_tensor) = self.sobel(&blurred, 1, 1, 3)?;
-        let gx = gx_tensor
+        let src = input
             .storage
             .as_slice()
-            .ok_or_else(|| crate::Error::MemoryError("Gx not on CPU".into()))?;
-        let gy = gy_tensor
-            .storage
-            .as_slice()
-            .ok_or_else(|| crate::Error::MemoryError("Gy not on CPU".into()))?;
+            .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
+        let px: Vec<u8> = src
+            .iter()
+            .map(|v| crate::cpu::canny_opencv::quantize_u8(Float::to_f32(*v)))
+            .collect();
+        let mask = crate::cpu::canny_opencv::canny_u8(
+            &px,
+            w,
+            h,
+            low_threshold.to_f32() as f64,
+            high_threshold.to_f32() as f64,
+            false,
+        );
 
-        // Step 3: Compute magnitude and direction
         let len = h * w;
-        let mut magnitude = vec![T::ZERO; len];
-        let mut direction = vec![0u8; len]; // 0=horiz, 1=diag45, 2=vert, 3=diag135
-
-        for i in 0..len {
-            let mx = gx[i].to_f32();
-            let my = gy[i].to_f32();
-            magnitude[i] = T::from_f32((mx * mx + my * my).sqrt());
-
-            // Quantize angle to 4 directions
-            let angle = my.atan2(mx).to_degrees();
-            let angle = if angle < 0.0 { angle + 180.0 } else { angle };
-            direction[i] = if !(22.5..157.5).contains(&angle) {
-                0 // horizontal edge -> suppress vertically
-            } else if angle < 67.5 {
-                1 // 45-degree
-            } else if angle < 112.5 {
-                2 // vertical edge -> suppress horizontally
-            } else {
-                3 // 135-degree
-            };
-        }
-
-        // Step 4: Non-maximum suppression
-        let mut nms_out = vec![T::ZERO; len];
-        nms_out
-            .par_chunks_mut(w)
-            .enumerate()
-            .for_each(|(y, row_out)| {
-                if y == 0 || y >= h - 1 {
-                    return;
-                }
-                for x in 1..w - 1 {
-                    let idx = y * w + x;
-                    let mag = magnitude[idx];
-                    let (n1, n2) = match direction[idx] {
-                        0 => (magnitude[idx - 1], magnitude[idx + 1]), // horizontal
-                        1 => (
-                            magnitude[(y - 1) * w + x - 1],
-                            magnitude[(y + 1) * w + x + 1],
-                        ), // 45 (gradient (+,+): thin along the main diagonal)
-                        2 => (magnitude[(y - 1) * w + x], magnitude[(y + 1) * w + x]), // vertical
-                        _ => (
-                            magnitude[(y - 1) * w + x + 1],
-                            magnitude[(y + 1) * w + x - 1],
-                        ), // 135 (gradient (+,-): thin along the anti-diagonal)
-                    };
-                    if mag >= n1 && mag >= n2 {
-                        row_out[x] = mag;
-                    }
-                }
-            });
-
-        // Step 5: Hysteresis thresholding
-        // Mark strong and weak edges
-        let mut edge_map = vec![0u8; len]; // 0=none, 1=weak, 2=strong
-        for i in 0..len {
-            if nms_out[i] >= high_threshold {
-                edge_map[i] = 2;
-            } else if nms_out[i] >= low_threshold {
-                edge_map[i] = 1;
-            }
-        }
-
-        // Trace weak edges connected to strong edges using iterative flood fill
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for y in 1..h - 1 {
-                for x in 1..w - 1 {
-                    let idx = y * w + x;
-                    if edge_map[idx] != 1 {
-                        continue;
-                    }
-                    // Check 8-connected neighbors for strong edge
-                    let has_strong = edge_map[(y - 1) * w + x - 1] == 2
-                        || edge_map[(y - 1) * w + x] == 2
-                        || edge_map[(y - 1) * w + x + 1] == 2
-                        || edge_map[y * w + x - 1] == 2
-                        || edge_map[y * w + x + 1] == 2
-                        || edge_map[(y + 1) * w + x - 1] == 2
-                        || edge_map[(y + 1) * w + x] == 2
-                        || edge_map[(y + 1) * w + x + 1] == 2;
-                    if has_strong {
-                        edge_map[idx] = 2;
-                        changed = true;
-                    }
-                }
-            }
-        }
-
-        // Build output: strong edges = 255, rest = 0 (matches canny.wgsl / OpenCV)
         let mut output_storage = S::new(len, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
-        for i in 0..len {
-            if edge_map[i] == 2 {
-                dst[i] = T::from_f32(255.0);
-            }
+        for (d, &m) in dst.iter_mut().zip(&mask) {
+            *d = T::from_f32(m as f32);
         }
 
         Ok(Tensor {
@@ -318,34 +229,18 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
 
-        let rho_f = rho.to_f32();
-        let theta_f = theta.to_f32();
-
-        // Accumulator layout is OpenCV's `HoughLinesStandard`: rho bins centred
-        // on integer multiples of `rho` (`round(r / rho) + (numrho - 1) / 2`)
-        // and `floor(pi / theta) + 1` angles, dropping the last when it would
-        // duplicate theta = 0. The previous layout offset rho by the image
-        // diagonal (90.51 for 64x64), so bin centres sat at fractional rho
-        // and one line at y = 32 came back at rho 32.49 split across two bins.
-        let rho_f = rho_f.max(1e-6);
-        let theta_f = theta_f.max(1e-6);
-        let num_rho = (((w + h) * 2 + 1) as f32 / rho_f).round() as usize;
-        let mut num_theta = (std::f32::consts::PI / theta_f).floor() as usize + 1;
-        if num_theta > 1
-            && (std::f32::consts::PI - (num_theta - 1) as f32 * theta_f).abs() < theta_f / 2.0
-        {
-            num_theta -= 1;
-        }
-        let rho_center = ((num_rho - 1) / 2) as f32;
+        // Layout, binning and peak rule live in `cpu::hough_standard` so the GPU
+        // backend reports exactly the same lines.
+        let layout =
+            crate::cpu::hough_standard::HoughLayout::new(w, h, rho.to_f32(), theta.to_f32());
+        let (num_rho, num_theta) = (layout.num_rho, layout.num_theta);
 
         // Check for overflow in accumulator size
         let acc_size = num_rho
             .checked_mul(num_theta)
             .ok_or_else(|| crate::Error::InvalidInput("Hough accumulator size too large".into()))?;
 
-        // Precompute sin/cos tables
-        let cos_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).cos()).collect();
-        let sin_table: Vec<f32> = (0..num_theta).map(|t| (t as f32 * theta_f).sin()).collect();
+        let (cos_table, sin_table) = layout.trig_tables();
 
         // Accumulate votes. One accumulator per rayon *task*, not per image
         // row: a per-row `vec![0; acc_size]` held h accumulators at once -
@@ -358,13 +253,10 @@ impl ComputeContext for CpuBackend {
                 |mut acc, y| {
                     for x in 0..w {
                         if src[y * w + x] > T::ZERO {
-                            let xf = x as f32;
-                            let yf = y as f32;
                             for t in 0..num_theta {
-                                let r = xf * cos_table[t] + yf * sin_table[t];
-                                let r_idx = (r / rho_f).round() + rho_center;
-                                if r_idx >= 0.0 && (r_idx as usize) < num_rho {
-                                    acc[t * num_rho + r_idx as usize] += 1;
+                                let k = layout.bin(x, y, cos_table[t], sin_table[t]);
+                                if let Some(i) = layout.index(t, k) {
+                                    acc[i] += 1;
                                 }
                             }
                         }
@@ -382,40 +274,10 @@ impl ComputeContext for CpuBackend {
                 },
             );
 
-        // Extract peaks: OpenCV's `findLocalMaximums` - a bin is a line only
-        // if it beats its rho and theta neighbours (`>` on the lower side,
-        // `>=` on the upper, so a flat pair yields one peak; out-of-range
-        // neighbours count as 0). Without it a single 64-px segment came back
-        // as three lines (theta 1.553/1.571/1.588, votes 58/64/57), and the
-        // GPU path, which does suppress, disagreed with this one.
-        let at = |t: usize, r: usize| accumulator[t * num_rho + r];
-        let mut lines = Vec::new();
-        for t in 0..num_theta {
-            for r in 0..num_rho {
-                let votes = at(t, r);
-                if votes < threshold {
-                    continue;
-                }
-                let r_lo = if r > 0 { at(t, r - 1) } else { 0 };
-                let r_hi = if r + 1 < num_rho { at(t, r + 1) } else { 0 };
-                let t_lo = if t > 0 { at(t - 1, r) } else { 0 };
-                let t_hi = if t + 1 < num_theta { at(t + 1, r) } else { 0 };
-                if votes > r_lo && votes >= r_hi && votes > t_lo && votes >= t_hi {
-                    lines.push(cv_core::HoughLine {
-                        // Bin r holds rho = (r - (num_rho - 1) / 2) * rho with *integer*
-                        // division - what cv2 4.13 reports, also when num_rho is
-                        // even (where `(num_rho - 1) * 0.5` is half a bin off).
-                        rho: (r as f32 - rho_center) * rho_f,
-                        theta: t as f32 * theta_f,
-                        score: votes,
-                    });
-                }
-            }
-        }
-        // Strongest first, as OpenCV returns them.
-        lines.sort_by(|a, b| b.score.cmp(&a.score));
-
-        Ok(lines)
+        // OpenCV's `findLocalMaximums`, strongest first (see `cpu::hough_standard`).
+        // Without the local-maximum test a single 64-px segment came back as
+        // three lines (theta 1.553/1.571/1.588, votes 58/64/57).
+        Ok(layout.peaks(&accumulator, threshold))
     }
 
     fn hough_circles<

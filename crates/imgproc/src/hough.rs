@@ -290,6 +290,126 @@ impl CvRng {
     }
 }
 
+/// OpenCV `HoughLinesStandard` accumulator layout and trig tables.
+struct StandardLayout {
+    num_angle: usize,
+    num_rho: usize,
+    rho_offset: i32,
+    /// `cos(ang) / rho`, `sin(ang) / rho` as OpenCV's `createTrigTable`
+    /// computes them (angle accumulated in f32, product in f64).
+    tab_cos: Vec<f32>,
+    tab_sin: Vec<f32>,
+}
+
+impl StandardLayout {
+    fn new(w: usize, h: usize, rho: f32, theta: f32) -> Self {
+        let irho = 1.0f32 / rho;
+        let mut num_angle = ((std::f64::consts::PI) / theta as f64).floor() as usize + 1;
+        if num_angle > 1
+            && (std::f64::consts::PI - ((num_angle - 1) as f32 * theta) as f64).abs()
+                < (theta / 2.0) as f64
+        {
+            num_angle -= 1;
+        }
+        let num_rho = cv_round(((w + h) * 2 + 1) as f32 / rho).max(1) as usize;
+        let rho_offset = ((num_rho - 1) / 2) as i32;
+
+        // createTrigTable: the angle is accumulated in f32.
+        let mut tab_cos = Vec::with_capacity(num_angle);
+        let mut tab_sin = Vec::with_capacity(num_angle);
+        let mut ang = 0.0f32;
+        for _ in 0..num_angle {
+            tab_sin.push(((ang as f64).sin() * irho as f64) as f32);
+            tab_cos.push(((ang as f64).cos() * irho as f64) as f32);
+            ang += theta;
+        }
+        Self {
+            num_angle,
+            num_rho,
+            rho_offset,
+            tab_cos,
+            tab_sin,
+        }
+    }
+
+    /// Accumulator index of edge pixel (x, y) at angle n, if in range.
+    #[inline]
+    fn index(&self, x: usize, y: usize, n: usize) -> Option<usize> {
+        let r = cv_round(x as f32 * self.tab_cos[n] + y as f32 * self.tab_sin[n]) + self.rho_offset;
+        (r >= 0 && (r as usize) < self.num_rho).then(|| n * self.num_rho + r as usize)
+    }
+
+    fn accumulate(&self, edges: &GrayImage) -> Vec<u32> {
+        let w = edges.width() as usize;
+        let h = edges.height() as usize;
+        let src = edges.as_raw();
+        let len = self.num_angle * self.num_rho;
+        (0..h)
+            .into_par_iter()
+            .fold(
+                || vec![0u32; len],
+                |mut acc, y| {
+                    for x in 0..w {
+                        if src[y * w + x] == 0 {
+                            continue;
+                        }
+                        for n in 0..self.num_angle {
+                            if let Some(i) = self.index(x, y, n) {
+                                acc[i] += 1;
+                            }
+                        }
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0u32; len],
+                |mut a, b| {
+                    a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
+                    a
+                },
+            )
+    }
+
+    /// findLocalMaximums + hough_cmp_gt ordering.
+    fn lines(&self, acc: &[u32], rho: f32, theta: f32, threshold: u32) -> Vec<Line> {
+        let (num_rho, num_angle) = (self.num_rho, self.num_angle);
+        // `>` the lower and `>=` the upper neighbour in rho and theta;
+        // out-of-range neighbours are 0. Scan order is rho-major as in
+        // OpenCV, but ties are broken by accumulator index (theta-major).
+        let at = |n: usize, r: usize| acc[n * num_rho + r];
+        let mut peaks: Vec<(u32, usize, usize)> = Vec::new();
+        for r in 0..num_rho {
+            for n in 0..num_angle {
+                let v = at(n, r);
+                if v <= threshold {
+                    continue;
+                }
+                let r_lo = if r > 0 { at(n, r - 1) } else { 0 };
+                let r_hi = if r + 1 < num_rho { at(n, r + 1) } else { 0 };
+                let n_lo = if n > 0 { at(n - 1, r) } else { 0 };
+                let n_hi = if n + 1 < num_angle { at(n + 1, r) } else { 0 };
+                if v > r_lo && v >= r_hi && v > n_lo && v >= n_hi {
+                    peaks.push((v, n, r));
+                }
+            }
+        }
+        // hough_cmp_gt: more votes first, then smaller accumulator index.
+        peaks.sort_by(|a, b| b.0.cmp(&a.0).then((a.1, a.2).cmp(&(b.1, b.2))));
+        peaks
+            .into_iter()
+            .map(|(score, n, r)| Line {
+                // Bin r holds rho = (r - offset) * rho_res. OpenCV 4.13 reports
+                // that value also when num_rho is even (where the textbook
+                // `(r - (num_rho - 1) * 0.5) * rho` would be half a bin off).
+                rho: (r as i32 - self.rho_offset) as f32 * rho,
+                theta: n as f32 * theta,
+                score,
+            })
+            .collect()
+    }
+}
+
 /// OpenCV `HoughLinesStandard` on a binary edge map (nonzero = edge).
 fn hough_lines_cpu(edges: &GrayImage, rho: f32, theta: f32, threshold: u32) -> Vec<Line> {
     let w = edges.width() as usize;
@@ -297,89 +417,9 @@ fn hough_lines_cpu(edges: &GrayImage, rho: f32, theta: f32, threshold: u32) -> V
     if w == 0 || h == 0 {
         return Vec::new();
     }
-    let irho = 1.0f32 / rho;
-    let mut num_angle = ((std::f64::consts::PI) / theta as f64).floor() as usize + 1;
-    if num_angle > 1
-        && (std::f64::consts::PI - ((num_angle - 1) as f32 * theta) as f64).abs()
-            < (theta / 2.0) as f64
-    {
-        num_angle -= 1;
-    }
-    let num_rho = cv_round(((w + h) * 2 + 1) as f32 / rho).max(1) as usize;
-    let rho_offset = ((num_rho - 1) / 2) as i32;
-
-    // createTrigTable: the angle is accumulated in f32.
-    let mut tab_cos = Vec::with_capacity(num_angle);
-    let mut tab_sin = Vec::with_capacity(num_angle);
-    let mut ang = 0.0f32;
-    for _ in 0..num_angle {
-        tab_sin.push(((ang as f64).sin() * irho as f64) as f32);
-        tab_cos.push(((ang as f64).cos() * irho as f64) as f32);
-        ang += theta;
-    }
-
-    let src = edges.as_raw();
-    let acc = (0..h)
-        .into_par_iter()
-        .fold(
-            || vec![0u32; num_angle * num_rho],
-            |mut acc, y| {
-                for x in 0..w {
-                    if src[y * w + x] == 0 {
-                        continue;
-                    }
-                    for n in 0..num_angle {
-                        let r =
-                            cv_round(x as f32 * tab_cos[n] + y as f32 * tab_sin[n]) + rho_offset;
-                        if r >= 0 && (r as usize) < num_rho {
-                            acc[n * num_rho + r as usize] += 1;
-                        }
-                    }
-                }
-                acc
-            },
-        )
-        .reduce(
-            || vec![0u32; num_angle * num_rho],
-            |mut a, b| {
-                a.iter_mut().zip(&b).for_each(|(x, y)| *x += y);
-                a
-            },
-        );
-
-    // findLocalMaximums: `>` the lower and `>=` the upper neighbour in rho and
-    // theta; out-of-range neighbours are 0. Scan order is rho-major as in
-    // OpenCV, but ties are broken by accumulator index (theta-major).
-    let at = |n: usize, r: usize| acc[n * num_rho + r];
-    let mut peaks: Vec<(u32, usize, usize)> = Vec::new();
-    for r in 0..num_rho {
-        for n in 0..num_angle {
-            let v = at(n, r);
-            if v <= threshold {
-                continue;
-            }
-            let r_lo = if r > 0 { at(n, r - 1) } else { 0 };
-            let r_hi = if r + 1 < num_rho { at(n, r + 1) } else { 0 };
-            let n_lo = if n > 0 { at(n - 1, r) } else { 0 };
-            let n_hi = if n + 1 < num_angle { at(n + 1, r) } else { 0 };
-            if v > r_lo && v >= r_hi && v > n_lo && v >= n_hi {
-                peaks.push((v, n, r));
-            }
-        }
-    }
-    // hough_cmp_gt: more votes first, then smaller accumulator index.
-    peaks.sort_by(|a, b| b.0.cmp(&a.0).then((a.1, a.2).cmp(&(b.1, b.2))));
-    peaks
-        .into_iter()
-        .map(|(score, n, r)| Line {
-            // Bin r holds rho = (r - offset) * rho_res. OpenCV 4.13 reports
-            // that value also when num_rho is even (where the textbook
-            // `(r - (num_rho - 1) * 0.5) * rho` would be half a bin off).
-            rho: (r as i32 - rho_offset) as f32 * rho,
-            theta: n as f32 * theta,
-            score,
-        })
-        .collect()
+    let layout = StandardLayout::new(w, h, rho, theta);
+    let acc = layout.accumulate(edges);
+    layout.lines(&acc, rho, theta, threshold)
 }
 
 /// Standard Hough line transform, `cv2.HoughLines(edges, rho_res, theta_res,
@@ -415,8 +455,10 @@ pub fn hough_lines(
     Ok(hough_lines_cpu(edges, rho_res, theta_res, threshold))
 }
 
-/// [`hough_lines`] with an explicit resource group. On a GPU group the
-/// `hough.wgsl` kernel is tried first; it is not bit-exact with OpenCV.
+/// [`hough_lines`] with an explicit resource group. On a GPU group the votes
+/// are cast by the `hough.wgsl` kernel ([`hough_lines_gpu`]), which yields
+/// the same accumulator - and therefore the same lines - as the CPU path; on
+/// any GPU error the CPU path runs instead.
 ///
 /// # Errors
 /// Returns [`crate::ImgprocError::InvalidInput`] if `rho_res` or `theta_res` is
@@ -440,35 +482,39 @@ pub fn hough_lines_ctx(
     Ok(group.run(|| hough_lines_cpu(edges, rho_res, theta_res, threshold)))
 }
 
-fn hough_lines_gpu(
+/// [`hough_lines`] with the voting on `gpu`, without a CPU fallback.
+///
+/// The GPU casts every vote whose bin is unambiguous in f32; the few that lie
+/// within rounding noise of a bin boundary are cast on the host with the CPU
+/// formula, so the accumulator is bit-identical to the CPU one. Peak finding
+/// and ordering are the CPU code. The result equals [`hough_lines`] on the
+/// CPU exactly. Resolutions are not validated here.
+pub fn hough_lines_gpu(
     gpu: &cv_hal::gpu::GpuContext,
     edges: &GrayImage,
     rho_res: f32,
     theta_res: f32,
     threshold: u32,
 ) -> cv_hal::Result<Vec<Line>> {
-    use cv_hal::context::ComputeContext;
-    let edges_f32: Vec<f32> = edges.as_raw().iter().map(|&p| p as f32).collect();
-
-    let input_tensor = cv_core::CpuTensor::from_vec(
-        edges_f32,
-        cv_core::TensorShape::new(1, edges.height() as usize, edges.width() as usize),
-    )
-    .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
-    let input_gpu = input_tensor
-        .to_gpu_ctx(gpu)
-        .map_err(|e| cv_hal::Error::RuntimeError(e.to_string()))?;
-
-    let res_hal = gpu.hough_lines(&input_gpu, rho_res, theta_res, threshold)?;
-
-    Ok(res_hal
-        .into_iter()
-        .map(|l| Line {
-            rho: l.rho,
-            theta: l.theta,
-            score: l.score,
-        })
-        .collect())
+    let w = edges.width() as usize;
+    let h = edges.height() as usize;
+    if w == 0 || h == 0 {
+        return Ok(Vec::new());
+    }
+    let layout = StandardLayout::new(w, h, rho_res, theta_res);
+    let exact = |x: usize, y: usize, n: usize| layout.index(x, y, n);
+    let acc = cv_hal::gpu_kernels::hough::hough_accumulate_u8(
+        gpu,
+        edges.as_raw(),
+        w,
+        h,
+        &layout.tab_cos,
+        &layout.tab_sin,
+        layout.num_rho,
+        layout.rho_offset,
+        &exact,
+    )?;
+    Ok(layout.lines(&acc, rho_res, theta_res, threshold))
 }
 
 /// Progressive probabilistic Hough transform, `cv2.HoughLinesP(edges,

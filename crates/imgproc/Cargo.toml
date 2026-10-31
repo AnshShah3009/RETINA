@@ -18,6 +18,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+pollster = { workspace = true }
 
 [features]
 default = ["runtime"]
