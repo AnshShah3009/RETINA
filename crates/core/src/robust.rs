@@ -91,8 +91,9 @@ impl<D, M: RobustModel<D>> Ransac<D, M> {
             }
 
             // 1. Sample
-            indices.shuffle(&mut rng);
-            let sample: Vec<&D> = (0..k).map(|i| &data[indices[i]]).collect();
+            // Only k indices are needed: shuffle k, not all n.
+            let (chosen, _) = indices.partial_shuffle(&mut rng, k);
+            let sample: Vec<&D> = chosen.iter().map(|&i| &data[i]).collect();
 
             // 2. Estimate
             if let Some(model) = estimator.estimate(&sample) {
@@ -128,7 +129,13 @@ impl<D, M: RobustModel<D>> Ransac<D, M> {
                     // w = inlier ratio, k = log(1 - confidence) / log(1 - w^sample_size)
                     let w = best_num_inliers as f64 / n as f64;
                     let w_k = w.powi(k as i32);
-                    if w_k > 0.0 && w_k < 1.0 {
+                    if w_k >= 1.0 {
+                        // Every point is an inlier: no later sample can do
+                        // better. The formula's `ln(0)` used to be skipped
+                        // here, leaving the bound at max_iterations, so the
+                        // easiest possible input ran the longest.
+                        adaptive_k = (iteration + 1) as f64;
+                    } else if w_k > 0.0 {
                         let new_k = (1.0 - self.config.confidence).ln() / (1.0 - w_k).ln();
                         adaptive_k = new_k.min(self.config.max_iterations as f64);
                     }
@@ -717,5 +724,42 @@ mod tests {
             assert!(result.model.is_none());
             assert_eq!(result.num_inliers, 0);
         }
+    }
+
+    /// With every point an inlier, the first exact model ends the search.
+    #[test]
+    fn ransac_stops_at_once_when_every_point_is_an_inlier() {
+        use std::cell::Cell;
+        struct Counting<'a>(&'a Cell<usize>);
+        impl RobustModel<Point2<f64>> for Counting<'_> {
+            type Model = LineModel;
+            fn min_sample_size(&self) -> usize {
+                2
+            }
+            fn estimate(&self, data: &[&Point2<f64>]) -> Option<LineModel> {
+                self.0.set(self.0.get() + 1);
+                LineEstimator.estimate(data)
+            }
+            fn compute_error(&self, m: &LineModel, p: &Point2<f64>) -> f64 {
+                LineEstimator.compute_error(m, p)
+            }
+        }
+        let pts: Vec<Point2<f64>> = (0..50)
+            .map(|i| Point2::new(i as f64, 2.0 * i as f64))
+            .collect();
+        let calls = Cell::new(0);
+        let ransac = Ransac::new(RobustConfig {
+            threshold: 1e-6,
+            max_iterations: 1000,
+            confidence: 0.99,
+        });
+        let r = ransac.run(&Counting(&calls), &pts);
+        assert_eq!(r.num_inliers, 50);
+        assert_eq!(
+            calls.get(),
+            1,
+            "ran {} iterations on an all-inlier set",
+            calls.get()
+        );
     }
 }

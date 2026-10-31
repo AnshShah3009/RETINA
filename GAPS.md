@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (40 open, was 77)
+## (g) Second review, 2026-10-31 — findings (39 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -349,7 +349,7 @@ Minor (LOW): python `pose.matrix()` flattened column-major (numpy gets the trans
 python `sparse_solve_cg` checks `ncols` not `nrows`; `slam` returns `Ok(last pose)` when PnP fails;
 `SphericalHarmonics::eval` mixes channels (unused).
 
-### (g5) calib3d / sfm (2 open, was 6)
+### (g5) calib3d / sfm (1 open, was 6)
 
 Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrappers,
 `cv_core::robust::Ransac`. **Not yet reviewed:** triangulation, distortion/undistort,
@@ -362,7 +362,7 @@ calibration, all of `crates/sfm`.
 | g-c3 | `calib3d/src/pnp.rs` `sample_unique_indices` | **CLOSED.** Sampler uses the LCG's high bits (`state >> 33`). Was: `state % n` uses an LCG's low bits: for n = 2^m only n distinct samples ever drawn | was MED — fixed | CONFIRMED |
 | g-c4 | `calib3d/src/pnp.rs` P3P roots | **CLOSED.** Candidates with distance ratio `p <= 0` are skipped; the same test asserts no candidate puts a point behind the camera. Was: distance ratio `p` not checked positive → behind-camera poses accepted; scoring ignores `z <= 0` | was MED — fixed | ARGUED |
 | g-c5 | `calib3d/src/pnp.rs` PnP RANSAC | final refinement only with ≥ 6 inliers; 4–5 return the raw P3P pose | MED | ARGUED |
-| g-c6 | `core/src/robust.rs` adaptive iterations | all-inlier case never lowers the iteration bound | LOW | ARGUED |
+| g-c6 | `core/src/robust.rs` adaptive iterations | **CLOSED.** All-inlier best model ends the search; sampling shuffles only k indices. Pinned by `ransac_stops_at_once_when_every_point_is_an_inlier`. Was: all-inlier case never lowers the iteration bound | was LOW — fixed | ARGUED |
 
 ### (g6) 3d / registration / pointcloud (5 open, was 12)
 
