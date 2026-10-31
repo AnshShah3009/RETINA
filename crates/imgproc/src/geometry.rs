@@ -181,6 +181,9 @@ fn interpolate_sample(
         Interpolation::Linear => get_pixel_bilinear_with_border(src, x, y, border),
         Interpolation::Cubic => get_pixel_cubic_with_border(src, x, y, border),
         Interpolation::Lanczos => get_pixel_lanczos_with_border(src, x, y, border),
+        // Area averaging is a resize of a rectangle, not a sample at one
+        // coordinate. A warp asks for a point, so this is bilinear.
+        Interpolation::Area => get_pixel_bilinear_with_border(src, x, y, border),
     }
 }
 
@@ -571,7 +574,7 @@ fn remap_gpu(
 
     let interp = match interpolation {
         Interpolation::Nearest => cv_hal::context::Interpolation::Nearest,
-        Interpolation::Linear => cv_hal::context::Interpolation::Linear,
+        Interpolation::Linear | Interpolation::Area => cv_hal::context::Interpolation::Linear,
         Interpolation::Cubic => cv_hal::context::Interpolation::Cubic,
         Interpolation::Lanczos => cv_hal::context::Interpolation::Lanczos,
     };
