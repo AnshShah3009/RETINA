@@ -443,10 +443,104 @@ fn poly_from_roots(roots: &[Complex<f64>]) -> Vec<f64> {
 // Spectral Analysis
 // ---------------------------------------------------------------------------
 
+/// Periodic ("DFT-even") Hann window, `scipy.signal.get_window('hann', n)`:
+/// `0.5 - 0.5 cos(2π i / n)`. Spectral estimators use this form; the
+/// symmetric [`hann_window`] (denominator `n - 1`) is for filter design.
+fn hann_periodic(n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos())
+        .collect()
+}
+
+/// Periodic Tukey window, `scipy.signal.get_window(('tukey', alpha), n)`:
+/// the symmetric Tukey window of length `n + 1` without its last sample.
+fn tukey_periodic(n: usize, alpha: f64) -> Vec<f64> {
+    let m = n + 1;
+    if m == 1 {
+        return vec![1.0];
+    }
+    let width = (alpha * (m - 1) as f64 / 2.0).floor() as usize;
+    let mut w = vec![1.0; m];
+    for (i, wi) in w.iter_mut().enumerate().take(width + 1) {
+        *wi = 0.5 * (1.0 + (PI * (-1.0 + 2.0 * i as f64 / alpha / (m - 1) as f64)).cos());
+    }
+    for (i, wi) in w.iter_mut().enumerate().skip(m - width - 1) {
+        *wi = 0.5
+            * (1.0 + (PI * (-2.0 / alpha + 1.0 + 2.0 * i as f64 / alpha / (m - 1) as f64)).cos());
+    }
+    w.truncate(n);
+    w
+}
+
+/// Windowed one-sided spectra of the segments `x[k*step .. k*step+nperseg]`
+/// (complete segments only), optionally mean-detrended first.
+fn segment_spectra(
+    x: &[f64],
+    window: &[f64],
+    step: usize,
+    detrend: bool,
+) -> Vec<Vec<Complex<f64>>> {
+    let nperseg = window.len();
+    let n_freqs = nperseg / 2 + 1;
+    let mut out = Vec::new();
+    let mut offset = 0;
+    while offset + nperseg <= x.len() {
+        let seg = &x[offset..offset + nperseg];
+        let m = if detrend {
+            seg.iter().sum::<f64>() / nperseg as f64
+        } else {
+            0.0
+        };
+        let windowed: Vec<f64> = seg
+            .iter()
+            .zip(window)
+            .map(|(&xi, &wi)| (xi - m) * wi)
+            .collect();
+        let mut spectrum = fft(&windowed);
+        spectrum.truncate(n_freqs);
+        out.push(spectrum);
+        offset += step;
+    }
+    out
+}
+
+/// `|X|²` with SciPy's one-sided `'density'` scaling: `1 / (fs Σw²)`, doubled
+/// except at DC and (for even `nperseg`) Nyquist.
+fn density(spectrum: &[Complex<f64>], nperseg: usize, scale: f64) -> Vec<f64> {
+    let n = spectrum.len();
+    let last_doubled = if nperseg.is_multiple_of(2) { n - 1 } else { n };
+    spectrum
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let p = c.norm_sqr() * scale;
+            if i > 0 && i < last_doubled {
+                2.0 * p
+            } else {
+                p
+            }
+        })
+        .collect()
+}
+
+fn rfft_freqs(nperseg: usize, sample_rate: f64) -> Vec<f64> {
+    (0..nperseg / 2 + 1)
+        .map(|i| i as f64 * sample_rate / nperseg as f64)
+        .collect()
+}
+
 /// Welch's method for power spectral density estimation.
 ///
-/// Returns `(frequencies, psd)`.
-/// `nperseg` is the segment length, `noverlap` defaults to `nperseg / 2`.
+/// Returns `(frequencies, psd)`. Matches `scipy.signal.welch(x, fs, nperseg=...,
+/// noverlap=...)` with its defaults: periodic Hann window, `noverlap =
+/// nperseg / 2`, `nfft = nperseg`, `detrend='constant'` (each segment's mean
+/// removed), one-sided, `scaling='density'`, `average='mean'`. Other SciPy
+/// options (window choice, `nfft`, linear detrend, `'spectrum'` scaling,
+/// median averaging) are not supported.
+///
+/// The previous version used a symmetric Hann window and no detrending: on
+/// `5 + sin(0.7 i)`, 64 samples, `nperseg = 16`, `PSD[0]` was 249.9 (SciPy
+/// 0.175).
 pub fn welch(
     x: &[f64],
     nperseg: usize,
@@ -455,59 +549,38 @@ pub fn welch(
 ) -> (Vec<f64>, Vec<f64>) {
     assert!(nperseg > 0 && nperseg <= x.len(), "nperseg out of range");
     let noverlap = noverlap.unwrap_or(nperseg / 2);
+    assert!(noverlap < nperseg, "noverlap must be < nperseg");
     let step = nperseg - noverlap;
-    assert!(step > 0, "noverlap must be < nperseg");
 
-    let window = hann_window(nperseg);
-    let win_ss: f64 = window.iter().map(|w| w * w).sum();
-    let n_freqs = nperseg / 2 + 1;
+    let window = hann_periodic(nperseg);
+    let scale = 1.0 / (sample_rate * window.iter().map(|w| w * w).sum::<f64>());
+    let spectra = segment_spectra(x, &window, step, true);
 
-    let mut psd = vec![0.0; n_freqs];
-    let mut n_segments = 0usize;
-
-    let mut offset = 0;
-    while offset + nperseg <= x.len() {
-        // Window the segment and FFT
-        let segment: Vec<f64> = x[offset..offset + nperseg]
-            .iter()
-            .zip(window.iter())
-            .map(|(&xi, &wi)| xi * wi)
-            .collect();
-        let spectrum = fft(&segment);
-
-        for i in 0..n_freqs {
-            psd[i] += spectrum[i].norm_sqr();
+    let mut psd = vec![0.0; nperseg / 2 + 1];
+    for s in &spectra {
+        for (p, d) in psd.iter_mut().zip(density(s, nperseg, scale)) {
+            *p += d;
         }
-        n_segments += 1;
-        offset += step;
     }
-
-    // Average and normalise
-    let scale = 1.0 / (sample_rate * win_ss * n_segments as f64);
+    let k = spectra.len() as f64;
     for p in &mut psd {
-        *p *= scale;
+        *p /= k;
     }
-    // Double non-DC, non-Nyquist
-    let nyquist_idx = if nperseg.is_multiple_of(2) {
-        n_freqs - 1
-    } else {
-        n_freqs
-    };
-    for p in psd.iter_mut().take(nyquist_idx).skip(1) {
-        *p *= 2.0;
-    }
-
-    let freqs: Vec<f64> = (0..n_freqs)
-        .map(|i| i as f64 * sample_rate / nperseg as f64)
-        .collect();
-
-    (freqs, psd)
+    (rfft_freqs(nperseg, sample_rate), psd)
 }
 
 /// Short-Time Fourier Transform.
 ///
 /// Returns `(times, frequencies, complex_spectrogram)` where each element
-/// of the spectrogram is `(real, imag)`.
+/// of the spectrogram is `(real, imag)`, indexed `[time][frequency]`
+/// (SciPy's `Zxx` transposed).
+///
+/// Matches `scipy.signal.stft(x, fs, nperseg=..., noverlap=...)` with its
+/// defaults: periodic Hann window, `noverlap = nperseg / 2`, no detrending,
+/// `boundary='zeros'` (`nperseg / 2` zeros on both ends, so `times` starts at
+/// 0), `padded=True` (zeros appended to complete the last segment), and
+/// `scaling='spectrum'` (divided by `Σw`). Other SciPy options are not
+/// supported.
 #[allow(clippy::type_complexity)]
 pub fn stft(
     x: &[f64],
@@ -517,52 +590,62 @@ pub fn stft(
 ) -> (Vec<f64>, Vec<f64>, Vec<Vec<(f64, f64)>>) {
     assert!(nperseg > 0 && nperseg <= x.len());
     let noverlap = noverlap.unwrap_or(nperseg / 2);
+    assert!(noverlap < nperseg);
     let step = nperseg - noverlap;
-    assert!(step > 0);
 
-    let window = hann_window(nperseg);
-    let n_freqs = nperseg / 2 + 1;
+    // boundary='zeros'
+    let half = nperseg / 2;
+    let mut padded = vec![0.0; half];
+    padded.extend_from_slice(x);
+    padded.extend(std::iter::repeat_n(0.0, half));
+    // padded=True: complete the last segment.
+    let nadd = (step - (padded.len() - nperseg) % step) % step;
+    padded.extend(std::iter::repeat_n(0.0, nadd));
 
-    let freqs: Vec<f64> = (0..n_freqs)
-        .map(|i| i as f64 * sample_rate / nperseg as f64)
+    let window = hann_periodic(nperseg);
+    let wsum: f64 = window.iter().sum();
+    let spectra = segment_spectra(&padded, &window, step, false);
+
+    let times: Vec<f64> = (0..spectra.len())
+        .map(|k| (k * step) as f64 / sample_rate)
         .collect();
-
-    let mut times = Vec::new();
-    let mut spectro = Vec::new();
-
-    let mut offset = 0;
-    while offset + nperseg <= x.len() {
-        let segment: Vec<f64> = x[offset..offset + nperseg]
-            .iter()
-            .zip(window.iter())
-            .map(|(&xi, &wi)| xi * wi)
-            .collect();
-        let spectrum = fft(&segment);
-
-        let frame: Vec<(f64, f64)> = spectrum[..n_freqs].iter().map(|c| (c.re, c.im)).collect();
-        spectro.push(frame);
-        times.push((offset as f64 + nperseg as f64 / 2.0) / sample_rate);
-        offset += step;
-    }
-
-    (times, freqs, spectro)
+    let frames = spectra
+        .iter()
+        .map(|s| s.iter().map(|c| (c.re / wsum, c.im / wsum)).collect())
+        .collect();
+    (times, rfft_freqs(nperseg, sample_rate), frames)
 }
 
-/// Spectrogram (magnitude-squared of STFT).
+/// Spectrogram: power spectral density of successive segments.
 ///
-/// Returns `(times, frequencies, power_spectrogram)`.
+/// Returns `(times, frequencies, power_spectrogram)` indexed
+/// `[time][frequency]` (SciPy's `Sxx` transposed).
+///
+/// Matches `scipy.signal.spectrogram(x, fs, nperseg=..., noverlap=...)` with
+/// its defaults: periodic Tukey(0.25) window, `noverlap = nperseg / 8`,
+/// `detrend='constant'`, one-sided, `scaling='density'`, `mode='psd'`, no
+/// boundary extension (times are segment centres). Other SciPy options are
+/// not supported.
 pub fn spectrogram(
     x: &[f64],
     nperseg: usize,
     noverlap: Option<usize>,
     sample_rate: f64,
 ) -> (Vec<f64>, Vec<f64>, Vec<Vec<f64>>) {
-    let (times, freqs, complex_spectro) = stft(x, nperseg, noverlap, sample_rate);
-    let power: Vec<Vec<f64>> = complex_spectro
-        .iter()
-        .map(|frame| frame.iter().map(|&(re, im)| re * re + im * im).collect())
+    assert!(nperseg > 0 && nperseg <= x.len());
+    let noverlap = noverlap.unwrap_or(nperseg / 8);
+    assert!(noverlap < nperseg);
+    let step = nperseg - noverlap;
+
+    let window = tukey_periodic(nperseg, 0.25);
+    let scale = 1.0 / (sample_rate * window.iter().map(|w| w * w).sum::<f64>());
+    let spectra = segment_spectra(x, &window, step, true);
+
+    let times: Vec<f64> = (0..spectra.len())
+        .map(|k| (k * step) as f64 / sample_rate + nperseg as f64 / 2.0 / sample_rate)
         .collect();
-    (times, freqs, power)
+    let power = spectra.iter().map(|s| density(s, nperseg, scale)).collect();
+    (times, rfft_freqs(nperseg, sample_rate), power)
 }
 
 // ---------------------------------------------------------------------------
