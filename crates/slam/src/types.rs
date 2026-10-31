@@ -19,6 +19,11 @@ pub struct MapPoint {
     /// observation: a point triangulated against an early keyframe is new,
     /// and must be given later keyframes in which to be seen again.
     pub born_kf: u64,
+    /// Metric depth (camera z, metres) in [`born_kf`] at creation, when the
+    /// point was back-projected from a depth image. `None` for a monocular
+    /// point. Local bundle adjustment uses it as a residual so an RGB-D
+    /// keyframe cannot slide along its rays.
+    pub depth_m: Option<f32>,
     pub world_pos: Point3<f32>,
     pub descriptor: Vec<u8>,
     /// Indices of keyframes observing this point
@@ -31,6 +36,7 @@ impl MapPoint {
             id,
             created_at: id,
             born_kf: 0,
+            depth_m: None,
             world_pos: pos,
             descriptor,
             observations: Vec::new(),

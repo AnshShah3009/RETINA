@@ -501,8 +501,11 @@ fn rgbd_long_sequence_keyframes_sparingly() {
         map.keyframes.len()
     );
     assert!(map.keyframes.len() >= 2, "the map never extended");
-    // Measured: 5 keyframes, centre error <= 2.94 cm, rotation <= 0.391 deg.
-    // Before the keyframe policy change: 20 keyframes, 3.79 cm, 0.513 deg.
+    // Measured with the depth residual in local BA: 5 keyframes, centre error
+    // <= 3.80 cm, rotation <= 0.472 deg. Tracking without that adjustment was
+    // 2.94 cm / 0.391 deg; reprojection alone, with no depth residual, jumped
+    // 0.4–0.6 m at keyframes. Before the keyframe policy change: 20 keyframes,
+    // 3.79 cm, 0.513 deg.
     assert!(max_terr < 0.04, "camera centre drifted {max_terr:.4} m");
     assert!(max_rot < 0.5, "rotation drifted {max_rot:.3} deg");
 }
