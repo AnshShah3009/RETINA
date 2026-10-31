@@ -326,39 +326,113 @@ impl Tracker {
         // Small angle approximation for rotation from omega
         let omega = nalgebra::Vector3::new(delta[3] as f64, delta[4] as f64, delta[5] as f64);
 
-        // Create rotation matrix from axis-angle (small angle)
-        let angle = omega.norm();
-        let rot_update = if angle > 1e-6 {
-            let axis = omega / angle;
-            nalgebra::Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(axis), angle)
-        } else {
-            nalgebra::Rotation3::identity()
-        };
-
-        // The solver linearizes a LEFT increment on T_rel:
-        //   T_rel' = exp(ξ̂) · T_rel,  ξ = [translation(3), omega(3)]
-        // i.e. R ← ΔR·R and t ← ΔR·t + v. A previous revision applied
-        // R ← R·ΔR and dropped the ΔR·t term, so the applied update did not
-        // match the solved step.
-        let mut delta_mat = nalgebra::Matrix4::<f64>::identity();
-        delta_mat
-            .fixed_slice_mut::<3, 3>(0, 0)
-            .copy_from(&rot_update.into_inner());
-        delta_mat
-            .fixed_slice_mut::<3, 1>(0, 3)
-            .copy_from(&(rot_update * t_rel.fixed_slice::<3, 1>(0, 3) + translation));
-
-        let t_rel_new = delta_mat * t_rel;
-
-        // Write back the new absolute pose: T_curr' = (T_rel')⁻¹ · T_prev.
-        let t_prev = prev_pose.matrix();
-        let t_curr_new = t_rel_new.try_inverse().unwrap_or(t_rel) * t_prev;
-        *pose = Pose::new(
-            t_curr_new.fixed_slice::<3, 3>(0, 0).into_owned(),
-            t_curr_new.fixed_slice::<3, 1>(0, 3).into_owned(),
-        );
+        *pose = apply_icp_increment(&t_rel, prev_pose, &translation, &omega);
 
         Ok(())
+    }
+}
+
+/// Apply a solved ICP increment to the relative transform and return the new
+/// absolute (world -> camera) pose of the current frame.
+///
+/// `t_rel` is `T_prev · T_curr⁻¹` (current-camera coordinates -> previous-camera
+/// coordinates), the transform the dense ICP kernel linearises. Factored out of
+/// `refine_pose_with_icp` because that path needs a GPU, while the composition
+/// is pure arithmetic that has to be testable everywhere.
+pub(crate) fn apply_icp_increment(
+    t_rel: &nalgebra::Matrix4<f64>,
+    prev_pose: &Pose,
+    translation: &nalgebra::Vector3<f64>,
+    omega: &nalgebra::Vector3<f64>,
+) -> Pose {
+    // Create rotation matrix from axis-angle (small angle)
+    let angle = omega.norm();
+    let rot_update = if angle > 1e-6 {
+        let axis = omega / angle;
+        nalgebra::Rotation3::from_axis_angle(&nalgebra::Unit::new_normalize(axis), angle)
+    } else {
+        nalgebra::Rotation3::identity()
+    };
+
+    // The solver linearizes a LEFT increment on T_rel:
+    //   T_rel' = exp(ξ̂) · T_rel,  ξ = [translation(3), omega(3)]
+    // i.e. R ← ΔR·R and t ← ΔR·t + v. The increment matrix is therefore
+    // exp(ξ̂) = [ΔR | v]: its translation is `v` alone. The `ΔR·t` term comes
+    // out of the matrix product below. A previous revision also put `ΔR·t`
+    // into the increment's translation, so it was added twice - a zero
+    // update doubled the relative translation.
+    let mut delta_mat = nalgebra::Matrix4::<f64>::identity();
+    delta_mat
+        .fixed_view_mut::<3, 3>(0, 0)
+        .copy_from(&rot_update.into_inner());
+    delta_mat
+        .fixed_view_mut::<3, 1>(0, 3)
+        .copy_from(translation);
+
+    let t_rel_new = delta_mat * t_rel;
+
+    // Write back the new absolute pose: T_curr' = (T_rel')⁻¹ · T_prev.
+    let t_prev = prev_pose.matrix();
+    let t_curr_new = t_rel_new.try_inverse().unwrap_or(*t_rel) * t_prev;
+    Pose::new(
+        t_curr_new.fixed_view::<3, 3>(0, 0).into_owned(),
+        t_curr_new.fixed_view::<3, 1>(0, 3).into_owned(),
+    )
+}
+
+#[cfg(test)]
+mod icp_increment_tests {
+    use super::*;
+    use nalgebra::{Matrix4, UnitQuaternion, Vector3};
+
+    fn max_abs(m: &Matrix4<f64>) -> f64 {
+        m.iter().fold(0.0f64, |a, v| a.max(v.abs()))
+    }
+
+    fn poses() -> (Pose, Pose) {
+        let prev = Pose::from_quat_translation(
+            UnitQuaternion::from_euler_angles(0.1, -0.2, 0.05),
+            Vector3::new(0.3, -0.1, 0.8),
+        );
+        let curr = Pose::from_quat_translation(
+            UnitQuaternion::from_euler_angles(0.12, -0.17, 0.02),
+            Vector3::new(0.5, 0.05, 0.6),
+        );
+        (prev, curr)
+    }
+
+    /// A zero ICP update must leave the pose exactly where it was.
+    #[test]
+    fn zero_increment_is_the_identity() {
+        let (prev, curr) = poses();
+        let t_rel = prev.matrix() * curr.inverse().matrix();
+        let out = apply_icp_increment(&t_rel, &prev, &Vector3::zeros(), &Vector3::zeros());
+        let err = max_abs(&(out.matrix() - curr.matrix()));
+        assert!(
+            err < 1e-12,
+            "zero ICP increment moved the pose by {err:.6}: expected {:?}, got {:?}",
+            curr.translation,
+            out.translation
+        );
+    }
+
+    /// A non-zero increment must be applied exactly as the left update
+    /// `T_rel' = [ΔR | v] · T_rel` that the solver linearises.
+    #[test]
+    fn nonzero_increment_is_a_left_update_on_t_rel() {
+        let (prev, curr) = poses();
+        let t_rel = prev.matrix() * curr.inverse().matrix();
+        let v = Vector3::new(0.01, -0.02, 0.005);
+        let w = Vector3::new(0.003, 0.002, -0.004);
+        let out = apply_icp_increment(&t_rel, &prev, &v, &w);
+
+        let rot = nalgebra::Rotation3::from_scaled_axis(w);
+        let mut delta = Matrix4::identity();
+        delta.fixed_view_mut::<3, 3>(0, 0).copy_from(rot.matrix());
+        delta.fixed_view_mut::<3, 1>(0, 3).copy_from(&v);
+        let expected = (delta * t_rel).try_inverse().unwrap() * prev.matrix();
+        let err = max_abs(&(out.matrix() - expected));
+        assert!(err < 1e-12, "left update mismatch {err:.3e}");
     }
 }
 
