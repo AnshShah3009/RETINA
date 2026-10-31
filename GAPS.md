@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (11 open, was 96)
+## (g) Second review, 2026-10-31 — findings (10 open, was 96)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -416,13 +416,13 @@ matches finite differences (~1e-7, including θ≈π) — checked, not defects.
 | g-s8 | `calib3d/src/calibration.rs` | **CLOSED.** Removed. Was: leftover debug `eprintln!` on every calibration / every 10 LM iterations | was LOW — fixed | CONFIRMED |
 | g-s9 | `calib3d/src/distortion.rs` `fisheye_init_undistort_rectify_map` | **CLOSED.** Zero-size guard copied from the pinhole map; pinned in `tests/undistort_map_singular_intrinsics.rs`. Was: zero-size image panics (`chunk_size must not be zero`) | was LOW — fixed | CONFIRMED |
 
-### (g9) follow-ups found while fixing (g1)–(g8) (3 open, was 9)
+### (g9) follow-ups found while fixing (g1)–(g8) (2 open, was 9)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-x1 | `hal/src/cpu/compute_context_impl.rs` `hough_lines` | **CLOSED.** rho reported as `(r - (num_rho-1)/2)·rho` with integer division, matching cv2 4.13 on an even bin count (`hough_lines_rho_with_an_even_bin_count_matches_opencv`); `>= threshold` kept and documented, as the HAL GPU path uses it. Was: when `numrho` is even, cv2 4.13 still reports rho on whole multiples of the resolution; the formula from `6b527e5` is half a bin off there, and it keeps `>= threshold` where OpenCV uses `>`. imgproc's `hough_lines` matches 4.13 exactly; the two should share one implementation | was LOW — fixed | ARGUED (found during g-f4) |
 | g-x2 | `hal/shaders/canny.wgsl`, `hough.wgsl` | GPU Canny and Hough still run the pre-g-f4/g-f5 algorithms, so `*_ctx` on a GPU runner disagrees with cv2 and with the CPU path (documented on the `_ctx` functions) | MED | ARGUED |
-| g-x3 | `imgproc` Gaussian kernels | OpenCV's 8-bit Gaussian uses fixed small-kernel tables (and `cvRound(6σ+1)\|1` sizing); applied for `adaptive_threshold` only - other Gaussian paths may differ by ±1 LSB | LOW | ARGUED |
+| g-x3 | `imgproc` Gaussian kernels | **CLOSED (duplicate).** Already tracked in `docs/PARITY.md` (gaussian section): 12 of 18 cases closed, the remaining 6 are ±1 LSB from OpenCV's fixed-point `GaussianBlur` path. Was: OpenCV's 8-bit Gaussian uses fixed small-kernel tables (and `cvRound(6σ+1)\|1` sizing); applied for `adaptive_threshold` only - other Gaussian paths may differ by ±1 LSB | was LOW — tracked in PARITY.md | ARGUED |
 | g-x4 | `rendering` `SphericalHarmonics::eval` | **CLOSED.** 3DGS reference basis (bands 1-3, its order/signs/constants) per channel on the normalised direction; matches numpy `eval_sh` to 1e-5 (`tests/spherical_harmonics_basis.rs`). Was: degree ≥ 1 is not the standard SH basis (channels mixed, constants missing); rendering uses DC only, so loaded `f_rest` view-dependence is wrong | was LOW — fixed | ARGUED (noted in g4, still open) |
 | g-x5 | `hal/src/gpu_kernels` `radix_sort_u32` | scatter is not stable, so later passes scramble lower digits: 32 of 1000 keys out of order (the prefix scan it uses was fixed in `a6f8e9c`) | MED | CONFIRMED (found during g-h1) |
 | g-x6 | `hal/shaders` spatial `voxel_downsample` | **CLOSED.** Shader validates (`all(...)`), spurious weak-CAS failure retries the slot, packed-xyz input/output (was 16-byte vec3 stride against (1, N, 3) tensors), buffer usages fixed: one point per occupied voxel, same set as the CPU (`tests/gpu_voxel_downsample.rs`). Was: fails wgpu shader validation (`voxel_of(..) == my_voxel` yields `vec3<bool>` where `bool` is needed) - broken on master before this review | was MED — fixed | CONFIRMED |
