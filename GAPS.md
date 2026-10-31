@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (37 open, was 86)
+## (g) Second review, 2026-10-31 — findings (36 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -310,7 +310,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f11 | `features/src/orb.rs` rBRIEF | rotated taps floored, OpenCV rounds | LOW | ARGUED |
 | g-f12 | `imgproc` `par_chunks_mut(width)` sites | zero-width image panics `chunk_size must not be zero` | LOW | CONFIRMED |
 
-### (g3) io / runtime / distributed / video / photo / videoio (7 open, was 12)
+### (g3) io / runtime / distributed / video / photo / videoio (6 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -325,7 +325,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-i9 | `distributed/.../shared_memory.rs` | atomics written through `as_ptr()` of a shared slice (Stacked Borrows UB); reapers' non-saturating `fetch_sub` | LOW | ARGUED |
 | g-i10 | `runtime/src/pipeline/allocator.rs` | `trim` uses `shrink_to` (frees nothing); re-`allocate` leaks accounting | LOW | ARGUED |
 | g-i11 | `videoio/src/backends/ffmpeg.rs` `grab` | one frame per packet; multi-frame packets → EAGAIN → stream dies | LOW | ARGUED |
-| g-i12 | `photo/src/bilateral.rs` | output truncated not rounded | LOW | ARGUED |
+| g-i12 | `photo/src/bilateral.rs` | **CLOSED.** Rounded and clamped; pinned by `tests/bilateral_rounding.rs` (uniform images now fixed points; step-edge mean 100.18 → within 0.1 of 100.5). Was: output truncated not rounded | was LOW — fixed | ARGUED |
 
 Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` uses it as the match threshold. Doc fix only.
 
