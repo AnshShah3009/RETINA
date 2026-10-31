@@ -451,9 +451,12 @@ pub fn eigs_inverse_power(
 
     for _ in 0..max_iters {
         // Solve B * w = v using CG (or GMRES for non-SPD)
-        let w = gmres_solve(&b, &v, 30, 200, 1e-12)?;
+        // Inverse iteration only needs the direction of B⁻¹v and tolerates an
+        // inexact solve - B is nearly singular by design when sigma is a good
+        // shift - so the GMRES iterate is used even short of 1e-12.
+        let (w, _rel_residual) = gmres_iterate(&b, &v, 30, 200, 1e-12);
         let norm = w.norm();
-        if norm < 1e-15 {
+        if !(norm > 0.0) || !norm.is_finite() {
             return Err("Inverse power iteration: zero vector encountered".into());
         }
         v = &w / norm;
@@ -647,7 +650,15 @@ pub fn eigsh(
 
 /// Conjugate Gradient solver for symmetric positive-definite systems `A x = b`.
 ///
-/// Returns the solution vector `x`.
+/// Stops when the relative residual `‖b − A x‖ / ‖b‖ < tol`. Returns `Err`
+/// (with the achieved relative residual) if that does not happen within
+/// `max_iters` iterations, and if a search direction has non-positive
+/// curvature `pᵀ A p ≤ 0` - the matrix is not positive definite. A zero `b`
+/// gives the zero solution.
+///
+/// No threshold here is absolute: the old `1e-15` / `1e-30` cut-offs turned a
+/// system scaled by `1e-16` into `Ok([0, 0, 0])`, and the iteration cap
+/// returned `Ok` at any residual (one step on `[[4, 1], [1, 3]]`: 0.71).
 pub fn cg_solve(
     a: &CsrMatrix,
     b: &DVector<f64>,
@@ -659,19 +670,23 @@ pub fn cg_solve(
 
     let n = a.nrows;
     let mut x = DVector::zeros(n);
+    let b_norm = b.norm();
+    if b_norm == 0.0 {
+        return Ok(x);
+    }
     let mut r = b.clone(); // r = b - A*x, but x=0 so r=b
     let mut p = r.clone();
     let mut rs_old = r.dot(&r);
-    let b_norm = b.norm();
-    if b_norm < 1e-15 {
-        return Ok(x);
-    }
 
-    for _ in 0..max_iters {
+    for it in 0..max_iters {
         let ap = a.spmv(&p);
         let p_ap = p.dot(&ap);
-        if p_ap.abs() < 1e-30 {
-            break;
+        if !(p_ap > 0.0) {
+            return Err(format!(
+                "CG breakdown at iteration {it}: pᵀAp = {p_ap:e} <= 0, the matrix is \
+                 not positive definite (relative residual {:e})",
+                rs_old.sqrt() / b_norm
+            ));
         }
         let alpha = rs_old / p_ap;
         x += &p * alpha;
@@ -685,14 +700,140 @@ pub fn cg_solve(
         rs_old = rs_new;
     }
 
-    Ok(x)
+    let res = (b - a.spmv(&x)).norm() / b_norm;
+    if res < tol {
+        return Ok(x);
+    }
+    Err(format!(
+        "CG did not converge in {max_iters} iterations: relative residual {res:e} \
+         (tol {tol:e})"
+    ))
+}
+
+/// Restarted GMRES, returning the iterate and its relative residual whether or
+/// not `tol` was reached. `max_iters` counts Arnoldi steps over all cycles.
+pub(crate) fn gmres_iterate(
+    a: &CsrMatrix,
+    b: &DVector<f64>,
+    restart: usize,
+    max_iters: usize,
+    tol: f64,
+) -> (DVector<f64>, f64) {
+    let n = a.nrows;
+    let mut x = DVector::zeros(n);
+    let b_norm = b.norm();
+    if b_norm == 0.0 {
+        return (x, 0.0);
+    }
+    let m = restart.max(1).min(n.max(1));
+    let mut used = 0usize;
+
+    loop {
+        let r = b - &a.spmv(&x);
+        let r_norm = r.norm();
+        if r_norm / b_norm < tol || used >= max_iters || r_norm == 0.0 {
+            return (x, r_norm / b_norm);
+        }
+
+        // Arnoldi basis vectors
+        let mut v: Vec<DVector<f64>> = Vec::with_capacity(m + 1);
+        v.push(&r / r_norm);
+
+        // Upper Hessenberg matrix H (stored as (m+1) x m), reduced in place
+        // to upper triangular by Givens rotations.
+        let mut h = DMatrix::zeros(m + 1, m);
+        // Transformed RHS for least squares
+        let mut g = DVector::zeros(m + 1);
+        g[0] = r_norm;
+
+        let mut cs: Vec<f64> = Vec::with_capacity(m);
+        let mut sn: Vec<f64> = Vec::with_capacity(m);
+
+        let mut j = 0;
+        while j < m && used < max_iters {
+            used += 1;
+            let mut wj = a.spmv(&v[j]);
+            let w_norm = wj.norm();
+
+            // Arnoldi: modified Gram-Schmidt against previous basis vectors
+            for i in 0..=j {
+                h[(i, j)] = v[i].dot(&wj);
+                wj -= &v[i] * h[(i, j)];
+            }
+            let h_next = wj.norm();
+            h[(j + 1, j)] = h_next;
+            // Lucky breakdown: A v_j lies in the current Krylov space, judged
+            // relative to |A v_j| (not against an absolute 1e-15, which
+            // fired on any matrix scaled by 1e-16).
+            let breakdown = h_next <= (n as f64) * f64::EPSILON * w_norm;
+            if !breakdown {
+                v.push(wj / h_next);
+            }
+
+            // Apply previous Givens rotations to column j of H. This must
+            // happen before leaving on a breakdown too: skipping it left the
+            // triangular solve with an unrotated column.
+            for i in 0..j {
+                let temp = cs[i] * h[(i, j)] + sn[i] * h[(i + 1, j)];
+                h[(i + 1, j)] = -sn[i] * h[(i, j)] + cs[i] * h[(i + 1, j)];
+                h[(i, j)] = temp;
+            }
+
+            // New rotation zeroing H[j+1, j]
+            let a_jj = h[(j, j)];
+            let a_j1j = h[(j + 1, j)];
+            let denom = a_jj.hypot(a_j1j);
+            if denom == 0.0 {
+                cs.push(1.0);
+                sn.push(0.0);
+            } else {
+                cs.push(a_jj / denom);
+                sn.push(a_j1j / denom);
+            }
+            h[(j, j)] = cs[j] * a_jj + sn[j] * a_j1j;
+            h[(j + 1, j)] = 0.0;
+
+            let temp = cs[j] * g[j] + sn[j] * g[j + 1];
+            g[j + 1] = -sn[j] * g[j] + cs[j] * g[j + 1];
+            g[j] = temp;
+
+            j += 1;
+            if breakdown || g[j].abs() / b_norm < tol {
+                break;
+            }
+        }
+
+        // Back-substitute H(0..j, 0..j) y = g(0..j). A zero pivot means the
+        // Krylov space is singular for A; that direction is dropped.
+        let mut y = DVector::zeros(j);
+        for i in (0..j).rev() {
+            let mut s = g[i];
+            for k in (i + 1)..j {
+                s -= h[(i, k)] * y[k];
+            }
+            y[i] = if h[(i, i)] == 0.0 { 0.0 } else { s / h[(i, i)] };
+        }
+        for i in 0..j {
+            x += &v[i] * y[i];
+        }
+    }
 }
 
 /// GMRES(restart) solver for general sparse systems `A x = b`.
 ///
 /// Uses the restarted Generalized Minimal Residual method. The `restart`
 /// parameter controls how many Arnoldi vectors are kept before restarting
-/// (typical value: 30).
+/// (typical value: 30); `max_iters` caps the total number of Arnoldi steps.
+///
+/// Returns `Ok(x)` only if `‖b − A x‖ / ‖b‖ < tol`, else `Err` with the
+/// achieved relative residual. Breakdown and pivot tests are relative. A zero
+/// `b` gives the zero solution.
+///
+/// Before: a lucky breakdown left the loop before the earlier Givens rotations
+/// were applied to the last column (`diag(1, 2)`, `b = [1, 1]`, one cycle of 2:
+/// relative residual 0.107 instead of exact), absolute `1e-15` thresholds
+/// returned `Ok([0, 0, 0])` for `1e-16 · diag(1, 2, 3)`, and the iteration cap
+/// returned `Ok` at any residual.
 pub fn gmres_solve(
     a: &CsrMatrix,
     b: &DVector<f64>,
@@ -702,117 +843,15 @@ pub fn gmres_solve(
 ) -> Result<DVector<f64>, String> {
     assert_eq!(a.nrows, a.ncols, "Matrix must be square for GMRES");
     assert_eq!(a.nrows, b.nrows(), "Dimension mismatch");
-
-    let n = a.nrows;
-    let b_norm = b.norm();
-    if b_norm < 1e-15 {
-        return Ok(DVector::zeros(n));
+    let (x, res) = gmres_iterate(a, b, restart, max_iters, tol);
+    if res < tol || b.norm() == 0.0 {
+        Ok(x)
+    } else {
+        Err(format!(
+            "GMRES({restart}) did not converge in {max_iters} iterations: relative \
+             residual {res:e} (tol {tol:e})"
+        ))
     }
-
-    let mut x = DVector::zeros(n);
-
-    for _outer in 0..(max_iters / restart.max(1) + 1) {
-        let r = b - &a.spmv(&x);
-        let r_norm = r.norm();
-        if r_norm / b_norm < tol {
-            return Ok(x);
-        }
-
-        let m = restart.min(n);
-        // Arnoldi basis vectors
-        let mut v: Vec<DVector<f64>> = Vec::with_capacity(m + 1);
-        v.push(&r / r_norm);
-
-        // Upper Hessenberg matrix H (stored as (m+1) x m)
-        let mut h = DMatrix::zeros(m + 1, m);
-        // Transformed RHS for least squares
-        let mut g = DVector::zeros(m + 1);
-        g[0] = r_norm;
-
-        // Givens rotation coefficients
-        let mut cs: Vec<f64> = Vec::with_capacity(m);
-        let mut sn: Vec<f64> = Vec::with_capacity(m);
-
-        let mut j = 0;
-        while j < m {
-            let w = a.spmv(&v[j]);
-            let mut wj = w;
-
-            // Arnoldi: orthogonalize against previous basis vectors
-            for i in 0..=j {
-                h[(i, j)] = v[i].dot(&wj);
-                wj -= &v[i] * h[(i, j)];
-            }
-            h[(j + 1, j)] = wj.norm();
-
-            if h[(j + 1, j)].abs() < 1e-15 {
-                // Lucky breakdown
-                j += 1;
-                break;
-            }
-            v.push(wj / h[(j + 1, j)]);
-
-            // Apply previous Givens rotations to column j of H
-            for i in 0..j {
-                let temp = cs[i] * h[(i, j)] + sn[i] * h[(i + 1, j)];
-                h[(i + 1, j)] = -sn[i] * h[(i, j)] + cs[i] * h[(i + 1, j)];
-                h[(i, j)] = temp;
-            }
-
-            // Compute new Givens rotation for row j
-            let a_jj = h[(j, j)];
-            let a_j1j = h[(j + 1, j)];
-            let denom = (a_jj * a_jj + a_j1j * a_j1j).sqrt();
-            if denom < 1e-15 {
-                cs.push(1.0);
-                sn.push(0.0);
-            } else {
-                cs.push(a_jj / denom);
-                sn.push(a_j1j / denom);
-            }
-
-            h[(j, j)] = cs[j] * a_jj + sn[j] * a_j1j;
-            h[(j + 1, j)] = 0.0;
-
-            // Apply rotation to g
-            let temp = cs[j] * g[j] + sn[j] * g[j + 1];
-            g[j + 1] = -sn[j] * g[j] + cs[j] * g[j + 1];
-            g[j] = temp;
-
-            if g[j + 1].abs() / b_norm < tol {
-                j += 1;
-                break;
-            }
-            j += 1;
-        }
-
-        // Back-substitute to find y: H(0..j, 0..j) * y = g(0..j)
-        let mut y = DVector::zeros(j);
-        for i in (0..j).rev() {
-            let mut s = g[i];
-            for k in (i + 1)..j {
-                s -= h[(i, k)] * y[k];
-            }
-            if h[(i, i)].abs() < 1e-15 {
-                y[i] = 0.0;
-            } else {
-                y[i] = s / h[(i, i)];
-            }
-        }
-
-        // Update x = x + V * y
-        for i in 0..j {
-            x += &v[i] * y[i];
-        }
-
-        // Check convergence
-        let final_r = b - &a.spmv(&x);
-        if final_r.norm() / b_norm < tol {
-            return Ok(x);
-        }
-    }
-
-    Ok(x)
 }
 
 // ---------------------------------------------------------------------------
