@@ -903,129 +903,116 @@ fn perpendicular_distance(p: &Point2D, a: &Point2D, b: &Point2D) -> f64 {
 /// Bowyer-Watson incremental Delaunay triangulation.
 ///
 /// Returns a list of triangles, each represented as three indices into the input
-/// `points` slice.
+/// `points` slice, in counter-clockwise order. The triangles tile the convex
+/// hull of the input exactly: for `n` points in general position with `h` on the
+/// hull there are `2n - h - 2` of them, as from `scipy.spatial.Delaunay`.
+///
+/// Non-finite points and exact duplicates are skipped (their indices appear in
+/// no triangle). Fewer than three distinct non-collinear points give an empty
+/// result. Co-circular points (e.g. the four corners of a square) are split by
+/// whichever diagonal the insertion order produces.
+///
+/// The predicates are Shewchuk's adaptive exact `orient2d` / `incircle`, so the
+/// result does not depend on the scale or offset of the coordinates. Hull edges
+/// are closed off by "ghost" triangles through a vertex at infinity rather than
+/// by a finite super-triangle. The old version compared the length⁴ in-circle
+/// determinant against an absolute `1e-10` and used a `20 x` super-triangle:
+/// 40 random points gave 2 triangles at scale 1e-3, none at 1e-5, and even at
+/// unit scale lost hull triangles to the super-triangle's vertices.
 pub fn delaunay_triangulation(points: &[Point2D]) -> Vec<[usize; 3]> {
-    let n = points.len();
-    if n < 3 {
+    const GHOST: usize = usize::MAX;
+
+    let finite: Vec<usize> = (0..points.len())
+        .filter(|&i| points[i].x.is_finite() && points[i].y.is_finite())
+        .collect();
+    if finite.len() < 3 {
         return vec![];
     }
 
-    // Compute bounding box and create super-triangle
-    let (min_x, min_y, max_x, max_y) = {
-        let mut mnx = f64::INFINITY;
-        let mut mny = f64::INFINITY;
-        let mut mxx = f64::NEG_INFINITY;
-        let mut mxy = f64::NEG_INFINITY;
-        for p in points {
-            if p.x < mnx {
-                mnx = p.x;
-            }
-            if p.y < mny {
-                mny = p.y;
-            }
-            if p.x > mxx {
-                mxx = p.x;
-            }
-            if p.y > mxy {
-                mxy = p.y;
-            }
+    // Seed triangle: the first point, the first point different from it, and
+    // the first point not collinear with both.
+    let i0 = finite[0];
+    let Some(&i1) = finite.iter().find(|&&i| points[i] != points[i0]) else {
+        return vec![];
+    };
+    let Some(&i2) = finite
+        .iter()
+        .find(|&&i| cross2d(&points[i0], &points[i1], &points[i]) != 0.0)
+    else {
+        return vec![];
+    };
+    let (a, b) = if cross2d(&points[i0], &points[i1], &points[i2]) > 0.0 {
+        (i1, i2)
+    } else {
+        (i2, i1)
+    };
+    // Solid triangles are counter-clockwise. A ghost triangle `[u, v, GHOST]`
+    // stands for the hull edge `u -> v` seen from outside: the outside of the
+    // hull is to the left of `u -> v`.
+    let mut triangles: Vec<[usize; 3]> =
+        vec![[i0, a, b], [a, i0, GHOST], [b, a, GHOST], [i0, b, GHOST]];
+
+    let conflicts = |tri: &[usize; 3], p: &Point2D| -> bool {
+        if tri[2] == GHOST {
+            let (u, v) = (&points[tri[0]], &points[tri[1]]);
+            let o = cross2d(u, v, p);
+            // The circumcircle of a ghost triangle is the open half-plane
+            // outside its edge plus the open edge itself.
+            o > 0.0 || (o == 0.0 && on_segment(u, p, v) && p != u && p != v)
+        } else {
+            let (a, b, c) = (&points[tri[0]], &points[tri[1]], &points[tri[2]]);
+            robust::incircle(coord(a), coord(b), coord(c), coord(p)) > 0.0
         }
-        (mnx, mny, mxx, mxy)
     };
 
-    let dx = max_x - min_x;
-    let dy = max_y - min_y;
-    let d_max = dx.max(dy);
-    let mid_x = (min_x + max_x) * 0.5;
-    let mid_y = (min_y + max_y) * 0.5;
-
-    // Super-triangle vertices (indices n, n+1, n+2)
-    let st0 = Point2D::new(mid_x - 20.0 * d_max, mid_y - d_max);
-    let st1 = Point2D::new(mid_x, mid_y + 20.0 * d_max);
-    let st2 = Point2D::new(mid_x + 20.0 * d_max, mid_y - d_max);
-
-    let mut all_pts: Vec<Point2D> = points.to_vec();
-    all_pts.push(st0);
-    all_pts.push(st1);
-    all_pts.push(st2);
-
-    // Each triangle stores 3 vertex indices
-    let mut triangles: Vec<[usize; 3]> = vec![[n, n + 1, n + 2]];
-
-    // Insert each point
-    for i in 0..n {
-        let p = &all_pts[i];
-        let mut bad_triangles = Vec::new();
-
-        for (ti, tri) in triangles.iter().enumerate() {
-            if in_circumcircle(p, &all_pts[tri[0]], &all_pts[tri[1]], &all_pts[tri[2]]) {
-                bad_triangles.push(ti);
-            }
+    for &i in &finite {
+        if i == i0 || i == a || i == b {
+            continue;
+        }
+        let p = &points[i];
+        let bad: Vec<usize> = (0..triangles.len())
+            .filter(|&ti| conflicts(&triangles[ti], p))
+            .collect();
+        // A duplicate of an existing vertex lies strictly inside no
+        // circumcircle and on no open hull edge: nothing to do.
+        if bad.is_empty() {
+            continue;
         }
 
-        // Find boundary polygon of the bad triangles
         let mut boundary = Vec::new();
-        for &ti in &bad_triangles {
-            let tri = &triangles[ti];
-            for edge_idx in 0..3 {
-                let e0 = tri[edge_idx];
-                let e1 = tri[(edge_idx + 1) % 3];
-                let mut shared = false;
-                for &tj in &bad_triangles {
-                    if tj == ti {
-                        continue;
-                    }
-                    let other = &triangles[tj];
-                    if triangle_has_edge(other, e0, e1) {
-                        shared = true;
-                        break;
-                    }
-                }
+        for &ti in &bad {
+            let tri = triangles[ti];
+            for k in 0..3 {
+                let (e0, e1) = (tri[k], tri[(k + 1) % 3]);
+                let shared = bad
+                    .iter()
+                    .any(|&tj| tj != ti && triangle_has_edge(&triangles[tj], e0, e1));
                 if !shared {
                     boundary.push((e0, e1));
                 }
             }
         }
 
-        // Remove bad triangles (in reverse order to keep indices valid)
-        let mut bad_sorted = bad_triangles.clone();
-        bad_sorted.sort_unstable();
-        for &ti in bad_sorted.iter().rev() {
+        for &ti in bad.iter().rev() {
             triangles.swap_remove(ti);
         }
 
-        // Create new triangles
-        for (e0, e1) in &boundary {
-            triangles.push([i, *e0, *e1]);
+        // `p` is on the inner side of every cavity edge `e0 -> e1`, so
+        // `[e0, e1, p]` keeps the orientation; rotate ghosts so GHOST is last.
+        for (e0, e1) in boundary {
+            let t = if e0 == GHOST {
+                [e1, i, GHOST]
+            } else if e1 == GHOST {
+                [i, e0, GHOST]
+            } else {
+                [e0, e1, i]
+            };
+            triangles.push(t);
         }
     }
 
-    // Remove triangles that share vertices with the super-triangle
-    triangles.retain(|tri| tri[0] < n && tri[1] < n && tri[2] < n);
-
+    triangles.retain(|t| t[2] != GHOST);
     triangles
-}
-
-fn in_circumcircle(p: &Point2D, a: &Point2D, b: &Point2D, c: &Point2D) -> bool {
-    let ax = a.x - p.x;
-    let ay = a.y - p.y;
-    let bx = b.x - p.x;
-    let by = b.y - p.y;
-    let cx = c.x - p.x;
-    let cy = c.y - p.y;
-
-    let det = ax * (by * (cx * cx + cy * cy) - cy * (bx * bx + by * by))
-        - bx * (ay * (cx * cx + cy * cy) - cy * (ax * ax + ay * ay))
-        + cx * (ay * (bx * bx + by * by) - by * (ax * ax + ay * ay));
-
-    // Positive det means inside circumcircle (for CCW triangle)
-    // We need to handle both orientations
-    let orient = cross2d(a, b, c);
-    if orient > 0.0 {
-        det > EPS
-    } else {
-        det < -EPS
-    }
 }
 
 fn triangle_has_edge(tri: &[usize; 3], e0: usize, e1: usize) -> bool {
