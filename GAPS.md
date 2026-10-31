@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (14 open, was 91)
+## (g) Second review, 2026-10-31 — findings (13 open, was 91)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -310,7 +310,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f11 | `features/src/orb.rs` rBRIEF | **CLOSED.** Rotated offsets rounded (OpenCV's `cvRound`); pinned by `steered_sampling_is_symmetric_under_half_turns` (fails at 30° with truncation). Was: rotated taps floored, OpenCV rounds | was LOW — fixed | ARGUED |
 | g-f12 | `imgproc` `par_chunks_mut(width)` sites | **CLOSED.** 64 function/shape pairs no longer panic on 0×N / N×0 (`tests/zero_sized_images.rs`). Was: zero-width image panics `chunk_size must not be zero` | was LOW — fixed | CONFIRMED |
 
-### (g3) io / runtime / distributed / video / photo / videoio (4 open, was 12)
+### (g3) io / runtime / distributed / video / photo / videoio (3 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -320,7 +320,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-i4 | `io/src/pcd.rs` ASCII | **CLOSED.** Column offsets are cumulative COUNTs. Same test file. Was: column index ignores `COUNT > 1` | was MED — fixed | CONFIRMED |
 | g-i5 | `io/src/pcd.rs` ASCII rgb | **CLOSED.** `TYPE U`/`I` packed colour parsed as an integer token. Same test file. Was: `TYPE U` packed rgb parsed as f32 then `to_bits()` → pure red reads `[0.498,0,0]` | was MED — fixed | CONFIRMED |
 | g-i6 | `io/src/obj.rs` | **CLOSED.** Negative indices resolved against vertices read so far; the robustness test that pinned the rejection now pins acceptance. Was: negative (relative) face indices rejected | was MED — fixed | CONFIRMED |
-| g-i7 | `distributed/.../shared_memory.rs` `Drop` | refcount decrement + unlink without the `flock` `new` takes → orphaned region, overcommit | MED | ARGUED |
+| g-i7 | `distributed/.../shared_memory.rs` `Drop` | **CLOSED.** Detach takes the attach `flock` around decrement + unlink; attach retries if its fd's (dev, inode) no longer matches the path. Race forced via a test hook. Was: refcount decrement + unlink without the `flock` `new` takes → orphaned region, overcommit | was MED — fixed | ARGUED |
 | g-i8 | `distributed/.../shared_memory.rs` `acquire_slot` | slot adopted by PID alone (PID namespaces, PID reuse) | MED | ARGUED |
 | g-i9 | `distributed/.../shared_memory.rs` | atomics written through `as_ptr()` of a shared slice (Stacked Borrows UB); reapers' non-saturating `fetch_sub` | LOW | ARGUED |
 | g-i10 | `runtime/src/pipeline/allocator.rs` | **CLOSED.** `trim` truncates free lists; re-`allocate` releases the old buffer (accounting 4000 → 3000). Was: `trim` uses `shrink_to` (frees nothing); re-`allocate` leaks accounting | was LOW — fixed | ARGUED |

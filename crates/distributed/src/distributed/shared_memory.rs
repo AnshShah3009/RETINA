@@ -131,6 +131,10 @@ const _: () = assert!(PROCESS_SLOT_SIZE % 64 == 0);
 /// `u32`, `PathBuf`, `Arc<AtomicU32>` and a `Mutex<Option<JoinHandle<()>>>`).
 pub struct ShmCoordinator {
     mmap: memmap2::MmapMut,
+    /// The open region file. Kept for the `flock` that `Drop` takes and for
+    /// the heartbeat thread's mapping (re-opening the path could reach a
+    /// different, newer region).
+    file: std::fs::File,
     slot_index: usize,
     pid: u32,
     path: std::path::PathBuf,
@@ -149,6 +153,65 @@ fn slot_refcounts() -> &'static Mutex<HashMap<(std::path::PathBuf, usize), Arc<A
     REFS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Exclusive advisory `flock` on the region file, released on drop.
+///
+/// Serializes every change to whether the region file is live: header
+/// initialization and refcount increment in `new`, refcount decrement and
+/// unlink in `Drop`.
+struct RegionLock<'a> {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    file: &'a std::fs::File,
+}
+
+impl<'a> RegionLock<'a> {
+    fn acquire(file: &'a std::fs::File) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: `flock` on a valid, open file descriptor we own.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Drop for RegionLock<'_> {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: as in `acquire`.
+            unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+}
+
+/// Whether `path` still names the file `file` has open (same device and
+/// inode). `false` once the path has been unlinked or replaced.
+fn path_names_file(file: &std::fs::File, path: &std::path::Path) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let open = file.metadata()?;
+        match std::fs::metadata(path) {
+            Ok(on_disk) => Ok(on_disk.dev() == open.dev() && on_disk.ino() == open.ino()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, path);
+        Ok(true)
+    }
+}
+
+/// How often `new` re-opens the region file after finding that the file it
+/// opened was unlinked (by the last detaching process) before it got the lock.
+const MAX_ATTACH_ATTEMPTS: usize = 64;
+
 impl ShmCoordinator {
     /// Create or attach to a shared memory region.
     ///
@@ -158,6 +221,20 @@ impl ShmCoordinator {
         let size = size.max(SHM_TOTAL_SIZE);
         let path = Self::get_shm_path(name);
 
+        for _ in 0..MAX_ATTACH_ATTEMPTS {
+            if let Some(coord) = Self::try_attach(&path, size)? {
+                return Ok(coord);
+            }
+        }
+        Err(io::Error::other(format!(
+            "Shared memory region {} kept being unlinked while attaching",
+            path.display()
+        )))
+    }
+
+    /// One attach attempt. `Ok(None)` means the opened file was unlinked by a
+    /// detaching process before we got the lock: the caller re-opens the path.
+    fn try_attach(path: &std::path::Path, size: usize) -> io::Result<Option<Self>> {
         // Open (or create) WITHOUT truncating: another process may already
         // hold a live mapping of this region. Initialization is serialized
         // with an advisory flock so concurrent starters re-validate the
@@ -166,16 +243,21 @@ impl ShmCoordinator {
             .read(true)
             .write(true)
             .create(true)
-            .open(&path)?;
+            .open(path)?;
 
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            // Block until any concurrent initializer releases the lock.
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if rc != 0 {
-                return Err(io::Error::last_os_error());
-            }
+        #[cfg(test)]
+        test_hooks::run_after_open();
+
+        // Block until any concurrent initializer or detacher releases the lock.
+        let lock = RegionLock::acquire(&file)?;
+
+        // Between our `open` and the lock, the last attached process may have
+        // dropped the refcount to 0 and unlinked the file. Attaching to that
+        // orphaned inode would leave us on a region nobody else can find
+        // while the next starter creates a fresh one at the same path - two
+        // regions handing out the same VRAM. Re-open instead.
+        if !path_names_file(&file, path)? {
+            return Ok(None);
         }
 
         let needs_init = {
@@ -230,39 +312,34 @@ impl ShmCoordinator {
             header.refcount.store(0, Ordering::Release);
         }
 
-        // The header is now valid (either freshly published or validated), so
-        // the init lock can be released.
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        }
-
         let pid = std::process::id();
         let slot_index = Self::acquire_slot(&mmap, pid)?;
+
+        // Increment the region refcount BEFORE releasing the lock: `Drop`
+        // decrements and unlinks under the same lock, so it can never see a
+        // count that misses us (it used to, when this ran after unlocking).
+        Self::header_ptr(&mmap)
+            .refcount
+            .fetch_add(1, Ordering::AcqRel);
+        drop(lock);
 
         // Register this coordinator against its slot's per-process refcount.
         {
             let mut refs = slot_refcounts().lock().unwrap_or_else(|e| e.into_inner());
-            refs.entry((path.clone(), slot_index))
+            refs.entry((path.to_path_buf(), slot_index))
                 .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
                 .fetch_add(1, Ordering::SeqCst);
         }
 
-        // Increment refcount atomically — protects against premature
-        // file deletion in Drop when multiple processes attach concurrently
-        Self::header_ptr(&mmap)
-            .refcount
-            .fetch_add(1, Ordering::Release);
-
-        Ok(Self {
+        Ok(Some(Self {
             mmap,
+            file,
             slot_index,
             pid,
-            path,
+            path: path.to_path_buf(),
             heartbeat_stop: Arc::new(AtomicU32::new(0)),
             heartbeat_thread: std::sync::Mutex::new(None),
-        })
+        }))
     }
 
     // --- Pointer helpers ---
@@ -866,21 +943,16 @@ impl ShmCoordinator {
         let stop = self.heartbeat_stop.clone();
         // We need to access the mmap from the thread. Since ShmCoordinator is !Clone,
         // we re-open the same shm file from the thread using the path + slot_index.
-        let path = self.path.clone();
+        let file = self.file.try_clone().ok();
         let slot_index = self.slot_index;
         let pid = self.pid;
 
         let thread_handle = std::thread::Builder::new()
             .name("shm-heartbeat".into())
             .spawn(move || {
-                // Re-open the mmap (read-write) for heartbeat writes
-                let file = match std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&path)
-                {
-                    Ok(f) => f,
-                    Err(_) => return,
+                // Map our own region file (read-write) for heartbeat writes.
+                let Some(file) = file else {
+                    return;
                 };
                 let mmap = match unsafe { memmap2::MmapOptions::new().map_mut(&file) } {
                     Ok(m) => m,
@@ -1242,10 +1314,45 @@ impl Drop for ShmCoordinator {
             self.cleanup();
         }
 
-        // Atomically decrement refcount; only the last process removes the file
+        // Decrement the region refcount and, if we were last, unlink the file -
+        // both under the lock `new` holds while it validates the file and
+        // increments. Without it a starter could open the path, then we drop
+        // 1 -> 0 and unlink, and the starter would attach to the orphaned
+        // inode while the next one created a fresh region. If locking fails
+        // we still decrement but leave the file in place (a stale file is
+        // re-validated by the next starter; an unlinked live one is not).
+        let lock = RegionLock::acquire(&self.file);
         let header = Self::header_ptr(&self.mmap);
-        if header.refcount.fetch_sub(1, Ordering::AcqRel) == 1 {
+        if header.refcount.fetch_sub(1, Ordering::AcqRel) == 1
+            && lock.is_ok()
+            && path_names_file(&self.file, &self.path).unwrap_or(false)
+        {
             let _ = std::fs::remove_file(&self.path);
+        }
+        drop(lock);
+    }
+}
+
+/// Deterministic interleaving hooks for the attach/detach race tests.
+#[cfg(test)]
+mod test_hooks {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnOnce()>;
+
+    thread_local! {
+        static AFTER_OPEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` once, inside the next `ShmCoordinator::new` on this thread,
+    /// after it has opened the region file but before it takes the flock.
+    pub(super) fn set_after_open(f: impl FnOnce() + 'static) {
+        AFTER_OPEN.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(super) fn run_after_open() {
+        if let Some(f) = AFTER_OPEN.with(|h| h.borrow_mut().take()) {
+            f();
         }
     }
 }
@@ -1256,6 +1363,39 @@ mod tests {
 
     fn unique_name(suffix: &str) -> String {
         format!("test_shm_v2_{}_{}", std::process::id(), suffix)
+    }
+
+    #[test]
+    fn test_drop_racing_attach_does_not_split_the_region() {
+        // Interleaving: B opens the region file while A is attached; A then
+        // drops (refcount 1 -> 0, unlink) before B takes the lock. Without
+        // locking in Drop and an inode re-check in `new`, B attaches to the
+        // orphaned inode while C creates a fresh file at the path, and the two
+        // hand out the same VRAM independently.
+        let name = unique_name("drop_attach_race");
+        let a = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        test_hooks::set_after_open(move || drop(a));
+        let b = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+        let c = ShmCoordinator::new(&name, SHM_TOTAL_SIZE).unwrap();
+
+        assert!(
+            b.path.exists(),
+            "B's region file was unlinked under it (B is on an orphaned inode)"
+        );
+        b.init_device(0, 1024).unwrap();
+        b.reserve_device(0, 1024, 0).unwrap();
+        assert_eq!(
+            c.device_memory_usage(),
+            vec![(0, 1024, 1024)],
+            "B and C are attached to different regions"
+        );
+        assert!(
+            c.reserve_device(0, 1, 0).is_err(),
+            "C over-committed a device B had filled"
+        );
+        drop(c);
+        drop(b);
+        assert!(!ShmCoordinator::get_shm_path(&name).exists());
     }
 
     #[test]
