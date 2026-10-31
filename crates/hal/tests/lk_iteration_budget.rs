@@ -28,11 +28,13 @@
 //!
 //! ## The fix
 //!
-//! The window is linearised once, about the position the track started from
-//! (`anchor_x`/`anchor_y`), and each iteration re-measures the residual at the
-//! **running** estimate against that fixed linearisation. The first iteration then
-//! reproduces the original estimate and subsequent ones reduce the residual, so
-//! `max_iters` behaves as a budget.
+//! Bouguet's pyramidal LK (OpenCV `calcOpticalFlowPyrLK`): the template window of
+//! `prev` is sampled bilinearly around the feature, `next` is sampled bilinearly at
+//! the running estimate, and each solve updates the residual flow that the next
+//! iteration samples at. The error is then non-increasing in the budget, so
+//! `max_iters` behaves as a budget. (An earlier fix anchored an integer window and
+//! sampled `next` at an integer offset, which double-counted the sub-pixel part and
+//! oscillated - see `lk_subpixel_bouguet.rs`.)
 
 #![forbid(unsafe_code)]
 
@@ -46,25 +48,34 @@ const START: (f32, f32) = (32.0, 24.0);
 
 /// A band-limited image with a known integer shift between the two frames.
 ///
-/// Built as a smooth sinusoid rather than noise so the shift is the only signal
+/// Built as smooth sinusoids rather than noise so the shift is the only signal
 /// present - a textureless or aliased input would make the measurement meaningless.
+///
+/// Two crossing waves, not one: a single plane wave `sin(2 pi (x/16 + y/24))` has a
+/// rank-1 structure tensor (every gradient is parallel to `(3, 2)`), so only the
+/// flow component along that normal is observable and `(+2, +1)` is one of a line
+/// of equally good answers. The original version of this test used that single
+/// wave and passed only because f32 round-off made `G` numerically invertible; a
+/// tracker with OpenCV's minimum-eigenvalue check correctly declines it.
 fn frames(
     w: usize,
     h: usize,
     dx: f32,
     dy: f32,
 ) -> (Tensor<f32, CpuStorage<f32>>, Tensor<f32, CpuStorage<f32>>) {
+    use std::f32::consts::PI;
+    let f = |x: f32, y: f32| {
+        127.0
+            + 60.0 * (2.0 * PI * (x / 16.0 + y / 24.0)).sin()
+            + 40.0 * (2.0 * PI * (x / 22.0 - y / 18.0)).cos()
+    };
     let mut a = vec![0.0f32; w * h];
     let mut b = vec![0.0f32; w * h];
     for y in 0..h {
         for x in 0..w {
-            let phase = 2.0 * std::f32::consts::PI * (x as f32 / 16.0 + y as f32 / 24.0);
-            a[y * w + x] = 127.0 + 100.0 * phase.sin();
+            a[y * w + x] = f(x as f32, y as f32);
             // `b` is `a` shifted by (dx, dy): b(x,y) = a(x - dx, y - dy).
-            let sx = x as f32 - dx;
-            let sy = y as f32 - dy;
-            b[y * w + x] =
-                127.0 + 100.0 * (2.0 * std::f32::consts::PI * (sx / 16.0 + sy / 24.0)).sin();
+            b[y * w + x] = f(x as f32 - dx, y as f32 - dy);
         }
     }
     let shape = cv_core::TensorShape::new(1, h, w);
@@ -136,11 +147,9 @@ fn more_iterations_do_not_diverge() {
 #[test]
 fn the_flow_converges_to_the_planted_shift() {
     let truth = Vector2::new(2.0f32, 1.0f32);
-    // **Not** asserted at 1 iteration: the window is linearised once, so the first
-    // iteration is an approximation by construction. Measured (+1.0, +1.75) against
-    // the planted (+2, +1) - the right sign and magnitude, 1.25 px out, which is what
-    // one iteration of LK looks like. Asserting sub-pixel accuracy here would be
-    // asserting something the algorithm does not promise.
+    // **Not** asserted at 1 iteration: the first solve linearises about zero flow,
+    // so it is an approximation by construction. Converged Bouguet LK on this
+    // smooth, noise-free pair lands within a few hundredths of a pixel.
     //
     // Claiming it converged *improves* with budget is the real contract, and
     // `more_iterations_do_not_diverge` above is the assertion that pins it.
@@ -148,8 +157,9 @@ fn the_flow_converges_to_the_planted_shift() {
         let got = track(iters, 21);
         let p = Vector2::new(got[0], got[1]) - Vector2::new(START.0, START.1);
         let err = (p - truth).norm();
+        println!("{iters} iterations: flow {p:?}, err {err:.4}");
         assert!(
-            err < 1.0,
+            err < 0.05,
             "at {iters} iterations the recovered flow {p:?} is {err:.4} px from the \
              planted {truth:?}"
         );

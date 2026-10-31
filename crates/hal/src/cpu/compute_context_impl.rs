@@ -3166,180 +3166,229 @@ impl ComputeContext for CpuBackend {
 
         use std::any::TypeId;
         if TypeId::of::<T>() == TypeId::of::<f32>() {
+            // Pyramidal Lucas-Kanade in Bouguet's formulation, the algorithm
+            // behind OpenCV's `calcOpticalFlowPyrLK`:
+            //
+            // * at level L the feature sits at `p / 2^L`; the template window of
+            //   `prev` (intensity and gradients) is sampled bilinearly around that
+            //   point - the feature itself, never the running estimate;
+            // * `next` is sampled bilinearly at `p / 2^L + g + v`, where `g` is the
+            //   guess carried down from the coarser level and `v` the in-level
+            //   residual flow; each solve updates `v` only;
+            // * the guess is propagated as `g = 2 (g + v)`.
+            //
+            // The previous version anchored an integer window at `round(u)` and
+            // sampled `next` at an *integer* offset `round(u) - anchor` while
+            // adding the solve to the fractional `u`, so the sub-pixel part was
+            // counted twice. A smooth image shifted by 2.3 px (window 21) came
+            // back as dx 2.155, 2.459, 2.763, 2.362, 1.864, 1.877 after 1, 2, 3,
+            // 5, 10, 20 iterations. At finer levels it also centred the template
+            // on the doubled tracked position rather than on the feature.
             let levels = prev_pyramid.len();
-            // Input points are in level-0 coordinates. The coarsest level
-            // (levels - 1) is scaled down by 2^(levels-1); each finer level then
-            // doubles the coordinates, matching the GPU path.
-            let coarsest_scale = 1.0 / (1 << (levels - 1)) as f32;
-            let mut scaled_points: Vec<[f32; 2]> = points
-                .iter()
-                .map(|&pt| {
-                    let pt_f: [f32; 2] = bytemuck::cast_slice(&[pt])[0];
-                    [pt_f[0] * coarsest_scale, pt_f[1] * coarsest_scale]
-                })
-                .collect();
 
-            for level in (0..levels).rev() {
-                let prev = &prev_pyramid[level];
-                let next = &next_pyramid[level];
-
-                let prev_data = prev
-                    .storage
-                    .as_slice()
-                    .ok_or_else(|| crate::Error::MemoryError("Prev not on CPU".into()))?;
-                let next_data = next
-                    .storage
-                    .as_slice()
-                    .ok_or_else(|| crate::Error::MemoryError("Next not on CPU".into()))?;
-
-                let prev_data_f32: &[f32] = bytemuck::cast_slice(prev_data);
-                let next_data_f32: &[f32] = bytemuck::cast_slice(next_data);
-
-                let (h, w) = prev.shape.hw();
-
-                let win = window_size as i32;
-                let half_win = win / 2;
-
-                let scaled: Vec<[f32; 2]> = scaled_points
-                    .par_iter()
-                    .map(|&pt| {
-                        let mut u = pt[0];
-                        let mut v = pt[1];
-
-                        let anchor_x = u.round() as i32;
-                        let anchor_y = v.round() as i32;
-
-                        for _ in 0..max_iters {
-                            // Fixed anchor for the whole walk: the window is
-                            // linearised once about the position the track
-                            // started from, and each iteration re-measures the
-                            // residual at the **running** estimate against that
-                            // linearisation. That is inverse-compositional /
-                            // forward-additive LK.
-                            //
-                            // The previous code re-anchored `ix`/`iy` on the
-                            // current `u`/`v` each pass while measuring `next` at
-                            // the *same integer coordinates* as `prev`, so `i_t`
-                            // was the intensity difference of the two frames at
-                            // one place and did not depend on `u`/`v` at all:
-                            // every iteration solved the identical 2x2 system and
-                            // accumulated the identical step. Measured on a 2-pixel
-                            // horizontal shift of a band-limited image (window 21)
-                            // the result was +0.05 px off after 1 iteration,
-                            // +2.05 after 2, +4.05 after 3, +8.15 after 5,
-                            // +18.5 after 10 and +58.6 after 30 - error growing
-                            // linearly with `max_iters`, which a caller reads as a
-                            // convergence budget.
-                            //
-                            // With `i_t` measured at `(x + (u - anchor), y + (v - anchor))`
-                            // the first iteration reproduces the original
-                            // estimate and subsequent ones *reduce* the residual,
-                            // so `max_iters` behaves as a budget.
-                            let ix = anchor_x;
-                            let iy = anchor_y;
-
-                            if ix - half_win < 0
-                                || ix + half_win >= w as i32
-                                || iy - half_win < 0
-                                || iy + half_win >= h as i32
-                            {
-                                break;
-                            }
-
-                            // Integer part of the running estimate's offset from
-                            // the anchor: the linearisation is only valid within
-                            // the anchor's own neighbourhood, so the fractional
-                            // part is carried in `u`/`v` itself.
-                            let sub_x = u.round() as i32 - anchor_x;
-                            let sub_y = v.round() as i32 - anchor_y;
-
-                            let mut g: nalgebra::Matrix2<f32> = nalgebra::Matrix2::zeros();
-                            let mut b: nalgebra::Vector2<f32> = nalgebra::Vector2::zeros();
-
-                            for dy in -half_win..=half_win {
-                                for dx in -half_win..=half_win {
-                                    let x = ix + dx;
-                                    let y = iy + dy;
-
-                                    // Spatial gradient of the *previous* frame at
-                                    // the anchor window.
-                                    let i_x = (utils::get_pixel_cpu(prev_data_f32, w, h, x + 1, y)
-                                        - utils::get_pixel_cpu(prev_data_f32, w, h, x - 1, y))
-                                        * 0.5;
-                                    let i_y = (utils::get_pixel_cpu(prev_data_f32, w, h, x, y + 1)
-                                        - utils::get_pixel_cpu(prev_data_f32, w, h, x, y - 1))
-                                        * 0.5;
-
-                                    // Temporal term sampled at the running
-                                    // estimate, so this iteration's solve is
-                                    // driven by what is still unexplained rather
-                                    // than replaying the first step.
-                                    let next_val = utils::get_val_cpu(
-                                        next_data_f32,
-                                        w,
-                                        h,
-                                        x + sub_x,
-                                        y + sub_y,
-                                    );
-                                    let i_t =
-                                        next_val - utils::get_pixel_cpu(prev_data_f32, w, h, x, y);
-
-                                    g[(0, 0)] += i_x * i_x;
-                                    g[(0, 1)] += i_x * i_y;
-                                    g[(1, 0)] += i_x * i_y;
-                                    g[(1, 1)] += i_y * i_y;
-
-                                    b[0] -= i_x * i_t;
-                                    b[1] -= i_y * i_t;
-                                }
-                            }
-
-                            if let Some(delta) = g.try_inverse().map(|inv| inv * b) {
-                                let next_u = u + delta[0];
-                                let next_v = v + delta[1];
-                                let small = delta.norm_squared() < 0.01;
-                                let (lo_x, hi_x) =
-                                    (half_win as f32, (w as i32 - 1 - half_win) as f32);
-                                let (lo_y, hi_y) =
-                                    (half_win as f32, (h as i32 - 1 - half_win) as f32);
-                                // Stop before applying a step that would take the
-                                // tracked point outside the frame, or a non-finite
-                                // one from an ill-conditioned `G`. Without this a
-                                // divergent walk runs to `max_iters` and returns a
-                                // position outside the image.
-                                if small
-                                    || !next_u.is_finite()
-                                    || !next_v.is_finite()
-                                    || next_u < lo_x
-                                    || next_u > hi_x
-                                    || next_v < lo_y
-                                    || next_v > hi_y
-                                {
-                                    u = next_u;
-                                    v = next_v;
-                                    break;
-                                }
-                                u = next_u;
-                                v = next_v;
-                            } else {
-                                break;
-                            }
-                        }
-                        [u, v]
-                    })
-                    .collect();
-
-                scaled_points = if level > 0 {
-                    // Carry the tracked position up to the next finer level.
-                    scaled.iter().map(|&p| [p[0] * 2.0, p[1] * 2.0]).collect()
-                } else {
-                    scaled
-                };
+            struct Level<'a> {
+                w: usize,
+                h: usize,
+                prev: &'a [f32],
+                next: &'a [f32],
+                gx: Vec<f32>,
+                gy: Vec<f32>,
             }
 
-            let results: Vec<[T; 2]> = scaled_points
-                .iter()
-                .map(|&pt| bytemuck::cast_slice(&[pt])[0])
+            let mut pyr: Vec<Level<'_>> = Vec::with_capacity(levels);
+            for level in 0..levels {
+                let prev = &prev_pyramid[level];
+                let next = &next_pyramid[level];
+                let (h, w) = prev.shape.hw();
+                if next.shape.hw() != (h, w) || w == 0 || h == 0 {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "optical_flow_lk: level {level} has prev {}x{} but next {}x{}",
+                        w,
+                        h,
+                        next.shape.hw().1,
+                        next.shape.hw().0
+                    )));
+                }
+                let prev_data: &[f32] = bytemuck::cast_slice(
+                    prev.storage
+                        .as_slice()
+                        .ok_or_else(|| crate::Error::MemoryError("Prev not on CPU".into()))?,
+                );
+                let next_data: &[f32] = bytemuck::cast_slice(
+                    next.storage
+                        .as_slice()
+                        .ok_or_else(|| crate::Error::MemoryError("Next not on CPU".into()))?,
+                );
+                if prev_data.len() < w * h || next_data.len() < w * h {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "optical_flow_lk: level {level} storage is smaller than {w}x{h}"
+                    )));
+                }
+
+                // Central-difference gradients of `prev`, computed once per level
+                // and sampled bilinearly at the template's sub-pixel positions.
+                let mut gx = vec![0.0f32; w * h];
+                let mut gy = vec![0.0f32; w * h];
+                gx.par_chunks_mut(w)
+                    .zip(gy.par_chunks_mut(w))
+                    .enumerate()
+                    .for_each(|(y, (rx, ry))| {
+                        let y = y as i32;
+                        for x in 0..w as i32 {
+                            rx[x as usize] = (utils::get_pixel_cpu(prev_data, w, h, x + 1, y)
+                                - utils::get_pixel_cpu(prev_data, w, h, x - 1, y))
+                                * 0.5;
+                            ry[x as usize] = (utils::get_pixel_cpu(prev_data, w, h, x, y + 1)
+                                - utils::get_pixel_cpu(prev_data, w, h, x, y - 1))
+                                * 0.5;
+                        }
+                    });
+                pyr.push(Level {
+                    w,
+                    h,
+                    prev: prev_data,
+                    next: next_data,
+                    gx,
+                    gy,
+                });
+            }
+
+            // Bilinear sample with replicated border.
+            fn bilinear(img: &[f32], w: usize, h: usize, x: f32, y: f32) -> f32 {
+                let x = x.clamp(0.0, (w - 1) as f32);
+                let y = y.clamp(0.0, (h - 1) as f32);
+                let x0 = (x.floor() as usize).min(w - 1);
+                let y0 = (y.floor() as usize).min(h - 1);
+                let x1 = (x0 + 1).min(w - 1);
+                let y1 = (y0 + 1).min(h - 1);
+                let ax = x - x0 as f32;
+                let ay = y - y0 as f32;
+                let top = img[y0 * w + x0] * (1.0 - ax) + img[y0 * w + x1] * ax;
+                let bot = img[y1 * w + x0] * (1.0 - ax) + img[y1 * w + x1] * ax;
+                top * (1.0 - ay) + bot * ay
+            }
+
+            let half_win = (window_size / 2) as i32;
+            // OpenCV's default termination: 0.01 px step.
+            const EPS2: f64 = 1e-4;
+
+            // Residual flow `v` at one level for the feature at `(px, py)` with the
+            // carried guess `g`. Zero when the template does not fit or is
+            // untextured, so the guess passes through unchanged.
+            let track_level = |lv: &Level<'_>, px: f32, py: f32, g: [f32; 2]| -> [f32; 2] {
+                let (w, h) = (lv.w, lv.h);
+                let hw = half_win as f32;
+                if !(px - hw >= 0.0
+                    && px + hw <= (w - 1) as f32
+                    && py - hw >= 0.0
+                    && py + hw <= (h - 1) as f32)
+                {
+                    return [0.0, 0.0];
+                }
+
+                let n = (2 * half_win + 1) as usize;
+                let mut tmpl = Vec::with_capacity(n * n);
+                let (mut a11, mut a12, mut a22) = (0.0f64, 0.0f64, 0.0f64);
+                for dy in -half_win..=half_win {
+                    for dx in -half_win..=half_win {
+                        let sx = px + dx as f32;
+                        let sy = py + dy as f32;
+                        let i0 = bilinear(lv.prev, w, h, sx, sy);
+                        let ix = bilinear(&lv.gx, w, h, sx, sy) as f64;
+                        let iy = bilinear(&lv.gy, w, h, sx, sy) as f64;
+                        a11 += ix * ix;
+                        a12 += ix * iy;
+                        a22 += iy * iy;
+                        tmpl.push((i0, ix, iy));
+                    }
+                }
+                let det = a11 * a22 - a12 * a12;
+                let tr = a11 + a22;
+                let min_eig = 0.5 * (tr - ((a11 - a22).powi(2) + 4.0 * a12 * a12).sqrt());
+                // Relative conditioning floor (shared with the GPU kernel): an
+                // untextured or aperture-limited window is not tracked.
+                if !det.is_finite() || det <= 0.0 || min_eig <= 1e-6 * tr {
+                    return [0.0, 0.0];
+                }
+                let inv_det = 1.0 / det;
+
+                let mut v = [0.0f64; 2];
+                let mut prev_delta = [0.0f64; 2];
+                for j in 0..max_iters {
+                    let cx = px as f64 + g[0] as f64 + v[0];
+                    let cy = py as f64 + g[1] as f64 + v[1];
+                    // Stop once the window centre leaves the frame.
+                    if !(cx.is_finite()
+                        && cy.is_finite()
+                        && cx >= 0.0
+                        && cx <= (w - 1) as f64
+                        && cy >= 0.0
+                        && cy <= (h - 1) as f64)
+                    {
+                        break;
+                    }
+                    let (mut b1, mut b2) = (0.0f64, 0.0f64);
+                    let mut k = 0;
+                    for dy in -half_win..=half_win {
+                        for dx in -half_win..=half_win {
+                            let j1 = bilinear(
+                                lv.next,
+                                w,
+                                h,
+                                (cx + dx as f64) as f32,
+                                (cy + dy as f64) as f32,
+                            );
+                            let (i0, ix, iy) = tmpl[k];
+                            let it = (j1 - i0) as f64;
+                            b1 += it * ix;
+                            b2 += it * iy;
+                            k += 1;
+                        }
+                    }
+                    // delta = -G^{-1} b
+                    let delta = [
+                        (a12 * b2 - a22 * b1) * inv_det,
+                        (a12 * b1 - a11 * b2) * inv_det,
+                    ];
+                    if !(delta[0].is_finite() && delta[1].is_finite()) {
+                        break;
+                    }
+                    v[0] += delta[0];
+                    v[1] += delta[1];
+                    if delta[0] * delta[0] + delta[1] * delta[1] <= EPS2 {
+                        break;
+                    }
+                    // OpenCV's oscillation guard: a step that undoes the previous
+                    // one means the minimum lies between them.
+                    if j > 0
+                        && (delta[0] + prev_delta[0]).abs() < 0.01
+                        && (delta[1] + prev_delta[1]).abs() < 0.01
+                    {
+                        v[0] -= 0.5 * delta[0];
+                        v[1] -= 0.5 * delta[1];
+                        break;
+                    }
+                    prev_delta = delta;
+                }
+                [v[0] as f32, v[1] as f32]
+            };
+
+            let results: Vec<[T; 2]> = points
+                .par_iter()
+                .map(|&pt| {
+                    let p0: [f32; 2] = bytemuck::cast_slice(&[pt])[0];
+                    let mut g = [0.0f32; 2];
+                    for level in (0..levels).rev() {
+                        let s = 1.0 / (1u32 << level) as f32;
+                        let v = track_level(&pyr[level], p0[0] * s, p0[1] * s, g);
+                        g = [g[0] + v[0], g[1] + v[1]];
+                        if level > 0 {
+                            g = [2.0 * g[0], 2.0 * g[1]];
+                        }
+                    }
+                    let out = [p0[0] + g[0], p0[1] + g[1]];
+                    bytemuck::cast_slice(&[out])[0]
+                })
                 .collect();
 
             Ok(results)

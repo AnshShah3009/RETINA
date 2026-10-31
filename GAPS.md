@@ -269,14 +269,14 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (42 open, was 86)
+## (g) Second review, 2026-10-31 — findings (41 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
 features/imgproc, `g-i` io/runtime/distributed/video/photo/videoio, `g-m` slam/rendering/
 plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
-### (g1) hal (5 open, was 12)
+### (g1) hal (4 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -286,7 +286,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-h4 | `cpu/compute_context_impl.rs` `tsdf_extract_mesh` | **CLOSED.** Corners at voxel centres and unobserved cells skipped on CPU and in the GPU marching-cubes shaders: wall at z=0.4 meshes to 726 vertices all at 0.400 (was 3036 incl. a phantom at 0.5). Pinned by `cv-hal/tests/tsdf_extract_mesh_surface.rs`. Was: vertex positions use `i*vs` while integration uses `(i+0.5)*vs` (half-voxel shift), and zero-weight corners are meshed → phantom back surface (wall at z=0.4 gives vertices at 0.375 and 0.471) | was HIGH — fixed | CONFIRMED |
 | g-h5 | `cpu/compute_context_impl.rs` `hough_lines` | **CLOSED.** rayon `fold`/`reduce`: one accumulator per task, not per row. Was: one full accumulator allocated per image row (~3.4 GB at 1080p) | was HIGH — fixed | ARGUED |
 | g-h6 | `cpu/compute_context_impl.rs` `hough_lines` | **CLOSED.** OpenCV `HoughLinesStandard` binning + `findLocalMaximums` 4-neighbour test, sorted by votes; matches `cv2.HoughLines` exactly on the pinned case (`tests/second_review_cpu_fixes.rs`). Was: no peak suppression (GPU path has 3x3 NMS): one line returns 3 | was MED — fixed | CONFIRMED |
-| g-h7 | `cpu/compute_context_impl.rs` `optical_flow_lk` | sub-pixel part applied twice; 2.3 px shift oscillates 2.15…2.76 and does not converge | MED | CONFIRMED |
+| g-h7 | `cpu/compute_context_impl.rs` `optical_flow_lk` | **CLOSED.** Bouguet pyramidal LK on CPU and GPU (template at the feature's level coordinates, next frame bilinear at x + g + v, g = 2(g + v)); 2.3 px shift error 0.0042 px and stable over iterations (was oscillating 0.22–0.52). GPU kernel had the same defect, worse. Pinned by `tests/lk_subpixel_bouguet.rs`. Was: sub-pixel part applied twice; 2.3 px shift oscillates 2.15…2.76 and does not converge | was MED — fixed | CONFIRMED |
 | g-h8 | `cpu/compute_context_impl.rs` `convolve_2d`, `morphology`, `warp`, `nms`, `stereo` | interleaved multi-channel input treated as `c*h` rows → scrambled output | MED | CONFIRMED |
 | g-h9 | `cpu/compute_context_impl.rs` `stereo_match` | **CLOSED.** Best disparity starts at the NO_MATCH sentinel. Same test file. Was: pixels with no testable disparity report 0 (valid) instead of the no-match marker | was MED — fixed | CONFIRMED |
 | g-h10 | `cpu/compute_context_impl.rs` `match_descriptors` | **CLOSED.** Queries with no candidate are skipped. Same test file. Was: empty train set + ratio ≥ 1 fabricates a match to index 0 | was LOW — fixed | CONFIRMED |
