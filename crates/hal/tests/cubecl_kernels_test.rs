@@ -1599,6 +1599,30 @@ fn optimized_icp_jacobian_rows_match_cpu_and_normal_equations() {
 // behaviour, per its `BUG(original)` marker.
 // ===========================================================================
 
+/// The maximum, not a copy of the input. The old kernel wrote `values[i] =
+/// input[i]` and was named argmax. A tie keeps the smaller index, and the
+/// maximum sitting past the first block is what a per-element kernel cannot
+/// see.
+#[test]
+fn optimized_argmax_is_the_maximum_not_a_copy() {
+    let c = client();
+    let ctx = ctx_opt(&c);
+    let mut input = data(1000, 7);
+    input[17] = 4.0;
+    input[873] = 9.0;
+    input[874] = 9.0;
+    let t = up(&c, &input, vec![input.len()]);
+    let (v, i) = opt::argmax(&ctx, &t).unwrap();
+    assert!((v - 9.0).abs() < 1e-5, "value {v}");
+    assert_eq!(i, 873, "tie must keep the smaller index");
+
+    let neg = vec![-3.0f32, -0.5, -8.0, -0.5];
+    let t = up(&c, &neg, vec![neg.len()]);
+    let (v, i) = opt::argmax(&ctx, &t).unwrap();
+    assert!((v - -0.5).abs() < 1e-5, "value {v}");
+    assert_eq!(i, 1);
+}
+
 #[test]
 fn optimized_element_values_and_indices_is_a_copy_not_an_argmax() {
     let c = client();

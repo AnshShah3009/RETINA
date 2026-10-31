@@ -920,6 +920,40 @@ mod reduction_opt {
         values[idx] = input[idx];
         indices[idx] = idx as u32;
     }
+
+    /// Per-block argmax. Each unit owns `block_size` consecutive elements and
+    /// writes the largest value and its flat index. Ties keep the smaller
+    /// index. The host finishes the reduction; CubeCL 0.9 has no portable
+    /// float `fetch_max`.
+    #[cube(launch_unchecked)]
+    pub fn block_argmax_kernel(
+        input: &Tensor<f32>,
+        values: &mut Tensor<f32>,
+        indices: &mut Tensor<u32>,
+        len: usize,
+        block_size: usize,
+    ) {
+        let idx = ABSOLUTE_POS;
+        let blocks = (len + block_size - 1) / block_size;
+        if idx >= blocks {
+            terminate!();
+        }
+        let start = idx * block_size;
+        let mut best_v = input[start];
+        let mut best_i = start;
+        for i in 1..block_size {
+            let pos = start + i;
+            if pos < len {
+                let v = input[pos];
+                if v > best_v {
+                    best_v = v;
+                    best_i = pos;
+                }
+            }
+        }
+        values[idx] = best_v;
+        indices[idx] = best_i as u32;
+    }
 }
 
 /// Per-cube partial sums over `len` elements, `block_size` elements per unit.
@@ -1025,11 +1059,60 @@ pub fn histogram<R: Runtime>(
     Ok(bins)
 }
 
+/// Index and value of the largest finite element.
+///
+/// Each unit reduces a block on the device; the host reduces those partials.
+/// Ties keep the smaller index, which is what a left-to-right scan does.
+/// NaN never wins a `>` comparison, so a NaN does not hide a real maximum
+/// unless every element is NaN.
+///
+/// This is the reduction [`element_values_and_indices`] is not. That function
+/// copies the input and was the original `argmax_kernel`.
+pub fn argmax<R: Runtime>(
+    ctx: &OptimizedContext<R>,
+    input: &TensorHandle<R>,
+) -> crate::Result<(f32, u32)> {
+    let client = ctx.client();
+    let len: usize = input.shape.iter().product();
+    if len == 0 {
+        return Err(crate::Error::InvalidInput("input must be non-empty".into()));
+    }
+    let block_size = 256usize;
+    let blocks = (len + block_size - 1) / block_size;
+    let values = TensorHandle::empty(client, vec![blocks], f32_storage());
+    let indices = TensorHandle::empty(client, vec![blocks], u32_storage());
+
+    unsafe {
+        reduction_opt::block_argmax_kernel::launch_unchecked(
+            client,
+            cubes_for(blocks),
+            CubeDim::new_1d(CUBE_DIM),
+            input.as_ref().as_tensor_arg(1),
+            values.as_ref().as_tensor_arg(1),
+            indices.as_ref().as_tensor_arg(1),
+            ScalarArg::new(len),
+            ScalarArg::new(block_size),
+        )
+    }
+    .map_err(|e| launch_err("argmax", e))?;
+
+    let vals = proto::tensor_to_slice(client, &values)?;
+    let idxs = proto::tensor_to_slice_u32(client, &indices)?;
+    let mut best_v = vals[0];
+    let mut best_i = idxs[0];
+    for (&v, &i) in vals.iter().zip(&idxs) {
+        if v > best_v || (v == best_v && i < best_i) {
+            best_v = v;
+            best_i = i;
+        }
+    }
+    Ok((best_v, best_i))
+}
+
 /// Copy every element into `values` and its flat index into `indices`.
 ///
 /// BUG(original): this function was called `argmax_kernel` and did exactly
-/// this. It is not argmax and does not claim to be — see
-/// [`reduction_opt::values_and_indices_kernel`]. It is kept only so the port is
+/// this. It is not argmax — [`argmax`] is. It is kept so the port stays
 /// complete; nothing should depend on it.
 pub fn element_values_and_indices<R: Runtime>(
     ctx: &OptimizedContext<R>,
