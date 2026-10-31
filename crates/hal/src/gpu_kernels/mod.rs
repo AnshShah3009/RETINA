@@ -13,6 +13,45 @@ pub fn dispatch_size_1d(count: u32) -> u32 {
     count.div_ceil(WORKGROUP_SIZE_1D)
 }
 
+/// WebGPU's guaranteed `maxComputeWorkgroupsPerDimension`. The device is
+/// requested with downlevel defaults, so this is the cap on every axis.
+pub const MAX_WORKGROUPS_PER_DIM: u32 = 65535;
+
+/// Spread `groups` workgroups of a 1-D problem over x and y so neither axis
+/// exceeds [`MAX_WORKGROUPS_PER_DIM`].
+///
+/// Returns `(groups, 1, 1)` when it fits, otherwise
+/// `(65535, ceil(groups / 65535), 1)`. The 2-D grid may contain up to 65534
+/// surplus workgroups at the tail, so the shader must linearise and
+/// bounds-check:
+///
+/// ```wgsl
+/// @builtin(global_invocation_id) gid: vec3<u32>,
+/// @builtin(num_workgroups) nwg: vec3<u32>,
+/// let idx = gid.x + gid.y * (nwg.x * WG_SIZE);
+/// if (idx >= n) { return; }
+/// ```
+///
+/// or, for one-workgroup-per-item kernels,
+/// `let wg = wid.x + wid.y * nwg.x; if (wg >= n_groups) { return; }`.
+pub fn dispatch_groups_1d(groups: u32) -> (u32, u32, u32) {
+    if groups <= MAX_WORKGROUPS_PER_DIM {
+        (groups, 1, 1)
+    } else {
+        (
+            MAX_WORKGROUPS_PER_DIM,
+            groups.div_ceil(MAX_WORKGROUPS_PER_DIM),
+            1,
+        )
+    }
+}
+
+/// Dispatch size for `count` invocations at `workgroup_size` per workgroup,
+/// split over x and y by [`dispatch_groups_1d`].
+pub fn dispatch_1d(count: u32, workgroup_size: u32) -> (u32, u32, u32) {
+    dispatch_groups_1d(count.div_ceil(workgroup_size))
+}
+
 pub fn dispatch_size_2d(width: u32, height: u32) -> (u32, u32) {
     (
         width.div_ceil(WORKGROUP_SIZE_2D),

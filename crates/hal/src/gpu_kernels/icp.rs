@@ -94,8 +94,8 @@ pub fn icp_correspondences(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (num_src as u32).div_ceil(64);
-        pass.dispatch_workgroups(x, 1, 1);
+        let (x, y, z) = super::dispatch_1d(num_src, 64);
+        pass.dispatch_workgroups(x, y, z);
     }
     ctx.submit(encoder);
 
@@ -261,8 +261,8 @@ pub fn icp_accumulate(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (num_corr as u32).div_ceil(256);
-        pass.dispatch_workgroups(x, 1, 1);
+        let (x, y, z) = super::dispatch_1d(num_corr as u32, 256);
+        pass.dispatch_workgroups(x, y, z);
     }
     ctx.submit(encoder);
 

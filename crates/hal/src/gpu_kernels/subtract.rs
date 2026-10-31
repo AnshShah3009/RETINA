@@ -58,8 +58,8 @@ pub fn subtract(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let workgroups = (size as u32).div_ceil(256);
-        pass.dispatch_workgroups(workgroups, 1, 1);
+        let (x, y, z) = super::dispatch_1d(size as u32, 256);
+        pass.dispatch_workgroups(x, y, z);
     }
     ctx.submit(encoder);
 

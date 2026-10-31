@@ -112,8 +112,8 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (num_pixels as u32).div_ceil(64);
-        pass.dispatch_workgroups(x, 1, 1);
+        let (x, y, z) = super::dispatch_1d(num_pixels as u32, 64);
+        pass.dispatch_workgroups(x, y, z);
     }
     ctx.submit(encoder);
 

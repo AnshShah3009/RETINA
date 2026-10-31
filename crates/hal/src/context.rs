@@ -75,7 +75,12 @@ pub trait ComputeContext: Send + Sync {
     /// * `name`: Name of the kernel (e.g., "gaussian_blur")
     /// * `buffers`: List of buffers (input/output)
     /// * `uniforms`: Uniform data (constants)
-    /// * `workgroups`: (x, y, z) dispatch size
+    /// * `workgroups`: (x, y, z) dispatch size. No axis may exceed 65535. The
+    ///   built-in 1-D kernels (e.g. `"threshold"`, `"color_cvt"`) linearise a
+    ///   2-D grid, so size them with
+    ///   [`crate::gpu_kernels::dispatch_1d`]`(invocations, 64)`; the packed u8
+    ///   kernels handle four pixels per invocation, so `invocations` is
+    ///   `len.div_ceil(4)`.
     fn dispatch<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
         name: &str,

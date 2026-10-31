@@ -269,18 +269,18 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (17 open, was 91)
+## (g) Second review, 2026-10-31 — findings (16 open, was 91)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
 features/imgproc, `g-i` io/runtime/distributed/video/photo/videoio, `g-m` slam/rendering/
 plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
-### (g1) hal (1 open, was 12)
+### (g1) hal (0 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
-| g-h1 | `gpu_kernels/{threshold,color,icp,subtract,pointcloud_transform}.rs` | 1-D dispatches exceed wgpu's 65535-group limit: `threshold` / `cvt_color` on a 3840x2160 frame panic with `dispatch group size dimension ([129600, 1, 1]) must be less or equal to 65535` | HIGH | CONFIRMED |
+| g-h1 | `gpu_kernels/{threshold,color,icp,subtract,pointcloud_transform}.rs` | **CLOSED.** `dispatch_1d` helper splits oversized grids into 2-D (65535 × n) with `num_workgroups`-based indexing in the shaders; 4K threshold/cvt_color/subtract/transform/ICP pass (`tests/gpu_dispatch_limits.rs`, 13 tests on real hardware). Was: 1-D dispatches exceed wgpu's 65535-group limit: `threshold` / `cvt_color` on a 3840x2160 frame panic with `dispatch group size dimension ([129600, 1, 1]) must be less or equal to 65535` | was HIGH — fixed | CONFIRMED |
 | g-h2 | `cpu/border.rs` | **CLOSED.** Was: `Reflect` and `Reflect101` swapped vs OpenCV (cb25ce4 swapped them and pinned the swap in tests); `cv-imgproc`'s own mapping was right. Now the same periodic folding as imgproc; test tables are `cv2.copyMakeBorder` output, including coordinates more than one width outside | was HIGH — fixed | CONFIRMED vs `cv2.copyMakeBorder` |
 | g-h3 | `cpu/compute_context_impl.rs` `akaze_contrast_k` | **CLOSED.** Zero gradients excluded on CPU and in the GPU shader (OpenCV's `compute_k_percentile`), 0.03 fallback when none remain. Pinned by `tests/second_review_cpu_fixes.rs`. Was: 70th-percentile gradient over all pixels is 0 on mostly flat images; diffusion then divides `0/0` → 4032/4096 pixels NaN | was HIGH — fixed | CONFIRMED |
 | g-h4 | `cpu/compute_context_impl.rs` `tsdf_extract_mesh` | **CLOSED.** Corners at voxel centres and unobserved cells skipped on CPU and in the GPU marching-cubes shaders: wall at z=0.4 meshes to 726 vertices all at 0.400 (was 3036 incl. a phantom at 0.5). Pinned by `cv-hal/tests/tsdf_extract_mesh_surface.rs`. Was: vertex positions use `i*vs` while integration uses `(i+0.5)*vs` (half-voxel shift), and zero-weight corners are meshed → phantom back surface (wall at z=0.4 gives vertices at 0.375 and 0.471) | was HIGH — fixed | CONFIRMED |
