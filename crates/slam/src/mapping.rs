@@ -23,10 +23,15 @@ impl MapExt for WorldMap {
         descs
     }
 
-    fn add_point(&mut self, point: MapPoint) {
+    fn add_point(&mut self, mut point: MapPoint) {
+        // `id` is the current index. `created_at` is a birth counter that
+        // culling does not reuse, and `born_kf` is the newest observation the
+        // caller already recorded (the keyframe that created the point).
+        point.born_kf = point.observations.iter().map(|o| o.0).max().unwrap_or(0);
+        point.id = self.points.len() as u64;
+        point.created_at = self.next_point_id;
+        self.next_point_id = self.next_point_id.saturating_add(1);
         self.points.push(Arc::new(RwLock::new(point)));
-        // The cache is now stale. The map only grows by appending, so comparing
-        // the length is sufficient to detect that.
         self.descriptor_cache = None;
     }
 }
@@ -75,7 +80,8 @@ impl WorldMap {
     /// Returns a cached buffer when one is valid. The tracker binds this as the
     /// map's descriptor tensor, and used to rebuild it every frame - a
     /// `flat_map` clone of every descriptor in the map, O(total map points) per
-    /// frame, for a map that only ever grows.
+    /// frame. Adding a point or culling clears the cache; an in-place
+    /// descriptor edit is caught by comparing bytes.
     pub fn descriptor_bytes(&mut self) -> Arc<Vec<u8>> {
         let n = self.points.len();
         if self.descriptor_cache_len == n {

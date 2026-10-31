@@ -144,7 +144,11 @@ impl Tracker {
     ///   triangulated against the previous keyframes from features not yet in
     ///   the map, then a local bundle adjustment refines the newest keyframes
     ///   and their points (see [`Tracker::local_ba_window`]), and the frame's
-    ///   adjusted pose is returned.
+    ///   adjusted pose is returned. Two map points that project onto the same
+    ///   feature are merged, and a point that still has only its creating
+    ///   observations two keyframes later is removed. RGB-D keeps every depth
+    ///   point: one measurement already places it, and merging neighbours
+    ///   there made the trajectory drift.
     ///
     /// Returns `Err` for every frame without a measured pose (initialising,
     /// tracking lost); [`Tracker::state`] says which.
@@ -249,6 +253,15 @@ impl Tracker {
                     };
                 }
             }
+            // After the pose is settled: fusion uses the refined points, and
+            // culling removes the observations the adjustment just rejected.
+            // Compaction renumbers every point, so the inlier list (indices
+            // into the map as it was) is translated by birth id.
+            let births = birth_ids(map, &tracked.map_indices);
+            maintain_map(&self.intrinsics, map, depth.is_none());
+            let result = (frame.pose, live_indices(map, &births));
+            self.push_frame(frame);
+            return Ok(result);
         }
 
         let result = (frame.pose, tracked.map_indices);
@@ -496,6 +509,11 @@ impl Tracker {
                     let kf = map.keyframes[1].read().unwrap_or_else(|e| e.into_inner());
                     frame.pose = local_map::keyframe_world_to_camera(&kf.pose);
                 }
+                // Two keyframes is not old enough to cull a point for lack of
+                // reobservation; this removes points fusion emptied.
+                let births = birth_ids(map, &created);
+                maintain_map(&self.intrinsics, map, true);
+                created = live_indices(map, &births);
                 self.state = TrackingState::Tracking;
                 let pose = frame.pose;
                 // The reference is the world origin, so the motion from it is
@@ -717,6 +735,49 @@ fn correspondences(
             (p.world_pos.cast::<f64>(), Point2::new(kp.x, kp.y))
         })
         .unzip()
+}
+
+/// Birth ids of `indices`, so the list can be translated after culling
+/// compacts the map. A point culling removes simply disappears from the result.
+fn birth_ids(map: &WorldMap, indices: &[usize]) -> Vec<u64> {
+    indices
+        .iter()
+        .filter_map(|&i| {
+            map.points
+                .get(i)
+                .map(|p| p.read().unwrap_or_else(|e| e.into_inner()).created_at)
+        })
+        .collect()
+}
+
+fn live_indices(map: &WorldMap, births: &[u64]) -> Vec<usize> {
+    let mut at = std::collections::HashMap::with_capacity(map.points.len());
+    for (i, p) in map.points.iter().enumerate() {
+        let born = p.read().unwrap_or_else(|e| e.into_inner()).created_at;
+        at.insert(born, i);
+    }
+    births.iter().filter_map(|b| at.get(b).copied()).collect()
+}
+
+/// Fuse duplicates into the newest keyframe and drop points that were never
+/// seen again.
+///
+/// Monocular map maintenance after a new keyframe.
+///
+/// Points that project onto the same feature are merged, and a point that
+/// still has only its creating observations (a triangulated pair; it must be
+/// seen from one more keyframe) two keyframes later is removed. RGB-D does
+/// neither. A depth point is already metric, and on the 20-frame sweep
+/// merging neighbours moved the camera from 2.9 cm / 0.39° to 4.8 cm / 0.65°.
+/// See [`local_map::fuse_keyframe`] and [`local_map::cull_under_observed`].
+fn maintain_map(k: &CameraIntrinsics, map: &mut WorldMap, monocular: bool) {
+    if !monocular {
+        return;
+    }
+    if let Some(idx) = map.keyframes.len().checked_sub(1) {
+        local_map::fuse_keyframe(k, map, idx);
+    }
+    local_map::cull_under_observed(map, 3);
 }
 
 /// Whether a tracked frame should become a keyframe.
