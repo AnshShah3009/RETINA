@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (48 open, was 77)
+## (g) Second review, 2026-10-31 — findings (47 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -364,7 +364,7 @@ calibration, all of `crates/sfm`.
 | g-c5 | `calib3d/src/pnp.rs` PnP RANSAC | final refinement only with ≥ 6 inliers; 4–5 return the raw P3P pose | MED | ARGUED |
 | g-c6 | `core/src/robust.rs` adaptive iterations | all-inlier case never lowers the iteration bound | LOW | ARGUED |
 
-### (g6) 3d / registration / pointcloud (7 open, was 12)
+### (g6) 3d / registration / pointcloud (6 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -374,7 +374,7 @@ calibration, all of `crates/sfm`.
 | g-d4 | `registration/mod.rs` `get_information_matrix_from_point_clouds` | **CLOSED.** Open3D's Σ GᵀG with G = [-[q]× │ I] and a `max_correspondence_distance` parameter. Pinned by `tests/information_matrix_open3d.rs`. Was: not Open3D's `Σ GᵀG`, `G = [-[q]x │ I]`: zero rotation information at perfect alignment, origin-dependent | was HIGH — fixed | CONFIRMED |
 | g-d5 | `3d/src/raycasting/mod.rs` `point_inside_mesh_bvh` | shared-edge hits counted twice: cube centre reported outside | MED | CONFIRMED |
 | g-d6 | `3d/src/gpu/mod.rs` `compute_normals_cpu` | 27-voxel neighbourhood with a global voxel size; sparse regions silently get `(0,0,1)` | MED | CONFIRMED |
-| g-d7 | `registration/mod.rs` point-to-plane ICP | rmse/fitness measured before the update but reported with it; no relative convergence | MED | CONFIRMED |
+| g-d7 | `registration/mod.rs` point-to-plane ICP | **CLOSED.** Metrics measured after the update (point-to-point rmse) and Open3D's 1e-6 relative stop. Pinned by `tests/icp_reports_open3d_metrics.rs`. Was: rmse/fitness measured before the update but reported with it; no relative convergence | was MED — fixed | CONFIRMED |
 | g-d8 | `pointcloud/src/point_cloud.rs` `voxel_down_sample` | **CLOSED.** Non-finite points skipped before bucketing. Pinned by `cv-pointcloud/tests/voxel_down_sample_nan.rs`. Was: NaN point joins voxel (0,0,0) and poisons a real point's centroid | was MED — fixed | CONFIRMED |
 | g-d9 | `3d/src/spatial/kd_tree.rs` `search_radius` | **CLOSED.** Radius prune is inclusive (`<=`) like the accept test. Pinned by `cv-3d/tests/kd_tree_radius_boundary.rs`. Was: strict prune vs inclusive accept: 2 of 3 points at exactly r returned | was LOW — fixed | CONFIRMED |
 | g-d10 | `3d/src/spatial/octree.rs` `insert` | out-of-bounds points dropped silently | LOW | CONFIRMED |

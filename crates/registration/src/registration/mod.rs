@@ -33,18 +33,18 @@ use rayon::prelude::*;
 
 /// Nearest-neighbor search structure for point cloud registration.
 /// Uses a balanced KDTree for O(log N) queries.
-struct SimpleNN {
+pub(crate) struct SimpleNN {
     tree: cv_3d::spatial::KDTree<usize>,
 }
 
 impl SimpleNN {
-    fn new(points: Vec<Point3<f32>>) -> Self {
+    pub(crate) fn new(points: Vec<Point3<f32>>) -> Self {
         let mut items: Vec<_> = points.iter().enumerate().map(|(i, &p)| (p, i)).collect();
         let tree = cv_3d::spatial::KDTree::build(&mut items);
         Self { tree }
     }
 
-    fn nearest(&self, query: &Point3<f32>) -> Option<(Point3<f32>, usize, f32)> {
+    pub(crate) fn nearest(&self, query: &Point3<f32>) -> Option<(Point3<f32>, usize, f32)> {
         self.tree.nearest_neighbor(query)
     }
 }
@@ -58,7 +58,8 @@ impl SimpleNN {
 ///
 /// * `transformation` - 4×4 SE(3) transformation matrix (rotation + translation)
 /// * `fitness` - Fraction of inlier correspondences (0-1 range)
-/// * `inlier_rmse` - Root mean square error of point-to-plane residuals
+/// * `inlier_rmse` - Point-to-point RMSE over the inlier correspondences, as
+///   Open3D reports it (equal to [`evaluate_registration`] on `transformation`)
 /// * `num_iterations` - Number of iterations performed before convergence
 #[derive(Debug, Clone)]
 pub struct ICPResult {
@@ -66,7 +67,7 @@ pub struct ICPResult {
     pub transformation: Matrix4<f32>,
     /// Registration fitness score: fraction of points with valid correspondences (0-1)
     pub fitness: f32,
-    /// Root mean square error of inlier point-to-plane distances
+    /// Point-to-point RMSE of the inlier correspondences at `transformation`
     pub inlier_rmse: f32,
     /// Iterations until convergence
     pub num_iterations: usize,
@@ -132,194 +133,201 @@ pub fn registration_icp_point_to_plane(
     init_transformation: &Matrix4<f32>,
     max_iterations: usize,
 ) -> Option<ICPResult> {
-    // Build simple nearest neighbor structure for target
+    if source.points.is_empty() || target.points.is_empty() {
+        return None;
+    }
     let target_nn = SimpleNN::new(target.points.clone());
+    let source_len = source.points.len();
 
+    // The loop follows Open3D's `RegistrationICP`: evaluate at the current pose,
+    // estimate an update from *those* correspondences, apply it, re-evaluate at
+    // the new pose, and stop once fitness and RMSE both change by less than
+    // `RELATIVE_FITNESS` / `RELATIVE_RMSE`.
+    //
+    // Previously fitness and rmse were accumulated while linearising - at the
+    // pose *before* the update - but stored next to the pose *after* it, and the
+    // rmse was the point-to-plane residual. Neither matched
+    // `evaluate_registration` on the returned transform (measured on a wavy
+    // surface after one iteration: reported 1.43e-2, actual 1.03e-6), and the only stop
+    // was `rmse < 1e-6`, which noisy data never reaches.
     let mut transformation = *init_transformation;
-    let mut best_fitness = 0.0;
-    let mut best_rmse = f32::MAX;
-    // The transform the best metrics were measured at. Without this the
-    // function returned `transformation` - the *last* iterate - next to metrics
-    // recorded for whichever iterate had the best fitness, so `inlier_rmse` and
-    // `num_iterations` described a different transform from the one returned.
-    // Measured: reported rmse overstated the achieved error by 5-6 orders of
-    // magnitude, and in one case the reported `fitness` was not one the
-    // returned transform achieved at all.
-    let mut best_transformation = *init_transformation;
-    let mut final_iterations = 0;
+    let mut correspondences = find_correspondences(
+        source,
+        &target_nn,
+        &transformation,
+        max_correspondence_distance,
+    );
+
+    // Too few correspondences to constrain a rigid transform. Returning `None`
+    // is what this function's documentation promises for "too few
+    // correspondences"; a result with `fitness 0.0` and the input transform
+    // unchanged reads as a successful registration that found nothing.
+    if correspondences.len() < 3 {
+        return None;
+    }
+    let (mut fitness, mut rmse) = fitness_and_rmse(&correspondences, source_len);
+
+    // Every candidate below is a pose together with the metrics measured *at
+    // that pose*, so whichever is returned, its numbers describe it.
+    //
+    // The best rather than the last is kept as a guard: a pseudo-inverse step
+    // on a rank-deficient system can overshoot (see the `_ctx` sibling), and
+    // that must not discard a better pose that was already measured. Ties in
+    // fitness go to the lower rmse, since fitness saturates at 1.0.
+    let mut best = (transformation, fitness, rmse);
+    let mut iterations = 0;
 
     for iter in 0..max_iterations {
-        // Find correspondences (parallel for large clouds, serial for small)
-        let find_corr = |src_idx: usize, src_point: &Point3<f32>| -> Option<(usize, usize, f32)> {
-            let transformed = transformation.transform_point(src_point);
-            target_nn
-                .nearest(&transformed)
-                .and_then(|(_, target_idx, dist_sq)| {
-                    let dist = dist_sq.sqrt();
-                    if dist <= max_correspondence_distance {
-                        Some((src_idx, target_idx, dist))
-                    } else {
-                        None
-                    }
-                })
-        };
-        let correspondences: Vec<(usize, usize, f32)> = if source.points.len() > 5000 {
-            source
-                .points
-                .par_iter()
-                .enumerate()
-                .filter_map(|(i, p)| find_corr(i, p))
-                .collect()
-        } else {
-            source
-                .points
-                .iter()
-                .enumerate()
-                .filter_map(|(i, p)| find_corr(i, p))
-                .collect()
-        };
-
-        // Too few correspondences to constrain a rigid transform. Returning
-        // `None` is what this function's own documentation promises for "too few
-        // correspondences", and it is the only honest answer: `break` fell
-        // through to the tail, which reported `fitness 0.0` and
-        // `inlier_rmse f32::MAX` with the input transform unchanged - a result
-        // that reads as a successful registration that found nothing.
-        //
-        // The `n_used < 3` and `correspondences.is_empty()` guards further down
-        // were unreachable for this case, because this fired first.
-        if correspondences.len() < 3 {
-            return None;
-        }
-
-        // Compute point-to-plane error
+        // Point-to-plane normal equations at the current pose.
         let mut ata = nalgebra::Matrix6::<f32>::zeros();
         let mut atb = nalgebra::Vector6::<f32>::zeros();
-        let mut total_residual = 0.0;
 
         // Correspondences that actually contribute geometry. A target without
-        // normals gives none, and the accumulation below is skipped for every
-        // one - leaving `ata` a zero matrix, so `try_inverse()` returns `None`,
-        // the update is silently skipped, and the function used to go on to
-        // report the caller's initial transform with `fitness: 1.0` and
-        // `inlier_rmse: 0.0`. A perfect score from a result that never moved.
-        // A target cloud with no normals is the *normal* case, since `PointCloud`
-        // makes the field optional.
+        // normals gives none, `ata` stays zero, and the solve would leave the
+        // pose untouched while the metrics reported a perfect fit. A target
+        // cloud with no normals is the *normal* case, since `PointCloud`
+        // makes the field optional, so it is reported as a failure.
         let mut n_used = 0usize;
-
-        for (src_idx, tgt_idx, _) in &correspondences {
-            let src_point = source.points[*src_idx];
-            let tgt_point = target.points[*tgt_idx];
-            let tgt_normal = target.normals.as_ref().map(|n| &n[*tgt_idx]);
-
-            if let Some(normal) = tgt_normal {
+        if let Some(normals) = target.normals.as_ref() {
+            for &(src_idx, tgt_idx, _) in &correspondences {
                 n_used += 1;
-                let transformed = transformation.transform_point(&src_point);
-                let diff = transformed - tgt_point;
-                let residual = diff.dot(normal);
-
-                // Compute Jacobian
-                let p = transformed.coords;
-                let n = normal;
-                let cross = p.cross(n);
-
-                let jacobian = nalgebra::Vector6::new(n.x, n.y, n.z, cross.x, cross.y, cross.z);
-
+                let (jacobian, residual) = point_to_plane_row(
+                    &transformation.transform_point(&source.points[src_idx]),
+                    &target.points[tgt_idx],
+                    &normals[tgt_idx],
+                );
                 ata += jacobian * jacobian.transpose();
                 atb += jacobian * residual;
-                total_residual += residual * residual;
             }
         }
-
-        // Solve for update
-        // A singular `A` means the correspondences cannot determine a rigid
-        // motion - a collinear target, a planar one with identical normals, any
-        // degenerate geometry. Skipping the solve silently was the defect: the
-        // loop then fell through, `fitness` was computed purely from how many
-        // correspondences existed, and the caller got `fitness 1.0` with the
-        // *input* transform and the input's error still unfixed.
-        //
-        // The pseudo-inverse recovers the solvable subspace and converges the
-        // observed cases exactly, so this is the useful behaviour rather than
-        // refusing outright. If even that fails, `None` - never a perfect score
-        // for a transform that never moved.
-        match ata.try_inverse() {
-            Some(ata_inv) => {
-                let delta = -(ata_inv * atb);
-                let update = exponential_map_se3(&delta);
-                transformation = update * transformation;
-            }
-            None => {
-                // `pseudo_inverse` returns a `Result` here. If even that fails
-                // the geometry is beyond recovery and `None` is the only honest
-                // answer.
-                // The epsilon is relative to the largest singular value, so a
-                // single value works across the whole range of problem scales.
-                let Ok(pinv) = ata.clone().pseudo_inverse(1e-6) else {
-                    return None;
-                };
-                let delta = -(pinv * atb);
-                let update = exponential_map_se3(&delta);
-                transformation = update * transformation;
-            }
-        }
-
-        // No usable geometry: a point-to-plane residual needs at least three
-        // independent constraints. Returning `None` says "this registration did
-        // not happen", which is the truth. Returning the input transform with a
-        // perfect score is a lie a caller cannot detect.
         if n_used < 3 {
             return None;
         }
 
-        let source_len = source.points.len();
-        if correspondences.is_empty() || source_len == 0 {
+        // A singular `A` means the correspondences cannot determine a rigid
+        // motion - a collinear target, a planar one with identical normals.
+        // The pseudo-inverse recovers the solvable subspace; if even that fails,
+        // `None` - never a perfect score for a transform that never moved.
+        let delta = match ata.try_inverse() {
+            Some(ata_inv) => -(ata_inv * atb),
+            None => {
+                let Ok(pinv) = ata.clone().pseudo_inverse(1e-6) else {
+                    return None;
+                };
+                -(pinv * atb)
+            }
+        };
+        if !delta.iter().all(|v| v.is_finite()) {
             return None;
         }
+        transformation = exponential_map_se3(&delta) * transformation;
+        iterations = iter + 1;
 
-        // Divided by the number of correspondences that actually contributed a
-        // residual, not the number offered. `total_residual` accumulated only
-        // from those, so dividing by the full count understated the error
-        // whenever some had no normal - the same class of quiet wrongness as
-        // the update being skipped.
-        let rmse = (total_residual / n_used as f32).sqrt();
-        // Fraction of the source that found a correspondence, which is what
-        // fitness means here and is independent of `n_used`.
-        let fitness = correspondences.len() as f32 / source_len as f32;
-
-        // Track the *best fit*, not the best fitness.
-        //
-        // `fitness` is the fraction of source points that found a
-        // correspondence, so it saturates at 1.0 as soon as every point matches
-        // and stays there. Comparing on it meant the record was frozen at the
-        // first iterate: with `fitness > best_fitness` false from iteration 1
-        // onward, the function reported iteration 0's rmse next to the final
-        // transform - overstated by 5-6 orders of magnitude, and in one case a
-        // `fitness` the returned transform did not achieve.
-        //
-        // A lower rmse is unambiguously a better fit, so that is what decides.
-        // Ties still prefer the higher fitness.
-        let better = fitness > best_fitness || (fitness == best_fitness && rmse < best_rmse);
-        if better {
-            best_fitness = fitness;
-            best_rmse = rmse;
-            best_transformation = transformation;
-            final_iterations = iter + 1;
+        // Re-evaluate at the pose just reached.
+        let next = find_correspondences(
+            source,
+            &target_nn,
+            &transformation,
+            max_correspondence_distance,
+        );
+        if next.len() < 3 {
+            // The step overshot the gate: nothing left to step from. Keep the
+            // best pose that was measured rather than inventing a score.
+            break;
         }
+        let (next_fitness, next_rmse) = fitness_and_rmse(&next, source_len);
+        let converged = (next_fitness - fitness).abs() < RELATIVE_FITNESS
+            && (next_rmse - rmse).abs() < RELATIVE_RMSE;
+        correspondences = next;
+        fitness = next_fitness;
+        rmse = next_rmse;
 
-        if rmse < 1e-6 {
+        if fitness > best.1 || (fitness == best.1 && rmse < best.2) {
+            best = (transformation, fitness, rmse);
+        }
+        if converged {
             break;
         }
     }
 
     Some(ICPResult {
-        // Only the recorded best, never the live iterate: the two can differ,
-        // and returning the live one makes every reported metric a lie.
-        transformation: best_transformation,
-        fitness: best_fitness,
-        inlier_rmse: best_rmse,
-        num_iterations: final_iterations,
+        transformation: best.0,
+        fitness: best.1,
+        inlier_rmse: best.2,
+        num_iterations: iterations,
     })
+}
+
+/// Open3D's default `ICPConvergenceCriteria::relative_fitness`.
+const RELATIVE_FITNESS: f32 = 1e-6;
+/// Open3D's default `ICPConvergenceCriteria::relative_rmse`.
+const RELATIVE_RMSE: f32 = 1e-6;
+
+/// One point-to-plane row for a source point already moved to `p`: the
+/// Jacobian with respect to a left-multiplied twist `[v; w]` (translation
+/// first, as consumed by [`exponential_map_se3`]) and the signed residual
+/// `(p - q) . n`.
+///
+/// For `p' = exp([v; w]) p ~ p + w x p + v`, the residual changes by
+/// `n . v + n . (w x p) = n . v + w . (p x n)`, hence `J = [n; p x n]`.
+pub(crate) fn point_to_plane_row(
+    p: &Point3<f32>,
+    q: &Point3<f32>,
+    n: &nalgebra::Vector3<f32>,
+) -> (nalgebra::Vector6<f32>, f32) {
+    let cross = p.coords.cross(n);
+    (
+        nalgebra::Vector6::new(n.x, n.y, n.z, cross.x, cross.y, cross.z),
+        (p - q).dot(n),
+    )
+}
+
+/// Nearest-neighbour correspondences of `source` under `transformation`, as
+/// `(source index, target index, squared distance)`, keeping those strictly
+/// closer than `max_correspondence_distance`. Ordered by source index, so
+/// every consumer sums in the same order and gets bit-identical metrics.
+pub(crate) fn find_correspondences(
+    source: &PointCloud,
+    target_nn: &SimpleNN,
+    transformation: &Matrix4<f32>,
+    max_correspondence_distance: f32,
+) -> Vec<(usize, usize, f32)> {
+    let find = |(i, p): (usize, &Point3<f32>)| {
+        let moved = transformation.transform_point(p);
+        target_nn
+            .nearest(&moved)
+            .filter(|&(_, _, d2)| d2.sqrt() < max_correspondence_distance)
+            .map(|(_, j, d2)| (i, j, d2))
+    };
+    if source.points.len() > 5000 {
+        source
+            .points
+            .par_iter()
+            .enumerate()
+            .filter_map(find)
+            .collect()
+    } else {
+        source.points.iter().enumerate().filter_map(find).collect()
+    }
+}
+
+/// Open3D's registration metrics for a correspondence set: `fitness` is the
+/// fraction of source points with a correspondence, `inlier_rmse` the
+/// point-to-point RMSE over them (`INFINITY` when there are none - see
+/// [`evaluate_registration`]).
+pub(crate) fn fitness_and_rmse(
+    correspondences: &[(usize, usize, f32)],
+    source_len: usize,
+) -> (f32, f32) {
+    if source_len == 0 {
+        return (0.0, f32::INFINITY);
+    }
+    let fitness = correspondences.len() as f32 / source_len as f32;
+    if correspondences.is_empty() {
+        return (fitness, f32::INFINITY);
+    }
+    let total: f32 = correspondences.iter().map(|c| c.2).sum();
+    (fitness, (total / correspondences.len() as f32).sqrt())
 }
 
 /// Standard point-to-plane ICP with context-aware acceleration
@@ -342,6 +350,7 @@ pub fn registration_icp_point_to_plane_ctx(
     // different pose than the one returned.
     let mut best_transformation = *init_transformation;
     let mut final_iterations = 0;
+    let mut prev_metrics: Option<(f32, f32)> = None;
 
     // Convert point clouds to tensors for GPU processing
     let source_tensor: cv_core::CpuTensor<f32> = Tensor::from_vec(
@@ -568,7 +577,12 @@ pub fn registration_icp_point_to_plane_ctx(
             final_iterations = iter + 1;
         }
 
-        if rmse < 1e-6 {
+        // Open3D's relative criteria, as in the CPU function.
+        let converged = prev_metrics.is_some_and(|(f, r): (f32, f32)| {
+            (fitness - f).abs() < RELATIVE_FITNESS && (rmse - r).abs() < RELATIVE_RMSE
+        });
+        prev_metrics = Some((fitness, rmse));
+        if converged || rmse < 1e-6 {
             break;
         }
     }
@@ -740,39 +754,23 @@ pub fn evaluate_registration(
     transformation: &Matrix4<f32>,
     max_correspondence_distance: f32,
 ) -> (f32, f32) {
-    let target_nn = SimpleNN::new(target.points.clone());
-
-    let mut inlier_count = 0;
-    let mut total_error = 0.0;
-
     // Nothing on either side is a registration that was never attempted, so it is
     // not a perfect one. The empty-source case used to fall through to the tail
     // and return `(0.0, 0.0)`.
     if source.points.is_empty() || target.points.is_empty() {
         return (0.0, f32::INFINITY);
     }
-
-    for point in &source.points {
-        let transformed = transformation.transform_point(point);
-        if let Some((_, _, dist_sq)) = target_nn.nearest(&transformed) {
-            let dist = dist_sq.sqrt();
-            if dist < max_correspondence_distance {
-                inlier_count += 1;
-                total_error += dist_sq;
-            }
-        }
-    }
-
-    let fitness = inlier_count as f32 / source.points.len() as f32;
-    let rmse = if inlier_count > 0 {
-        (total_error / inlier_count as f32).sqrt()
-    } else {
-        // Zero inliers is zero *support*, not zero error: every source point was
-        // found and every one of them was beyond the gate. See the doc comment.
-        f32::INFINITY
-    };
-
-    (fitness, rmse)
+    let target_nn = SimpleNN::new(target.points.clone());
+    // Same correspondence search and the same reduction the ICP loops report
+    // through, so their metrics and this function agree exactly. Zero inliers
+    // is zero *support*, not zero error: `INFINITY` (see the doc comment).
+    let correspondences = find_correspondences(
+        source,
+        &target_nn,
+        transformation,
+        max_correspondence_distance,
+    );
+    fitness_and_rmse(&correspondences, source.points.len())
 }
 mod mod_test;
 
