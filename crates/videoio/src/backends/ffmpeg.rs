@@ -11,8 +11,9 @@ pub struct NativeFfmpegCapture {
     stream_index: usize,
     width: u32,
     height: u32,
-    scaler: ffmpeg::software::scaling::Context,
     current_frame: Option<GrayImage>,
+    /// `send_eof` has been issued; the decoder is draining.
+    flushed: bool,
 }
 
 impl std::fmt::Debug for NativeFfmpegCapture {
@@ -48,26 +49,57 @@ impl NativeFfmpegCapture {
         let width = decoder.width();
         let height = decoder.height();
 
-        let scaler = ffmpeg::software::scaling::context::Context::get(
-            decoder.format(),
-            width,
-            height,
-            ffmpeg::format::Pixel::GRAY8,
-            width,
-            height,
-            ffmpeg::software::scaling::flag::BILINEAR,
-        )
-        .map_err(|e| VideoError::Backend(format!("Failed to initialize scaler: {}", e)))?;
-
         Ok(Self {
             ictx,
             decoder,
             stream_index,
             width,
             height,
-            scaler,
             current_frame: None,
+            flushed: false,
         })
+    }
+
+    /// Next packet of the video stream, or `None` at end of input.
+    fn next_packet(&mut self) -> Option<ffmpeg::Packet> {
+        let index = self.stream_index;
+        self.ictx
+            .packets()
+            .find(|(stream, _)| stream.index() == index)
+            .map(|(_, packet)| packet)
+    }
+
+    /// Convert a decoded frame to an unpadded GRAY8 image.
+    fn to_gray(&mut self, decoded: &ffmpeg::util::frame::Video) -> Result<GrayImage> {
+        // The swscale context is built per frame, from the frame's own format.
+        // ffmpeg-next 9's `scaling::Context` is not `Send` (it wraps a raw
+        // `*mut SwsContext`), `VideoCapture` must be, and this crate forbids
+        // `unsafe` - so it cannot be cached in the capture. Building it per
+        // frame also follows a mid-stream format change.
+        let mut scaler = ffmpeg::software::scaling::context::Context::get(
+            decoded.format(),
+            decoded.width(),
+            decoded.height(),
+            ffmpeg::format::Pixel::GRAY8,
+            self.width,
+            self.height,
+            ffmpeg::software::scaling::flag::Flags::BILINEAR,
+        )
+        .map_err(|e| VideoError::CaptureFailed(format!("Failed to initialize scaler: {}", e)))?;
+        let mut gray_frame =
+            ffmpeg::util::frame::Video::new(ffmpeg::format::Pixel::GRAY8, self.width, self.height);
+        scaler
+            .run(decoded, &mut gray_frame)
+            .map_err(|e| VideoError::CaptureFailed(format!("Scaling failed: {}", e)))?;
+        let data = gray_frame.data(0);
+        let stride = gray_frame.stride(0);
+        let (width, height) = (self.width as usize, self.height as usize);
+        let mut unpadded = Vec::with_capacity(width * height);
+        for row in 0..height {
+            unpadded.extend_from_slice(&data[row * stride..row * stride + width]);
+        }
+        GrayImage::from_raw(self.width, self.height, unpadded)
+            .ok_or_else(|| VideoError::CaptureFailed("Image creation failed".to_string()))
     }
 }
 
@@ -76,96 +108,51 @@ impl VideoCapture for NativeFfmpegCapture {
         true
     }
 
+    /// FFmpeg's send/receive loop: return any frame the decoder already holds,
+    /// and feed it a packet only when it asks for input (`EAGAIN`).
+    ///
+    /// This used to send one packet and receive at most one frame per packet.
+    /// A decoder with reordering delay (B-frames) or a packet holding several
+    /// frames (packed MPEG-4 in AVI) still has output pending when the next
+    /// packet is sent; `send_packet` then fails with `EAGAIN`, which was
+    /// reported as `CaptureFailed` and ended the stream mid-video. Frames still
+    /// buffered at end of input were also only partly drained.
     fn grab(&mut self) -> Result<()> {
-        // Read packets until a frame is decoded
-        for (stream, packet) in self.ictx.packets() {
-            if stream.index() == self.stream_index {
-                self.decoder
-                    .send_packet(&packet)
-                    .map_err(|e| VideoError::CaptureFailed(format!("Send packet failed: {}", e)))?;
-
-                let mut decoded = ffmpeg::util::frame::Video::empty();
-                if self.decoder.receive_frame(&mut decoded).is_ok() {
-                    let mut gray_frame = ffmpeg::util::frame::Video::new(
-                        ffmpeg::format::Pixel::GRAY8,
-                        self.width,
-                        self.height,
-                    );
-
-                    self.scaler
-                        .run(&decoded, &mut gray_frame)
-                        .map_err(|e| VideoError::CaptureFailed(format!("Scaling failed: {}", e)))?;
-
-                    let data = gray_frame.data(0).to_vec();
-                    let stride = gray_frame.stride(0) as usize; // Stride is usually i32/isize, cast to usize
-                    let width = self.width as usize;
-
-                    let final_data = if stride == width {
-                        data
-                    } else {
-                        // Copy row by row removing padding
-                        let height = self.height as usize;
-                        let mut unpadded = Vec::with_capacity(width * height);
-                        for i in 0..height {
-                            let start = i * stride;
-                            let end = start + width;
-                            if end <= data.len() {
-                                unpadded.extend_from_slice(&data[start..end]);
-                            }
-                        }
-                        unpadded
-                    };
-
-                    let img = GrayImage::from_raw(self.width, self.height, final_data).ok_or_else(
-                        || VideoError::CaptureFailed("Image creation failed".to_string()),
-                    )?;
-
-                    self.current_frame = Some(img);
+        loop {
+            let mut decoded = ffmpeg::util::frame::Video::empty();
+            match self.decoder.receive_frame(&mut decoded) {
+                Ok(()) => {
+                    self.current_frame = Some(self.to_gray(&decoded)?);
                     return Ok(());
+                }
+                Err(ffmpeg::Error::Eof) => {
+                    return Err(VideoError::CaptureFailed("End of stream".to_string()))
+                }
+                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {}
+                Err(e) => {
+                    return Err(VideoError::CaptureFailed(format!(
+                        "Receive frame failed: {}",
+                        e
+                    )))
+                }
+            }
+            // The decoder wants input.
+            if self.flushed {
+                return Err(VideoError::CaptureFailed("End of stream".to_string()));
+            }
+            match self.next_packet() {
+                Some(packet) => self
+                    .decoder
+                    .send_packet(&packet)
+                    .map_err(|e| VideoError::CaptureFailed(format!("Send packet failed: {}", e)))?,
+                None => {
+                    self.decoder.send_eof().map_err(|e| {
+                        VideoError::CaptureFailed(format!("Flushing decoder failed: {}", e))
+                    })?;
+                    self.flushed = true;
                 }
             }
         }
-
-        // If we reach here, EOF or no more frames
-        // Flush decoder
-        self.decoder.send_eof().ok();
-        let mut decoded = ffmpeg::util::frame::Video::empty();
-        if self.decoder.receive_frame(&mut decoded).is_ok() {
-            let mut gray_frame = ffmpeg::util::frame::Video::new(
-                ffmpeg::format::Pixel::GRAY8,
-                self.width,
-                self.height,
-            );
-
-            self.scaler
-                .run(&decoded, &mut gray_frame)
-                .map_err(|e| VideoError::CaptureFailed(format!("Scaling failed: {}", e)))?;
-
-            let data = gray_frame.data(0).to_vec();
-            let stride = gray_frame.stride(0) as usize;
-            let width = self.width as usize;
-            let final_data = if stride == width {
-                data
-            } else {
-                let height = self.height as usize;
-                let mut unpadded = Vec::with_capacity(width * height);
-                for i in 0..height {
-                    let start = i * stride;
-                    let end = start + width;
-                    if end <= data.len() {
-                        unpadded.extend_from_slice(&data[start..end]);
-                    }
-                }
-                unpadded
-            };
-
-            let img = GrayImage::from_raw(self.width, self.height, final_data)
-                .ok_or_else(|| VideoError::CaptureFailed("Image creation failed".to_string()))?;
-            self.current_frame = Some(img);
-            return Ok(());
-        }
-
-        Err(VideoError::CaptureFailed("End of stream".to_string()))
     }
 
     fn retrieve(&mut self) -> Result<GrayImage> {
