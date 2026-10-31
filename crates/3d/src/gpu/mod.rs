@@ -168,6 +168,31 @@ pub mod point_cloud {
             voxel_grid.entry((vx, vy, vz)).or_default().push(i);
         }
 
+        // Exact fallback for points the 27-voxel shell cannot answer. The
+        // shell only contains a point's true k nearest neighbours when the
+        // k-th of them lies within one voxel size (the ball then fits inside
+        // the shell). In sparse regions - a wall of 25 points next to a dense
+        // 10k-point floor, with the voxel size set by the whole cloud - the
+        // shell held fewer than 3 points and the normal silently became
+        // (0, 0, 1). Those points now get exact k-NN from a KD-tree, built
+        // only if some point needs it.
+        let kdtree = std::sync::OnceLock::new();
+        let exact_knn = |center: &Point3<f32>| -> Vec<(f32, usize)> {
+            let tree = kdtree.get_or_init(|| {
+                let mut items: Vec<(Point3<f32>, usize)> = points
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(i, p)| (p, i))
+                    .collect();
+                crate::spatial::KDTree::build(&mut items)
+            });
+            tree.k_nearest_neighbors(center, k + 1)
+                .into_iter()
+                .map(|(p, idx, _)| ((p - center).norm_squared(), idx))
+                .collect()
+        };
+
         points
             .par_iter()
             .enumerate()
@@ -204,6 +229,16 @@ pub mod point_cloud {
                         a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal)
                     });
                     candidates.truncate(k);
+                }
+                let shell_is_exact =
+                    candidates.len() >= k && candidates.iter().all(|&(d, _)| d <= vs * vs);
+                if !shell_is_exact {
+                    let exact: Vec<(f32, usize)> = exact_knn(center)
+                        .into_iter()
+                        .filter(|&(_, idx)| idx != i)
+                        .take(k)
+                        .collect();
+                    return compute_pca_normal(center, &exact, points);
                 }
 
                 compute_pca_normal(center, &candidates, points)
@@ -256,10 +291,6 @@ pub mod point_cloud {
     /// This is the classic approach used by Open3D and most 3D libraries.
     /// O(n log n) construction, O(n log k) queries.
     pub fn compute_normals_cpu_kdtree(points: &[Point3<f32>], k: usize) -> Vec<Vector3<f32>> {
-        eprintln!(
-            "[CPU-KDTREE] compute_normals_cpu_kdtree: {} points",
-            points.len()
-        );
         if points.is_empty() {
             return Vec::new();
         }

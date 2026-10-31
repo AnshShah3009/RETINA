@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (33 open, was 86)
+## (g) Second review, 2026-10-31 — findings (32 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -363,7 +363,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-c5 | `calib3d/src/pnp.rs` PnP RANSAC | final refinement only with ≥ 6 inliers; 4–5 return the raw P3P pose | MED | ARGUED |
 | g-c6 | `core/src/robust.rs` adaptive iterations | **CLOSED.** All-inlier best model ends the search; sampling shuffles only k indices. Pinned by `ransac_stops_at_once_when_every_point_is_an_inlier`. Was: all-inlier case never lowers the iteration bound | was LOW — fixed | ARGUED |
 
-### (g6) 3d / registration / pointcloud (2 open, was 12)
+### (g6) 3d / registration / pointcloud (1 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -372,7 +372,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-d3 | `registration/.../gnc.rs` | **CLOSED.** Schedule from a saved reference loss, loss restored on return: μ stays in [μ0, 100μ0], repeated calls identical. Pinned by `tests/gnc_schedule_anneals.rs`. Was: schedule read from the already-updated loss → μ grows to 2.7e12; loss state leaks across calls | was HIGH — fixed | CONFIRMED |
 | g-d4 | `registration/mod.rs` `get_information_matrix_from_point_clouds` | **CLOSED.** Open3D's Σ GᵀG with G = [-[q]× │ I] and a `max_correspondence_distance` parameter. Pinned by `tests/information_matrix_open3d.rs`. Was: not Open3D's `Σ GᵀG`, `G = [-[q]x │ I]`: zero rotation information at perfect alignment, origin-dependent | was HIGH — fixed | CONFIRMED |
 | g-d5 | `3d/src/raycasting/mod.rs` `point_inside_mesh_bvh` | **CLOSED.** Majority vote of three generic-direction rays; pinned by `tests/point_inside_mesh_cube.rs` (cube centre was outside). Was: shared-edge hits counted twice: cube centre reported outside | was MED — fixed | CONFIRMED |
-| g-d6 | `3d/src/gpu/mod.rs` `compute_normals_cpu` | 27-voxel neighbourhood with a global voxel size; sparse regions silently get `(0,0,1)` | MED | CONFIRMED |
+| g-d6 | `3d/src/gpu/mod.rs` `compute_normals_cpu` | **CLOSED.** Shell result used only when provably exact (k-th distance ≤ voxel size); otherwise exact k-NN from the KD-tree. Pinned by `tests/normals_sparse_region.rs`. Was: 27-voxel neighbourhood with a global voxel size; sparse regions silently get `(0,0,1)` | was MED — fixed | CONFIRMED |
 | g-d7 | `registration/mod.rs` point-to-plane ICP | **CLOSED.** Metrics measured after the update (point-to-point rmse) and Open3D's 1e-6 relative stop. Pinned by `tests/icp_reports_open3d_metrics.rs`. Was: rmse/fitness measured before the update but reported with it; no relative convergence | was MED — fixed | CONFIRMED |
 | g-d8 | `pointcloud/src/point_cloud.rs` `voxel_down_sample` | **CLOSED.** Non-finite points skipped before bucketing. Pinned by `cv-pointcloud/tests/voxel_down_sample_nan.rs`. Was: NaN point joins voxel (0,0,0) and poisons a real point's centroid | was MED — fixed | CONFIRMED |
 | g-d9 | `3d/src/spatial/kd_tree.rs` `search_radius` | **CLOSED.** Radius prune is inclusive (`<=`) like the accept test. Pinned by `cv-3d/tests/kd_tree_radius_boundary.rs`. Was: strict prune vs inclusive accept: 2 of 3 points at exactly r returned | was LOW — fixed | CONFIRMED |
