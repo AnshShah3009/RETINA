@@ -269,14 +269,14 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (25 open, was 87)
+## (g) Second review, 2026-10-31 — findings (23 open, was 87)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
 features/imgproc, `g-i` io/runtime/distributed/video/photo/videoio, `g-m` slam/rendering/
 plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 
-### (g1) hal (4 open, was 12)
+### (g1) hal (2 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -290,8 +290,8 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-h8 | `cpu/compute_context_impl.rs` `convolve_2d`, `morphology`, `warp`, `nms`, `stereo` | interleaved multi-channel input treated as `c*h` rows → scrambled output | MED | CONFIRMED |
 | g-h9 | `cpu/compute_context_impl.rs` `stereo_match` | **CLOSED.** Best disparity starts at the NO_MATCH sentinel. Same test file. Was: pixels with no testable disparity report 0 (valid) instead of the no-match marker | was MED — fixed | CONFIRMED |
 | g-h10 | `cpu/compute_context_impl.rs` `match_descriptors` | **CLOSED.** Queries with no candidate are skipped. Same test file. Was: empty train set + ratio ≥ 1 fabricates a match to index 0 | was LOW — fixed | CONFIRMED |
-| g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | not renormalised after the 0.2 clamp | LOW | ARGUED |
-| g-h12 | AKAZE Scharr derivatives (CPU + WGSL) | taps `[1,3,1]/32` give gain 0.3125 on a unit ramp; should be `[3,10,3]/32` | LOW | ARGUED |
+| g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | **CLOSED.** CPU renormalises after the 0.2 clamp (as the GPU shader already did); both backends round when quantising. Step-edge descriptor norm 204 → 512 (`tests/second_review_cpu_fixes.rs`). Was: not renormalised after the 0.2 clamp | was LOW — fixed | ARGUED |
+| g-h12 | AKAZE Scharr derivatives (CPU + WGSL) | **CLOSED.** `[3, 10, 3]/32` taps on CPU and in the WGSL shader: unit gain (was 0.3125). Same test file. Was: taps `[1,3,1]/32` give gain 0.3125 on a unit ramp; should be `[3,10,3]/32` | was LOW — fixed | ARGUED |
 
 ### (g2) features / imgproc (7 open, was 12)
 

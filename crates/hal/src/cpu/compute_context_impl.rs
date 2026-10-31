@@ -4415,12 +4415,17 @@ impl ComputeContext for CpuBackend {
                     }
                     let norm_inv = 1.0 / (norm_sq.sqrt() + 1e-7);
 
-                    let data: Vec<u8> = hist
+                    // Lowe / OpenCV: clamp each normalised bin at 0.2, then
+                    // *renormalise*, scale by 512 and round. Skipping the
+                    // second normalisation left clamped descriptors shorter
+                    // than unit length - and different from the GPU path,
+                    // which does renormalise - shifting every distance.
+                    let clamped: Vec<f32> = hist.iter().map(|&v| (v * norm_inv).min(0.2)).collect();
+                    let norm2 = clamped.iter().map(|v| v * v).sum::<f32>().sqrt();
+                    let scale = 512.0 / norm2.max(f32::EPSILON);
+                    let data: Vec<u8> = clamped
                         .iter()
-                        .map(|&v| {
-                            let norm_v = (v * norm_inv).min(0.2);
-                            ((norm_v * 512.0).min(255.0)) as u8
-                        })
+                        .map(|&v| (v * scale).round().clamp(0.0, 255.0) as u8)
                         .collect();
 
                     cv_core::Descriptor::new(data, *kp)
@@ -4726,19 +4731,22 @@ impl ComputeContext for CpuBackend {
                 let y = y as i32;
                 for x in 0..w {
                     let x = x as i32;
-                    let lx = (get_val(x + 1, y - 1)
-                        + T::from_f32(3.0) * get_val(x + 1, y)
-                        + get_val(x + 1, y + 1))
-                        - (get_val(x - 1, y - 1)
-                            + T::from_f32(3.0) * get_val(x - 1, y)
-                            + get_val(x - 1, y + 1));
+                    // Scharr: [3, 10, 3] smoothing, central difference,
+                    // / 32 for unit gain on a unit ramp. The taps were
+                    // [1, 3, 1], a gain of 10/32 = 0.3125.
+                    let lx = (T::from_f32(3.0) * get_val(x + 1, y - 1)
+                        + T::from_f32(10.0) * get_val(x + 1, y)
+                        + T::from_f32(3.0) * get_val(x + 1, y + 1))
+                        - (T::from_f32(3.0) * get_val(x - 1, y - 1)
+                            + T::from_f32(10.0) * get_val(x - 1, y)
+                            + T::from_f32(3.0) * get_val(x - 1, y + 1));
 
-                    let ly = (get_val(x - 1, y + 1)
-                        + T::from_f32(3.0) * get_val(x, y + 1)
-                        + get_val(x + 1, y + 1))
-                        - (get_val(x - 1, y - 1)
-                            + T::from_f32(3.0) * get_val(x, y - 1)
-                            + get_val(x + 1, y - 1));
+                    let ly = (T::from_f32(3.0) * get_val(x - 1, y + 1)
+                        + T::from_f32(10.0) * get_val(x, y + 1)
+                        + T::from_f32(3.0) * get_val(x + 1, y + 1))
+                        - (T::from_f32(3.0) * get_val(x - 1, y - 1)
+                            + T::from_f32(10.0) * get_val(x, y - 1)
+                            + T::from_f32(3.0) * get_val(x + 1, y - 1));
 
                     row_lx[x as usize] = lx / T::from_f32(32.0);
                     row_ly[x as usize] = ly / T::from_f32(32.0);

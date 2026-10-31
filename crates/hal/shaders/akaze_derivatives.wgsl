@@ -33,12 +33,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let idx = y * w + x;
 
-    // First derivatives (Scharr)
-    let lx = (get_val(x + 1, y - 1) + 3.0 * get_val(x + 1, y) + get_val(x + 1, y + 1)) -
-             (get_val(x - 1, y - 1) + 3.0 * get_val(x - 1, y) + get_val(x - 1, y + 1));
-    
-    let ly = (get_val(x - 1, y + 1) + 3.0 * get_val(x, y + 1) + get_val(x + 1, y + 1)) -
-             (get_val(x - 1, y - 1) + 3.0 * get_val(x, y - 1) + get_val(x + 1, y - 1));
+    // First derivatives (Scharr: [3, 10, 3] smoothing, / 32 for unit gain;
+    // the taps were [1, 3, 1], a gain of 0.3125 on a unit ramp)
+    let lx = (3.0 * get_val(x + 1, y - 1) + 10.0 * get_val(x + 1, y) + 3.0 * get_val(x + 1, y + 1)) -
+             (3.0 * get_val(x - 1, y - 1) + 10.0 * get_val(x - 1, y) + 3.0 * get_val(x - 1, y + 1));
+
+    let ly = (3.0 * get_val(x - 1, y + 1) + 10.0 * get_val(x, y + 1) + 3.0 * get_val(x + 1, y + 1)) -
+             (3.0 * get_val(x - 1, y - 1) + 10.0 * get_val(x, y - 1) + 3.0 * get_val(x + 1, y - 1));
 
     Lx[idx] = lx / 32.0;
     Ly[idx] = ly / 32.0;

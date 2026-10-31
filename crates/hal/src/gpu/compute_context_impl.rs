@@ -1497,7 +1497,9 @@ impl ComputeContext for GpuContext {
                 _phantom: PhantomData,
             })
         } else {
-            Err(crate::Error::InvalidInput("Failed to downcast GPU result".into()))
+            Err(crate::Error::InvalidInput(
+                "Failed to downcast GPU result".into(),
+            ))
         }
     }
 
@@ -1919,7 +1921,7 @@ impl ComputeContext for GpuContext {
                     let start = i * 128;
                     let data: Vec<u8> = raw_descs[start..start + 128]
                         .iter()
-                        .map(|&v| (v * 512.0).min(255.0) as u8)
+                        .map(|&v| (v * 512.0).round().clamp(0.0, 255.0) as u8)
                         .collect();
                     descs.push(cv_core::Descriptor::new(data, keypoints.keypoints[i]));
                 }
