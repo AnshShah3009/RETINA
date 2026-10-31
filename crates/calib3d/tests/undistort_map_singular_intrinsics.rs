@@ -119,3 +119,15 @@ fn the_fisheye_map_builder_is_guarded() {
     .expect_err("the fisheye builder already rejected singular intrinsics");
     assert!(format!("{err}").contains("invertible"), "got: {err}");
 }
+
+/// A zero-size image is an error for the fisheye map too; it used to panic
+/// inside `par_chunks_mut(0)` ("chunk_size must not be zero").
+#[test]
+fn fisheye_map_rejects_a_zero_size_image() {
+    let k = cv_core::CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+    let d = cv_core::FisheyeDistortion::new(0.1, 0.01, 0.0, 0.0);
+    let r = nalgebra::Matrix3::identity();
+    for size in [(0, 480), (640, 0)] {
+        assert!(cv_calib3d::fisheye_init_undistort_rectify_map(size, &k, &d, &r, &k).is_err());
+    }
+}

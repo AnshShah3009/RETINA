@@ -145,6 +145,12 @@ pub fn fisheye_init_undistort_rectify_map(
     rectification: &Matrix3<f64>,
     new_intrinsics: &CameraIntrinsics,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
+    // Same guard as the pinhole map: `par_chunks_mut(0)` panics.
+    if image_size.0 == 0 || image_size.1 == 0 {
+        return Err(cv_core::Error::AlgorithmError(
+            "fisheye_init_undistort_rectify_map requires non-zero image size".to_string(),
+        ));
+    }
     let (width, height) = image_size;
     let mut map_x = vec![0.0f32; (width * height) as usize];
     let mut map_y = vec![0.0f32; (width * height) as usize];

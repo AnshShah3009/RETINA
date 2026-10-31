@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (46 open, was 86)
+## (g) Second review, 2026-10-31 — findings (44 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -397,7 +397,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-n11 | `math/src/stats.rs` normal cdf/ppf, p-values | lower-tail cancellation (`cdf(-10)` = 0), unrefined `ppf`, `1 - cdf` p-values | MED | CONFIRMED vs SciPy |
 | g-n12 | `math/src/integrate.rs` | `quad` is a fixed trapezoid with error 0 and evaluates endpoints; `ode_solve` overshoots `t_end` and stops silently at 10k steps | MED | ARGUED |
 
-### (g8) sfm / triangulation / distortion / calibration (7 open, was 9)
+### (g8) sfm / triangulation / distortion / calibration (5 open, was 9)
 
 Second calib3d pass, covering what (g5) did not reach. `calibrate_camera_planar` matches
 `cv2.calibrateCamera` to every printed digit (rms 0.237948) and the BA analytic Jacobian
@@ -412,8 +412,8 @@ matches finite differences (~1e-7, including θ≈π) — checked, not defects.
 | g-s5 | `sfm/src/mapper.rs` `sample_unique_indices` | **CLOSED.** High LCG bits, as g-c3. Was: same LCG low-bit sampler as g-c3: n distinct samples for n = 2^m | was MED — fixed | CONFIRMED |
 | g-s6 | `sfm/src/bundle_adjustment.rs` `bundle_adjust_sequential` | cost not recomputed after `remove_outliers` → any next step accepted | MED | ARGUED |
 | g-s7 | `sfm/src/bundle_adjustment.rs` `compute_point_reprojection_error_index` | behind-camera observations skipped (error 0) → never pruned | MED | ARGUED |
-| g-s8 | `calib3d/src/calibration.rs` | leftover debug `eprintln!` on every calibration / every 10 LM iterations | LOW | CONFIRMED |
-| g-s9 | `calib3d/src/distortion.rs` `fisheye_init_undistort_rectify_map` | zero-size image panics (`chunk_size must not be zero`) | LOW | CONFIRMED |
+| g-s8 | `calib3d/src/calibration.rs` | **CLOSED.** Removed. Was: leftover debug `eprintln!` on every calibration / every 10 LM iterations | was LOW — fixed | CONFIRMED |
+| g-s9 | `calib3d/src/distortion.rs` `fisheye_init_undistort_rectify_map` | **CLOSED.** Zero-size guard copied from the pinhole map; pinned in `tests/undistort_map_singular_intrinsics.rs`. Was: zero-size image panics (`chunk_size must not be zero`) | was LOW — fixed | CONFIRMED |
 
 ---
 
