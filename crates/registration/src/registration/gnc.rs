@@ -94,14 +94,22 @@ impl GNCOptimizer {
         //
         // The loss is `Copy`, so taking a snapshot costs nothing and gives every
         // iteration the same yardstick.
+        //
+        // It is also the anchor of the annealing schedule. The schedule used to
+        // be computed from `self.loss`, which the previous outer iteration had
+        // already overwritten with `update_param`, so each step multiplied the
+        // last scheduled value by up to 100 instead of interpolating between
+        // `100 * mu0` and `mu0`. Measured (Geman-McClure, mu0 = 0.0025, 200
+        // correspondences, 40% outliers): mu ended at 2.7e12 - every weight ~2,
+        // i.e. plain least squares - and the mutation persisted, so a second
+        // call on the same optimizer started from there and reached ~3e27.
         let reference_loss = self.loss;
-        let reference_param = self.loss.get_param();
 
         // GNC outer loop - gradually reduce parameter
         for gnc_iter in 0..self.gnc_iterations {
             // Compute current parameter schedule
             let alpha = gnc_iter as f32 / (self.gnc_iterations as f32 - 1.0).max(1.0);
-            let param = self.compute_parameter_schedule(alpha);
+            let param = Self::compute_parameter_schedule(&reference_loss, alpha);
             self.loss.update_param(param);
 
             // Inner loop - weighted least squares
@@ -142,6 +150,11 @@ impl GNCOptimizer {
                 }
             }
         }
+
+        // Hand the caller back the loss they configured. Leaving the last
+        // scheduled parameter in `self.loss` made the next call anneal from a
+        // different starting point and return a different answer.
+        self.loss = reference_loss;
 
         // Final evaluation
         let inliers: Vec<_> = correspondences
@@ -207,8 +220,13 @@ impl GNCOptimizer {
 
     /// Compute parameter schedule for GNC
     /// α ∈ [0, 1] where 0 = convex surrogate, 1 = target cost
-    fn compute_parameter_schedule(&self, alpha: f32) -> f32 {
-        match &self.loss {
+    ///
+    /// `reference` must be the *target* loss as configured by the caller, never
+    /// the annealed `self.loss`: the schedule interpolates between a multiple of
+    /// the target parameter and the target itself, so reading an already
+    /// annealed value compounds it every outer iteration.
+    fn compute_parameter_schedule(reference: &RobustLoss, alpha: f32) -> f32 {
+        match reference {
             RobustLoss::GemanMcClure { mu } => {
                 // Start with large μ (convex), decrease to target
                 let max_mu = mu * 100.0;
@@ -431,6 +449,21 @@ mod tests {
         let w_small = loss.weight(0.1);
         let w_large = loss.weight(10.0);
         assert!(w_large < w_small);
+    }
+
+    #[test]
+    fn the_schedule_interpolates_between_surrogate_and_target() {
+        let target = RobustLoss::GemanMcClure { mu: 0.0025 };
+        let first = GNCOptimizer::compute_parameter_schedule(&target, 0.0);
+        let last = GNCOptimizer::compute_parameter_schedule(&target, 1.0);
+        assert!((first - 0.25).abs() < 1e-6, "alpha=0 gave {first}");
+        assert!((last - 0.0025).abs() < 1e-9, "alpha=1 gave {last}");
+        let mut prev = f32::INFINITY;
+        for i in 0..=9 {
+            let mu = GNCOptimizer::compute_parameter_schedule(&target, i as f32 / 9.0);
+            assert!((0.0025..=0.25).contains(&mu) && mu <= prev);
+            prev = mu;
+        }
     }
 
     #[test]
