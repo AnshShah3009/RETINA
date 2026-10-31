@@ -37,19 +37,26 @@ struct VoxelParams {
     padding: u32,
 }
 
-@group(0) @binding(0) var<storage, read> input_points: array<vec3<f32>>;
+// Points are packed xyz (stride 3 floats), matching the (1, N, 3) tensor
+// the host passes and returns. `array<vec3<f32>>` has a 16-byte stride in
+// WGSL, so it read every point after the first from the wrong offset.
+@group(0) @binding(0) var<storage, read> input_points: array<f32>;
 // The host allocates this with BufferUsages::UNIFORM only, so the shader must
 // declare it `uniform`: a buffer bound to a storage binding is rejected unless
 // it carries STORAGE usage.
 @group(0) @binding(1) var<uniform> params: VoxelParams;
 @group(0) @binding(2) var<storage, read_write> voxel_indices: array<u32>;
-@group(0) @binding(3) var<storage, read_write> output_points: array<vec3<f32>>;
+@group(0) @binding(3) var<storage, read_write> output_points: array<f32>;
 // Word 0 is the emitted-point counter; words [1, 1 + table_size) are the claim
 // slots.
 @group(0) @binding(4) var<storage, read_write> claim_data: array<atomic<u32>>;
 
 const EMPTY: u32 = 0xFFFFFFFFu;
 const CLAIM_BASE: u32 = 1u;
+
+fn point_at(i: u32) -> vec3<f32> {
+    return vec3<f32>(input_points[3u * i], input_points[3u * i + 1u], input_points[3u * i + 2u]);
+}
 
 fn voxel_of(p: vec3<f32>) -> vec3<i32> {
     return vec3<i32>(
@@ -76,7 +83,7 @@ fn main(
     let idx = global_id.x + global_id.y * num_wg.x * 256u;
     if (idx >= params.num_points) { return; }
 
-    let p = input_points[idx];
+    let p = point_at(idx);
     let my_voxel = voxel_of(p);
 
     // Open-addressed keep-first-per-voxel claiming. The first point to claim
@@ -89,15 +96,24 @@ fn main(
             // We claimed an empty slot: this point represents its voxel.
             let out_slot = atomicAdd(&claim_data[0], 1u);
             if (out_slot < params.num_points) {
-                output_points[out_slot] = p;
+                output_points[3u * out_slot] = p.x;
+                output_points[3u * out_slot + 1u] = p.y;
+                output_points[3u * out_slot + 2u] = p.z;
             }
             voxel_indices[idx] = out_slot;
             break;
         }
 
+        // A *weak* compare-exchange may fail spuriously while the slot is
+        // still empty; retry the same slot rather than probing past it.
+        let holder = res.old_value;
+        if (holder == EMPTY) {
+            continue;
+        }
         // Slot held by another point: same voxel -> duplicate, else probe on.
-        let holder = atomicLoad(&claim_data[CLAIM_BASE + slot]);
-        if (holder != EMPTY && voxel_of(input_points[holder]) == my_voxel) {
+        // (`==` on vec3 is component-wise; `all` makes it a bool - the bare
+        // comparison failed shader validation, so this kernel never ran.)
+        if (all(voxel_of(point_at(holder)) == my_voxel)) {
             voxel_indices[idx] = 0xFFFFFFFFu; // dropped duplicate
             break;
         }
@@ -144,7 +160,7 @@ fn main(
     let output_points = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Voxel Output Points"),
         // WGSL `array<vec3<f32>>` has a 16-byte stride, not 12.
-        size: (num_points * 16) as u64,
+        size: (num_points * 12) as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
@@ -154,7 +170,11 @@ fn main(
     let claim_data = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Voxel Claim Data (count + table)"),
         size: 4 * (1 + table_size as usize) as u64,
-        usage: wgpu::BufferUsages::STORAGE,
+        // COPY_DST for the EMPTY-fill `write_buffer` below, COPY_SRC for
+        // reading the output count back.
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
     // The counter is bumped with atomicAdd so word 0 must start at zero, and
@@ -230,7 +250,7 @@ fn main(
     // i.e. every point from the second onwards was read at the wrong offset and
     // the tail was cut mid-element. It did not merely lose the last quarter.
     Ok(Tensor {
-        storage: GpuStorage::from_buffer(Arc::new(output_points), actual_count * 4),
+        storage: GpuStorage::from_buffer(Arc::new(output_points), actual_count * 3),
         shape: cv_core::TensorShape::new(1, actual_count, 3),
         dtype: points.dtype,
         _phantom: std::marker::PhantomData,
