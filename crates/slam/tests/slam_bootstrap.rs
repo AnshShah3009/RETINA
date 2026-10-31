@@ -15,6 +15,12 @@
 //!   second initialises from the essential matrix, the rest track by PnP.
 //!   Scale is arbitrary, so translations are compared after fixing the scale
 //!   on the initialisation baseline.
+//!
+//! The 20-frame sweeps check that the map *grows*: the camera travels ~3 m,
+//! so the view that built the initial map leaves the image, and tracking has
+//! to continue on points added at later keyframes (back-projected from depth,
+//! or triangulated between monocular keyframes) without making every frame a
+//! keyframe.
 
 use cv_core::storage::CpuStorage;
 use cv_core::{CameraIntrinsics, CpuTensor, Pose, Tensor, TensorShape};
@@ -280,17 +286,15 @@ fn monocular_two_view_init_then_tracks_known_trajectory() {
         // Tolerances are set by the front end, not the geometry: ORB matches
         // only ~20% of features across a 16 cm baseline on this scene, with
         // ~0.6-0.9 px localisation error against ground truth, and the init
-        // has ~2-3 deg of parallax. Measured: rotation <= 1.73 deg and centre
-        // error <= 8.5% of the distance travelled over the five frames.
+        // has ~2-3 deg of parallax.
         //
-        // The rotation bound was 2.5 deg. fb52132 made ORB round its steered
-        // taps as OpenCV does, which measurably *improves* matching (correct
-        // cross-checked matches on a rotated texture: 15 deg 219 -> 224,
-        // 30 deg 173 -> 179, 60 deg 136 -> 152) but changes which features
-        // match here; monocular mode never grows its map, so by frame 3 only
-        // ~18 points carry the pose and it measures 2.887 deg. The bound is
-        // the front end's, so it moves with it.
-        assert!(rot < 3.5, "frame {k}: rotation off by {rot:.3} deg");
+        // The rotation bound was relaxed to 3.5 deg while monocular mode
+        // never grew its map: by frame 3 only ~18 points carried the pose and
+        // it measured 2.887 deg (2.968 at frame 4). With keyframes,
+        // triangulation and local BA the tracked set grows instead (43-97
+        // points) and it measures <= 0.684 deg, centre error <= 8.1% of the
+        // distance travelled (was <= 10.4%).
+        assert!(rot < 2.5, "frame {k}: rotation off by {rot:.3} deg");
         // Direction of the init baseline, and scale drift afterwards.
         assert!(
             terr < 0.15 * c_gt.norm(),
@@ -335,4 +339,157 @@ fn tracking_loss_is_reported() {
         .expect("returning to a mapped view must relocalise");
     assert_eq!(tracker.state, TrackingState::Tracking);
     assert!(pose.translation.norm() < 0.02);
+}
+
+/// A sweep right across the scene: the camera translates ~3 m while turning
+/// to the right, so by the last frame the view that initialised the map has
+/// (almost) left the image.
+fn sweep(n: usize) -> Vec<Pose> {
+    (0..n)
+        .map(|k| {
+            let k = k as f64;
+            camera_pose(
+                Vector3::new(0.16 * k, -0.01 * k, 0.03 * k),
+                (0.6f64 * k).to_radians(),
+                (0.2f64 * k).to_radians(),
+            )
+        })
+        .collect()
+}
+
+/// How many of `inliers` are map points created at initialisation (map
+/// indices below `n_initial`; the map only grows by appending).
+fn from_initial_map(inliers: &[usize], n_initial: usize) -> usize {
+    inliers.iter().filter(|&&i| i < n_initial).count()
+}
+
+/// Twenty monocular frames over the sweep. Tracking has to survive on map
+/// points triangulated from later keyframes, and the trajectory error has to
+/// stay bounded.
+#[test]
+fn monocular_long_sequence_extends_the_map() {
+    const N: usize = 20;
+    let truth = sweep(N);
+
+    let mut tracker = tracker();
+    let mut map = WorldMap::new();
+    let mut scale = None;
+    let mut n_initial = 0;
+    let mut max_rot = 0.0f64;
+    let mut max_rel_terr = 0.0f64;
+    let mut last_inliers = Vec::new();
+    for (k, gt) in truth.iter().enumerate() {
+        let (img, _) = render(gt);
+        let res = tracker.process_frame(&img, &mut map);
+        if k == 0 {
+            assert!(res.is_err());
+            continue;
+        }
+        let (pose, inliers) = res.unwrap_or_else(|e| {
+            panic!(
+                "mono frame {k} failed ({} map points, {} keyframes): {e}",
+                map.points.len(),
+                map.keyframes.len()
+            )
+        });
+        if k == 1 {
+            n_initial = map.points.len();
+        }
+        let c_est = pose.inverse().translation;
+        let c_gt = gt.inverse().translation;
+        // Monocular scale is arbitrary: fix it on the initialisation baseline.
+        let s = *scale.get_or_insert_with(|| c_gt.norm() / c_est.norm());
+        let terr = (c_est * s - c_gt).norm();
+        let rot = rotation_error_deg(&pose, gt);
+        let travelled = c_gt.norm();
+        println!(
+            "frame {k}: map points {}, keyframes {}, tracked {} ({} from init), scaled \
+             centre err {terr:.4} m ({:.1}% of travel), rot err {rot:.3} deg",
+            map.points.len(),
+            map.keyframes.len(),
+            inliers.len(),
+            from_initial_map(&inliers, n_initial),
+            100.0 * terr / travelled
+        );
+        assert_eq!(tracker.state, TrackingState::Tracking, "frame {k}");
+        assert!(
+            inliers.len() >= 40,
+            "frame {k}: only {} inliers",
+            inliers.len()
+        );
+        max_rot = max_rot.max(rot);
+        max_rel_terr = max_rel_terr.max(terr / travelled);
+        last_inliers = inliers;
+    }
+    println!(
+        "max rot err {max_rot:.3} deg, max centre err {:.1}% of travel",
+        100.0 * max_rel_terr
+    );
+    assert!(
+        map.points.len() > 2 * n_initial,
+        "the map never grew: {} points, {n_initial} at initialisation",
+        map.points.len()
+    );
+    // By the end the pose rests on points mapped after initialisation.
+    assert!(
+        from_initial_map(&last_inliers, n_initial) * 4 < last_inliers.len(),
+        "the last frame still tracks mostly initial points: {} of {}",
+        from_initial_map(&last_inliers, n_initial),
+        last_inliers.len()
+    );
+    // Measured: rotation <= 0.659 deg, centre error <= 6.6% of the distance
+    // travelled (5.3% at the last frame), 20 keyframes, 1338 map points.
+    // Before map extension the sequence was lost at frame 3 (28 inliers,
+    // 3.3 deg, 66% of travel).
+    assert!(max_rot < 1.5, "rotation drifted to {max_rot:.3} deg");
+    assert!(
+        max_rel_terr < 0.10,
+        "camera centre drifted to {:.1}% of the distance travelled",
+        100.0 * max_rel_terr
+    );
+}
+
+/// Twenty RGB-D frames over the same sweep. The map must keep up, but not by
+/// making every frame a keyframe, and the metric trajectory must stay tight.
+#[test]
+fn rgbd_long_sequence_keyframes_sparingly() {
+    const N: usize = 20;
+    let truth = sweep(N);
+
+    let mut tracker = tracker();
+    let mut map = WorldMap::new();
+    let mut max_rot = 0.0f64;
+    let mut max_terr = 0.0f64;
+    for (k, gt) in truth.iter().enumerate() {
+        let (img, depth) = render(gt);
+        let (pose, inliers) = tracker
+            .process_frame_with_depth(&img, &depth, &mut map)
+            .unwrap_or_else(|e| panic!("RGB-D frame {k} failed: {e}"));
+        let rot = rotation_error_deg(&pose, gt);
+        let terr = (pose.inverse().translation - gt.inverse().translation).norm();
+        println!(
+            "frame {k}: map points {}, keyframes {}, tracked {}, centre err {terr:.4} m, \
+             rot err {rot:.3} deg",
+            map.points.len(),
+            map.keyframes.len(),
+            inliers.len()
+        );
+        assert_eq!(tracker.state, TrackingState::Tracking, "frame {k}");
+        max_rot = max_rot.max(rot);
+        max_terr = max_terr.max(terr);
+    }
+    println!(
+        "{} keyframes for {N} frames, max centre err {max_terr:.4} m, max rot err {max_rot:.3} deg",
+        map.keyframes.len()
+    );
+    assert!(
+        map.keyframes.len() <= N / 2,
+        "{} keyframes for {N} frames: nearly every frame became a keyframe",
+        map.keyframes.len()
+    );
+    assert!(map.keyframes.len() >= 2, "the map never extended");
+    // Measured: 5 keyframes, centre error <= 2.94 cm, rotation <= 0.391 deg.
+    // Before the keyframe policy change: 20 keyframes, 3.79 cm, 0.513 deg.
+    assert!(max_terr < 0.04, "camera centre drifted {max_terr:.4} m");
+    assert!(max_rot < 0.5, "rotation drifted {max_rot:.3} deg");
 }

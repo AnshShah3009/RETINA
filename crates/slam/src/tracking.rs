@@ -1,5 +1,6 @@
 use crate::mapping::MapExt;
 use crate::types::{KeyFrame, MapPoint, WorldMap};
+use crate::{local_ba, local_map};
 use cv_calib3d::{recover_pose_from_essential, solve_pnp_ransac, triangulate_points};
 use cv_core::storage::CpuStorage;
 use cv_core::{storage::Storage, CameraIntrinsics, KeyPoints, Pose, Tensor};
@@ -49,8 +50,36 @@ const MIN_INIT_POINTS: usize = 40;
 /// Minimum median triangulation angle for a monocular initialisation.
 const MIN_INIT_PARALLAX_DEG: f64 = 1.0;
 /// An RGB-D keyframe is inserted when a tracked frame keeps fewer than this
-/// fraction of the last keyframe's map points.
+/// fraction of the last keyframe's established map points (see
+/// `KeyframeDistance::reference`)...
 const KEYFRAME_TRACKED_RATIO: f64 = 0.6;
+/// ...or has moved more than this fraction of the last keyframe's median scene
+/// depth from it...
+const KEYFRAME_BASELINE_RATIO: f64 = 0.15;
+/// ...or has turned more than this many degrees away from it.
+const KEYFRAME_ROTATION_DEG: f64 = 15.0;
+/// Monocular keyframes need parallax to triangulate from, so none is inserted
+/// closer than this fraction of the median depth to the last one...
+const MONO_KEYFRAME_MIN_BASELINE_RATIO: f64 = 0.02;
+/// ...and one is inserted when the tracked set falls below this fraction of
+/// the last keyframe's map points, or the baseline exceeds
+/// [`MONO_KEYFRAME_BASELINE_RATIO`], whichever comes first.
+const MONO_KEYFRAME_TRACKED_RATIO: f64 = 0.8;
+const MONO_KEYFRAME_BASELINE_RATIO: f64 = 0.08;
+/// Keyframes before the newest one that a monocular keyframe is triangulated
+/// against.
+const MONO_TRIANGULATION_NEIGHBOURS: usize = 3;
+/// Search radius (pixels) around a map point projected with the
+/// constant-velocity prediction.
+const PREDICTED_SEARCH_RADIUS: f64 = 20.0;
+/// Search radius (pixels) around a map point projected with the coarse pose.
+const REFINE_SEARCH_RADIUS: f64 = 5.0;
+/// Default [`Tracker::local_ba_window`].
+const LOCAL_BA_WINDOW: usize = 10;
+/// Levenberg-Marquardt iterations per local bundle adjustment.
+const LOCAL_BA_ITERATIONS: usize = 15;
+/// Reprojection error (pixels) of a tracked map point in the final pose.
+const TRACK_INLIER_PX: f64 = 2.0;
 
 pub struct Tracker {
     pub group: Arc<ResourceGroup>,
@@ -62,6 +91,19 @@ pub struct Tracker {
     pub state: TrackingState,
     /// Monocular initialisation reference (world origin once initialised).
     pub init_reference: Option<TrackingFrame<CpuStorage<u8>>>,
+    /// Motion between the last two tracked frames (`T_cur · T_prev⁻¹`), the
+    /// constant-velocity prediction for the next one. `None` until two
+    /// consecutive frames are tracked, and after tracking is lost.
+    pub velocity: Option<Pose>,
+    /// Keyframes optimised by the local bundle adjustment that runs after each
+    /// new monocular keyframe; 0 disables it.
+    ///
+    /// Monocular only. The adjustment minimises reprojection error alone, and
+    /// an RGB-D keyframe's fresh points are back-projected from depth with a
+    /// single observation, so they are not adjusted - moving their keyframe
+    /// would leave them behind. Measured on the 20-frame sweep: centre error
+    /// 3 cm without, jumps of 0.4-0.6 m at keyframes with it.
+    pub local_ba_window: usize,
 }
 
 /// Result of matching a frame against the map.
@@ -84,6 +126,8 @@ impl Tracker {
             last_depth: None,
             state: TrackingState::NotInitialized,
             init_reference: None,
+            velocity: None,
+            local_ba_window: LOCAL_BA_WINDOW,
         }
     }
 
@@ -94,7 +138,13 @@ impl Tracker {
     ///   frame with enough parallax initialises the map by essential matrix,
     ///   pose recovery and triangulation, and returns its pose. Monocular scale
     ///   is arbitrary: the initialisation baseline has length 1.
-    /// * Non-empty map: PnP against the map.
+    /// * Non-empty map: tracked against the map (see `track_against_map`).
+    ///   When the frame has moved far enough from the last keyframe, or tracks
+    ///   too few of its points, it becomes a keyframe: new map points are
+    ///   triangulated against the previous keyframes from features not yet in
+    ///   the map, then a local bundle adjustment refines the newest keyframes
+    ///   and their points (see [`Tracker::local_ba_window`]), and the frame's
+    ///   adjusted pose is returned.
     ///
     /// Returns `Err` for every frame without a measured pose (initialising,
     /// tracking lost); [`Tracker::state`] says which.
@@ -145,6 +195,7 @@ impl Tracker {
                 // return `Ok(last pose)`, indistinguishable from a measurement.
                 // The previous good frame stays in `current_frame`.
                 self.state = TrackingState::Lost;
+                self.velocity = None;
                 return Err(format!(
                     "Tracking lost: {reason}. The map is kept and the next frame is \
                      matched against all of it again."
@@ -152,12 +203,51 @@ impl Tracker {
             }
         };
         frame.pose = tracked.pose;
+        let was_tracking = self.state == TrackingState::Tracking;
         self.state = TrackingState::Tracking;
+        self.velocity = match (&self.current_frame, was_tracking) {
+            (Some(prev), true) => Some(frame.pose.compose(&prev.pose.inverse())),
+            _ => None,
+        };
 
-        if let Some(d) = depth {
-            if needs_keyframe(tracked.map_indices.len(), map) {
-                let fresh = depth_points(&self.intrinsics, &frame, d, &tracked.query_indices)?;
-                add_keyframe(&frame, &tracked, fresh, map);
+        if needs_keyframe(&frame.pose, tracked.map_indices.len(), map, depth.is_none()) {
+            match depth {
+                Some(d) => {
+                    let fresh = depth_points(&self.intrinsics, &frame, d, &tracked.query_indices)?;
+                    add_keyframe(&frame, &tracked, fresh, map);
+                }
+                None => {
+                    // Monocular: the keyframe links what it tracked, then new
+                    // points are triangulated against its predecessors from
+                    // features neither has mapped yet.
+                    add_keyframe(&frame, &tracked, Vec::new(), map);
+                    local_map::triangulate_new_points(
+                        &self.intrinsics,
+                        map,
+                        MONO_TRIANGULATION_NEIGHBOURS,
+                    );
+                }
+            }
+            if self.local_ba_window > 0 && depth.is_none() {
+                if local_ba::local_bundle_adjust(
+                    &self.intrinsics,
+                    map,
+                    self.local_ba_window,
+                    1,
+                    LOCAL_BA_ITERATIONS,
+                )
+                .is_some()
+                {
+                    // The new keyframe is this frame: report its adjusted pose.
+                    if let Some(kf) = map.keyframes.last() {
+                        let kf = kf.read().unwrap_or_else(|e| e.into_inner());
+                        frame.pose = local_map::keyframe_world_to_camera(&kf.pose);
+                    }
+                    self.velocity = match (&self.current_frame, was_tracking) {
+                        (Some(prev), true) => Some(frame.pose.compose(&prev.pose.inverse())),
+                        _ => None,
+                    };
+                }
             }
         }
 
@@ -166,12 +256,37 @@ impl Tracker {
         Ok(result)
     }
 
+    /// Constant-velocity prediction of the next frame's pose, while tracking.
+    fn predicted_pose(&self) -> Option<Pose> {
+        if self.state != TrackingState::Tracking {
+            return None;
+        }
+        let last = self.current_frame.as_ref()?.pose;
+        Some(match &self.velocity {
+            Some(v) => v.compose(&last),
+            None => last,
+        })
+    }
+
     fn push_frame(&mut self, frame: TrackingFrame<CpuStorage<u8>>) {
         self.last_frame = self.current_frame.take();
         self.current_frame = Some(frame);
     }
 
-    /// Match the frame's descriptors against every map point and solve PnP.
+    /// Locate the frame against the map.
+    ///
+    /// 1. Coarse pose: while tracking, map points are projected with the
+    ///    constant-velocity prediction and matched within
+    ///    [`PREDICTED_SEARCH_RADIUS`], then PnP-RANSAC. Without a prediction
+    ///    (after initialisation or loss), or if that fails, every map point is
+    ///    matched by descriptor alone (relocalisation).
+    /// 2. Fine pose: every map point is projected again with the coarse pose
+    ///    and matched within [`REFINE_SEARCH_RADIUS`]; the pose is refined on
+    ///    those matches, keeping those within [`TRACK_INLIER_PX`].
+    ///
+    /// Step 2 is what lets the tracked set follow a growing map: a global
+    /// descriptor match with a ratio test drops every point that has a
+    /// near-duplicate in the map, and keyframes that overlap create many.
     fn track_against_map(
         &self,
         device: &ComputeDevice,
@@ -181,6 +296,81 @@ impl Tracker {
         if frame.descriptors.is_empty() {
             return Err("no features detected in the frame".to_string());
         }
+        let k = &self.intrinsics;
+        let coarse = match self
+            .predicted_pose()
+            .and_then(|p| self.coarse_by_projection(frame, map, &p))
+        {
+            Some(pose) => pose,
+            None => self.coarse_by_descriptors(device, frame, map)?,
+        };
+
+        let pairs = local_map::match_by_projection(
+            k,
+            &frame.descriptors,
+            map,
+            &coarse,
+            REFINE_SEARCH_RADIUS,
+        );
+        let (object, image) = correspondences(frame, map, &pairs);
+        let (pose, inliers) = if object.len() >= MIN_TRACKED_INLIERS {
+            local_map::refine_pose(k, &coarse, &object, &image, TRACK_INLIER_PX)
+        } else {
+            (coarse, vec![false; object.len()])
+        };
+        let (mut map_indices, mut query_indices) = (Vec::new(), Vec::new());
+        for (&(mi, qi), &ok) in pairs.iter().zip(&inliers) {
+            if ok {
+                map_indices.push(mi);
+                query_indices.push(qi);
+            }
+        }
+        if map_indices.len() < MIN_TRACKED_INLIERS {
+            return Err(format!(
+                "{} map points within {TRACK_INLIER_PX} px of the refined pose, among {} \
+                 projection matches (need {MIN_TRACKED_INLIERS})",
+                map_indices.len(),
+                pairs.len(),
+            ));
+        }
+        Ok(MapTrack {
+            pose,
+            map_indices,
+            query_indices,
+        })
+    }
+
+    /// Coarse pose from map points matched around their predicted projection.
+    fn coarse_by_projection(
+        &self,
+        frame: &TrackingFrame<CpuStorage<u8>>,
+        map: &WorldMap,
+        predicted: &Pose,
+    ) -> Option<Pose> {
+        let pairs = local_map::match_by_projection(
+            &self.intrinsics,
+            &frame.descriptors,
+            map,
+            predicted,
+            PREDICTED_SEARCH_RADIUS,
+        );
+        let (object, image) = correspondences(frame, map, &pairs);
+        if object.len() < 2 * MIN_TRACKED_INLIERS {
+            return None;
+        }
+        let (pose, inliers) =
+            solve_pnp_ransac(&object, &image, &self.intrinsics, None, 3.0, 100).ok()?;
+        (inliers.iter().filter(|&&b| b).count() >= MIN_TRACKED_INLIERS).then_some(pose)
+    }
+
+    /// Coarse pose from every map point matched by descriptor alone (no pose
+    /// prior): relocalisation, and the first frame after initialisation.
+    fn coarse_by_descriptors(
+        &self,
+        device: &ComputeDevice,
+        frame: &TrackingFrame<CpuStorage<u8>>,
+        map: &mut WorldMap,
+    ) -> Result<Pose, String> {
         // Cached on the map. This used to rebuild the whole map's descriptor
         // tensor on every frame - a `flat_map` clone of every descriptor in
         // the map, O(total map points) per frame - and the map only ever
@@ -209,12 +399,6 @@ impl Tracker {
 
         let mut object_pts = Vec::new();
         let mut image_pts = Vec::new();
-        // Map-point index for each successfully read correspondence. Only
-        // these entries appear in `object_pts`, so it is the index map
-        // that keeps `inliers` (returned parallel to `object_pts`) aligned.
-        let mut point_indices = Vec::new();
-        let mut query_indices = Vec::new();
-
         for m in &matches.matches {
             if let Ok(p) = map.points[m.train_idx as usize].read() {
                 object_pts.push(Point3::new(
@@ -227,8 +411,6 @@ impl Tracker {
                 // leaves the image are dropped).
                 let kp = &frame.descriptors.descriptors[m.query_idx as usize].keypoint;
                 image_pts.push(Point2::new(kp.x, kp.y));
-                point_indices.push(m.train_idx as usize);
-                query_indices.push(m.query_idx as usize);
             }
         }
 
@@ -238,31 +420,16 @@ impl Tracker {
 
         // `inliers` is parallel to `object_pts` (one flag per successfully
         // read point), NOT to `matches`.
-        let mut map_indices = Vec::new();
-        let mut inlier_queries = Vec::new();
-        for ((&mi, &qi), &ok) in point_indices
-            .iter()
-            .zip(query_indices.iter())
-            .zip(inliers.iter())
-        {
-            if ok {
-                map_indices.push(mi);
-                inlier_queries.push(qi);
-            }
-        }
-        if map_indices.len() < MIN_TRACKED_INLIERS {
+        let n_inliers = inliers.iter().filter(|&&ok| ok).count();
+        if n_inliers < MIN_TRACKED_INLIERS {
             return Err(format!(
                 "PnP found {} inliers among {} matches (need {})",
-                map_indices.len(),
+                n_inliers,
                 object_pts.len(),
                 MIN_TRACKED_INLIERS
             ));
         }
-        Ok(MapTrack {
-            pose,
-            map_indices,
-            query_indices: inlier_queries,
-        })
+        Ok(pose)
     }
 
     /// RGB-D bootstrap: the first frame defines the world (identity pose), and
@@ -320,9 +487,20 @@ impl Tracker {
         match two_view_init(device, &self.intrinsics, &reference, &frame) {
             Ok(init) => {
                 frame.pose = init.pose;
-                let created = insert_two_view_map(&reference, &frame, &init, map);
+                let mut created = insert_two_view_map(&reference, &frame, &init, map);
+                // The init matched features by descriptor alone; with both
+                // poses known, an epipolar-guided search finds more.
+                created.extend(local_map::triangulate_new_points(&self.intrinsics, map, 1));
+                if self.local_ba_window > 0 {
+                    local_ba::local_bundle_adjust(&self.intrinsics, map, 2, 1, LOCAL_BA_ITERATIONS);
+                    let kf = map.keyframes[1].read().unwrap_or_else(|e| e.into_inner());
+                    frame.pose = local_map::keyframe_world_to_camera(&kf.pose);
+                }
                 self.state = TrackingState::Tracking;
                 let pose = frame.pose;
+                // The reference is the world origin, so the motion from it is
+                // the pose itself.
+                self.velocity = Some(pose);
                 self.current_frame = Some(reference);
                 self.push_frame(frame);
                 Ok((pose, created))
@@ -349,8 +527,10 @@ impl Tracker {
     ///
     /// * Empty map: the frame is the world origin; keypoints with valid depth
     ///   are back-projected into map points and the frame becomes a keyframe.
-    /// * Non-empty map: PnP against the map; a keyframe with new depth points is
-    ///   inserted when too few of the last keyframe's points remain tracked.
+    /// * Non-empty map: tracked against the map (see `track_against_map`); a
+    ///   keyframe with new depth points is inserted when too few of the last
+    ///   keyframe's established points remain tracked or the camera has moved
+    ///   or turned far enough from it (see `needs_keyframe`).
     pub fn process_frame_with_depth<
         S: Storage<u8> + cv_core::StorageFactory<u8> + 'static,
         D: Storage<f32> + cv_core::StorageFactory<f32> + 'static,
@@ -522,20 +702,51 @@ fn keyframe_pose(pose: &Pose) -> cv_core::TypedPose {
     )
 }
 
-/// Whether a tracked RGB-D frame should become a keyframe: it keeps fewer than
-/// [`KEYFRAME_TRACKED_RATIO`] of the map points the last keyframe observed.
-fn needs_keyframe(n_tracked: usize, map: &WorldMap) -> bool {
-    let Some(last) = map.keyframes.last() else {
-        return true;
-    };
-    let observed = last
-        .read()
-        .unwrap_or_else(|p| p.into_inner())
-        .map_points
+/// World points and pixel observations of `(map index, descriptor index)`
+/// pairs, in order.
+fn correspondences(
+    frame: &TrackingFrame<CpuStorage<u8>>,
+    map: &WorldMap,
+    pairs: &[(usize, usize)],
+) -> (Vec<Point3<f64>>, Vec<Point2<f64>>) {
+    pairs
         .iter()
-        .filter(|m| m.is_some())
-        .count();
-    (n_tracked as f64) < KEYFRAME_TRACKED_RATIO * observed as f64
+        .map(|&(mi, qi)| {
+            let p = map.points[mi].read().unwrap_or_else(|e| e.into_inner());
+            let kp = frame.descriptors.descriptors[qi].keypoint;
+            (p.world_pos.cast::<f64>(), Point2::new(kp.x, kp.y))
+        })
+        .unzip()
+}
+
+/// Whether a tracked frame should become a keyframe.
+///
+/// RGB-D: when it keeps fewer than [`KEYFRAME_TRACKED_RATIO`] of the
+/// established map points the last keyframe observes, or has moved [`KEYFRAME_BASELINE_RATIO`] of the
+/// scene depth or turned [`KEYFRAME_ROTATION_DEG`] away from it. This used to
+/// be the tracked-ratio test alone, against a tracked set that a global
+/// descriptor match kept small (~20-25% of a keyframe's points), so every
+/// frame became a keyframe (20 of 20 on the 20-frame sweep; now 5).
+///
+/// Monocular: the same idea with a stricter ratio and baseline (a keyframe is
+/// also where the map grows, so it must come before the tracked set thins
+/// out), but never closer than [`MONO_KEYFRAME_MIN_BASELINE_RATIO`]: without
+/// parallax nothing can be triangulated.
+fn needs_keyframe(pose: &Pose, n_tracked: usize, map: &WorldMap, monocular: bool) -> bool {
+    let Some(d) = local_map::distance_to_last_keyframe(map, pose) else {
+        return !monocular;
+    };
+    let tracked = n_tracked as f64;
+    let reference = d.reference as f64;
+    if monocular {
+        d.baseline_ratio >= MONO_KEYFRAME_MIN_BASELINE_RATIO
+            && (tracked < MONO_KEYFRAME_TRACKED_RATIO * reference
+                || d.baseline_ratio > MONO_KEYFRAME_BASELINE_RATIO)
+    } else {
+        tracked < KEYFRAME_TRACKED_RATIO * reference
+            || d.baseline_ratio > KEYFRAME_BASELINE_RATIO
+            || d.rotation_deg > KEYFRAME_ROTATION_DEG
+    }
 }
 
 /// Back-project every descriptor's keypoint that has valid depth, skipping the
