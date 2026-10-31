@@ -9,6 +9,11 @@
 //! The solver is Levenberg-Marquardt on the reduced camera system (Schur
 //! complement of the block-diagonal point part), with a Huber kernel, so it is
 //! cheap for a handful of keyframes and a few thousand observations.
+//!
+//! A point back-projected from a depth image also contributes its creating
+//! keyframe's depth (see [`crate::types::MapPoint::depth_m`]). Reprojection
+//! alone cannot see scale, and on an RGB-D map it slid keyframes off the
+//! points that depth had just placed.
 
 use crate::types::WorldMap;
 use cv_core::{CameraIntrinsics, FrameConvention, Pose, TypedPose};
@@ -46,6 +51,13 @@ struct Obs {
     uv: Point2<f64>,
     kf_id: u64,
     kp_idx: usize,
+}
+
+/// A depth measurement in the keyframe that created the point.
+struct DepthRef {
+    cam: usize,
+    point: usize,
+    z_meas: f64,
 }
 
 fn skew(v: &Vector3<f64>) -> Matrix3<f64> {
@@ -92,8 +104,59 @@ fn huber_weight(r: f64) -> f64 {
     }
 }
 
-fn robust_cost(k: &CameraIntrinsics, poses: &[Pose], pts: &[Vector3<f64>], obs: &[Obs]) -> f64 {
-    obs.iter()
+fn scalar_robust(r: f64) -> f64 {
+    let n = r.abs();
+    if n <= HUBER_PX {
+        r * r
+    } else {
+        2.0 * HUBER_PX * n - HUBER_PX * HUBER_PX
+    }
+}
+
+/// Depth of `x` in `pose` (world -> camera), as a residual in pixels.
+///
+/// `(z - z_meas) * fx / z_meas` is the pixel-sized form of a metre error, so
+/// it shares the reprojection Huber threshold. The gradients match the camera
+/// update used for reprojection (`R <- exp(w) R`, `t <- t + v`):
+/// `dz/dw = (rx.y, -rx.x, 0)` and `dz/dv = (0, 0, 1)`, with `rx = R x`.
+/// Returns `(residual, d(residual)/d(point), d(residual)/d(camera))`.
+fn depth_jac(
+    k: &CameraIntrinsics,
+    pose: &Pose,
+    x: &Vector3<f64>,
+    z_meas: f64,
+) -> Option<(f64, Vector3<f64>, Vector6<f64>)> {
+    if !(z_meas > 1e-6) {
+        return None;
+    }
+    let r_mat = pose.rotation_matrix();
+    let rx = r_mat * x;
+    let z = rx.z + pose.translation.z;
+    if z <= 1e-9 {
+        return None;
+    }
+    let scale = k.fx / z_meas;
+    let g_point = scale * r_mat.row(2).transpose();
+    let g_cam = scale * Vector6::new(rx.y, -rx.x, 0.0, 0.0, 0.0, 1.0);
+    Some(((z - z_meas) * scale, g_point, g_cam))
+}
+
+fn depth_penalty(k: &CameraIntrinsics, pose: &Pose, x: &Vector3<f64>, z_meas: f64) -> f64 {
+    match depth_jac(k, pose, x, z_meas) {
+        Some((r, _, _)) => scalar_robust(r),
+        None => 1e6,
+    }
+}
+
+fn robust_cost(
+    k: &CameraIntrinsics,
+    poses: &[Pose],
+    pts: &[Vector3<f64>],
+    obs: &[Obs],
+    depths: &[DepthRef],
+) -> f64 {
+    let reproj: f64 = obs
+        .iter()
         .map(|o| match residual(k, &poses[o.cam], &pts[o.point], &o.uv) {
             Some((r, _)) => {
                 let n = r.norm();
@@ -105,7 +168,12 @@ fn robust_cost(k: &CameraIntrinsics, poses: &[Pose], pts: &[Vector3<f64>], obs: 
             }
             None => 1e6,
         })
-        .sum()
+        .sum();
+    let depth: f64 = depths
+        .iter()
+        .map(|d| depth_penalty(k, &poses[d.cam], &pts[d.point], d.z_meas))
+        .sum();
+    reproj + depth
 }
 
 fn rms(k: &CameraIntrinsics, poses: &[Pose], pts: &[Vector3<f64>], obs: &[Obs]) -> f64 {
@@ -131,10 +199,14 @@ fn rms(k: &CameraIntrinsics, poses: &[Pose], pts: &[Vector3<f64>], obs: &[Obs]) 
 /// then removed after the solve by a similarity about the fixed keyframe that
 /// keeps its distance to the oldest optimised keyframe (reprojections are
 /// invariant to it). That lets the initialisation pair itself be refined,
-/// rather than freezing its distortion by fixing both. Afterwards observations
-/// further than
-/// [`OUTLIER_PX`] from their projection are unlinked from both the keyframe
-/// and the point.
+/// rather than freezing its distortion by fixing both. A depth measurement
+/// removes that freedom instead: the similarity is not applied when any point
+/// in the window has one, because it would throw away the metric scale the
+/// residual just recovered. A depth point seen only once is not a variable.
+/// After the poses are written it is placed on the ray of its keypoint at the
+/// measured depth, so a moved keyframe does not leave it behind and it does
+/// not drag the keyframe. Afterwards observations further than [`OUTLIER_PX`]
+/// from their projection are unlinked from both the keyframe and the point.
 pub fn local_bundle_adjust(
     k: &CameraIntrinsics,
     map: &mut WorldMap,
@@ -158,7 +230,10 @@ pub fn local_bundle_adjust(
             if id >= map.points.len() || point_slot.contains_key(&id) {
                 continue;
             }
-            // A point seen once has an unconstrained depth.
+            // A point seen once has an unconstrained depth. A depth image
+            // fixes that, but the point is then determined by its keyframe, so
+            // it is placed from the adjusted pose afterwards rather than
+            // pulling the keyframe toward wherever it currently sits.
             let seen = map.points[id]
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
@@ -211,6 +286,26 @@ pub fn local_bundle_adjust(
         }
     }
 
+    // Depth of each point in the keyframe that created it. `born_kf` is that
+    // keyframe; it is in `kf_slot` only while the creating observation remains.
+    let mut depths: Vec<DepthRef> = Vec::new();
+    for (slot, &pid) in point_ids.iter().enumerate() {
+        let p = map.points[pid].read().unwrap_or_else(|e| e.into_inner());
+        let Some(z) = p.depth_m else { continue };
+        let z = z as f64;
+        if !(z.is_finite() && z > 1e-6) {
+            continue;
+        }
+        let Some(&cam) = kf_slot.get(&p.born_kf) else {
+            continue;
+        };
+        depths.push(DepthRef {
+            cam,
+            point: slot,
+            z_meas: z,
+        });
+    }
+
     // Which cameras move. Keyframe ids are their indices in `map.keyframes`.
     let mut fixed: Vec<bool> = kf_ids
         .iter()
@@ -236,15 +331,20 @@ pub fn local_bundle_adjust(
         return None;
     }
 
-    // Observations of each point, for the Schur complement.
+    // Observations of each point, for the Schur complement. Kept as an index
+    // list so a map with no depth runs the same reductions as before.
     let mut obs_of_point: Vec<Vec<usize>> = vec![Vec::new(); pts.len()];
     for (i, o) in obs.iter().enumerate() {
         obs_of_point[o.point].push(i);
     }
+    let mut depth_of_point: Vec<Vec<usize>> = vec![Vec::new(); pts.len()];
+    for (di, d) in depths.iter().enumerate() {
+        depth_of_point[d.point].push(di);
+    }
 
     let rms_before = rms(k, &poses, &pts, &obs);
     let poses_before = poses.clone();
-    let mut cost = robust_cost(k, &poses, &pts, &obs);
+    let mut cost = robust_cost(k, &poses, &pts, &obs, &depths);
     let mut lambda = 1e-3;
     let nc = 6 * n_opt;
 
@@ -256,6 +356,8 @@ pub fn local_bundle_adjust(
         let mut b_p = vec![Vector3::<f64>::zeros(); pts.len()];
         // W blocks, one per observation of an optimised camera.
         let mut w_blocks: Vec<Option<Matrix6x3<f64>>> = vec![None; obs.len()];
+        // Depth cross terms, optimised cameras only, parallel to `depths`.
+        let mut depth_w: Vec<Option<(usize, Matrix6x3<f64>)>> = vec![None; depths.len()];
         for (i, o) in obs.iter().enumerate() {
             let pose = &poses[o.cam];
             let Some((r, c)) = residual(k, pose, &pts[o.point], &o.uv) else {
@@ -291,6 +393,24 @@ pub fn local_bundle_adjust(
                 w_blocks[i] = Some(w * j_cam.transpose() * j_point);
             }
         }
+        for (di, d) in depths.iter().enumerate() {
+            let Some((r, g_point, g_cam)) = depth_jac(k, &poses[d.cam], &pts[d.point], d.z_meas)
+            else {
+                continue;
+            };
+            let w = huber_weight(r.abs());
+            v_p[d.point] += w * g_point * g_point.transpose();
+            b_p[d.point] -= w * g_point * r;
+            if let Some(ci) = cam_param[d.cam] {
+                let hcc: Matrix6<f64> = w * g_cam * g_cam.transpose();
+                let bc: Vector6<f64> = -w * g_cam * r;
+                let mut blk = h_cc.view_mut((6 * ci, 6 * ci), (6, 6));
+                blk += hcc;
+                let mut bblk = b_c.rows_mut(6 * ci, 6);
+                bblk += bc;
+                depth_w[di] = Some((ci, w * g_cam * g_point.transpose()));
+            }
+        }
 
         // Damped Schur complement.
         let mut s = h_cc.clone();
@@ -322,6 +442,34 @@ pub fn local_bundle_adjust(
                     let mut blk = s.view_mut((6 * ca, 6 * cb), (6, 6));
                     blk -= wa_vi * wb.transpose();
                 }
+                for &di in &depth_of_point[p] {
+                    let Some((cb, wb)) = depth_w[di] else {
+                        continue;
+                    };
+                    let mut blk = s.view_mut((6 * ca, 6 * cb), (6, 6));
+                    blk -= wa_vi * wb.transpose();
+                }
+            }
+            for &di in &depth_of_point[p] {
+                let Some((ca, wa)) = depth_w[di] else {
+                    continue;
+                };
+                let wa_vi = wa * vi;
+                let mut r = rhs.rows_mut(6 * ca, 6);
+                r -= wa_vi * b_p[p];
+                for &b in ob {
+                    let Some(wb) = w_blocks[b] else { continue };
+                    let cb = cam_param[obs[b].cam].expect("w block implies optimised camera");
+                    let mut blk = s.view_mut((6 * ca, 6 * cb), (6, 6));
+                    blk -= wa_vi * wb.transpose();
+                }
+                for &dj in &depth_of_point[p] {
+                    let Some((cb, wb)) = depth_w[dj] else {
+                        continue;
+                    };
+                    let mut blk = s.view_mut((6 * ca, 6 * cb), (6, 6));
+                    blk -= wa_vi * wb.transpose();
+                }
             }
         }
         let Some(dc) = s
@@ -345,6 +493,12 @@ pub fn local_bundle_adjust(
                     rhs_p -= wa.transpose() * dca;
                 }
             }
+            for &di in &depth_of_point[p] {
+                if let Some((ca, wa)) = depth_w[di] {
+                    let dca: Vector6<f64> = dc.fixed_rows::<6>(6 * ca).into_owned();
+                    rhs_p -= wa.transpose() * dca;
+                }
+            }
             new_pts[p] += v_inv[p] * rhs_p;
         }
         let mut new_poses = poses.clone();
@@ -356,7 +510,7 @@ pub fn local_bundle_adjust(
                 *pose = Pose::new(r, pose.translation + v);
             }
         }
-        let new_cost = robust_cost(k, &new_poses, &new_pts, &obs);
+        let new_cost = robust_cost(k, &new_poses, &new_pts, &obs, &depths);
         if new_cost < cost {
             let converged = (cost - new_cost) < 1e-6 * cost;
             poses = new_poses;
@@ -373,12 +527,13 @@ pub fn local_bundle_adjust(
             }
         }
     }
-    // With a single fixed keyframe the solution is only defined up to a
-    // scale about it. Remove that freedom exactly: a similarity about the
-    // fixed camera centre leaves every reprojection unchanged, so rescale to
-    // keep the distance from it to the oldest optimised keyframe (for the
-    // initialisation pair, the unit baseline).
-    if fixed.iter().filter(|&&f| f).count() == 1 {
+    // With a single fixed keyframe and no depth, the solution is only defined
+    // up to a scale about that keyframe. Remove that freedom exactly: a
+    // similarity about the fixed camera centre leaves every reprojection
+    // unchanged, so rescale to keep the distance from it to the oldest
+    // optimised keyframe (for the initialisation pair, the unit baseline).
+    // Depth measurements already fix the scale; rescaling would undo them.
+    if depths.is_empty() && fixed.iter().filter(|&&f| f).count() == 1 {
         let f = fixed.iter().position(|&f| f).expect("one fixed");
         let r = (0..kf_ids.len())
             .filter(|&c| !fixed[c])
@@ -415,6 +570,43 @@ pub fn local_bundle_adjust(
     for (slot, &pid) in point_ids.iter().enumerate() {
         let mut p = map.points[pid].write().unwrap_or_else(|e| e.into_inner());
         p.world_pos = Point3::from(pts[slot].cast::<f32>());
+    }
+    // A depth point with one observation is the back-projection of its
+    // keypoint. The solve does not include it (it would only repeat its
+    // keyframe's pose), so place it from the pose just written.
+    for (c, &kf_id) in kf_ids.iter().enumerate() {
+        if cam_param[c].is_none() {
+            continue;
+        }
+        let c2w = poses[c].inverse();
+        let kf = map.keyframes[kf_id as usize]
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut place: Vec<(usize, f64, f64, f64)> = Vec::new();
+        for (i, p) in map.points.iter().enumerate() {
+            let p = p.read().unwrap_or_else(|e| e.into_inner());
+            let Some(z) = p.depth_m else { continue };
+            let z = z as f64;
+            if !(z.is_finite() && z > 1e-6) || p.born_kf != kf_id || p.observations.len() != 1 {
+                continue;
+            }
+            let (obs_kf, kp_idx) = p.observations[0];
+            if obs_kf != kf_id {
+                continue;
+            }
+            let Some(d) = kf.descriptors.descriptors.get(kp_idx) else {
+                continue;
+            };
+            place.push((i, d.keypoint.x, d.keypoint.y, z));
+        }
+        drop(kf);
+        for (i, u, v, z) in place {
+            let x_cam = Point3::new((u - k.cx) * z / k.fx, (v - k.cy) * z / k.fy, z);
+            map.points[i]
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .world_pos = c2w.transform_point(&x_cam).cast::<f32>();
+        }
     }
     let mut outliers_removed = 0;
     for o in &obs {
@@ -596,6 +788,133 @@ mod tests {
                 terr < 1e-3 && rerr < 0.01,
                 "keyframe {i}: {terr} m, {rerr} deg"
             );
+        }
+    }
+
+    /// Scale every optimised camera and every point about keyframe 0.
+    /// Reprojection is unchanged; a depth measurement is not.
+    fn scale_about_origin(map: &mut WorldMap, s: f64) {
+        let origin = kf_pose(map, 0).inverse().translation;
+        for p in &map.points {
+            let mut p = p.write().unwrap();
+            let x = p.world_pos.coords.cast::<f64>();
+            p.world_pos = Point3::from((origin + s * (x - origin)).cast::<f32>());
+        }
+        for i in 1..map.keyframes.len() {
+            let pose = kf_pose(map, i);
+            let centre = pose.inverse().translation;
+            let new_c = origin + s * (centre - origin);
+            let scaled = Pose::from_quat_translation(pose.rotation, -(pose.rotation * new_c));
+            map.keyframes[i].write().unwrap().pose = typed_pose(&scaled);
+        }
+    }
+
+    fn stamp_depth_in_keyframe(map: &mut WorldMap, kf: u64, points: &[Vector3<f64>], cam: &Pose) {
+        for (pi, p) in points.iter().enumerate() {
+            let mut mp = map.points[pi].write().unwrap();
+            if !mp.observations.iter().any(|o| o.0 == kf) {
+                continue;
+            }
+            let c = cam.rotation * p + cam.translation;
+            mp.depth_m = Some(c.z as f32);
+            mp.born_kf = kf;
+        }
+    }
+
+    /// A 2% scale leaves every reprojection exactly where it was, so monocular
+    /// adjustment would keep it (the gauge removal restores the *scaled*
+    /// baseline). Depth in an optimised keyframe is what pulls the metric
+    /// scale back.
+    #[test]
+    fn depth_recovers_a_scale_reprojection_cannot_see() {
+        let (mut map, truth, points) = scene();
+        stamp_depth_in_keyframe(&mut map, 1, &points, &truth[1]);
+        let s = 1.02;
+        scale_about_origin(&mut map, s);
+        let scaled = kf_pose(&map, 1).inverse().translation.norm();
+        let true_base = truth[1].inverse().translation.norm();
+        assert!(
+            (scaled / true_base - s).abs() < 1e-3,
+            "scale did not take: {scaled} vs {}",
+            s * true_base
+        );
+
+        let report = local_bundle_adjust(&k(), &mut map, 4, 1, 40).expect("adjusted");
+        assert!(report.rms_after < 0.05, "did not converge: {report:?}");
+        for (i, gt) in truth.iter().enumerate() {
+            let got = kf_pose(&map, i).inverse().translation;
+            let terr = (got - gt.inverse().translation).norm();
+            assert!(
+                terr < 0.005,
+                "keyframe {i} stayed at the scaled pose: {terr} m"
+            );
+        }
+    }
+
+    /// A point with one observation is free along its ray under reprojection.
+    /// With a depth measurement it is in the solve, and a point left off its
+    /// ray is pulled back. Dropping once-seen points is what left fresh RGB-D
+    /// landmarks behind their keyframe.
+    #[test]
+    fn depth_point_seen_once_returns_to_its_measurement() {
+        let (mut map, truth, points) = scene();
+        stamp_depth_in_keyframe(&mut map, 1, &points, &truth[1]);
+        let pi = (0..points.len())
+            .find(|&pi| {
+                map.points[pi]
+                    .read()
+                    .unwrap()
+                    .observations
+                    .iter()
+                    .any(|o| o.0 == 1)
+            })
+            .expect("keyframe 1 sees a point");
+        let keep = map.points[pi]
+            .read()
+            .unwrap()
+            .observations
+            .iter()
+            .copied()
+            .find(|o| o.0 == 1)
+            .unwrap();
+        let others: Vec<(u64, usize)> = map.points[pi]
+            .read()
+            .unwrap()
+            .observations
+            .iter()
+            .copied()
+            .filter(|o| o.0 != 1)
+            .collect();
+        for (kf, kp) in others {
+            let mut kfw = map.keyframes[kf as usize].write().unwrap();
+            if kfw.map_points.get(kp).copied().flatten() == Some(pi as u64) {
+                kfw.map_points[kp] = None;
+            }
+        }
+        {
+            let mut p = map.points[pi].write().unwrap();
+            p.observations.clear();
+            p.observations.push(keep);
+            p.world_pos =
+                Point3::from((points[pi] + Vector3::new(0.01, -0.02, 0.05)).cast::<f32>());
+        }
+
+        let report = local_bundle_adjust(&k(), &mut map, 4, 1, 40).expect("adjusted");
+        assert!(report.rms_after < 0.05, "did not converge: {report:?}");
+        let got = map.points[pi]
+            .read()
+            .unwrap()
+            .world_pos
+            .coords
+            .cast::<f64>();
+        let err = (got - points[pi]).norm();
+        assert!(
+            err < 0.005,
+            "once-seen depth point was left {err} m from its measurement"
+        );
+        for (i, gt) in truth.iter().enumerate() {
+            let terr = (kf_pose(&map, i).inverse().translation - gt.inverse().translation).norm();
+            assert!(terr < 0.005, "keyframe {i} moved {terr} m");
         }
     }
 }
