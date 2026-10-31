@@ -357,10 +357,20 @@ fn sweep(n: usize) -> Vec<Pose> {
         .collect()
 }
 
-/// How many of `inliers` are map points created at initialisation (map
-/// indices below `n_initial`; the map only grows by appending).
-fn from_initial_map(inliers: &[usize], n_initial: usize) -> usize {
-    inliers.iter().filter(|&&i| i < n_initial).count()
+/// How many of `inliers` were created during initialisation.
+///
+/// `born_before` is [`WorldMap::points_created`] at the end of initialisation.
+/// Culling compacts point indices, so the index itself no longer says when a
+/// point was born; [`MapPoint::created_at`] does, and it is not reused.
+fn from_initial_map(inliers: &[usize], map: &WorldMap, born_before: u64) -> usize {
+    inliers
+        .iter()
+        .filter(|&&i| {
+            map.points.get(i).is_some_and(|p| {
+                p.read().unwrap_or_else(|e| e.into_inner()).created_at < born_before
+            })
+        })
+        .count()
 }
 
 /// Twenty monocular frames over the sweep. Tracking has to survive on map
@@ -374,7 +384,8 @@ fn monocular_long_sequence_extends_the_map() {
     let mut tracker = tracker();
     let mut map = WorldMap::new();
     let mut scale = None;
-    let mut n_initial = 0;
+    let mut n_initial = 0usize;
+    let mut born_before = 0u64;
     let mut max_rot = 0.0f64;
     let mut max_rel_terr = 0.0f64;
     let mut last_inliers = Vec::new();
@@ -394,6 +405,7 @@ fn monocular_long_sequence_extends_the_map() {
         });
         if k == 1 {
             n_initial = map.points.len();
+            born_before = map.points_created();
         }
         let c_est = pose.inverse().translation;
         let c_gt = gt.inverse().translation;
@@ -408,7 +420,7 @@ fn monocular_long_sequence_extends_the_map() {
             map.points.len(),
             map.keyframes.len(),
             inliers.len(),
-            from_initial_map(&inliers, n_initial),
+            from_initial_map(&inliers, &map, born_before),
             100.0 * terr / travelled
         );
         assert_eq!(tracker.state, TrackingState::Tracking, "frame {k}");
@@ -432,15 +444,16 @@ fn monocular_long_sequence_extends_the_map() {
     );
     // By the end the pose rests on points mapped after initialisation.
     assert!(
-        from_initial_map(&last_inliers, n_initial) * 4 < last_inliers.len(),
+        from_initial_map(&last_inliers, &map, born_before) * 4 < last_inliers.len(),
         "the last frame still tracks mostly initial points: {} of {}",
-        from_initial_map(&last_inliers, n_initial),
+        from_initial_map(&last_inliers, &map, born_before),
         last_inliers.len()
     );
-    // Measured: rotation <= 0.659 deg, centre error <= 6.6% of the distance
-    // travelled (5.3% at the last frame), 20 keyframes, 1338 map points.
-    // Before map extension the sequence was lost at frame 3 (28 inliers,
-    // 3.3 deg, 66% of travel).
+    // Measured: rotation <= 0.555 deg, centre error <= 6.6% of the distance
+    // travelled (0.9% at the last frame), 20 keyframes, 606 map points.
+    // Before culling the same sweep held 1338 points (rotation <= 0.659 deg,
+    // 5.3% at the last frame). Before map extension the sequence was lost
+    // at frame 3 (28 inliers, 3.3 deg, 66% of travel).
     assert!(max_rot < 1.5, "rotation drifted to {max_rot:.3} deg");
     assert!(
         max_rel_terr < 0.10,

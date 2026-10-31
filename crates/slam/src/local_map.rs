@@ -1,6 +1,7 @@
 //! Map maintenance shared by both tracking modes: matching map points to a
 //! frame by projection, pose refinement on those matches, the keyframe policy,
-//! and monocular map extension by triangulation between keyframes.
+//! monocular map extension by triangulation between keyframes, and fusion and
+//! culling of the points that produces.
 
 use crate::mapping::MapExt;
 use crate::types::{MapPoint, WorldMap};
@@ -24,6 +25,16 @@ const TRIANGULATION_REPROJ_PX: f64 = 2.0;
 /// Minimum angle between the two viewing rays of a new map point. Below this
 /// the depth is too poorly constrained to be worth adding.
 const MIN_TRIANGULATION_PARALLAX_DEG: f64 = 1.0;
+/// Projection window in which a map point and a keyframe feature are the same
+/// corner. Wider than the triangulation check: fusion runs after the pose is
+/// known, and a duplicate's own error is what it is absorbing.
+const FUSE_PX: f64 = 3.0;
+/// Largest Hamming distance at which fusion treats two descriptors as the same
+/// corner. The triangulation gate, which is the same decision made earlier.
+const FUSE_HAMMING: u32 = 50;
+/// Keyframes a point is given, after the one it was born in, to be seen again.
+/// A point that still has only its creating observations by then is removed.
+const CULL_MIN_AGE: u64 = 2;
 
 pub(crate) fn hamming(a: &[u8], b: &[u8]) -> u32 {
     a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum()
@@ -422,4 +433,475 @@ pub(crate) fn triangulate_new_points(
         }
     }
     created
+}
+
+fn read_point(map: &WorldMap, i: usize) -> std::sync::RwLockReadGuard<'_, MapPoint> {
+    map.points[i].read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write_point(map: &WorldMap, i: usize) -> std::sync::RwLockWriteGuard<'_, MapPoint> {
+    map.points[i].write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Move every observation of `drop` onto `keep`, and clear `drop`.
+///
+/// A keyframe that already observes `keep` cannot observe it twice, so
+/// `drop`'s feature there is unlinked instead of transferred. Returns nothing;
+/// the caller culls `drop` once it has no observations.
+fn merge_into(map: &mut WorldMap, keep: usize, drop_at: usize) {
+    if keep == drop_at || keep >= map.points.len() || drop_at >= map.points.len() {
+        return;
+    }
+    let obs = {
+        let mut dropped = write_point(map, drop_at);
+        std::mem::take(&mut dropped.observations)
+    };
+    for (kf_id, kp_idx) in obs {
+        let Some(kf) = map.keyframes.get(kf_id as usize) else {
+            continue;
+        };
+        let mut kf = kf.write().unwrap_or_else(|e| e.into_inner());
+        let Some(slot) = kf.map_points.get_mut(kp_idx) else {
+            continue;
+        };
+        if *slot != Some(drop_at as u64) {
+            continue;
+        }
+        let keep_observes = read_point(map, keep)
+            .observations
+            .iter()
+            .any(|(k, _)| *k == kf_id);
+        if keep_observes {
+            *slot = None;
+        } else {
+            *slot = Some(keep as u64);
+            drop(kf);
+            write_point(map, keep).observations.push((kf_id, kp_idx));
+        }
+    }
+}
+
+/// Fuse map points into keyframe `kf_index`.
+///
+/// Every map point is projected into the keyframe. When the projection lands
+/// within [`FUSE_PX`] of a feature with a similar descriptor:
+///
+/// * the feature has no point yet, and the projected point is not already in
+///   this keyframe: the feature becomes another observation of that point;
+/// * the feature belongs to a different point: the two are the same corner
+///   (a second pyramid level, or a point triangulated again), and the one
+///   with fewer observations is merged into the other.
+///
+/// One point is fused to one feature, the closest acceptable one. Returns how
+/// many features were attached or merged.
+pub(crate) fn fuse_keyframe(k: &CameraIntrinsics, map: &mut WorldMap, kf_index: usize) -> usize {
+    if kf_index >= map.keyframes.len() || map.points.is_empty() {
+        return 0;
+    }
+    let (pose, kf_id, features, linked): (
+        Pose,
+        u64,
+        Vec<(Point2<f64>, Vec<u8>)>,
+        Vec<Option<u64>>,
+    ) = {
+        let kf = map.keyframes[kf_index]
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        let features = kf
+            .descriptors
+            .descriptors
+            .iter()
+            .map(|d| (Point2::new(d.keypoint.x, d.keypoint.y), d.data.clone()))
+            .collect();
+        (
+            keyframe_world_to_camera(&kf.pose),
+            kf.id,
+            features,
+            kf.map_points.clone(),
+        )
+    };
+    if features.is_empty() {
+        return 0;
+    }
+
+    let mut seen_here = vec![false; map.points.len()];
+    for id in linked.iter().flatten() {
+        if let Some(slot) = seen_here.get_mut(*id as usize) {
+            *slot = true;
+        }
+    }
+
+    struct Cand {
+        point: usize,
+        feat: usize,
+        ham: u32,
+        dist: f64,
+    }
+    let mut cands = Vec::new();
+    for pi in 0..map.points.len() {
+        let point = read_point(map, pi);
+        if point.observations.is_empty() {
+            continue;
+        }
+        let Some(uv) = project(k, &pose, &point.world_pos.coords.cast::<f64>()) else {
+            continue;
+        };
+        let descriptor = point.descriptor.clone();
+        drop(point);
+        let mut best: Option<Cand> = None;
+        for (fi, (kp, desc)) in features.iter().enumerate() {
+            if linked.get(fi).copied().flatten() == Some(pi as u64) {
+                continue;
+            }
+            let dist = (kp - uv).norm();
+            if dist > FUSE_PX {
+                continue;
+            }
+            let ham = hamming(&descriptor, desc);
+            if ham > FUSE_HAMMING {
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some(b) => ham < b.ham || (ham == b.ham && dist < b.dist),
+            };
+            if better {
+                best = Some(Cand {
+                    point: pi,
+                    feat: fi,
+                    ham,
+                    dist,
+                });
+            }
+        }
+        if let Some(c) = best {
+            cands.push(c);
+        }
+    }
+    cands.sort_by(|a, b| a.ham.cmp(&b.ham).then(a.dist.total_cmp(&b.dist)));
+
+    let mut used_point = vec![false; map.points.len()];
+    let mut used_feat = vec![false; features.len()];
+    let mut fused = 0usize;
+    for c in cands {
+        if used_feat[c.feat] || used_point[c.point] {
+            continue;
+        }
+        let live = map.keyframes[kf_index]
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .map_points
+            .get(c.feat)
+            .copied()
+            .flatten();
+        match live {
+            Some(other) if other as usize != c.point && (other as usize) < map.points.len() => {
+                if used_point[other as usize] {
+                    continue;
+                }
+                let (keep, drop_at) = {
+                    let na = read_point(map, c.point).observations.len();
+                    let nb = read_point(map, other as usize).observations.len();
+                    if nb > na || (nb == na && (other as usize) < c.point) {
+                        (other as usize, c.point)
+                    } else {
+                        (c.point, other as usize)
+                    }
+                };
+                merge_into(map, keep, drop_at);
+                used_point[drop_at] = true;
+                used_feat[c.feat] = true;
+                fused += 1;
+            }
+            None if !seen_here[c.point] => {
+                write_point(map, c.point).observations.push((kf_id, c.feat));
+                map.keyframes[kf_index]
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .map_points[c.feat] = Some(c.point as u64);
+                seen_here[c.point] = true;
+                used_feat[c.feat] = true;
+                fused += 1;
+            }
+            _ => {}
+        }
+    }
+    fused
+}
+
+/// Remove map points that were never seen again, and compact the map.
+///
+/// A point with no observations (merged, or every observation rejected) is
+/// removed immediately. A point that still has fewer than `min_obs`
+/// observations [`CULL_MIN_AGE`] keyframes after the one it was born in is
+/// removed too. Monocular tracking passes 3: a point is born from a
+/// triangulated pair and has to be seen from one more keyframe. RGB-D does
+/// not call this. A depth point is already a metric landmark, and both
+/// merging neighbours and dropping points that lacked a second view made
+/// the 20-frame sweep drift (2.9 cm / 0.39° to about 5 cm / 0.7°).
+///
+/// Surviving points keep [`MapPoint::created_at`] and receive a new [`MapPoint::id`]
+/// equal to their new index. Keyframe slots are rewritten to match, and the
+/// descriptor cache is dropped.
+pub(crate) fn cull_under_observed(map: &mut WorldMap, min_obs: usize) -> usize {
+    let newest = match map.keyframes.len().checked_sub(1) {
+        Some(n) => n as u64,
+        None => return 0,
+    };
+    let mut drop_point = vec![false; map.points.len()];
+    for i in 0..map.points.len() {
+        let point = read_point(map, i);
+        if point.observations.is_empty()
+            || (newest.saturating_sub(point.born_kf) >= CULL_MIN_AGE
+                && point.observations.len() < min_obs)
+        {
+            drop_point[i] = true;
+        }
+    }
+    let n_drop = drop_point.iter().filter(|d| **d).count();
+    if n_drop == 0 {
+        return 0;
+    }
+
+    for (i, go) in drop_point.iter().copied().enumerate() {
+        if !go {
+            continue;
+        }
+        let obs = std::mem::take(&mut write_point(map, i).observations);
+        for (kf_id, kp_idx) in obs {
+            let Some(kf) = map.keyframes.get(kf_id as usize) else {
+                continue;
+            };
+            let mut kf = kf.write().unwrap_or_else(|e| e.into_inner());
+            if kf.map_points.get(kp_idx).copied().flatten() == Some(i as u64) {
+                kf.map_points[kp_idx] = None;
+            }
+        }
+    }
+
+    let mut new_index = vec![None; map.points.len()];
+    let mut kept = Vec::with_capacity(map.points.len() - n_drop);
+    for (i, point) in map.points.drain(..).enumerate() {
+        if drop_point[i] {
+            continue;
+        }
+        {
+            let mut p = point.write().unwrap_or_else(|e| e.into_inner());
+            p.id = kept.len() as u64;
+        }
+        new_index[i] = Some(kept.len());
+        kept.push(point);
+    }
+    map.points = kept;
+    map.descriptor_cache = None;
+    map.descriptor_cache_len = 0;
+
+    for kf in &map.keyframes {
+        let mut kf = kf.write().unwrap_or_else(|e| e.into_inner());
+        for slot in &mut kf.map_points {
+            if let Some(id) = *slot {
+                *slot = new_index
+                    .get(id as usize)
+                    .copied()
+                    .flatten()
+                    .map(|n| n as u64);
+            }
+        }
+    }
+    n_drop
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mapping::MapExt;
+    use crate::types::KeyFrame;
+    use cv_core::{Descriptor, Descriptors, FrameConvention, KeyPoint, KeyPoints};
+    use std::sync::{Arc, RwLock};
+
+    fn intrinsics() -> CameraIntrinsics {
+        CameraIntrinsics::new(100.0, 100.0, 50.0, 50.0, 100, 100)
+    }
+
+    fn identity_pose() -> TypedPose {
+        TypedPose::new(
+            Point3::origin(),
+            nalgebra::Matrix3::identity(),
+            FrameConvention::opencv(),
+        )
+    }
+
+    fn add_born(map: &mut WorldMap, pos: Point3<f32>, byte: u8, obs: &[(u64, usize)]) -> usize {
+        let mut mp = MapPoint::new(0, pos, vec![byte; 32]);
+        mp.observations = obs.to_vec();
+        map.add_point(mp);
+        map.points.len() - 1
+    }
+
+    fn push_kf(map: &mut WorldMap, id: u64, feats: &[(f64, f64, u8)], links: &[Option<u64>]) {
+        let mut descs = Descriptors::new();
+        for &(x, y, byte) in feats {
+            descs.push(Descriptor::new(vec![byte; 32], KeyPoint::new(x, y)));
+        }
+        let kps = KeyPoints {
+            keypoints: descs.descriptors.iter().map(|d| d.keypoint).collect(),
+        };
+        let mut kf = KeyFrame::new(id, identity_pose(), kps, descs);
+        assert_eq!(
+            kf.map_points.len(),
+            links.len(),
+            "test keyframe built with one slot per feature"
+        );
+        kf.map_points = links.to_vec();
+        map.keyframes.push(Arc::new(RwLock::new(kf)));
+    }
+
+    /// Every keyframe slot points at the point that lists that observation,
+    /// and every observation has a slot. This is the invariant compaction
+    /// has to keep: `id` is the index, and the two sides name each other.
+    fn assert_links(map: &WorldMap) {
+        for (i, point) in map.points.iter().enumerate() {
+            let point = point.read().unwrap();
+            assert_eq!(point.id, i as u64);
+            for &(kf_id, kp_idx) in &point.observations {
+                let kf = map.keyframes[kf_id as usize].read().unwrap();
+                assert_eq!(kf.map_points[kp_idx], Some(i as u64));
+            }
+        }
+        for kf in &map.keyframes {
+            let kf = kf.read().unwrap();
+            for (kp_idx, slot) in kf.map_points.iter().enumerate() {
+                if let Some(id) = *slot {
+                    let point = map.points[id as usize].read().unwrap();
+                    assert!(
+                        point
+                            .observations
+                            .iter()
+                            .any(|&(k, i)| k == kf.id && i == kp_idx),
+                        "keyframe {} feature {kp_idx} points at {id}, which does not list it",
+                        kf.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_point_never_reobserved_is_removed_and_survivors_are_renumbered() {
+        let mut map = WorldMap::new();
+        // Born at keyframe 0, then seen twice more.
+        let a = add_born(&mut map, Point3::new(0.0, 0.0, 5.0), 1, &[(0, 0)]);
+        write_point(&map, a).observations.extend([(1, 0), (2, 0)]);
+        // Born at keyframe 0 and never seen again.
+        let _b = add_born(&mut map, Point3::new(1.0, 0.0, 5.0), 2, &[(0, 1)]);
+        // Born at the newest keyframe: too young to remove, one observation.
+        let c = add_born(&mut map, Point3::new(0.0, 1.0, 5.0), 3, &[(2, 1)]);
+        push_kf(
+            &mut map,
+            0,
+            &[(50.0, 50.0, 1), (60.0, 50.0, 2)],
+            &[Some(0), Some(1)],
+        );
+        push_kf(&mut map, 1, &[(50.0, 50.0, 1)], &[Some(0)]);
+        push_kf(
+            &mut map,
+            2,
+            &[(50.0, 50.0, 1), (40.0, 50.0, 3)],
+            &[Some(0), Some(2)],
+        );
+        let _ = map.descriptor_bytes();
+
+        let removed = cull_under_observed(&mut map, 2);
+        assert_eq!(removed, 1);
+        assert_eq!(map.points.len(), 2);
+        assert!(
+            map.descriptor_cache.is_none(),
+            "compaction must drop the cache"
+        );
+        let bytes = map.descriptor_bytes();
+        assert_eq!(bytes[0], 1, "the reobserved point stays first");
+        assert_eq!(bytes[32], 3, "the young point slides into the hole");
+        assert_eq!(read_point(&map, 0).created_at, 0);
+        assert_eq!(read_point(&map, 1).created_at, c as u64);
+        assert_eq!(read_point(&map, 1).id, 1);
+        assert_links(&map);
+    }
+
+    #[test]
+    fn a_reobserved_point_stays_and_a_young_one_is_not_judged_yet() {
+        let mut map = WorldMap::new();
+        // Two observations, born at 0. Monocular rule (min 3) removes it once
+        // two further keyframes have passed: it never earned a third view.
+        add_born(&mut map, Point3::new(0.0, 0.0, 5.0), 1, &[(0, 0)]);
+        write_point(&map, 0).observations.push((1, 0));
+        // Born at keyframe 1, so with the newest keyframe at 2 it is one
+        // keyframe old and must be kept even with two observations. The later
+        // observation is recorded after birth, or born_kf would be the newer
+        // keyframe and the age check would not be what this test claims.
+        let young = add_born(&mut map, Point3::new(0.2, 0.0, 5.0), 2, &[(1, 1)]);
+        write_point(&map, young).observations.push((2, 0));
+        push_kf(&mut map, 0, &[(50.0, 50.0, 1)], &[Some(0)]);
+        push_kf(
+            &mut map,
+            1,
+            &[(50.0, 50.0, 1), (55.0, 50.0, 2)],
+            &[Some(0), Some(1)],
+        );
+        push_kf(&mut map, 2, &[(52.0, 50.0, 2)], &[Some(1)]);
+
+        assert_eq!(cull_under_observed(&mut map, 3), 1);
+        assert_eq!(map.points.len(), 1);
+        assert_eq!(read_point(&map, 0).created_at, 1);
+        assert_links(&map);
+    }
+
+    #[test]
+    fn an_unmatched_feature_adopts_the_point_that_projects_onto_it() {
+        let mut map = WorldMap::new();
+        // (0, 0, 5) projects to the principal point (50, 50).
+        add_born(&mut map, Point3::new(0.0, 0.0, 5.0), 7, &[(0, 0)]);
+        // Twenty pixels away: 100 * 1/5 = 20, so u = 70. Must not be fused.
+        add_born(&mut map, Point3::new(1.0, 0.0, 5.0), 7, &[(0, 1)]);
+        push_kf(
+            &mut map,
+            0,
+            &[(50.0, 50.0, 7), (70.0, 50.0, 7)],
+            &[Some(0), Some(1)],
+        );
+        push_kf(&mut map, 1, &[(50.0, 50.0, 7)], &[None]);
+
+        assert_eq!(fuse_keyframe(&intrinsics(), &mut map, 1), 1);
+        let obs = read_point(&map, 0).observations.clone();
+        assert!(
+            obs.contains(&(1, 0)),
+            "the feature became an observation: {obs:?}"
+        );
+        assert_eq!(read_point(&map, 1).observations.len(), 1);
+        assert_eq!(map.keyframes[1].read().unwrap().map_points[0], Some(0),);
+        assert_links(&map);
+    }
+
+    #[test]
+    fn two_points_on_the_same_corner_become_one() {
+        let mut map = WorldMap::new();
+        // A at the principal point. B is 0.05 m to the side at depth 5:
+        // 100 * 0.05/5 = 1 px, so it lands on A's feature and A lands on B's
+        // (2 px away). Same descriptor, so they are one corner seen twice.
+        add_born(&mut map, Point3::new(0.0, 0.0, 5.0), 4, &[(0, 0)]);
+        add_born(&mut map, Point3::new(0.05, 0.0, 5.0), 4, &[(0, 1)]);
+        push_kf(
+            &mut map,
+            0,
+            &[(50.0, 50.0, 4), (52.0, 50.0, 4)],
+            &[Some(0), Some(1)],
+        );
+
+        assert_eq!(fuse_keyframe(&intrinsics(), &mut map, 0), 1);
+        assert_eq!(cull_under_observed(&mut map, 2), 1);
+        assert_eq!(map.points.len(), 1);
+        assert_eq!(read_point(&map, 0).created_at, 0, "the older point is kept");
+        let linked = map.keyframes[0].read().unwrap().map_points.clone();
+        assert_eq!(linked.iter().filter(|s| s.is_some()).count(), 1);
+        assert_links(&map);
+    }
 }
