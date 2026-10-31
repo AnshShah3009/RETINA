@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (42 open, was 77)
+## (g) Second review, 2026-10-31 — findings (40 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -293,7 +293,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | not renormalised after the 0.2 clamp | LOW | ARGUED |
 | g-h12 | AKAZE Scharr derivatives (CPU + WGSL) | taps `[1,3,1]/32` give gain 0.3125 on a unit ramp; should be `[3,10,3]/32` | LOW | ARGUED |
 
-### (g2) features / imgproc (10 open, was 12)
+### (g2) features / imgproc (8 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -303,8 +303,8 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f4 | `imgproc/src/hough.rs` | runs Canny on its input (edges of an edge map), rho binned with floor → one line returns two at 48.58/50.58 | HIGH | CONFIRMED |
 | g-f5 | `imgproc/src/edges.rs` Canny NMS | `>=` on both sides keeps 2-px edges; L2 default and implicit σ=1 blur differ from OpenCV | MED | CONFIRMED |
 | g-f6 | `imgproc/src/threshold.rs` `adaptive_threshold` | truncated mean, shrinking-window border, fractional `c` comparison | MED | CONFIRMED |
-| g-f7 | `features/src/usac.rs` `score_magsac` | `1..=sigma_max as usize` never runs for `sigma_max < 1` → no model | MED | CONFIRMED |
-| g-f8 | `features/src/usac.rs` adaptive iterations | count fixed at 50% inlier assumption, never updated from the best model | MED | ARGUED |
+| g-f7 | `features/src/usac.rs` `score_magsac` | **CLOSED.** Marginalised MSAC over 10 sigmas in `(0, σ_max]`; works below 1 and ranks by fit. Pinned by `magsac_scores_below_unit_sigma`. Was: `1..=sigma_max as usize` never runs for `sigma_max < 1` → no model | was MED — fixed | CONFIRMED |
+| g-f8 | `features/src/usac.rs` adaptive iterations | **CLOSED.** `max_iterations = 0` now adapts N from the best model's inlier ratio (cap 10 000); nonzero stays a fixed budget, as documented. Pinned by `adaptive_iterations_track_the_inlier_ratio`. Was: count fixed at 50% inlier assumption, never updated from the best model | was MED — fixed | ARGUED |
 | g-f9 | `imgproc/src/resize.rs` `pyr_down`/`pyr_up` | bilinear resize to `w/2` instead of 5-tap Gaussian + `(w+1)/2`; 1x10 → black 1x1 | MED | CONFIRMED |
 | g-f10 | `features/src/matcher.rs` | only Hamming exists; SIFT float-histogram bytes matched by Hamming | MED | ARGUED |
 | g-f11 | `features/src/orb.rs` rBRIEF | rotated taps floored, OpenCV rounds | LOW | ARGUED |
