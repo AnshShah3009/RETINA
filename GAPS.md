@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (39 open, was 77)
+## (g) Second review, 2026-10-31 — findings (48 open, was 86)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -352,8 +352,7 @@ python `sparse_solve_cg` checks `ncols` not `nrows`; `slam` returns `Ok(last pos
 ### (g5) calib3d / sfm (1 open, was 6)
 
 Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrappers,
-`cv_core::robust::Ransac`. **Not yet reviewed:** triangulation, distortion/undistort,
-calibration, all of `crates/sfm`.
+`cv_core::robust::Ransac`. Triangulation, distortion, calibration and `crates/sfm` are covered by (g8).
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -397,6 +396,24 @@ calibration, all of `crates/sfm`.
 | g-n10 | `signal_proc` `find_peaks` | **CLOSED.** SciPy's `_local_maxima_1d` plateau scan (midpoint, rounded down). Pinned by `tests/scipy_find_peaks_resample.rs`. Was: plateau peaks never found | was MED — fixed | CONFIRMED vs SciPy |
 | g-n11 | `math/src/stats.rs` normal cdf/ppf, p-values | lower-tail cancellation (`cdf(-10)` = 0), unrefined `ppf`, `1 - cdf` p-values | MED | CONFIRMED vs SciPy |
 | g-n12 | `math/src/integrate.rs` | `quad` is a fixed trapezoid with error 0 and evaluates endpoints; `ode_solve` overshoots `t_end` and stops silently at 10k steps | MED | ARGUED |
+
+### (g8) sfm / triangulation / distortion / calibration (9 open, was 9)
+
+Second calib3d pass, covering what (g5) did not reach. `calibrate_camera_planar` matches
+`cv2.calibrateCamera` to every printed digit (rms 0.237948) and the BA analytic Jacobian
+matches finite differences (~1e-7, including θ≈π) — checked, not defects.
+
+| id | location | defect | severity | evidence |
+|---|---|---|---|---|
+| g-s1 | `core/src/geometry/distortion.rs` `remove` | undistortion fixed-point diverges with tangential terms; `remove` then returns the *distorted* point: 166.6 px error at r = 0.8 (`cv2.undistortPointsIter` exact) | HIGH | CONFIRMED vs cv2 |
+| g-s2 | `sfm/src/mapper.rs` `triangulate_track` | cheirality tests world z, not depth in camera A: 36-view orbit registers 19/36 | HIGH | CONFIRMED |
+| g-s3 | `calib3d/src/project.rs` rotation Jacobian | `rotation_matrix_to_rodrigues` divides by sin θ: max \|J − FD\| = 2.1e8 at θ = π | HIGH | CONFIRMED |
+| g-s4 | `calib3d/src/stereo.rs` `stereo_rectify_matrices` | always rotates the baseline onto +x: right-camera-on-left rectifies 180° turned, vertical stereo 90° (cv2 gives R1 = I) | MED | CONFIRMED vs cv2 |
+| g-s5 | `sfm/src/mapper.rs` `sample_unique_indices` | same LCG low-bit sampler as g-c3: n distinct samples for n = 2^m | MED | CONFIRMED |
+| g-s6 | `sfm/src/bundle_adjustment.rs` `bundle_adjust_sequential` | cost not recomputed after `remove_outliers` → any next step accepted | MED | ARGUED |
+| g-s7 | `sfm/src/bundle_adjustment.rs` `compute_point_reprojection_error_index` | behind-camera observations skipped (error 0) → never pruned | MED | ARGUED |
+| g-s8 | `calib3d/src/calibration.rs` | leftover debug `eprintln!` on every calibration / every 10 LM iterations | LOW | CONFIRMED |
+| g-s9 | `calib3d/src/distortion.rs` `fisheye_init_undistort_rectify_map` | zero-size image panics (`chunk_size must not be zero`) | LOW | CONFIRMED |
 
 ---
 
