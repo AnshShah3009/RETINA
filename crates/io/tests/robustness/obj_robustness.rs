@@ -178,16 +178,17 @@ fn obj_non_numeric_face_index_errors() {
     assert!(err.contains("Invalid face index"), "got: {err}");
 }
 
-/// `f 1/2/3 4/5/6 7/8/9` (v/vt/vn form) parses; a negative *relative* index -
-/// legal OBJ - is rejected by the `usize` parse.
+/// `f 1/2/3 4/5/6 7/8/9` (v/vt/vn form) parses, and so does a negative
+/// *relative* index - legal OBJ, which this test used to pin as rejected.
 #[test]
 fn obj_face_with_slashes_and_negative_index() {
     let file = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1/1/1 2/2/2 3/3/3\n".to_vec();
     let m = obj_raw(&file).expect_ok("v/vt/vn");
     assert_eq!(m.faces[0], vec![0, 1, 2]);
 
-    let rel = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3 -2 -1\n".to_vec();
-    obj_raw(&rel).expect_err("relative index");
+    let rel = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3/1/1 -2/2/2 -1/3/3\n".to_vec();
+    let m = obj_raw(&rel).expect_ok("relative index");
+    assert_eq!(m.faces[0], vec![0, 1, 2]);
 }
 
 /// A face index of `usize::MAX` becomes `usize::MAX - 1` after the 1-based

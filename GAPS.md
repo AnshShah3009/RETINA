@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (66 open, was 77)
+## (g) Second review, 2026-10-31 — findings (62 open, was 77)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -310,16 +310,16 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f11 | `features/src/orb.rs` rBRIEF | rotated taps floored, OpenCV rounds | LOW | ARGUED |
 | g-f12 | `imgproc` `par_chunks_mut(width)` sites | zero-width image panics `chunk_size must not be zero` | LOW | CONFIRMED |
 
-### (g3) io / runtime / distributed / video / photo / videoio (12 open, was 12)
+### (g3) io / runtime / distributed / video / photo / videoio (8 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-i1 | `runtime/src/pipeline/` | CPU-only pipeline cannot run two chained ops (`TransientBufferPool only supports GPU`); GPU↔CPU op hand-off never copies data | HIGH | CONFIRMED (CPU) / ARGUED (GPU) |
 | g-i2 | `video/src/optical_flow.rs` `track_point` | template sampled at `floor(lx)`: a static sub-pixel point (60.5, 60.5) tracks to (60, 60) | HIGH | CONFIRMED |
-| g-i3 | `io/src/pcd.rs` | reader rejects `compressed > uncompressed`, so the crate's own LZF writer output on random data is unreadable | MED-HIGH | CONFIRMED |
-| g-i4 | `io/src/pcd.rs` ASCII | column index ignores `COUNT > 1` | MED | CONFIRMED |
-| g-i5 | `io/src/pcd.rs` ASCII rgb | `TYPE U` packed rgb parsed as f32 then `to_bits()` → pure red reads `[0.498,0,0]` | MED | CONFIRMED |
-| g-i6 | `io/src/obj.rs` | negative (relative) face indices rejected | MED | CONFIRMED |
+| g-i3 | `io/src/pcd.rs` | **CLOSED.** Reader accepts up to LZF's worst-case growth (`n + n/32 + 16`). Pinned by `tests/second_review_io_parsing.rs`. Was: reader rejects `compressed > uncompressed`, so the crate's own LZF writer output on random data is unreadable | was MED-HIGH — fixed | CONFIRMED |
+| g-i4 | `io/src/pcd.rs` ASCII | **CLOSED.** Column offsets are cumulative COUNTs. Same test file. Was: column index ignores `COUNT > 1` | was MED — fixed | CONFIRMED |
+| g-i5 | `io/src/pcd.rs` ASCII rgb | **CLOSED.** `TYPE U`/`I` packed colour parsed as an integer token. Same test file. Was: `TYPE U` packed rgb parsed as f32 then `to_bits()` → pure red reads `[0.498,0,0]` | was MED — fixed | CONFIRMED |
+| g-i6 | `io/src/obj.rs` | **CLOSED.** Negative indices resolved against vertices read so far; the robustness test that pinned the rejection now pins acceptance. Was: negative (relative) face indices rejected | was MED — fixed | CONFIRMED |
 | g-i7 | `distributed/.../shared_memory.rs` `Drop` | refcount decrement + unlink without the `flock` `new` takes → orphaned region, overcommit | MED | ARGUED |
 | g-i8 | `distributed/.../shared_memory.rs` `acquire_slot` | slot adopted by PID alone (PID namespaces, PID reuse) | MED | ARGUED |
 | g-i9 | `distributed/.../shared_memory.rs` | atomics written through `as_ptr()` of a shared slice (Stacked Borrows UB); reapers' non-saturating `fetch_sub` | LOW | ARGUED |

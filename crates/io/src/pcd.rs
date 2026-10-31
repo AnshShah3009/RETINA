@@ -54,7 +54,13 @@ pub fn read_pcd<R: BufRead>(mut reader: R) -> Result<PointCloud> {
     match header.data_format {
         PcdData::Ascii => {
             let lines = reader.lines();
-            parse_pcd_ascii(lines, header.points_count, &header.fields, &header.types)
+            parse_pcd_ascii(
+                lines,
+                header.points_count,
+                &header.fields,
+                &header.types,
+                &header.counts,
+            )
         }
         PcdData::Binary => parse_pcd_binary(reader, &header),
         PcdData::BinaryCompressed => parse_pcd_binary_compressed(reader, &header),
@@ -222,10 +228,25 @@ fn parse_pcd_ascii<I>(
     count: usize,
     fields: &[String],
     types: &[char],
+    counts: &[usize],
 ) -> Result<PointCloud>
 where
     I: Iterator<Item = std::io::Result<String>>,
 {
+    // A field with `COUNT k` occupies `k` columns, so the column a field
+    // starts at is the sum of the counts before it - the ASCII twin of
+    // `compute_field_offsets`. Indexing columns by *field* number shifted
+    // every field after a multi-count one: `FIELDS h x y z` / `COUNT 2 1 1 1`
+    // with row `9 9 1 2 3` read the point as (9, 1, 2).
+    let count_of = |i: usize| counts.get(i).copied().unwrap_or(1);
+    let column_of: Vec<usize> = (0..fields.len())
+        .scan(0usize, |col, i| {
+            let start = *col;
+            *col += count_of(i);
+            Some(start)
+        })
+        .collect();
+    let total_columns: usize = (0..fields.len()).map(count_of).sum();
     // `POINTS` is a header line, so it is worth exactly as much as the rest of
     // the header, and the body may hold no points at all. Reserving from it up
     // front meant `POINTS 40000000000` - twenty-six characters - committed
@@ -273,18 +294,21 @@ where
     // Get field indices. `parse_header` has already rejected a header without
     // x/y/z, so the coordinate indices are resolved here as `Some`, never
     // guessed from a positional fallback.
-    let x_idx = fields.iter().position(|f| f == "x");
-    let y_idx = fields.iter().position(|f| f == "y");
-    let z_idx = fields.iter().position(|f| f == "z");
+    let x_idx = fields.iter().position(|f| f == "x").map(|i| column_of[i]);
+    let y_idx = fields.iter().position(|f| f == "y").map(|i| column_of[i]);
+    let z_idx = fields.iter().position(|f| f == "z").map(|i| column_of[i]);
 
-    let nx_idx = fields.iter().position(|f| f == "normal_x" || f == "nx");
-    let ny_idx = fields.iter().position(|f| f == "normal_y" || f == "ny");
-    let nz_idx = fields.iter().position(|f| f == "normal_z" || f == "nz");
+    let col = |pred: &dyn Fn(&str) -> bool| fields.iter().position(|f| pred(f));
+    let nx_idx = col(&|f| f == "normal_x" || f == "nx").map(|i| column_of[i]);
+    let ny_idx = col(&|f| f == "normal_y" || f == "ny").map(|i| column_of[i]);
+    let nz_idx = col(&|f| f == "normal_z" || f == "nz").map(|i| column_of[i]);
 
-    let rgb_idx = fields.iter().position(|f| f == "rgb" || f == "rgba");
-    let r_idx = fields.iter().position(|f| f == "r");
-    let g_idx = fields.iter().position(|f| f == "g");
-    let b_idx = fields.iter().position(|f| f == "b");
+    // Colour fields keep their *field* index too: the declared TYPE is per
+    // field, the value is per column.
+    let rgb_field = col(&|f| f == "rgb" || f == "rgba");
+    let r_field = col(&|f| f == "r");
+    let g_field = col(&|f| f == "g");
+    let b_field = col(&|f| f == "b");
 
     for line in lines {
         let line = line?;
@@ -298,8 +322,9 @@ where
         // (0, 0, 0): a malformed row became *plausible data*, which is the worst
         // possible outcome - a caller cannot tell it from a real scan. A column
         // that does not parse is an error.
-        let values: Vec<f32> = line
-            .split_whitespace()
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let values: Vec<f32> = tokens
+            .iter()
             .map(|s| {
                 s.parse::<f32>().map_err(|_| {
                     Error::ParseError(format!(
@@ -318,15 +343,16 @@ where
         // BLACK COLOUR - a fabricated value that is exactly what a
         // normal-estimation consumer treats as valid input. Neither is
         // recoverable, so say so.
-        let expected = fields.len();
+        let expected = total_columns;
         if values.len() < expected {
             return Err(Error::ParseError(format!(
                 "PCD ascii: row {} has {} column(s) but the header declares {} FIELDS \
-                 ({:?}): {line:?}",
+                 ({:?}, COUNT {:?}): {line:?}",
                 points.len(),
                 values.len(),
                 expected,
-                fields
+                fields,
+                counts
             )));
         }
 
@@ -356,15 +382,29 @@ where
 
         // Read colors
         if let Some(ref mut c) = colors {
-            if let Some(idx) = rgb_idx {
-                // Packed RGB/RGBA: the float is a bit-reinterpreted u32, not a numeric value
-                let float_value = values[idx];
-                let packed: u32 = float_value.to_bits();
+            if let Some(field) = rgb_field {
+                // Packed RGB/RGBA. Declared `TYPE F` (PCL's convention) the
+                // token is a float whose *bits* are the u32; declared `U`/`I`
+                // the token is the integer itself. Parsing everything as f32
+                // and taking `to_bits()` turned `TYPE U` pure red `16711680`
+                // into (0.498, 0, 0), and an f32 parse would also round away
+                // the low bits of any value above 2^24 (rgba with alpha).
+                let token = tokens[column_of[field]];
+                let packed: u32 = match types.get(field).copied() {
+                    Some('U') | Some('I') => {
+                        token.parse::<i64>().map(|v| v as u32).map_err(|_| {
+                            Error::ParseError(format!(
+                                "PCD ascii: packed colour {token:?} is not an integer: {line:?}"
+                            ))
+                        })?
+                    }
+                    _ => values[column_of[field]].to_bits(),
+                };
                 let r = ((packed >> 16) & 0xFF) as f32 / 255.0;
                 let g = ((packed >> 8) & 0xFF) as f32 / 255.0;
                 let b = (packed & 0xFF) as f32 / 255.0;
                 c.push(Point3::new(r, g, b));
-            } else if let (Some(ri), Some(gi), Some(bi)) = (r_idx, g_idx, b_idx) {
+            } else if let (Some(ri), Some(gi), Some(bi)) = (r_field, g_field, b_field) {
                 // Normalise by the *declared* (TYPE, SIZE) pair, not by
                 // guessing from the value.
                 //
@@ -388,10 +428,11 @@ where
                         .get(idx)
                         .copied()
                         .is_some_and(|t| matches!(t, 'U' | 'I'));
+                    let v = values[column_of[idx]];
                     if is_integer {
-                        values[idx] / 255.0
+                        v / 255.0
                     } else {
-                        values[idx]
+                        v
                     }
                 };
                 c.push(Point3::new(norm(ri), norm(gi), norm(bi)));
@@ -630,12 +671,19 @@ fn parse_pcd_binary_compressed<R: Read>(mut reader: R, header: &PcdHeader) -> Re
     // 4 GiB allocation before the read that would have failed on the very next
     // byte. The plain-binary path's 8 GiB cap never covered this buffer. LZF
     // cannot do better than ~1:1 on incompressible input, so the decompressed
-    // payload is the ceiling on what a well-formed file can legitimately carry,
-    // and anything much above it is a header lying about the payload.
+    // payload bounds what a well-formed file can legitimately carry, and
+    // anything much above it is a header lying about the payload.
+    //
+    // "Much above", not "above": LZF *grows* incompressible input by one
+    // control byte per 32-byte literal run, and this crate's own writer emits
+    // that. Rejecting `compressed > uncompressed` refused 1000 random points
+    // written by `write_pcd_binary_compressed` (12299 compressed bytes for
+    // 12000). The bound is LZF's worst case plus slack.
     const MAX_PCD_COMPRESSED_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8 GiB
+    let lzf_worst_case = uncompressed_size + uncompressed_size / 32 + 16;
     if compressed_size > MAX_PCD_COMPRESSED_BYTES
         || uncompressed_size > MAX_PCD_COMPRESSED_BYTES
-        || compressed_size > uncompressed_size
+        || compressed_size > lzf_worst_case
     {
         return Err(Error::ParseError(format!(
             "PCD binary_compressed: refusing to read {compressed_size} compressed bytes \
