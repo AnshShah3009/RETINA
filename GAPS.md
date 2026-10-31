@@ -34,8 +34,8 @@ Targets claimed by the workspace README/root crate: OpenCV, Open3D, Matplotlib, 
 >   different projection than the one placing it — **fixed**, and now pinned by
 >   `footprint_is_the_placement_jacobian`.
 >
-> Still open and worth reading before planning: the facade re-exports 11 of 30
-> crates. `Interpolation::Linear` aliases when downscaling — the same as OpenCV's
+> Still open and worth reading before planning: `Interpolation::Linear` aliases
+> when downscaling — the same as OpenCV's
 > `INTER_LINEAR` (use `INTER_AREA`-style filtering for decimation), so it is a parity
 > property, not a defect. Since closed and kept here only so they are not re-opened:
 > `erf` (now machine precision, `5f17b5b`), `score_msac`'s `unimplemented!()` (b1 #7 —
@@ -466,7 +466,7 @@ non-trivial.
 - **Partial — photo stitching**: `photo::stitcher::Stitcher::stitch` is a stub returning image 0 (see (b1) #1)
   while a real two-image pipeline exists at `imgproc/src/stitching.rs:336 stitch_pair`.
   Two stitching APIs, one of which lies.
-- **Unreachable:** `videoio`, `photo`, `dnn` are not re-exported by the root crate (see §Unreachable API).
+- **Reachable:** `videoio`, `photo`, `dnn` are modules of the root crate.
 
 ### Open3D → `3d`, `registration`, `pointcloud`, `rendering`, `viewer`
 - **Present (read):** TSDF volume with real marching cubes (`3d/src/tsdf/mod.rs:323` uses
@@ -554,19 +554,14 @@ non-trivial.
 
 ## Unreachable / un-integrated public API
 
-- `src/lib.rs` re-exports **11** of the workspace's **30** member crates (`d3`, `calib3d`, `core`,
-  `features`, `hal`, `imgproc`, `optimize`, `runtime`, `sfm`, `slam`, `video`). **Measured** by
-  reading `src/lib.rs` against the `members` list in the root `Cargo.toml`.
-  Not reachable via `rust_cv_native::`: `videoio`, `photo`, `io`, `dnn`, `rendering`, `registration`,
-  `plot`, `viewer`, `math`, `geometry2d`, `signal_proc`, `pointcloud`, `distributed`, `eval`, `cli`,
-  `localization`, `scientific`, `examples`. A user of the root crate cannot reach the Matplotlib
-  replacement (`plot`), the Open3D registration crate, the SciPy surface (`math`), or the VSLoc-RS
-  target (`localization`) without a second `Cargo.toml` entry. The root `Cargo.toml` only declares
-  `scientific` and `registration` as **dev**-dependencies.
+- `src/lib.rs` re-exports **27** library crates. **CLOSED** for the library surface
+  (see the follow-up at the end of this file). Still not modules of the facade, on
+  purpose: `cli` (a binary), `examples` (no library), `python` (the PyO3 extension).
 - `crates/hal/src/gpu_sparse.rs` — `GpuSparseMatrix` carries `#[allow(dead_code)]`: the GPU CSR type
   is never used (see (c8)).
-- `crates/viewer` — advertised in the README and **does** render (see (c5)), but is reachable only by
-  a direct dependency, and its own crate doc wrongly tells users it cannot.
+- `crates/viewer` — advertised in the README and **does** render (see (c5)). It is a
+  module of the facade (`rust_cv_native::viewer`). Its own crate doc wrongly tells
+  users it cannot.
 
 ## Build hygiene
 
@@ -676,30 +671,15 @@ dummy mask in an example binary.
 
 ---
 
-## Follow-up: the facade gap, verified and left for a deliberate decision
+## Follow-up: the facade gap — **CLOSED**
 
-The root crate `rust-cv-native` re-exports **11 of 30** crates, and the list is
-alphabetical up to `video`:
-
-```
-3d calib3d core features hal imgproc optimize runtime sfm slam video
-```
-
-so it reads as a snapshot taken when those were the crates that existed, not as a
-selection. Evidence that it is drift rather than curation: **none** of the omitted
-crates sets `publish = false`, and the four named competitive targets are among the
-omissions — `plot` (Matplotlib), `math` (SciPy), `registration` (Open3D) and
-`localization` (VSLoc-RS). A user of the facade cannot reach four of the five things
-the project says it replaces.
-
-**Not closed here, deliberately.** The re-export lines alone do not compile — the
-omitted crates are not declared as dependencies of `rust-cv-native`, so completing the
-facade means adding **16 dependencies** to the root `Cargo.toml`. That changes the
-facade's build graph and feature unification for every downstream user, which is an
-architectural decision rather than a fix, and one that deserves a build-and-test pass
-on its own rather than being tacked onto an audit.
-
-**If someone closes it:** add the dependencies, re-export all 26 library crates, and
-exclude `cli` (a binary) and `python` (a PyO3 cdylib) — neither is a library API
-surface. Then confirm `cargo build -p rust-cv-native` and the full suite, since 16 new
-edges into one crate is exactly where a feature-unification problem would surface.
+The root crate `rust-cv-native` re-exports **27** library crates. The survey
+counted 26 and 11 already exported; the workspace has 30 members, of which
+`cv-cli` is a binary, `cv-examples` has no library, and `cv-python` is the PyO3
+extension. Those three stay out. The other sixteen (`plot`, `math`,
+`registration`, `localization`, `photo`, `videoio`, `io`, `dnn`, `rendering`,
+`viewer`, `geometry2d`, `signal`, `pointcloud`, `distributed`, `eval`,
+`scientific`) are modules of the facade. Pinned by `tests/facade_reexports.rs`.
+`cargo test -p rust-cv-native --test facade_reexports` is the build-graph check:
+sixteen new edges into one crate is where a feature-unification failure would
+show up.

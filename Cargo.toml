@@ -17,18 +17,32 @@ cv-sfm = { workspace = true }
 cv-slam = { workspace = true }
 cv-runtime = { workspace = true }
 cv-optimize = { workspace = true }
+cv-videoio = { workspace = true }
+cv-photo = { workspace = true }
+cv-scientific = { workspace = true }
+cv-viewer = { workspace = true }
+cv-io = { workspace = true }
+cv-dnn = { workspace = true }
+cv-rendering = { workspace = true }
+cv-registration = { workspace = true }
+cv-plot = { workspace = true }
+cv-math = { workspace = true }
+cv-geometry2d = { workspace = true }
+cv-signal = { workspace = true }
+cv-pointcloud = { workspace = true }
+cv-distributed = { workspace = true }
+cv-eval = { workspace = true }
+cv-localization = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 image = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-cv-scientific = { workspace = true }
 nalgebra = { workspace = true }
 futures = { workspace = true }
 wgpu = { workspace = true }
 rand = { workspace = true }
 bytemuck = { workspace = true }
-cv-registration = { workspace = true }
 
 [features]
 default = ["full-precision"]

@@ -98,6 +98,12 @@ impl LshIndex {
         }
 
         let desc = descriptor.as_ref();
+        // A descriptor of another length is not a neighbor. Hamming on the
+        // shared prefix used to report 0 for an 8-byte query against a 32-byte
+        // entry that differed only past byte 8.
+        if desc.len() != self.dim {
+            return Vec::new();
+        }
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
         for (table, positions) in self.positions.iter().enumerate() {
@@ -241,6 +247,16 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), count, "ids must not repeat across tables");
+    }
+
+    #[test]
+    fn a_shorter_query_is_not_a_neighbor() {
+        let mut index = LshIndex::new(32, 4, 8, 1);
+        index.insert(0, vec![0u8; 32]);
+        assert!(
+            index.query(vec![0u8; 8], 1).is_empty(),
+            "an 8-byte query matched a 32-byte descriptor"
+        );
     }
 
     #[test]
