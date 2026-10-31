@@ -1,7 +1,7 @@
 use nalgebra::{Matrix3, Point3, Vector3};
 use rayon::prelude::*;
 
-use super::dist_sq;
+use super::{knn_excluding_self, knn_tree};
 
 /// Estimate point cloud normals using PCA over k nearest neighbours.
 ///
@@ -22,20 +22,14 @@ pub fn estimate_normals_knn(points: &[Point3<f64>], k: usize) -> Vec<Vector3<f64
     }
     let k = k.min(points.len() - 1).max(1);
 
+    // k nearest neighbours from an f64 KD-tree: O(n log n) instead of an O(n)
+    // scan plus a Vec per point (see `knn_excluding_self`).
+    let tree = knn_tree(points);
     points
         .par_iter()
         .enumerate()
         .map(|(i, p)| {
-            // Find k nearest neighbours (brute force).
-            let mut dists: Vec<(usize, f64)> = points
-                .iter()
-                .enumerate()
-                .filter(|&(j, _)| j != i)
-                .map(|(j, q)| (j, dist_sq(p, q)))
-                .collect();
-            dists.select_nth_unstable_by(k - 1, |a, b| {
-                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            let dists = knn_excluding_self(&tree, points, i, k);
 
             // Build covariance matrix from k nearest.
             let mut cov = Matrix3::<f64>::zeros();
