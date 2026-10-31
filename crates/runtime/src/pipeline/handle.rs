@@ -1,11 +1,14 @@
-use super::{BufferId, ExecutionGraph, PipelineNode, TransientBufferPool};
+use super::{
+    finish_kernel, gather_cpu_inputs, kernel_workgroups, prepare_kernel_buffers, store_cpu_outputs,
+    BufferId, ExecutionGraph, GpuTensor, PipelineNode, TransientBufferPool,
+};
 use crate::Error;
 use crate::Result;
-use cv_core::Tensor;
 use cv_hal::context::ComputeContext;
 use cv_hal::DeviceId;
 use cv_hal::SubmissionIndex;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 
 #[cfg(feature = "tracing")]
@@ -185,7 +188,10 @@ async fn execute_pipeline(
         .get_device(device_id)
         .ok_or_else(|| Error::RuntimeError(format!("Device {:?} not found", device_id)))?;
 
-    let allocator = TransientBufferPool::new(device_id);
+    // Shared with the blocking pool: CPU-op input gathering may block on a GPU
+    // readback, so it runs there along with the op itself.
+    let allocator = Arc::new(TransientBufferPool::new(device_id));
+    let buffers = Arc::new(buffers);
     let mut submissions = Vec::new();
 
     for &node_id in &graph.topology_order {
@@ -198,64 +204,26 @@ async fn execute_pipeline(
                 outputs,
                 params,
             } => {
-                for &input_id in inputs {
-                    if allocator.get_buffer(input_id).is_none() {
-                        if let Some(&size) = buffers.get(&input_id) {
-                            allocator.allocate(input_id, size)?;
-                        }
-                    }
-                }
-
-                let output_sizes: Vec<_> = outputs
-                    .iter()
-                    .filter_map(|&id| buffers.get(&id).copied())
-                    .collect();
-
-                for &output_id in outputs {
-                    // Look the size up per output id: `output_sizes` may be
-                    // shorter than `outputs` when a buffer is unregistered, so
-                    // indexing it positionally would shift every later size.
-                    if let Some(&size) = buffers.get(&output_id) {
-                        allocator.allocate_or_update(output_id, size, &[])?;
-                    }
-                }
-
-                let submission = device_runtime.next_submission();
-                submissions.push(submission);
-
                 #[cfg(feature = "tracing")]
                 tracing::debug!("Executing kernel '{}' on device {:?}", name, device_id);
 
                 // Execute kernel via cv-hal dispatch (mirrors synchronous path)
-                if let crate::device_registry::BackendContext::Gpu(gpu_ctx) =
-                    device_runtime.context()
-                {
-                    let mut all_tensors: Vec<Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> =
-                        Vec::new();
-
-                    for &input_id in inputs {
-                        if let Some(tensor) = allocator.create_tensor(input_id) {
-                            all_tensors.push(tensor);
-                        }
-                    }
-                    for &output_id in outputs {
-                        if let Some(tensor) = allocator.create_tensor(output_id) {
-                            all_tensors.push(tensor);
-                        }
-                    }
-
-                    let all_refs: Vec<&Tensor<u8, cv_hal::storage::WgpuGpuStorage<u8>>> =
-                        all_tensors.iter().collect();
-
-                    let max_size = output_sizes.iter().copied().max().unwrap_or(1);
-                    let workgroups = (((max_size as f64 / 64.0).ceil() as u32).max(1), 1, 1);
-
-                    gpu_ctx.dispatch(name, &all_refs, params, workgroups)?;
-                } else {
+                let crate::device_registry::BackendContext::Gpu(gpu_ctx) = device_runtime.context()
+                else {
                     return Err(Error::NotSupported(
                         "Kernel execution only supported on GPU".into(),
                     ));
-                }
+                };
+
+                let tensors = prepare_kernel_buffers(&allocator, &buffers, inputs, outputs)?;
+                let refs: Vec<&GpuTensor> = tensors.iter().collect();
+                let workgroups = kernel_workgroups(&buffers, outputs);
+
+                let submission = device_runtime.next_submission();
+                submissions.push(submission);
+
+                gpu_ctx.dispatch(name, &refs, params, workgroups)?;
+                finish_kernel(&allocator, outputs)?;
 
                 let _ = event_tx.send(ExecutionEvent::NodeCompleted {
                     node_index: node_id.0,
@@ -267,32 +235,26 @@ async fn execute_pipeline(
                 outputs,
                 op,
             } => {
-                let input_data: Vec<Vec<u8>> = inputs
-                    .iter()
-                    .filter_map(|&id| allocator.get_buffer_data(id))
-                    .collect();
-
-                // Arbitrary user closures can take seconds; run them on the
+                // Arbitrary user closures can take seconds, and reading a
+                // kernel's output back blocks on the GPU; run both on the
                 // blocking pool so async worker threads (timers, I/O) are not
                 // starved.
                 let op = op.clone();
-                let results = tokio::task::spawn_blocking(move || {
+                let pool = allocator.clone();
+                let sizes = buffers.clone();
+                let inputs = inputs.clone();
+                let results = tokio::task::spawn_blocking(move || -> Result<Vec<Vec<u8>>> {
+                    let input_data = gather_cpu_inputs(&pool, &sizes, &inputs)?;
                     let input_slices: Vec<&[u8]> =
                         input_data.iter().map(|v| v.as_slice()).collect();
-                    op(&input_slices)
+                    Ok(op(&input_slices))
                 })
                 .await
                 .map_err(|e| {
                     Error::RuntimeError(format!("CPU op task panicked or was cancelled: {}", e))
-                })?;
+                })??;
 
-                for (i, &output_id) in outputs.iter().enumerate() {
-                    if i < results.len() {
-                        if let Some(&size) = buffers.get(&output_id) {
-                            allocator.allocate_or_update(output_id, size, &results[i])?;
-                        }
-                    }
-                }
+                store_cpu_outputs(&allocator, &buffers, outputs, results)?;
 
                 let _ = event_tx.send(ExecutionEvent::NodeCompleted {
                     node_index: node_id.0,

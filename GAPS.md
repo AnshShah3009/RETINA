@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (15 open, was 91)
+## (g) Second review, 2026-10-31 — findings (14 open, was 91)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -310,11 +310,11 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f11 | `features/src/orb.rs` rBRIEF | **CLOSED.** Rotated offsets rounded (OpenCV's `cvRound`); pinned by `steered_sampling_is_symmetric_under_half_turns` (fails at 30° with truncation). Was: rotated taps floored, OpenCV rounds | was LOW — fixed | ARGUED |
 | g-f12 | `imgproc` `par_chunks_mut(width)` sites | **CLOSED.** 64 function/shape pairs no longer panic on 0×N / N×0 (`tests/zero_sized_images.rs`). Was: zero-width image panics `chunk_size must not be zero` | was LOW — fixed | CONFIRMED |
 
-### (g3) io / runtime / distributed / video / photo / videoio (5 open, was 12)
+### (g3) io / runtime / distributed / video / photo / videoio (4 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
-| g-i1 | `runtime/src/pipeline/` | CPU-only pipeline cannot run two chained ops (`TransientBufferPool only supports GPU`); GPU↔CPU op hand-off never copies data | HIGH | CONFIRMED (CPU) / ARGUED (GPU) |
+| g-i1 | `runtime/src/pipeline/` | **CLOSED.** CPU allocation path, host/device freshness tracking with upload before kernels and readback before CPU ops, Err on missing buffers; 11 dataflow tests incl. real-GPU round trips (`tests/pipeline_dataflow_tests.rs`). Was: CPU-only pipeline cannot run two chained ops (`TransientBufferPool only supports GPU`); GPU↔CPU op hand-off never copies data | was HIGH — fixed | CONFIRMED (CPU) / ARGUED (GPU) |
 | g-i2 | `video/src/optical_flow.rs` `track_point` | **CLOSED.** Template and gradients sampled bilinearly at the fractional feature position, OpenCV-style f32 pyramid, pyramids built once per call: static sub-pixel points stay put, 3-level (9.6, −4.3) shift recovered to 0.004 px (was 0.81 px off). Was: template sampled at `floor(lx)`: a static sub-pixel point (60.5, 60.5) tracks to (60, 60) | was HIGH — fixed | CONFIRMED |
 | g-i3 | `io/src/pcd.rs` | **CLOSED.** Reader accepts up to LZF's worst-case growth (`n + n/32 + 16`). Pinned by `tests/second_review_io_parsing.rs`. Was: reader rejects `compressed > uncompressed`, so the crate's own LZF writer output on random data is unreadable | was MED-HIGH — fixed | CONFIRMED |
 | g-i4 | `io/src/pcd.rs` ASCII | **CLOSED.** Column offsets are cumulative COUNTs. Same test file. Was: column index ignores `COUNT > 1` | was MED — fixed | CONFIRMED |
