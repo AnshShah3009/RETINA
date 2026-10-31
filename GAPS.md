@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (6 open, was 96)
+## (g) Second review, 2026-10-31 — findings (5 open, was 96)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -381,7 +381,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-d11 | `registration/.../global/ransac.rs` | **CLOSED.** Nearest-feature matching without a metric gate (Open3D); `ransac_n` sets the sample size. Pinned by `tests/global_ransac_feature_gate.rs` (3 mm noise: error 2.83 → < 0.15). Was: one distance gates FPFH feature space and metric space; `ransac_n` ignored | was LOW — fixed | ARGUED |
 | g-d12 | `pointcloud/src/point_cloud.rs` `cluster_dbscan` | **CLOSED.** Each point queued at most once; noise points reached become border points directly. Pinned by `tests/dbscan_queue.rs`. Was: visited neighbours re-queued → O(N²) seed memory | was LOW — fixed | ARGUED |
 
-### (g7) core / math / optimize / geometry2d / signal_proc / scientific (3 open, was 12)
+### (g7) core / math / optimize / geometry2d / signal_proc / scientific (2 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -395,7 +395,7 @@ Partial pass: essential, pnp, essential_fundamental, fundamental/homography wrap
 | g-n8 | `signal_proc` `resample` | **CLOSED.** Even-length downsample folds `X[num/2]` into the Nyquist bin; matches SciPy to 1e-8 in the same test file. Was: even-length Nyquist bin halved, not folded | was MED — fixed | CONFIRMED vs SciPy |
 | g-n9 | `signal_proc` `welch` / `stft` / `spectrogram` | no constant detrend, symmetric Hann: PSD[0] 249.9 vs SciPy 0.175 | MED | CONFIRMED vs SciPy |
 | g-n10 | `signal_proc` `find_peaks` | **CLOSED.** SciPy's `_local_maxima_1d` plateau scan (midpoint, rounded down). Pinned by `tests/scipy_find_peaks_resample.rs`. Was: plateau peaks never found | was MED — fixed | CONFIRMED vs SciPy |
-| g-n11 | `math/src/stats.rs` normal cdf/ppf, p-values | lower-tail cancellation (`cdf(-10)` = 0), unrefined `ppf`, `1 - cdf` p-values | MED | CONFIRMED vs SciPy |
+| g-n11 | `math/src/stats.rs` normal cdf/ppf, p-values | **CLOSED.** erfc-based tails (cdf(−10) = 7.62e-24), Halley-refined ppf (4e-15), direct tail p-values; linregress/t-tests match SciPy (`tests/stats_tails.rs`). Was: lower-tail cancellation (`cdf(-10)` = 0), unrefined `ppf`, `1 - cdf` p-values | was MED — fixed | CONFIRMED vs SciPy |
 | g-n12 | `math/src/integrate.rs` | `quad` is a fixed trapezoid with error 0 and evaluates endpoints; `ode_solve` overshoots `t_end` and stops silently at 10k steps | MED | ARGUED |
 
 ### (g8) sfm / triangulation / distortion / calibration (0 open, was 9)
