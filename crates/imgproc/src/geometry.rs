@@ -96,7 +96,7 @@ fn get_pixel_lanczos_with_border(img: &GrayImage, x: f32, y: f32, border: Border
     let mut sum = 0.0;
     for (j, &wyj) in wy.iter().enumerate() {
         for (i, &wxi) in wx.iter().enumerate() {
-            sum += wxi * wyj * sample_pixel(img, x0 + i as isize - 2, y0 + j as isize - 2, border);
+            sum += wxi * wyj * sample_pixel(img, x0 + i as isize - 3, y0 + j as isize - 3, border);
         }
     }
     sum
