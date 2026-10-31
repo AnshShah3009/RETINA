@@ -712,6 +712,7 @@ pub fn cluster_dbscan(pc: &PointCloud, eps: f32, min_points: usize) -> Vec<i32> 
 
     let eps2 = eps * eps;
     let mut visited = vec![false; n];
+    let mut queued = vec![false; n];
 
     for i in 0..n {
         if visited[i] {
@@ -729,34 +730,40 @@ pub fn cluster_dbscan(pc: &PointCloud, eps: f32, min_points: usize) -> Vec<i32> 
             labels[i] = -1; // Noise
         } else {
             labels[i] = cluster_idx;
-            // Expand cluster
-            let mut seeds = neighbors.clone();
+            // Expand the cluster. Each point is queued at most once: pushing
+            // every neighbour of every core point - visited or not - made the
+            // queue O(N^2) on a dense cluster (20k mutually-close points is
+            // ~3.2 GB of seeds). Noise points reached here become border
+            // points directly; they were already visited and have no
+            // neighbourhood to expand.
+            let mut seeds: Vec<usize> = Vec::new();
+            queued[i] = true;
+            let mut enqueue = |idx: usize, seeds: &mut Vec<usize>, labels: &mut Vec<i32>| {
+                if labels[idx] == -1 {
+                    labels[idx] = cluster_idx;
+                }
+                if !queued[idx] {
+                    queued[idx] = true;
+                    seeds.push(idx);
+                }
+            };
+            for n in &neighbors {
+                enqueue(n.0, &mut seeds, &mut labels);
+            }
             let mut head = 0;
             while head < seeds.len() {
-                let current_idx = seeds[head].0;
+                let current_idx = seeds[head];
                 head += 1;
+                visited[current_idx] = true;
+                labels[current_idx] = cluster_idx;
 
-                if labels[current_idx] == -1 {
-                    labels[current_idx] = cluster_idx; // Change noise to border
-                }
-                if !visited[current_idx] {
-                    visited[current_idx] = true;
-                    labels[current_idx] = cluster_idx;
-
-                    let p_curr = pc.points[current_idx];
-                    let q_curr = [p_curr.x, p_curr.y, p_curr.z];
-                    let n_curr: Vec<&PointWrapper> =
-                        tree.locate_within_distance(q_curr, eps2).collect();
-                    if n_curr.len() >= min_points {
-                        for n in n_curr {
-                            // Avoid adding duplicates?
-                            // seeds is a simple vec, might grow definedly.
-                            // Actually better to use a Set or just push and check visited.
-                            // But we check visited when popping/processing?
-                            // The standard DBSCAN expands seeds.
-                            // Simple list append approach:
-                            seeds.push(n);
-                        }
+                let p_curr = pc.points[current_idx];
+                let q_curr = [p_curr.x, p_curr.y, p_curr.z];
+                let n_curr: Vec<&PointWrapper> =
+                    tree.locate_within_distance(q_curr, eps2).collect();
+                if n_curr.len() >= min_points {
+                    for n in n_curr {
+                        enqueue(n.0, &mut seeds, &mut labels);
                     }
                 }
             }
