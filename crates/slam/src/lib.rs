@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+pub mod local_ba;
+pub(crate) mod local_map;
 pub mod mapping;
 pub mod pose_graph;
 pub mod tracking;
