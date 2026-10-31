@@ -60,15 +60,43 @@ use cv_core::{Ransac, RobustConfig, RobustModel};
 
 pub struct EssentialEstimator;
 
+/// Minimal samples are Nistér 5-point plus one point to choose among its up
+/// to ten roots - the minimal solver OpenCV's `findEssentialMat` uses. Larger
+/// sets (RANSAC's final consensus refit) use the linear 8-point fit.
+///
+/// The minimal sample used to be 8-point. With noise it is badly conditioned
+/// whenever the scene is close to a plane or the motion is mostly forward -
+/// ordinary for a camera moving into a room - and RANSAC then never found a
+/// good hypothesis: on a wall-dominated forward-motion scene (0.5 px noise,
+/// 20% outliers) it returned fewer than 5 inliers.
 impl RobustModel<(Point2<f64>, Point2<f64>)> for EssentialEstimator {
     type Model = Matrix3<f64>;
     fn min_sample_size(&self) -> usize {
-        8
+        6
     }
     fn estimate(&self, data: &[&(Point2<f64>, Point2<f64>)]) -> Option<Self::Model> {
-        let pts1: Vec<Point2<f64>> = data.iter().map(|p| p.0).collect();
-        let pts2: Vec<Point2<f64>> = data.iter().map(|p| p.1).collect();
-        estimate_essential_8_point(&pts1, &pts2).ok()
+        if data.len() >= 8 {
+            let pts1: Vec<Point2<f64>> = data.iter().map(|p| p.0).collect();
+            let pts2: Vec<Point2<f64>> = data.iter().map(|p| p.1).collect();
+            return estimate_essential_8_point(&pts1, &pts2).ok();
+        }
+        if data.len() < 5 {
+            return None;
+        }
+        let a: Vec<[f64; 2]> = data[..5].iter().map(|p| [p.0.x, p.0.y]).collect();
+        let b: Vec<[f64; 2]> = data[..5].iter().map(|p| [p.1.x, p.1.y]).collect();
+        let candidates = crate::essential::EssentialSolver::estimate_5point(&a, &b).ok()?;
+        // Pick the root that best explains every point in the sample (the
+        // sixth disambiguates; the first five fit every root exactly).
+        candidates
+            .into_iter()
+            .map(|e| {
+                let err: f64 = data.iter().map(|p| sampson_error(&e, &p.0, &p.1)).sum();
+                (e, err)
+            })
+            .filter(|(_, err)| err.is_finite())
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+            .map(|(e, _)| e)
     }
     fn compute_error(&self, model: &Self::Model, data: &(Point2<f64>, Point2<f64>)) -> f64 {
         sampson_error(model, &data.0, &data.1)
@@ -109,7 +137,8 @@ pub fn find_essential_mat_ransac(
     let config = RobustConfig {
         threshold: thresh_norm * thresh_norm,
         max_iterations: max_iters,
-        confidence: 0.99,
+        // OpenCV's findEssentialMat default.
+        confidence: 0.999,
     };
 
     let ransac = Ransac::new(config);

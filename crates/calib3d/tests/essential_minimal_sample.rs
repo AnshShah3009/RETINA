@@ -19,10 +19,12 @@
 //!
 //! Only the minimal sample was broken, which is why the general case looks fine.
 //!
-//! This reaches past the direct call: `EssentialEstimator::min_sample_size()` is
-//! 8 and `find_essential_mat_ransac` drives it with `Ransac::run`, which samples
-//! exactly that many — so **every** minimal sample in RANSAC came from a solver
-//! returning a wrong `E`.
+//! This reached past the direct call: `EssentialEstimator::min_sample_size()`
+//! was 8 and `find_essential_mat_ransac` drove it with `Ransac::run`, which
+//! samples exactly that many — so **every** minimal sample in RANSAC came from a
+//! solver returning a wrong `E`. (RANSAC's minimal sample is now Nistér 5-point
+//! plus one disambiguating point; the 8-point solver remains the consensus
+//! refit, which is why its minimum still matters.)
 
 use cv_calib3d::{essential_from_extrinsics, find_essential_mat};
 use cv_core::{CameraIntrinsics, Pose};
