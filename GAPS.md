@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (16 open, was 91)
+## (g) Second review, 2026-10-31 — findings (15 open, was 91)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -310,7 +310,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f11 | `features/src/orb.rs` rBRIEF | **CLOSED.** Rotated offsets rounded (OpenCV's `cvRound`); pinned by `steered_sampling_is_symmetric_under_half_turns` (fails at 30° with truncation). Was: rotated taps floored, OpenCV rounds | was LOW — fixed | ARGUED |
 | g-f12 | `imgproc` `par_chunks_mut(width)` sites | **CLOSED.** 64 function/shape pairs no longer panic on 0×N / N×0 (`tests/zero_sized_images.rs`). Was: zero-width image panics `chunk_size must not be zero` | was LOW — fixed | CONFIRMED |
 
-### (g3) io / runtime / distributed / video / photo / videoio (6 open, was 12)
+### (g3) io / runtime / distributed / video / photo / videoio (5 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -323,7 +323,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-i7 | `distributed/.../shared_memory.rs` `Drop` | refcount decrement + unlink without the `flock` `new` takes → orphaned region, overcommit | MED | ARGUED |
 | g-i8 | `distributed/.../shared_memory.rs` `acquire_slot` | slot adopted by PID alone (PID namespaces, PID reuse) | MED | ARGUED |
 | g-i9 | `distributed/.../shared_memory.rs` | atomics written through `as_ptr()` of a shared slice (Stacked Borrows UB); reapers' non-saturating `fetch_sub` | LOW | ARGUED |
-| g-i10 | `runtime/src/pipeline/allocator.rs` | `trim` uses `shrink_to` (frees nothing); re-`allocate` leaks accounting | LOW | ARGUED |
+| g-i10 | `runtime/src/pipeline/allocator.rs` | **CLOSED.** `trim` truncates free lists; re-`allocate` releases the old buffer (accounting 4000 → 3000). Was: `trim` uses `shrink_to` (frees nothing); re-`allocate` leaks accounting | was LOW — fixed | ARGUED |
 | g-i11 | `videoio/src/backends/ffmpeg.rs` `grab` | one frame per packet; multi-frame packets → EAGAIN → stream dies — **BLOCKED locally**: `cargo check -p cv-videoio --features ffmpeg` fails building `ffmpeg-sys-next 7.1.3` against the system FFmpeg 8 (libavcodec 63), so a fix cannot be compiled or tested here; left open rather than edited blind | LOW | ARGUED |
 | g-i12 | `photo/src/bilateral.rs` | **CLOSED.** Rounded and clamped; pinned by `tests/bilateral_rounding.rs` (uniform images now fixed points; step-edge mean 100.18 → within 0.1 of 100.5). Was: output truncated not rounded | was LOW — fixed | ARGUED |
 

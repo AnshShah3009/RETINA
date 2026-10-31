@@ -58,6 +58,11 @@ impl TransientBufferPool {
             }
         };
 
+        // Re-allocating an id replaces its buffer: release the old one first so
+        // it returns to the free list and stops counting toward
+        // `total_allocated` (previously both leaked on every replacement).
+        self.release(id);
+
         let buffer = self.get_or_create_buffer(device, size)?;
 
         let alloc = Arc::new(BufferAlloc {
@@ -179,10 +184,17 @@ impl TransientBufferPool {
         self.buffers.len()
     }
 
+    /// Number of released buffers parked in the free lists for reuse.
+    pub fn free_buffer_count(&self) -> usize {
+        self.free_lists.read().values().map(Vec::len).sum()
+    }
+
     pub fn trim(&self) {
         let mut free_lists = self.free_lists.write();
-        for (_, pool) in free_lists.iter_mut() {
-            pool.shrink_to(pool.len() / 2);
+        for pool in free_lists.values_mut() {
+            // `shrink_to` only lowers capacity, never length, so it freed no
+            // buffers at all. Truncating drops the excess `wgpu::Buffer`s.
+            pool.truncate(pool.len() / 2);
         }
     }
 }
@@ -210,5 +222,47 @@ mod tests {
             TransientBufferPool::size_bucket(2 * 1024 * 1024 + 1),
             3 * 1024 * 1024
         );
+    }
+
+    fn gpu_pool() -> Option<TransientBufferPool> {
+        let gpu = registry().ok()?.default_gpu()?;
+        Some(TransientBufferPool::new(gpu.id()))
+    }
+
+    #[test]
+    fn reallocating_an_id_releases_the_old_buffer() {
+        let Some(pool) = gpu_pool() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        pool.allocate(BufferId(1), 1000).unwrap();
+        pool.allocate(BufferId(1), 3000).unwrap();
+        assert_eq!(pool.buffer_count(), 1);
+        assert_eq!(
+            pool.total_allocated(),
+            3000,
+            "the replaced 1000-byte allocation is still counted"
+        );
+        // The replaced buffer went back to its free list rather than leaking.
+        assert_eq!(pool.free_buffer_count(), 1);
+        pool.release_all();
+        assert_eq!(pool.total_allocated(), 0);
+    }
+
+    #[test]
+    fn trim_drops_half_of_each_free_list() {
+        let Some(pool) = gpu_pool() else {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        };
+        for i in 0..8 {
+            pool.allocate(BufferId(i), 512).unwrap();
+        }
+        pool.release_all();
+        assert_eq!(pool.free_buffer_count(), 8);
+        pool.trim();
+        assert_eq!(pool.free_buffer_count(), 4, "trim freed nothing");
+        pool.trim();
+        assert_eq!(pool.free_buffer_count(), 2);
     }
 }
