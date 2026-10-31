@@ -751,6 +751,31 @@ impl ComputeContext for CpuBackend {
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
+        // Integer-valued images (the usual u8-derived input): per-disparity
+        // running box sums, O(W*H*D) instead of O(W*H*D*B^2). Every partial
+        // sum is an exact integer in `T` under `integer_pixels`' bound, so the
+        // costs, comparisons and chosen disparities equal the dense loop's.
+        if block_size >= 1 {
+            if let Some((li, ri)) =
+                crate::cpu::stereo_sad::integer_pixels(left_data, right_data, block_size)
+            {
+                let best = crate::cpu::stereo_sad::block_match_sad(
+                    &li, &ri, w, h, block_size, min_disp, num_disp,
+                );
+                for (o, b) in dst.iter_mut().zip(&best) {
+                    if let Some(d) = b {
+                        *o = T::from_f32(*d as f32);
+                    }
+                }
+                return Ok(Tensor {
+                    storage: output_storage,
+                    shape: TensorShape::new(1, h, w),
+                    dtype: left.dtype,
+                    _phantom: std::marker::PhantomData,
+                });
+            }
+        }
+
         // Block matching with SAD (Sum of Absolute Differences)
         dst.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
             if y < half_block || y + half_block >= h {
