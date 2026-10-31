@@ -69,8 +69,15 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
     let shader_source = match cv_core::DataType::from_type::<T>() {
         #[cfg(feature = "half-precision")]
         Ok(cv_core::DataType::F16) => include_str!("../../shaders/color_cvt_f16.wgsl"),
+        // There is no bf16 colour-conversion shader. This arm used to
+        // `include_str!` one that does not exist, so the `half-precision`
+        // feature did not compile at all; it now declines loudly.
         #[cfg(feature = "half-precision")]
-        Ok(cv_core::DataType::BF16) => include_str!("../../shaders/color_cvt_bf16.wgsl"),
+        Ok(cv_core::DataType::BF16) => {
+            return Err(crate::Error::NotSupported(
+                "GPU colour conversion has no bf16 kernel; convert to f32 or f16 first".into(),
+            ))
+        }
         _ => {
             include_str!("../../shaders/color_cvt_f32.wgsl")
         }
