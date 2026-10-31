@@ -1,18 +1,28 @@
 use nalgebra::{Point3, Vector3};
 use rand::Rng;
 
-use super::rasterize::DifferentiableRasterizer;
+use super::rasterize::{DifferentiableRasterizer, GaussianGradient};
 use super::types::{unit_quaternion, Gaussian, GaussianCloud};
 
+/// Adaptive density control settings. See [`GaussianOptimizer::densify`].
 #[derive(Clone, Debug)]
 pub struct DensificationConfig {
     pub enabled: bool,
+    /// Average view-space (NDC) positional gradient norm at or above which a
+    /// Gaussian is densified (reference `densify_grad_threshold`, 0.0002).
     pub grad_threshold: f32,
+    /// World-space scale separating clone (`<=`) from split (`>`); the
+    /// reference's `percent_dense * scene_extent`.
     pub size_threshold: f32,
+    /// Not read by `densify`; pruning uses `PruningConfig::min_opacity`.
     pub min_opacity: f32,
+    /// Densify every this many optimizer steps.
     pub densification_interval: usize,
+    /// Scale divisor for split Gaussians (reference: `0.8 * N`, N = 2).
     pub density_factor: f32,
+    /// Not read by `densify` (kept for compatibility).
     pub clone_threshold: f32,
+    /// Not read by `densify` (kept for compatibility).
     pub split_threshold: f32,
 }
 
@@ -24,7 +34,7 @@ impl Default for DensificationConfig {
             size_threshold: 0.01,
             min_opacity: 0.005,
             densification_interval: 100,
-            density_factor: 1.5,
+            density_factor: 1.6,
             clone_threshold: 0.05,
             split_threshold: 0.1,
         }
@@ -102,11 +112,16 @@ impl Default for TrainingConfig {
 /// rotation 4, logit-opacity 1, DC colour 3.
 const N_PARAMS: usize = 14;
 
-/// Adam moments for one Gaussian.
+/// Optimizer state for one Gaussian: Adam moments and densification
+/// statistics.
 #[derive(Clone, Debug, Default)]
-struct AdamState {
+struct GaussianState {
     m: [f32; N_PARAMS],
     v: [f32; N_PARAMS],
+    /// Sum of view-space positional gradient norms since the last densify.
+    grad_accum: f32,
+    /// Iterations in which the Gaussian was visible since the last densify.
+    grad_count: u32,
 }
 
 /// 3DGS training optimizer: Adam (Kerbl et al. 2023, §7) over the activated
@@ -120,7 +135,8 @@ struct AdamState {
 /// so a learning rate means the same thing as in the reference: a relative
 /// step for scale, and a step in logit space for opacity.
 ///
-/// The Adam state is kept index-aligned with `cloud.gaussians` across
+/// The per-Gaussian state (Adam moments and densification statistics) is
+/// kept index-aligned with `cloud.gaussians` across
 /// [`prune`](Self::prune) and [`densify`](Self::densify). If the cloud is
 /// edited between steps by other code and its length no longer matches, the
 /// state is truncated or extended with zeros, which is exact for appended
@@ -128,7 +144,7 @@ struct AdamState {
 pub struct GaussianOptimizer {
     pub config: TrainingConfig,
     iteration: usize,
-    adam: Vec<AdamState>,
+    state: Vec<GaussianState>,
 }
 
 const ADAM_BETA1: f32 = 0.9;
@@ -150,12 +166,12 @@ impl GaussianOptimizer {
         Self {
             config,
             iteration: 0,
-            adam: Vec::new(),
+            state: Vec::new(),
         }
     }
 
     fn sync_state(&mut self, n: usize) {
-        self.adam.resize(n, AdamState::default());
+        self.state.resize(n, GaussianState::default());
     }
 
     /// Learning rate of each of the [`N_PARAMS`] slots.
@@ -170,12 +186,9 @@ impl GaussianOptimizer {
         lr
     }
 
-    pub fn step(
-        &mut self,
-        cloud: &mut GaussianCloud,
-        gradients: &[super::rasterize::GaussianGradient],
-    ) {
+    pub fn step(&mut self, cloud: &mut GaussianCloud, gradients: &[GaussianGradient]) {
         self.sync_state(cloud.gaussians.len());
+        self.accumulate_densification_stats(gradients);
         let lr = self.learning_rates();
         let t = (self.iteration + 1) as i32;
         let bias1 = 1.0 - ADAM_BETA1.powi(t);
@@ -199,7 +212,7 @@ impl GaussianOptimizer {
             g[10] = grad.opacity_grad * o * (1.0 - o);
             g[11..14].copy_from_slice(grad.color_grad.as_slice());
 
-            let state = &mut self.adam[idx];
+            let state = &mut self.state[idx];
             let mut step = [0.0f32; N_PARAMS];
             for k in 0..N_PARAMS {
                 if !g[k].is_finite() {
@@ -258,68 +271,99 @@ impl GaussianOptimizer {
             self.reset_opacity(cloud);
         }
     }
-    pub fn densify(&self, cloud: &mut GaussianCloud) {
-        let mut new_gaussians: Vec<Gaussian> = Vec::new();
-        let mut to_remove: Vec<usize> = Vec::new();
-        let mut updates: Vec<(usize, (Vector3<f32>, f32))> = Vec::new();
+    /// Add one iteration's view-space positional gradients to the
+    /// densification statistics (INRIA `add_densification_stats`): for every
+    /// visible Gaussian, `accum += |dL/d mean2d_ndc|` and `count += 1`.
+    ///
+    /// [`step`](Self::step) calls this; it is public so a caller driving its
+    /// own loop can feed the statistics without an optimizer step.
+    pub fn accumulate_densification_stats(&mut self, gradients: &[GaussianGradient]) {
+        for grad in gradients {
+            if !grad.visible {
+                continue;
+            }
+            if grad.idx >= self.state.len() {
+                self.state.resize(grad.idx + 1, GaussianState::default());
+            }
+            let norm = grad.mean2d_grad_ndc.norm();
+            if norm.is_finite() {
+                let s = &mut self.state[grad.idx];
+                s.grad_accum += norm;
+                s.grad_count += 1;
+            }
+        }
+    }
 
-        for (idx, gaussian) in cloud.gaussians.iter().enumerate() {
-            let max_scale = gaussian.scale.x.max(gaussian.scale.y).max(gaussian.scale.z);
+    /// 3DGS adaptive density control (Kerbl et al. 2023, §5.2; INRIA
+    /// `densify_and_clone` / `densify_and_split`).
+    ///
+    /// A Gaussian is selected when its average accumulated view-space
+    /// positional gradient (see
+    /// [`accumulate_densification_stats`](Self::accumulate_densification_stats))
+    /// is at least `grad_threshold`. A selected Gaussian whose largest scale is
+    /// at most `size_threshold` (the reference's `percent_dense * extent`) is
+    /// under-reconstructing and is **cloned** unchanged; a larger one is
+    /// over-reconstructing and is **split**: replaced by two Gaussians whose
+    /// centres are sampled from the original Gaussian `N(mu, R S S^T R^T)` and
+    /// whose scales are divided by `density_factor` (1.6 = 0.8 N for N = 2 in
+    /// the reference). New Gaussians start with zero optimizer state, and all
+    /// statistics are reset afterwards.
+    ///
+    /// Without accumulated gradient this is a no-op: it used to duplicate
+    /// every Gaussian below `size_threshold / 2` on each call regardless of
+    /// gradient, doubling the cloud per call.
+    pub fn densify(&mut self, cloud: &mut GaussianCloud) {
+        let n = cloud.gaussians.len();
+        self.sync_state(n);
+        let cfg = &self.config.densification;
+        let threshold = cfg.grad_threshold;
+        let size_threshold = cfg.size_threshold;
+        let factor = cfg.density_factor;
 
-            if max_scale > self.config.densification.size_threshold {
-                let mut rng = rand::rng();
-                let offset = Vector3::new(
-                    rng.random_range(-0.5..0.5) * max_scale,
-                    rng.random_range(-0.5..0.5) * max_scale,
-                    rng.random_range(-0.5..0.5) * max_scale,
-                );
+        let mut rng = rand::rng();
+        let mut normal = || {
+            // Box-Muller; `1 - u` keeps the logarithm's argument in (0, 1].
+            let u1: f32 = 1.0 - rng.random::<f32>();
+            let u2: f32 = rng.random::<f32>();
+            (-2.0 * u1.ln()).sqrt() * (std::f32::consts::TAU * u2).cos()
+        };
 
-                let mut new_gaussian = gaussian.clone();
-                new_gaussian.position = Point3::new(
-                    gaussian.position.x + offset.x,
-                    gaussian.position.y + offset.y,
-                    gaussian.position.z + offset.z,
-                );
-                new_gaussian.opacity = gaussian.opacity * 0.5;
-                new_gaussians.push(new_gaussian);
-
-                let new_scale = gaussian.scale / self.config.densification.density_factor;
-                updates.push((idx, (new_scale, gaussian.opacity * 0.5)));
-            } else if max_scale < self.config.densification.size_threshold * 0.5 {
-                let mut new_gaussian = gaussian.clone();
-                new_gaussian.position = Point3::new(
-                    gaussian.position.x + gaussian.scale.x,
-                    gaussian.position.y,
-                    gaussian.position.z,
-                );
-                new_gaussian.opacity = gaussian.opacity;
-                new_gaussians.push(new_gaussian);
-
-                let mut new_gaussian2 = gaussian.clone();
-                new_gaussian2.position = Point3::new(
-                    gaussian.position.x - gaussian.scale.x,
-                    gaussian.position.y,
-                    gaussian.position.z,
-                );
-                new_gaussians.push(new_gaussian2);
-
-                to_remove.push(idx);
+        let mut keep = vec![true; n];
+        let mut added: Vec<Gaussian> = Vec::new();
+        for (i, g) in cloud.gaussians.iter().enumerate() {
+            let s = &self.state[i];
+            if s.grad_count == 0 {
+                continue;
+            }
+            let avg = s.grad_accum / s.grad_count as f32;
+            if avg < threshold {
+                continue;
+            }
+            let max_scale = g.scale.x.max(g.scale.y).max(g.scale.z);
+            if max_scale <= size_threshold {
+                added.push(g.clone());
+            } else {
+                let rot = g.rotation_matrix();
+                for _ in 0..2 {
+                    let z = Vector3::new(normal(), normal(), normal());
+                    let offset = rot * g.scale.component_mul(&z);
+                    let mut sample = g.clone();
+                    sample.position = Point3::from(g.position.coords + offset);
+                    sample.scale = g.scale / factor;
+                    added.push(sample);
+                }
+                keep[i] = false;
             }
         }
 
-        for (idx, (new_scale, new_opacity)) in updates {
-            if idx < cloud.gaussians.len() {
-                cloud.gaussians[idx].scale = new_scale;
-                cloud.gaussians[idx].opacity = new_opacity;
-            }
-        }
-
-        for &idx in to_remove.iter().rev() {
-            cloud.remove(idx);
-        }
-
-        for g in new_gaussians {
+        self.retain(cloud, &keep);
+        for g in added {
             cloud.push(g);
+        }
+        self.sync_state(cloud.gaussians.len());
+        for s in &mut self.state {
+            s.grad_accum = 0.0;
+            s.grad_count = 0;
         }
     }
 
@@ -340,7 +384,7 @@ impl GaussianOptimizer {
             keep[i - 1]
         });
         let mut i = 0;
-        self.adam.retain(|_| {
+        self.state.retain(|_| {
             i += 1;
             keep[i - 1]
         });
@@ -358,7 +402,7 @@ impl GaussianOptimizer {
     pub fn reset_opacity(&mut self, cloud: &mut GaussianCloud) {
         self.sync_state(cloud.gaussians.len());
         let target = self.config.opacity_reset.target;
-        for (gaussian, state) in cloud.gaussians.iter_mut().zip(&mut self.adam) {
+        for (gaussian, state) in cloud.gaussians.iter_mut().zip(&mut self.state) {
             gaussian.opacity = gaussian.opacity.min(target);
             state.m[10] = 0.0;
             state.v[10] = 0.0;

@@ -608,8 +608,9 @@ impl DifferentiableRasterizer {
     /// transmittance 0.001 are not differentiated through. A splat whose alpha
     /// is capped receives no gradient through that alpha.
     ///
-    /// Each [`GaussianGradient`] also carries `mean2d_grad`, the gradient with
-    /// respect to the projected centre in pixels, and `visible`, whether the
+    /// Each [`GaussianGradient`] also carries `mean2d_grad` /
+    /// `mean2d_grad_ndc`, the gradient with respect to the projected centre in
+    /// pixels and in NDC units, and `visible`, whether the
     /// splat contributed to any pixel - the inputs 3DGS densification
     /// accumulates.
     pub fn backward(
@@ -726,6 +727,10 @@ fn finish(
                 opacity_grad: a.opacity,
                 color_grad: a.color,
                 mean2d_grad: a.center,
+                mean2d_grad_ndc: Vector2::new(
+                    a.center.x * 0.5 * r.camera.width as f32,
+                    a.center.y * 0.5 * r.camera.height as f32,
+                ),
                 visible: a.visible,
             };
             if !a.visible {
@@ -887,6 +892,11 @@ pub struct GaussianGradient {
     /// dL/d(projected centre), in pixels. 3DGS densification accumulates its
     /// norm (see `optimize::GaussianOptimizer`).
     pub mean2d_grad: Vector2<f32>,
+    /// The same gradient with respect to the centre in normalised device
+    /// coordinates, `(W/2, H/2) * mean2d_grad`: the units of the reference
+    /// implementation's view-space gradient, which `grad_threshold` (0.0002)
+    /// is calibrated in.
+    pub mean2d_grad_ndc: Vector2<f32>,
     /// Whether the splat contributed to at least one pixel of this render.
     pub visible: bool,
 }
