@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (20 open, was 87)
+## (g) Second review, 2026-10-31 — findings (19 open, was 87)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -293,13 +293,13 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | **CLOSED.** CPU renormalises after the 0.2 clamp (as the GPU shader already did); both backends round when quantising. Step-edge descriptor norm 204 → 512 (`tests/second_review_cpu_fixes.rs`). Was: not renormalised after the 0.2 clamp | was LOW — fixed | ARGUED |
 | g-h12 | AKAZE Scharr derivatives (CPU + WGSL) | **CLOSED.** `[3, 10, 3]/32` taps on CPU and in the WGSL shader: unit gain (was 0.3125). Same test file. Was: taps `[1,3,1]/32` give gain 0.3125 on a unit ramp; should be `[3,10,3]/32` | was LOW — fixed | ARGUED |
 
-### (g2) features / imgproc (6 open, was 12)
+### (g2) features / imgproc (5 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
 | g-f1 | `features/src/brief.rs` | **CLOSED.** Angle converted with `to_radians`; only exactly `-1.0` means unset. Pinned by `tests/brief_angle_degrees.rs`. Was: `kp.angle` (degrees everywhere else) fed to `cos`/`sin` as radians; negative angles treated as "unset" | was HIGH — fixed | CONFIRMED: hamming(0°,360°)=124 |
 | g-f2 | `imgproc/src/geometry.rs` `get_pixel_lanczos_with_border` | **CLOSED.** Taps read at offset `k - 3` to match their weights; pinned by `tests/lanczos_tap_alignment.rs` (identity remap and warp return the input). Was: tap index off by one: Lanczos warp/remap shifted 1 px | was HIGH — fixed | CONFIRMED |
-| g-f3 | `imgproc/src/histogram.rs` `clahe` | equalizeHist-style LUT instead of OpenCV's `cdf*255/area`; constant 100 → 255 | HIGH | CONFIRMED |
+| g-f3 | `imgproc/src/histogram.rs` `clahe` | **CLOSED.** OpenCV's LUT (`cdf·255/area`), clip-limit residual spreading and tile interpolation; 5 cases bit-exact vs cv2 (`tests/clahe_opencv_parity.rs`). Was: equalizeHist-style LUT instead of OpenCV's `cdf*255/area`; constant 100 → 255 | was HIGH — fixed | CONFIRMED |
 | g-f4 | `imgproc/src/hough.rs` | runs Canny on its input (edges of an edge map), rho binned with floor → one line returns two at 48.58/50.58 | HIGH | CONFIRMED |
 | g-f5 | `imgproc/src/edges.rs` Canny NMS | `>=` on both sides keeps 2-px edges; L2 default and implicit σ=1 blur differ from OpenCV | MED | CONFIRMED |
 | g-f6 | `imgproc/src/threshold.rs` `adaptive_threshold` | truncated mean, shrinking-window border, fractional `c` comparison | MED | CONFIRMED |
