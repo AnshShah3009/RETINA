@@ -269,6 +269,90 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
+## (g) Second review, 2026-10-31 — findings (34 open, was 0)
+
+Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
+or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
+features/imgproc, `g-i` io/runtime/distributed/video/photo/videoio, `g-m` slam/rendering/
+plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
+
+### (g1) hal (12 open, was 12)
+
+| id | location | defect | severity | evidence |
+|---|---|---|---|---|
+| g-h1 | `gpu_kernels/{threshold,color,icp,subtract,pointcloud_transform}.rs` | 1-D dispatches exceed wgpu's 65535-group limit: `threshold` / `cvt_color` on a 3840x2160 frame panic with `dispatch group size dimension ([129600, 1, 1]) must be less or equal to 65535` | HIGH | CONFIRMED |
+| g-h2 | `cpu/border.rs` | `Reflect` and `Reflect101` swapped vs OpenCV (cb25ce4 swapped them and pinned the swap in tests); `cv-imgproc`'s own mapping was right | HIGH | CONFIRMED vs `cv2.copyMakeBorder` |
+| g-h3 | `cpu/compute_context_impl.rs` `akaze_contrast_k` | 70th-percentile gradient over all pixels is 0 on mostly flat images; diffusion then divides `0/0` → 4032/4096 pixels NaN | HIGH | CONFIRMED |
+| g-h4 | `cpu/compute_context_impl.rs` `tsdf_extract_mesh` | vertex positions use `i*vs` while integration uses `(i+0.5)*vs` (half-voxel shift), and zero-weight corners are meshed → phantom back surface (wall at z=0.4 gives vertices at 0.375 and 0.471) | HIGH | CONFIRMED |
+| g-h5 | `cpu/compute_context_impl.rs` `hough_lines` | one full accumulator allocated per image row (~3.4 GB at 1080p) | HIGH | ARGUED |
+| g-h6 | `cpu/compute_context_impl.rs` `hough_lines` | no peak suppression (GPU path has 3x3 NMS): one line returns 3 | MED | CONFIRMED |
+| g-h7 | `cpu/compute_context_impl.rs` `optical_flow_lk` | sub-pixel part applied twice; 2.3 px shift oscillates 2.15…2.76 and does not converge | MED | CONFIRMED |
+| g-h8 | `cpu/compute_context_impl.rs` `convolve_2d`, `morphology`, `warp`, `nms`, `stereo` | interleaved multi-channel input treated as `c*h` rows → scrambled output | MED | CONFIRMED |
+| g-h9 | `cpu/compute_context_impl.rs` `stereo_match` | pixels with no testable disparity report 0 (valid) instead of the no-match marker | MED | CONFIRMED |
+| g-h10 | `cpu/compute_context_impl.rs` `match_descriptors` | empty train set + ratio ≥ 1 fabricates a match to index 0 | LOW | CONFIRMED |
+| g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | not renormalised after the 0.2 clamp | LOW | ARGUED |
+| g-h12 | AKAZE Scharr derivatives (CPU + WGSL) | taps `[1,3,1]/32` give gain 0.3125 on a unit ramp; should be `[3,10,3]/32` | LOW | ARGUED |
+
+### (g2) features / imgproc (12 open, was 12)
+
+| id | location | defect | severity | evidence |
+|---|---|---|---|---|
+| g-f1 | `features/src/brief.rs` | `kp.angle` (degrees everywhere else) fed to `cos`/`sin` as radians; negative angles treated as "unset" | HIGH | CONFIRMED: hamming(0°,360°)=124 |
+| g-f2 | `imgproc/src/geometry.rs` `get_pixel_lanczos_with_border` | tap index off by one: Lanczos warp/remap shifted 1 px | HIGH | CONFIRMED |
+| g-f3 | `imgproc/src/histogram.rs` `clahe` | equalizeHist-style LUT instead of OpenCV's `cdf*255/area`; constant 100 → 255 | HIGH | CONFIRMED |
+| g-f4 | `imgproc/src/hough.rs` | runs Canny on its input (edges of an edge map), rho binned with floor → one line returns two at 48.58/50.58 | HIGH | CONFIRMED |
+| g-f5 | `imgproc/src/edges.rs` Canny NMS | `>=` on both sides keeps 2-px edges; L2 default and implicit σ=1 blur differ from OpenCV | MED | CONFIRMED |
+| g-f6 | `imgproc/src/threshold.rs` `adaptive_threshold` | truncated mean, shrinking-window border, fractional `c` comparison | MED | CONFIRMED |
+| g-f7 | `features/src/usac.rs` `score_magsac` | `1..=sigma_max as usize` never runs for `sigma_max < 1` → no model | MED | CONFIRMED |
+| g-f8 | `features/src/usac.rs` adaptive iterations | count fixed at 50% inlier assumption, never updated from the best model | MED | ARGUED |
+| g-f9 | `imgproc/src/resize.rs` `pyr_down`/`pyr_up` | bilinear resize to `w/2` instead of 5-tap Gaussian + `(w+1)/2`; 1x10 → black 1x1 | MED | CONFIRMED |
+| g-f10 | `features/src/matcher.rs` | only Hamming exists; SIFT float-histogram bytes matched by Hamming | MED | ARGUED |
+| g-f11 | `features/src/orb.rs` rBRIEF | rotated taps floored, OpenCV rounds | LOW | ARGUED |
+| g-f12 | `imgproc` `par_chunks_mut(width)` sites | zero-width image panics `chunk_size must not be zero` | LOW | CONFIRMED |
+
+### (g3) io / runtime / distributed / video / photo / videoio (12 open, was 12)
+
+| id | location | defect | severity | evidence |
+|---|---|---|---|---|
+| g-i1 | `runtime/src/pipeline/` | CPU-only pipeline cannot run two chained ops (`TransientBufferPool only supports GPU`); GPU↔CPU op hand-off never copies data | HIGH | CONFIRMED (CPU) / ARGUED (GPU) |
+| g-i2 | `video/src/optical_flow.rs` `track_point` | template sampled at `floor(lx)`: a static sub-pixel point (60.5, 60.5) tracks to (60, 60) | HIGH | CONFIRMED |
+| g-i3 | `io/src/pcd.rs` | reader rejects `compressed > uncompressed`, so the crate's own LZF writer output on random data is unreadable | MED-HIGH | CONFIRMED |
+| g-i4 | `io/src/pcd.rs` ASCII | column index ignores `COUNT > 1` | MED | CONFIRMED |
+| g-i5 | `io/src/pcd.rs` ASCII rgb | `TYPE U` packed rgb parsed as f32 then `to_bits()` → pure red reads `[0.498,0,0]` | MED | CONFIRMED |
+| g-i6 | `io/src/obj.rs` | negative (relative) face indices rejected | MED | CONFIRMED |
+| g-i7 | `distributed/.../shared_memory.rs` `Drop` | refcount decrement + unlink without the `flock` `new` takes → orphaned region, overcommit | MED | ARGUED |
+| g-i8 | `distributed/.../shared_memory.rs` `acquire_slot` | slot adopted by PID alone (PID namespaces, PID reuse) | MED | ARGUED |
+| g-i9 | `distributed/.../shared_memory.rs` | atomics written through `as_ptr()` of a shared slice (Stacked Borrows UB); reapers' non-saturating `fetch_sub` | LOW | ARGUED |
+| g-i10 | `runtime/src/pipeline/allocator.rs` | `trim` uses `shrink_to` (frees nothing); re-`allocate` leaks accounting | LOW | ARGUED |
+| g-i11 | `videoio/src/backends/ffmpeg.rs` `grab` | one frame per packet; multi-frame packets → EAGAIN → stream dies | LOW | ARGUED |
+| g-i12 | `photo/src/bilateral.rs` | output truncated not rounded | LOW | ARGUED |
+
+Also: (c2) says `MOG2`'s `var_threshold` is inert — it is not; `mog2_update` uses it as the match threshold. Doc fix only.
+
+### (g4) slam / rendering / plot / cli / dnn / python (11 open, was 11)
+
+| id | location | defect | severity | evidence |
+|---|---|---|---|---|
+| g-m1 | `slam/src/tracking.rs` | map is never populated, so `process_frame` / `process_frame_with_depth` / Python `PySlam` always fail | HIGH | CONFIRMED |
+| g-m2 | `rendering/.../rasterize.rs` `backward` | returns all-zero gradients; trainer never fits | HIGH | CONFIRMED |
+| g-m3 | `rendering/.../optimize.rs` `densify` | every small Gaussian doubled each call (exponential growth); `grad_threshold` unread | HIGH | CONFIRMED |
+| g-m4 | `rendering/.../io.rs` | Gaussian PLY columns read by position, header ignored; binary → `Ok(empty)`; `rot_0` read as x not w | HIGH | CONFIRMED |
+| g-m5 | `cli/src/main.rs` EuRoC | GT/estimate paired by index not timestamp: identical 200 Hz vs 20 Hz trajectories give ATE 0.5 m | HIGH | CONFIRMED |
+| g-m6 | `dnn/src/lib.rs` preprocess | HWC data labelled NCHW → RGB models see a garbled image | HIGH | ARGUED |
+| g-m7 | `slam/src/tracking.rs` `refine_pose_with_icp` | relative translation applied twice | MED | ARGUED |
+| g-m8 | `rendering/.../optimize.rs` `reset_opacity` | raises low opacities instead of capping at 0.01 | MED | CONFIRMED |
+| g-m9 | `plot/src/export.rs` `format_tick_value` | decimals from value, not step → duplicate labels `0,0,0.001,…` | MED | CONFIRMED |
+| g-m10 | `plot/src/export.rs` bars | drawn from axis min, not 0 | MED | CONFIRMED |
+| g-m11 | `plot/src/three_d.rs` `camera_position` | HTML camera convention disagrees with SVG `project` (~22° at defaults) | LOW-MED | CONFIRMED |
+
+Minor (LOW): python `pose.matrix()` flattened column-major (numpy gets the transpose);
+python `sparse_solve_cg` checks `ncols` not `nrows`; `slam` returns `Ok(last pose)` when PnP fails;
+`SphericalHarmonics::eval` mixes channels (unused).
+
+Pending: calib3d/sfm, 3d/registration/pointcloud, core/math/optimize/geometry2d/signal_proc/scientific.
+
+---
+
 ## (f) Capability notes against the five targets
 
 Only claims that can be pointed at in the source. Status: **absent** / **partial** /
