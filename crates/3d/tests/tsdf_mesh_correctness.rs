@@ -180,8 +180,9 @@ fn triangle_colours_come_from_the_volume_not_a_constant() {
     // part-way there. (Verified the formula is correct: with old=0 and
     // colour=200 it gives 200, 100, 67, 50, 40 over successive integrations.)
     //
-    // Voxels no ray reached keep their initial zero colour, so the mesh contains
-    // vertices at both ends of the range. What distinguishes real interpolation
+    // Voxels no ray reached keep their initial zero colour. `extract_mesh` no
+    // longer meshes cells with an unobserved corner, so they should not reach
+    // the output, but the filter is kept harmless. What distinguishes real interpolation
     // from a hardcoded default is that the observed values agree with each other
     // and are not 128.
     let observed: Vec<&Vector3<u8>> = all.iter().filter(|c| **c != Vector3::zeros()).collect();

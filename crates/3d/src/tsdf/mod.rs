@@ -5,13 +5,16 @@
 
 use nalgebra::{Matrix4, Point3, Vector3};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cv_core::CameraIntrinsicsF32;
 use cv_runtime::orchestrator::RuntimeRunner;
 
 /// Re-export the canonical f32 camera intrinsics from cv-core.
 pub type CameraIntrinsics = CameraIntrinsicsF32;
+
+/// Depths beyond this (metres, after `depth_scale`) are treated as invalid.
+const MAX_INTEGRATION_DEPTH: f32 = 10.0;
 
 /// Voxel block for TSDF volume
 #[derive(Debug, Clone)]
@@ -29,7 +32,9 @@ impl VoxelBlock {
     pub fn new(coords: (i32, i32, i32)) -> Self {
         Self {
             coords,
-            tsdf: vec![1.0; Self::VOXELS_PER_BLOCK], // Initialize to empty (positive)
+            // Positive is free space. The value of an unobserved voxel is never
+            // meshed (its weight is zero), but +1 is the honest placeholder.
+            tsdf: vec![1.0; Self::VOXELS_PER_BLOCK],
             weights: vec![0.0; Self::VOXELS_PER_BLOCK],
             colors: vec![Vector3::new(0, 0, 0); Self::VOXELS_PER_BLOCK],
         }
@@ -57,6 +62,20 @@ impl VoxelBlock {
         self.tsdf[idx] = tsdf;
         self.weights[idx] = weight;
         self.colors[idx] = color;
+    }
+
+    /// Fold one observation into voxel `idx` as a running weighted mean.
+    fn fuse(&mut self, idx: usize, tsdf: f32, color: Vector3<u8>, max_weight: f32) {
+        let w = self.weights[idx];
+        self.tsdf[idx] = (self.tsdf[idx] * w + tsdf) / (w + 1.0);
+        let old = self.colors[idx];
+        let mix = |o: u8, c: u8| ((o as f32 * w + c as f32) / (w + 1.0)) as u8;
+        self.colors[idx] = Vector3::new(
+            mix(old.x, color.x),
+            mix(old.y, color.y),
+            mix(old.z, color.z),
+        );
+        self.weights[idx] = (w + 1.0).min(max_weight);
     }
 }
 
@@ -156,7 +175,6 @@ impl TSDFVolume {
                     .to_string(),
             )
         })?;
-        let camera_origin = extrinsics.transform_point(&Point3::origin());
 
         // Validate the frame up front, at the boundary where caller data enters.
         //
@@ -202,172 +220,210 @@ impl TSDFVolume {
             )));
         }
 
-        let updates: Vec<_> = group.run(|| {
+        // KinectFusion projective TSDF, integrated per voxel.
+        //
+        // Convention: **positive is free space**. `sdf = depth - z_voxel`, where
+        // `z_voxel` is the voxel centre's camera-frame z, truncated to
+        // `[-trunc, +trunc]` and normalised to `[-1, 1]`. Voxels more than
+        // `trunc` behind the measured surface are occluded, i.e. unobserved,
+        // and are not touched at all, so their weight stays zero.
+        //
+        // Three defects lived here:
+        //
+        // - The sign was `z_voxel - depth`, negative in observed free space,
+        //   while untouched voxels start at `+1` ("empty"). Where the measured
+        //   band met never-observed voxels there was a sign change, and marching
+        //   cubes put a phantom surface there.
+        // - The band was marched `depth +/- trunc` along the *unit* ray, but
+        //   `depth` is a z value: off axis the surface sits at range
+        //   `depth / cos(theta)`, so the band stopped short of it.
+        // - Each ray sample was written into whichever voxel it fell in, so the
+        //   stored value was the distance of some point inside the voxel rather
+        //   than of the voxel centre the mesh is built on.
+        //
+        // Integration is now two passes: find the blocks the truncation band
+        // reaches (walking each pixel's ray in *z*, so off-axis rays reach
+        // `z = depth`), then project every voxel centre of those blocks into the
+        // image and update it from the pixel it lands on.
+        let bs = VoxelBlock::BLOCK_SIZE as i32;
+        let vs = self.voxel_size;
+        let trunc = self.truncation_distance;
+        let depth_scale = self.depth_scale;
+        let max_weight = self.max_weight;
+        let (fx, fy, cx, cy) = (intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy);
+        // Written to reject NaN as well as out-of-range depths.
+        let valid_depth = |d: f32| d > 0.0 && d <= MAX_INTEGRATION_DEPTH;
+
+        let touched: HashSet<(i32, i32, i32)> = group.run(|| {
             (0..height)
                 .into_par_iter()
-                .flat_map(|v| {
-                    let mut local_updates = Vec::new();
-
+                .fold(HashSet::new, |mut set, v| {
                     for u in 0..width {
-                        let idx = v * width + u;
-                        // No bounds check here: the lengths are validated above,
-                        // before the parallel region, so every `idx` is in range.
-                        // The previous check existed because this function could
-                        // not report the problem - see the note there.
-                        let depth = depth_image[idx] / self.depth_scale;
-
-                        if depth <= 0.0 || depth > 10.0 {
+                        // Lengths were validated above, before the parallel
+                        // region, so every index is in range.
+                        let depth = depth_image[v * width + u] / depth_scale;
+                        if !valid_depth(depth) {
                             continue;
                         }
-
-                        // Backproject to 3D in camera space
-                        let x = (u as f32 - intrinsics.cx) * depth / intrinsics.fx;
-                        let y = (v as f32 - intrinsics.cy) * depth / intrinsics.fy;
-                        let z = depth;
-                        let point_camera = Point3::new(x, y, z);
-
-                        // Transform to world space
-                        let point_world = extrinsics.transform_point(&point_camera);
-
-                        // Get color
-                        // Length-checked above, so this cannot fall back - and it
-                        // used to fabricate a mid-grey for every missing sample,
-                        // which is a plausible colour a caller cannot distinguish
-                        // from a measured one.
-                        let color = color_image
-                            .and_then(|c| c.get(idx).copied())
-                            .unwrap_or(Vector3::new(128, 128, 128));
-
-                        // Find affected voxels along ray
-                        let ray_dir = (point_world - camera_origin).normalize();
-                        let start =
-                            camera_origin + ray_dir * (depth - self.truncation_distance).max(0.01);
-                        let end = camera_origin + ray_dir * (depth + self.truncation_distance);
-
-                        // March along ray and update voxels
-                        let steps = ((end - start).norm() / self.voxel_size).ceil() as usize;
+                        // Camera-frame ray scaled so its z component is 1: the
+                        // point at camera depth z is `(rx * z, ry * z, z)`.
+                        let rx = (u as f32 - cx) / fx;
+                        let ry = (v as f32 - cy) / fy;
+                        let z0 = (depth - trunc).max(0.01);
+                        let z1 = depth + trunc;
+                        // Samples at most half a voxel apart in 3D.
+                        let len = (rx * rx + ry * ry + 1.0).sqrt();
+                        let steps = ((z1 - z0) * len / (0.5 * vs)).ceil().max(1.0) as usize;
                         for i in 0..=steps {
-                            let t = i as f32 / steps.max(1) as f32;
-                            let voxel_pos = start + (end - start) * t;
-
-                            // Calculate TSDF value using projective distance:
-                            // Transform voxel back to camera frame and compare depths
-                            let voxel_camera = extrinsics_inv.transform_point(&voxel_pos);
-                            let sdf = voxel_camera.z - depth;
-
-                            let tsdf = (sdf / self.truncation_distance).clamp(-1.0, 1.0);
-
-                            local_updates.push((voxel_pos, tsdf, color));
+                            let z = z0 + (z1 - z0) * i as f32 / steps as f32;
+                            let p = extrinsics.transform_point(&Point3::new(rx * z, ry * z, z));
+                            set.insert((
+                                ((p.x / vs).floor() as i32).div_euclid(bs),
+                                ((p.y / vs).floor() as i32).div_euclid(bs),
+                                ((p.z / vs).floor() as i32).div_euclid(bs),
+                            ));
                         }
                     }
-
-                    local_updates
+                    set
                 })
-                .collect()
+                .reduce(HashSet::new, |mut a, b| {
+                    a.extend(b);
+                    a
+                })
         });
 
-        // Apply updates
-        for (pos, tsdf, color) in updates {
-            self.update_voxel(pos, tsdf, color);
+        for &c in &touched {
+            self.blocks.entry(c).or_insert_with(|| VoxelBlock::new(c));
         }
+        let mut targets: Vec<&mut VoxelBlock> = self
+            .blocks
+            .iter_mut()
+            .filter(|(c, _)| touched.contains(c))
+            .map(|(_, b)| b)
+            .collect();
+
+        group.run(|| {
+            targets.par_iter_mut().for_each(|block| {
+                let n = VoxelBlock::BLOCK_SIZE;
+                for lz in 0..n {
+                    for ly in 0..n {
+                        for lx in 0..n {
+                            let centre = Point3::new(
+                                ((block.coords.0 * bs + lx as i32) as f32 + 0.5) * vs,
+                                ((block.coords.1 * bs + ly as i32) as f32 + 0.5) * vs,
+                                ((block.coords.2 * bs + lz as i32) as f32 + 0.5) * vs,
+                            );
+                            let pc = extrinsics_inv.transform_point(&centre);
+                            if pc.z <= 0.0 {
+                                continue;
+                            }
+                            // Pixel `u` backprojects through its integer
+                            // coordinate (see the ray walk above), so the pixel
+                            // a voxel belongs to is its rounded projection.
+                            let u = (fx * pc.x / pc.z + cx).round();
+                            let v = (fy * pc.y / pc.z + cy).round();
+                            if !(u >= 0.0 && v >= 0.0 && u < width as f32 && v < height as f32) {
+                                continue;
+                            }
+                            let idx = v as usize * width + u as usize;
+                            let depth = depth_image[idx] / depth_scale;
+                            if !valid_depth(depth) {
+                                continue;
+                            }
+                            let sdf = depth - pc.z;
+                            if sdf < -trunc {
+                                continue;
+                            }
+                            let tsdf = (sdf / trunc).min(1.0);
+                            // Length-checked above, so a supplied image always
+                            // has this sample; grey only when there is no colour
+                            // image at all.
+                            let color = color_image
+                                .and_then(|c| c.get(idx).copied())
+                                .unwrap_or(Vector3::new(128, 128, 128));
+                            block.fuse(
+                                VoxelBlock::voxel_index((lx, ly, lz)),
+                                tsdf,
+                                color,
+                                max_weight,
+                            );
+                        }
+                    }
+                }
+            })
+        });
 
         Ok(())
     }
 
-    /// Update a single voxel with new TSDF value
-    fn update_voxel(&mut self, world_pos: Point3<f32>, tsdf: f32, color: Vector3<u8>) {
-        // Convert to voxel coordinates
-        let voxel_x = (world_pos.x / self.voxel_size).floor() as i32;
-        let voxel_y = (world_pos.y / self.voxel_size).floor() as i32;
-        let voxel_z = (world_pos.z / self.voxel_size).floor() as i32;
-
-        // Calculate block coordinates
-        let block_x = voxel_x.div_euclid(VoxelBlock::BLOCK_SIZE as i32);
-        let block_y = voxel_y.div_euclid(VoxelBlock::BLOCK_SIZE as i32);
-        let block_z = voxel_z.div_euclid(VoxelBlock::BLOCK_SIZE as i32);
-
-        let block_coords = (block_x, block_y, block_z);
-
-        // Calculate local voxel coordinates within block
-        let local_x = voxel_x.rem_euclid(VoxelBlock::BLOCK_SIZE as i32) as usize;
-        let local_y = voxel_y.rem_euclid(VoxelBlock::BLOCK_SIZE as i32) as usize;
-        let local_z = voxel_z.rem_euclid(VoxelBlock::BLOCK_SIZE as i32) as usize;
-        let local = (local_x, local_y, local_z);
-
-        // Get or create block
-        let block = self
-            .blocks
-            .entry(block_coords)
-            .or_insert_with(|| VoxelBlock::new(block_coords));
-
-        // Integrate with running average
-        let idx = VoxelBlock::voxel_index(local);
-        let old_tsdf = block.tsdf[idx];
-        let old_weight = block.weights[idx];
-
-        let new_tsdf = (old_tsdf * old_weight + tsdf) / (old_weight + 1.0);
-        let new_weight = (old_weight + 1.0).min(self.max_weight);
-
-        // Weighted average for colors instead of overwriting
-        let old_color = block.colors[idx];
-        let new_color = Vector3::new(
-            ((old_color.x as f32 * old_weight + color.x as f32) / (old_weight + 1.0)) as u8,
-            ((old_color.y as f32 * old_weight + color.y as f32) / (old_weight + 1.0)) as u8,
-            ((old_color.z as f32 * old_weight + color.z as f32) / (old_weight + 1.0)) as u8,
-        );
-
-        block.tsdf[idx] = new_tsdf;
-        block.weights[idx] = new_weight;
-        block.colors[idx] = new_color;
-    }
-
-    /// Extract surface mesh using Marching Cubes
+    /// Extract surface mesh using Marching Cubes.
+    ///
+    /// A cell is meshed only when all eight of its corners have been observed
+    /// (non-zero weight): an unobserved voxel's value is a placeholder, and a
+    /// sign change against it is not a surface.
+    ///
+    /// Each cell is owned by the block holding its lowest corner, and corners
+    /// past that block's upper faces are read from the neighbouring blocks, so
+    /// cells straddling a block seam are meshed. They used to be skipped -
+    /// cells ran `0..BLOCK_SIZE - 1` within each block - which left a
+    /// one-voxel crack every eight voxels.
     pub fn extract_mesh(&self) -> Vec<Triangle> {
+        const CORNERS: [(usize, usize, usize); 8] = [
+            (0, 0, 0),
+            (1, 0, 0),
+            (1, 1, 0),
+            (0, 1, 0),
+            (0, 0, 1),
+            (1, 0, 1),
+            (1, 1, 1),
+            (0, 1, 1),
+        ];
+        let n = VoxelBlock::BLOCK_SIZE;
         let mut triangles = Vec::new();
 
-        for (block_coords, block) in &self.blocks {
-            for z in 0..VoxelBlock::BLOCK_SIZE - 1 {
-                for y in 0..VoxelBlock::BLOCK_SIZE - 1 {
-                    for x in 0..VoxelBlock::BLOCK_SIZE - 1 {
-                        // Get corner values
-                        let corners = [
-                            block.get_tsdf((x, y, z)),
-                            block.get_tsdf((x + 1, y, z)),
-                            block.get_tsdf((x + 1, y + 1, z)),
-                            block.get_tsdf((x, y + 1, z)),
-                            block.get_tsdf((x, y, z + 1)),
-                            block.get_tsdf((x + 1, y, z + 1)),
-                            block.get_tsdf((x + 1, y + 1, z + 1)),
-                            block.get_tsdf((x, y + 1, z + 1)),
-                        ];
+        for (&(bx, by, bz), block) in &self.blocks {
+            // This block and its +x / +y / +z neighbours, indexed by
+            // `dx | dy << 1 | dz << 2`.
+            let neighbours: [Option<&VoxelBlock>; 8] = core::array::from_fn(|i| {
+                if i == 0 {
+                    Some(block)
+                } else {
+                    let (dx, dy, dz) = ((i & 1) as i32, ((i >> 1) & 1) as i32, (i >> 2) as i32);
+                    self.blocks.get(&(bx + dx, by + dy, bz + dz))
+                }
+            });
+            // An observed voxel at block-relative coordinates in `0..=n`.
+            let sample = |x: usize, y: usize, z: usize| -> Option<(f32, Vector3<u8>)> {
+                let b = neighbours[(x / n) | ((y / n) << 1) | ((z / n) << 2)]?;
+                let idx = VoxelBlock::voxel_index((x % n, y % n, z % n));
+                (b.weights[idx] > 0.0).then(|| (b.tsdf[idx], b.colors[idx]))
+            };
 
+            for z in 0..n {
+                for y in 0..n {
+                    'cell: for x in 0..n {
+                        let mut corners = [0.0f32; 8];
                         // Corner colours, in the same order as `corners`, so a
                         // triangle vertex can be coloured by where it lies
                         // between the two corners its edge joins.
-                        let ci = |dx: usize, dy: usize, dz: usize| {
-                            block.colors[VoxelBlock::voxel_index((x + dx, y + dy, z + dz))]
-                        };
-                        let corner_colors = [
-                            ci(0, 0, 0),
-                            ci(1, 0, 0),
-                            ci(1, 1, 0),
-                            ci(0, 1, 0),
-                            ci(0, 0, 1),
-                            ci(1, 0, 1),
-                            ci(1, 1, 1),
-                            ci(0, 1, 1),
-                        ];
+                        let mut corner_colors = [Vector3::new(0u8, 0, 0); 8];
+                        for (c, &(dx, dy, dz)) in CORNERS.iter().enumerate() {
+                            match sample(x + dx, y + dy, z + dz) {
+                                Some((t, col)) => {
+                                    corners[c] = t;
+                                    corner_colors[c] = col;
+                                }
+                                None => continue 'cell,
+                            }
+                        }
 
-                        // Marching cubes on this cell
-                        let cell_tris = marching_cubes_cell(
-                            block_coords,
+                        triangles.extend(marching_cubes_cell(
+                            &(bx, by, bz),
                             (x, y, z),
                             &corners,
                             &corner_colors,
                             self.voxel_size,
-                        );
-
-                        triangles.extend(cell_tris);
+                        ));
                     }
                 }
             }
@@ -413,10 +469,12 @@ impl TSDFVolume {
         let vy = block_coords.1 * VoxelBlock::BLOCK_SIZE as i32 + local.1 as i32;
         let vz = block_coords.2 * VoxelBlock::BLOCK_SIZE as i32 + local.2 as i32;
 
+        // Voxel `i` spans `[i, i + 1) * voxel_size`; its value is the distance
+        // at its centre.
         Point3::new(
-            vx as f32 * self.voxel_size,
-            vy as f32 * self.voxel_size,
-            vz as f32 * self.voxel_size,
+            (vx as f32 + 0.5) * self.voxel_size,
+            (vy as f32 + 0.5) * self.voxel_size,
+            (vz as f32 + 0.5) * self.voxel_size,
         )
     }
 
@@ -864,9 +922,14 @@ fn marching_cubes_cell(
 
     // Compute world-space positions of the 8 corners
     let (lx, ly, lz) = local;
-    let base_x = (block_coords.0 * VoxelBlock::BLOCK_SIZE as i32 + lx as i32) as f32 * voxel_size;
-    let base_y = (block_coords.1 * VoxelBlock::BLOCK_SIZE as i32 + ly as i32) as f32 * voxel_size;
-    let base_z = (block_coords.2 * VoxelBlock::BLOCK_SIZE as i32 + lz as i32) as f32 * voxel_size;
+    // Corners are voxel centres, `(i + 0.5) * voxel_size`, where the stored
+    // distances were evaluated.
+    let centre = |b: i32, l: usize| {
+        ((b * VoxelBlock::BLOCK_SIZE as i32 + l as i32) as f32 + 0.5) * voxel_size
+    };
+    let base_x = centre(block_coords.0, lx);
+    let base_y = centre(block_coords.1, ly);
+    let base_z = centre(block_coords.2, lz);
 
     // Corner offsets in (dx, dy, dz) matching Paul Bourke numbering
     let corner_offsets: [[f32; 3]; 8] = [
@@ -927,9 +990,12 @@ fn marching_cubes_cell(
         if row[i] < 0 {
             break;
         }
-        let v0 = vert_list[row[i] as usize];
-        let v1 = vert_list[row[i + 1] as usize];
-        let v2 = vert_list[row[i + 2] as usize];
+        // Bourke's table winds each triangle so its normal faces the corners
+        // *below* the iso level. Positive is free space here, so the edges are
+        // taken in reverse to make the face normal point out of the surface,
+        // toward the camera that observed it.
+        let e = [row[i] as usize, row[i + 2] as usize, row[i + 1] as usize];
+        let (v0, v1, v2) = (vert_list[e[0]], vert_list[e[1]], vert_list[e[2]]);
 
         // Compute face normal from cross product
         let edge_a = v1 - v0;
@@ -944,11 +1010,7 @@ fn marching_cubes_cell(
         triangles.push(Triangle {
             vertices: [v0, v1, v2],
             normals: [normal, normal, normal],
-            colors: [
-                color_list[row[i] as usize],
-                color_list[row[i + 1] as usize],
-                color_list[row[i + 2] as usize],
-            ],
+            colors: [color_list[e[0]], color_list[e[1]], color_list[e[2]]],
         });
 
         i += 3;
@@ -988,77 +1050,64 @@ mod tests {
             .map(|(r, _)| r)
             .unwrap_or_else(|_| cv_runtime::orchestrator::RuntimeRunner::Sync(cv_hal::DeviceId(0)));
 
-        volume.integrate_ctx(
-            &depth_image,
-            None,
-            &intrinsics,
-            &extrinsics,
-            width,
-            height,
-            &runner,
-        );
+        volume
+            .integrate_ctx(
+                &depth_image,
+                None,
+                &intrinsics,
+                &extrinsics,
+                width,
+                height,
+                &runner,
+            )
+            .expect("a well-formed frame must integrate");
 
-        // The TSDF formula in integrate_ctx is: sdf = voxel_camera.z - depth
-        // So: voxels IN FRONT of the surface (z < depth) => negative TSDF
-        //     voxels BEHIND the surface (z > depth) => positive TSDF
-        //     voxels AT the surface (z == depth)    => TSDF near 0
+        // KinectFusion convention: sdf = depth - z_voxel, positive in front of
+        // the surface (free space), negative behind it, evaluated at the voxel
+        // centre and truncated. With the camera at the identity, a voxel's
+        // camera z is its world z, so every observed voxel's value is known
+        // exactly. Voxels more than `trunc` behind the plane are occluded and
+        // must never have been touched.
         //
-        // Ray marching covers [depth - trunc, depth + trunc] along each ray,
-        // which for the center pixel means z in ~[0.94, 1.06].
-
-        let mut near_surface_ok = false;
-        let mut front_negative = false;
-        let mut behind_positive = false;
-
+        // This test used to assert the opposite sign (negative in front), which
+        // is what put a phantom surface wherever the observed band met
+        // never-observed voxels initialised to +1.
+        let mut observed = 0;
+        let (mut front, mut behind) = (0, 0);
         for (block_coords, block) in &volume.blocks {
             for z in 0..VoxelBlock::BLOCK_SIZE {
                 for y in 0..VoxelBlock::BLOCK_SIZE {
                     for x in 0..VoxelBlock::BLOCK_SIZE {
                         let local = (x, y, z);
                         let idx = VoxelBlock::voxel_index(local);
-                        let weight = block.weights[idx];
-                        if weight <= 0.0 {
+                        if block.weights[idx] <= 0.0 {
                             continue;
                         }
+                        observed += 1;
+                        let wz = volume.voxel_to_world(*block_coords, local).z;
+                        assert!(
+                            1.0 - wz >= -truncation - 1e-5,
+                            "voxel centred at z = {wz} is more than the truncation \
+                             behind the surface and must be unobserved"
+                        );
+                        let expected = ((1.0 - wz) / truncation).min(1.0);
                         let tsdf = block.tsdf[idx];
-                        let world = volume.voxel_to_world(*block_coords, local);
-                        let wz = world.z;
-
-                        // Voxels near z=1.0 should have TSDF near 0
-                        if (wz - 1.0).abs() < voxel_size {
-                            if tsdf.abs() < 0.3 {
-                                near_surface_ok = true;
-                            }
-                        }
-                        // Just in front of surface: sdf = z_vox - 1.0 < 0 => negative
-                        if wz > 0.95 && wz < 0.99 {
-                            if tsdf < 0.0 {
-                                front_negative = true;
-                            }
-                        }
-                        // Just behind surface: sdf = z_vox - 1.0 > 0 => positive
-                        if wz > 1.01 && wz < 1.05 {
-                            if tsdf > 0.0 {
-                                behind_positive = true;
-                            }
+                        assert!(
+                            (tsdf - expected).abs() < 1e-4,
+                            "voxel centred at z = {wz}: tsdf {tsdf}, expected {expected}"
+                        );
+                        if wz < 1.0 {
+                            front += 1;
+                            assert!(tsdf > 0.0, "free space in front must be positive");
+                        } else {
+                            behind += 1;
+                            assert!(tsdf < 0.0, "space behind must be negative");
                         }
                     }
                 }
             }
         }
-
-        assert!(
-            near_surface_ok,
-            "Expected voxels near z=1.0 to have TSDF near 0"
-        );
-        assert!(
-            front_negative,
-            "Expected voxels in front of z=1.0 surface to have negative TSDF (sdf = z_vox - depth < 0)"
-        );
-        assert!(
-            behind_positive,
-            "Expected voxels behind z=1.0 surface to have positive TSDF (sdf = z_vox - depth > 0)"
-        );
+        assert!(observed > 0 && front > 0 && behind > 0);
     }
 
     #[test]
