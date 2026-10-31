@@ -39,13 +39,30 @@ fn example_path(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Removes a scratch directory when the test using it ends (pass or panic).
+struct RemoveOnDrop(std::path::PathBuf);
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn run(name: &str) {
     let Some(path) = example_path(name) else {
         eprintln!("skipping {name}: not built (cargo build --workspace --examples)");
         return;
     };
 
+    // Each example runs in its own scratch directory. Examples write their
+    // outputs to the working directory (plot_demo saves plot_line.svg,
+    // plot_scatter.svg, plot_3d.html/.svg), and run from the repo root they
+    // overwrote those tracked files on every test run.
+    let workdir = std::env::temp_dir().join(format!("cv_example_{name}_{}", std::process::id()));
+    std::fs::create_dir_all(&workdir).expect("create example scratch dir");
+    let _cleanup = RemoveOnDrop(workdir.clone());
+
     let mut child = match Command::new(&path)
+        .current_dir(&workdir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
