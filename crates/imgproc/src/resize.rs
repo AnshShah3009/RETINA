@@ -446,21 +446,119 @@ fn resize_rgb_sampled(
     RgbImage::from_raw(width, height, data).unwrap_or_else(|| RgbImage::new(width, height))
 }
 
-pub fn pyr_down(src: &GrayImage) -> GrayImage {
-    let new_width = src.width() / 2;
-    let new_height = src.height() / 2;
-    if new_width == 0 || new_height == 0 {
-        return GrayImage::new(1, 1);
+/// OpenCV `borderInterpolate(p, len, BORDER_REFLECT_101)`.
+fn reflect101(p: isize, len: usize) -> usize {
+    if len == 1 {
+        return 0;
     }
-    resize(src, new_width, new_height, Interpolation::Linear)
+    let n = len as isize;
+    let mut p = p;
+    while p < 0 || p >= n {
+        if p < 0 {
+            p = -p;
+        } else {
+            p = 2 * n - 2 - p;
+        }
+    }
+    p as usize
 }
 
+/// Gaussian pyramid down-step, `cv2.pyrDown(src)`.
+///
+/// Output is `((w + 1) / 2, (h + 1) / 2)`. Each output pixel `(x, y)` is the
+/// 5x5 `[1 4 6 4 1]^T [1 4 6 4 1] / 256` filter at source `(2x, 2y)`,
+/// BORDER_REFLECT_101, integer arithmetic rounded half up as in OpenCV.
+pub fn pyr_down(src: &GrayImage) -> GrayImage {
+    use rayon::prelude::*;
+    let (sw, sh) = (src.width() as usize, src.height() as usize);
+    let (dw, dh) = (sw.div_ceil(2), sh.div_ceil(2));
+    if dw == 0 || dh == 0 {
+        return GrayImage::new(dw as u32, dh as u32);
+    }
+    const K: [u32; 5] = [1, 4, 6, 4, 1];
+    let data = src.as_raw();
+    // Column taps for every output x, reflected once.
+    let xtab: Vec<[usize; 5]> = (0..dw)
+        .map(|x| std::array::from_fn(|k| reflect101(2 * x as isize + k as isize - 2, sw)))
+        .collect();
+    // Horizontal pass on the source rows (only every row is needed once).
+    let mut rows = vec![0u32; sh * dw];
+    rows.par_chunks_mut(dw).enumerate().for_each(|(y, out)| {
+        let r = &data[y * sw..(y + 1) * sw];
+        for (x, o) in out.iter_mut().enumerate() {
+            *o = xtab[x].iter().zip(K).map(|(&i, k)| r[i] as u32 * k).sum();
+        }
+    });
+    let mut dst = GrayImage::new(dw as u32, dh as u32);
+    dst.as_mut()
+        .par_chunks_mut(dw)
+        .enumerate()
+        .for_each(|(y, out)| {
+            let ys: [usize; 5] =
+                std::array::from_fn(|k| reflect101(2 * y as isize + k as isize - 2, sh));
+            for (x, o) in out.iter_mut().enumerate() {
+                let s: u32 = ys.iter().zip(K).map(|(&yy, k)| rows[yy * dw + x] * k).sum();
+                *o = ((s + 128) >> 8) as u8;
+            }
+        });
+    dst
+}
+
+/// Gaussian pyramid up-step, `cv2.pyrUp(src)`.
+///
+/// Output is `(2w, 2h)`: zero-insertion upsampling filtered with
+/// `[1 4 6 4 1] / 16` per axis (scaled by 4), i.e. even outputs
+/// `(s[i-1] + 6 s[i] + s[i+1]) / 8` and odd outputs `(s[i] + s[i+1]) / 2`
+/// per axis, rounded half up. As in OpenCV, the missing neighbour is
+/// reflected at the start (`s[-1] = s[1]`) and repeated at the end
+/// (`s[n] = s[n-1]`).
 pub fn pyr_up(src: &GrayImage) -> GrayImage {
-    let new_width = src.width() * 2;
-    let new_height = src.height() * 2;
-    resize(src, new_width, new_height, Interpolation::Linear)
+    use rayon::prelude::*;
+    let (sw, sh) = (src.width() as usize, src.height() as usize);
+    let (dw, dh) = (sw * 2, sh * 2);
+    if dw == 0 || dh == 0 {
+        return GrayImage::new(dw as u32, dh as u32);
+    }
+    // Source index of neighbour i - 1 / i + 1, OpenCV style:
+    // borderInterpolate(2i, 2n, REFLECT_101) / 2.
+    let nb = |i: isize, n: usize| reflect101(2 * i, 2 * n) / 2;
+    let data = src.as_raw();
+    // Horizontal pass: each source row -> 2w values (x8).
+    let mut rows = vec![0u32; sh * dw];
+    rows.par_chunks_mut(dw).enumerate().for_each(|(y, out)| {
+        let r = &data[y * sw..(y + 1) * sw];
+        for x in 0..sw {
+            let l = r[nb(x as isize - 1, sw)] as u32;
+            let c = r[x] as u32;
+            let rr = r[nb(x as isize + 1, sw)] as u32;
+            out[2 * x] = l + 6 * c + rr;
+            out[2 * x + 1] = (c + rr) * 4;
+        }
+    });
+    let mut dst = GrayImage::new(dw as u32, dh as u32);
+    dst.as_mut()
+        .par_chunks_mut(dw)
+        .enumerate()
+        .for_each(|(dy, out)| {
+            let y = dy / 2;
+            let up = nb(y as isize - 1, sh);
+            let dn = nb(y as isize + 1, sh);
+            for (x, o) in out.iter_mut().enumerate() {
+                let c = rows[y * dw + x];
+                let d = rows[dn * dw + x];
+                let s = if dy % 2 == 0 {
+                    rows[up * dw + x] + 6 * c + d
+                } else {
+                    (c + d) * 4
+                };
+                *o = ((s + 32) >> 6) as u8;
+            }
+        });
+    dst
 }
 
+/// Gaussian pyramid: `levels` images, each `pyr_down` of the previous,
+/// stopping early once a level is 1 pixel wide or tall.
 pub fn build_pyramid(src: &GrayImage, levels: u32) -> Vec<GrayImage> {
     let mut pyramid = vec![src.clone()];
 

@@ -269,7 +269,7 @@ Distinguished from (b) by *no error and no flag returned* — the caller cannot 
 
 ---
 
-## (g) Second review, 2026-10-31 — findings (16 open, was 87)
+## (g) Second review, 2026-10-31 — findings (15 open, was 87)
 
 Fresh per-crate review. Every entry is **CONFIRMED** (a scratch test showed the wrong output)
 or **ARGUED** (a precise line-level input → output argument). IDs: `g-h` hal, `g-f`
@@ -293,7 +293,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-h11 | `cpu/compute_context_impl.rs` SIFT descriptor | **CLOSED.** CPU renormalises after the 0.2 clamp (as the GPU shader already did); both backends round when quantising. Step-edge descriptor norm 204 → 512 (`tests/second_review_cpu_fixes.rs`). Was: not renormalised after the 0.2 clamp | was LOW — fixed | ARGUED |
 | g-h12 | AKAZE Scharr derivatives (CPU + WGSL) | **CLOSED.** `[3, 10, 3]/32` taps on CPU and in the WGSL shader: unit gain (was 0.3125). Same test file. Was: taps `[1,3,1]/32` give gain 0.3125 on a unit ramp; should be `[3,10,3]/32` | was LOW — fixed | ARGUED |
 
-### (g2) features / imgproc (2 open, was 12)
+### (g2) features / imgproc (1 open, was 12)
 
 | id | location | defect | severity | evidence |
 |---|---|---|---|---|
@@ -305,7 +305,7 @@ plot/cli/dnn/python. Line numbers are as of `dae9a8f`.
 | g-f6 | `imgproc/src/threshold.rs` `adaptive_threshold` | **CLOSED.** Rounded mean, BORDER_REPLICATE, OpenCV's integer delta rule; 56/56 cases exact (`tests/adaptive_threshold_opencv_parity.rs`). Was: truncated mean, shrinking-window border, fractional `c` comparison | was MED — fixed | CONFIRMED |
 | g-f7 | `features/src/usac.rs` `score_magsac` | **CLOSED.** Marginalised MSAC over 10 sigmas in `(0, σ_max]`; works below 1 and ranks by fit. Pinned by `magsac_scores_below_unit_sigma`. Was: `1..=sigma_max as usize` never runs for `sigma_max < 1` → no model | was MED — fixed | CONFIRMED |
 | g-f8 | `features/src/usac.rs` adaptive iterations | **CLOSED.** `max_iterations = 0` now adapts N from the best model's inlier ratio (cap 10 000); nonzero stays a fixed budget, as documented. Pinned by `adaptive_iterations_track_the_inlier_ratio`. Was: count fixed at 50% inlier assumption, never updated from the best model | was MED — fixed | ARGUED |
-| g-f9 | `imgproc/src/resize.rs` `pyr_down`/`pyr_up` | bilinear resize to `w/2` instead of 5-tap Gaussian + `(w+1)/2`; 1x10 → black 1x1 | MED | CONFIRMED |
+| g-f9 | `imgproc/src/resize.rs` `pyr_down`/`pyr_up` | **CLOSED.** 5-tap Gaussian + Reflect101, `(w+1)/2` sizes; 8 cases exact (`tests/pyramid_opencv_parity.rs`). Was: bilinear resize to `w/2` instead of 5-tap Gaussian + `(w+1)/2`; 1x10 → black 1x1 | was MED — fixed | CONFIRMED |
 | g-f10 | `features/src/matcher.rs` | **CLOSED.** `MatchType::BruteForceL2` (OpenCV `NORM_L2` on bytes); `BruteForce` stays the documented Hamming alias for the ORB pipelines. Cross-check against an empty train set no longer panics. Pinned by `tests/matcher_l2.rs`. Was: only Hamming exists; SIFT float-histogram bytes matched by Hamming | was MED — fixed | ARGUED |
 | g-f11 | `features/src/orb.rs` rBRIEF | **CLOSED.** Rotated offsets rounded (OpenCV's `cvRound`); pinned by `steered_sampling_is_symmetric_under_half_turns` (fails at 30° with truncation). Was: rotated taps floored, OpenCV rounds | was LOW — fixed | ARGUED |
 | g-f12 | `imgproc` `par_chunks_mut(width)` sites | zero-width image panics `chunk_size must not be zero` | LOW | CONFIRMED |
