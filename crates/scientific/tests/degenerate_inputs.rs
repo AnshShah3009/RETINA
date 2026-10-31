@@ -56,11 +56,11 @@ fn the_shortest_ffts_are_the_samples_themselves() {
 fn integration_survives_empty_and_degenerate_intervals() {
     use cv_scientific::integrate::{quad, simpson, trapezoid};
 
-    // `quad` is a 100-point trapezoid rule (`h = 0.01`), whose error here is
-    // `h^2 * (f'(1) - f'(0)) / 12 = 1.7e-5`: measured 0.33335000000000004.
-    let (value, _error) = quad(|x| x * x, 0.0, 1.0);
+    // `quad` is adaptive Gauss-Kronrod (G7-K15): a single panel is exact for
+    // polynomials up to degree 22, so x^2 comes out to rounding.
+    let (value, _error) = quad(|x| x * x, 0.0, 1.0).expect("x^2 is integrable");
     assert!(
-        (value - 1.0 / 3.0).abs() < 1e-4,
+        (value - 1.0 / 3.0).abs() < 1e-15,
         "the integral of x^2 over [0, 1] is 1/3, got {value}"
     );
 
@@ -75,19 +75,19 @@ fn integration_survives_empty_and_degenerate_intervals() {
         "trapezoid of a line over [0, 2] is exact"
     );
     assert!(
-        (quad(|_| 2.0, 0.0, 5.0).0 - 10.0).abs() < 1e-9,
+        (quad(|_| 2.0, 0.0, 5.0).unwrap().0 - 10.0).abs() < 1e-9,
         "a constant integrates to constant * width"
     );
 
     // Degenerate intervals: zero width, and the reversed argument order.
     assert_eq!(
-        quad(|_| 7.0, 1.0, 1.0).0,
+        quad(|_| 7.0, 1.0, 1.0).unwrap().0,
         0.0,
         "a zero-width interval contains no area"
     );
-    let (reversed, _) = quad(|x| x * x, 1.0, 0.0);
+    let (reversed, _) = quad(|x| x * x, 1.0, 0.0).unwrap();
     assert!(
-        (reversed + 1.0 / 3.0).abs() < 1e-4,
+        (reversed + 1.0 / 3.0).abs() < 1e-15,
         "reversing the limits must negate the integral, got {reversed}"
     );
 }

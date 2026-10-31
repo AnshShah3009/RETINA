@@ -15,8 +15,8 @@
 //! use cv_math::integrate::quad;
 //!
 //! // Integrate f(x) = x^2 from 0 to 1
-//! let result = quad(|x| x * x, 0.0, 1.0);
-//! println!("Integral: {}", result.0);  // Should be ~0.333
+//! let (result, _err) = quad(|x| x * x, 0.0, 1.0).unwrap();
+//! println!("Integral: {}", result);  // 1/3 to ~1e-16
 //! ```
 //!
 //! ## Example: Special Functions
