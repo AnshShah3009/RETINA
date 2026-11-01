@@ -118,16 +118,20 @@ pub fn qr_solve(a: &DMatrix<f64>, b: &DVector<f64>) -> Result<DVector<f64>, Stri
     let r_top = r.rows(0, n).clone_owned();
     let qt_b_top = qt_b.rows(0, n).clone_owned();
 
-    // Check for (numerically) zero pivots. The test is RELATIVE to R[0,0]: R's
-    // diagonal scales with the input, so an absolute 1e-14 cutoff declared a
-    // perfectly well-conditioned system rank-deficient merely for being scaled
-    // down (e.g. every entry of A multiplied by 1e-14).
-    let r0 = r_top[(0, 0)].abs();
-    if r0 == 0.0 {
-        return Err("QR solve failed: rank-deficient matrix".into());
-    }
+    // A pivot is numerically zero when it is tiny next to its own column, not
+    // next to the largest pivot. Comparing every diagonal entry to
+    // `eps * |R[0,0]|` rejected `diag(1e16, 1)` (solution `(1, 3)`) because
+    // `eps * 1e16 ≈ 2.22` and the second pivot is 1. Column scaling still
+    // accepts a well-conditioned system that has been scaled down: the pivot
+    // and the column norm shrink together. An exactly zero pivot has column
+    // norm 0, and `0 <= eps * 0`, so it is still rejected.
     for i in 0..n {
-        if r_top[(i, i)].abs() <= f64::EPSILON * r0 {
+        let mut col_norm = 0.0;
+        for k in 0..=i {
+            col_norm = col_norm.hypot(r_top[(k, i)]);
+        }
+        let pivot = r_top[(i, i)];
+        if !pivot.is_finite() || pivot.abs() <= f64::EPSILON * col_norm {
             return Err("QR solve failed: rank-deficient matrix".into());
         }
     }
@@ -393,7 +397,43 @@ pub fn eig(a: &DMatrix<f64>) -> Result<(Vec<(f64, f64)>, DMatrix<f64>), String> 
     }
 
     let vectors = eigenvectors_from_eigenvalues(a, &eigenvalues);
+    // A defective matrix (the Jordan block [[1, 1], [0, 1]]) has only one
+    // eigenvector. The second singular vector is not a null vector and its
+    // residual is 1; reporting that as Ok is a wrong success. A diagonal
+    // matrix, and any non-defective one, stays well under this tolerance.
+    let residual = eigen_residual(a, &eigenvalues, &vectors);
+    let scale = a.norm().max(1.0);
+    if !(residual.is_finite() && residual <= 1e-6 * scale) {
+        return Err(format!(
+            "eig: eigenvector residual {residual} is too large (||A|| = {scale}); \
+             the matrix is defective or the eigenbasis is not a full basis"
+        ));
+    }
     Ok((eigenvalues, vectors))
+}
+
+/// Largest `||A v − λ v||` over the packed eigenbasis.
+fn eigen_residual(a: &DMatrix<f64>, eigenvalues: &[(f64, f64)], vectors: &DMatrix<f64>) -> f64 {
+    use nalgebra::Complex;
+    let n = a.nrows();
+    let ac: DMatrix<Complex<f64>> = a.map(|x| Complex::new(x, 0.0));
+    let mut worst = 0.0_f64;
+    let mut j = 0;
+    while j < eigenvalues.len() && j < n {
+        let (re, im) = eigenvalues[j];
+        let paired = im != 0.0 && j + 1 < n;
+        let v = if paired {
+            DVector::from_fn(n, |k, _| Complex::new(vectors[(k, j)], vectors[(k, j + 1)]))
+        } else {
+            DVector::from_fn(n, |k, _| Complex::new(vectors[(k, j)], 0.0))
+        };
+        let r = (&ac * &v - &v * Complex::new(re, im)).norm();
+        if r > worst {
+            worst = r;
+        }
+        j += if paired { 2 } else { 1 };
+    }
+    worst
 }
 
 /// Unit null vectors of `A − λI` for each eigenvalue, packed `dgeev`-style
