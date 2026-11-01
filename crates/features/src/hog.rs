@@ -57,13 +57,23 @@ pub fn compute_hog(image: &GrayImage, params: &HogParams) -> Vec<f32> {
                     - image.get_pixel(x as u32, (y - 1) as u32)[0] as f32;
 
                 row_mag[x] = (gx * gx + gy * gy).sqrt();
-                let mut ori = gy.atan2(gx) * 180.0 / PI;
+                // Unsigned gradients live in [0, 180): a vector and its
+                // negation are the same orientation. Fold into the right
+                // half-plane *before* atan2, so a leftward edge is angle 0 by
+                // construction. Wrapping afterwards relied on
+                // `atan2(0, -1) * 180 / PI` rounding to exactly 180.0 - true
+                // with Linux's libm, but macOS's lands just below 180 and the
+                // edge went to the last bin.
+                let (fx, fy) = if gx < 0.0 || (gx == 0.0 && gy < 0.0) {
+                    (-gx, -gy)
+                } else {
+                    (gx, gy)
+                };
+                let mut ori = fy.atan2(fx) * 180.0 / PI; // (-90, 90]
                 if ori < 0.0 {
                     ori += 180.0;
                 }
-                // Unsigned gradients live in [0, 180). `atan2(0, -1)` is
-                // exactly 180°, the same direction as 0°; leaving it there
-                // parks a leftward edge in the last bin.
+                // `-tiny + 180` can round up to 180.0 in f32.
                 if ori >= 180.0 {
                     ori = 0.0;
                 }
