@@ -579,7 +579,9 @@ impl Farneback {
             let next_poly =
                 polynomial_expansion(&next_pyramid[level], self.poly_n, self.poly_sigma);
 
-            // Refine flow using iterative method
+            // Refine flow using iterative method. Each pass samples the
+            // next frame at the displacement already estimated, so it adds
+            // a residual instead of stacking another copy of the full motion.
             for _ in 0..self.iterations {
                 flow = self.refine_flow(&prev_poly, &next_poly, &flow, level_width, level_height);
             }
@@ -598,10 +600,22 @@ impl Farneback {
     ) -> MotionField {
         let mut new_flow = MotionField::new(width, height);
         let half_window = (self.window_size / 2) as i32;
+        // Weight across the flow window, not the polynomial neighbourhood.
+        // `poly_sigma` (~1.2) zeros every tap past a couple of pixels, so
+        // `window_size` never actually entered the fit.
+        let win_sigma = (self.window_size as f32) * 0.3;
+        let win_side = (2 * half_window + 1) as usize;
+        let mut win_weight = vec![0.0f64; win_side * win_side];
+        for dy in -half_window..=half_window {
+            for dx in -half_window..=half_window {
+                let i = ((dy + half_window) as usize) * win_side + (dx + half_window) as usize;
+                win_weight[i] = gaussian_weight(dx as f32, dy as f32, win_sigma) as f64;
+            }
+        }
 
         for y in 0..height {
             for x in 0..width {
-                let (_u, _v) = flow.get_motion(x, y);
+                let (u_prev, v_prev) = flow.get_motion(x, y);
 
                 // Correct Farneback formulation:
                 // For each pixel, build A from quadratic coefficients and b from linear terms.
@@ -609,6 +623,13 @@ impl Farneback {
                 // b_k = [coeff.3, coeff.4]
                 // Then: A_avg = (A1 + A2) / 2, delta_b = -(b2 - b1) / 2
                 // displacement d = A_avg^{-1} * delta_b
+                //
+                // The next-frame expansion is sampled at the displacement already
+                // estimated for the pixel being refined, so `d` is the residual
+                // of the current field (Farnebäck / Bouguet). Sampling it at the
+                // same pixel as the previous frame makes every iteration
+                // recompute the full displacement, and adding that scales the
+                // field by `iterations`.
                 let mut a_sum: Matrix2<f64> = Matrix2::zeros();
                 let mut db_sum: Vector2<f64> = Vector2::zeros();
                 let mut w_sum: f64 = 0.0;
@@ -623,9 +644,13 @@ impl Farneback {
                         }
 
                         let prev_c = prev_poly.get(px, py);
-                        let next_c = next_poly.get(px, py);
+                        // One displacement for the window: the estimate at the
+                        // pixel being refined. The next-frame expansion is read
+                        // there, so the solve returns a residual.
+                        let next_c = next_poly.sample(px as f32 + u_prev, py as f32 + v_prev);
 
-                        let weight = gaussian_weight(dx as f32, dy as f32, self.poly_sigma) as f64;
+                        let weight = win_weight[((dy + half_window) as usize) * win_side
+                            + (dx + half_window) as usize];
 
                         // A from quadratic coefficients: [[2*A, B], [B, 2*C]]
                         let a1 = Matrix2::new(
@@ -642,7 +667,12 @@ impl Farneback {
                         );
                         let a_avg = (a1 + a2) * 0.5;
 
-                        // b from linear terms
+                        // b from linear terms.
+                        // a = [[2A, B], [B, 2C]] = 2 A_paper, and the
+                        // displacement identity is 2 A d = b1 - b2. The 1/2 on
+                        // the mismatch is a damped step: the undamped step is
+                        // unstable once the remaining motion exceeds the
+                        // polynomial neighbourhood (~2 px).
                         let b1 = Vector2::new(prev_c.3 as f64, prev_c.4 as f64);
                         let b2 = Vector2::new(next_c.3 as f64, next_c.4 as f64);
                         let delta_b = -(b2 - b1) * 0.5;
@@ -657,31 +687,21 @@ impl Farneback {
 
                 if w_sum > 0.0 {
                     if let Some(a_inv) = a_sum.try_inverse() {
-                        // `d` is the *increment*, not the answer. The solve gives
-                        // the displacement that best reconciles the two polynomial
-                        // expansions, and it belongs on top of whatever the
-                        // previous level or iteration already established.
-                        //
-                        // Assigning it outright discarded `_u, _v` on the success
-                        // path - they were read and then used only on the two
-                        // failure branches - so the iteration never accumulated
-                        // and the result was dominated by the image-content term
-                        // rather than by motion. Measured: a known 10 px shift
-                        // came back as 0.054 px, 0.5% of the truth, and the
-                        // existing `test_farneback` passed because it only
-                        // asserted `u > 0.0`.
+                        // `d` is only the residual against the displacement the
+                        // next-frame polynomial was sampled at. Add it to the
+                        // estimate this pixel already holds.
                         let d = a_inv * db_sum;
                         new_flow.set_motion(
                             x,
                             y,
-                            (_u as f64 + d[0]) as f32,
-                            (_v as f64 + d[1]) as f32,
+                            (u_prev as f64 + d[0]) as f32,
+                            (v_prev as f64 + d[1]) as f32,
                         );
                     } else {
-                        new_flow.set_motion(x, y, _u, _v);
+                        new_flow.set_motion(x, y, u_prev, v_prev);
                     }
                 } else {
-                    new_flow.set_motion(x, y, _u, _v);
+                    new_flow.set_motion(x, y, u_prev, v_prev);
                 }
             }
         }
@@ -703,7 +723,7 @@ struct PolyCoeffs(f32, f32, f32, f32, f32);
 struct PolynomialExpansion {
     coeffs: Vec<PolyCoeffs>,
     width: u32,
-    _height: u32,
+    height: u32,
 }
 
 impl PolynomialExpansion {
@@ -714,6 +734,61 @@ impl PolynomialExpansion {
             .copied()
             .unwrap_or(PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0))
     }
+
+    fn at(&self, x: i32, y: i32) -> PolyCoeffs {
+        if x < 0 || y < 0 || x as u32 >= self.width || y as u32 >= self.height {
+            PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0)
+        } else {
+            self.get(x as u32, y as u32)
+        }
+    }
+
+    /// Expansion at a fractional pixel.
+    ///
+    /// Each neighbouring expansion is recentred onto `(x, y)` before the
+    /// bilinear blend. Blending the raw coefficients mixes polynomials that
+    /// are centred on different pixels, so a fractional displacement does not
+    /// describe the image at that point. An integer coordinate inside the
+    /// image is exactly [`PolynomialExpansion::get`].
+    fn sample(&self, x: f32, y: f32) -> PolyCoeffs {
+        if !x.is_finite() || !y.is_finite() {
+            return PolyCoeffs(0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+        let c00 = recenter(self.at(x0, y0), fx, fy);
+        let c10 = recenter(self.at(x0 + 1, y0), fx - 1.0, fy);
+        let c01 = recenter(self.at(x0, y0 + 1), fx, fy - 1.0);
+        let c11 = recenter(self.at(x0 + 1, y0 + 1), fx - 1.0, fy - 1.0);
+        let top = lerp_poly(c00, c10, fx);
+        let bot = lerp_poly(c01, c11, fx);
+        lerp_poly(top, bot, fy)
+    }
+}
+
+/// Re-express a quadratic centred at the origin as one centred at `(-dx, -dy)`,
+/// i.e. shift the expansion point by `(dx, dy)`. Quadratic terms are unchanged;
+/// linear terms pick up `2 A δ`.
+fn recenter(c: PolyCoeffs, dx: f32, dy: f32) -> PolyCoeffs {
+    PolyCoeffs(
+        c.0,
+        c.1,
+        c.2,
+        c.3 + 2.0 * c.0 * dx + c.1 * dy,
+        c.4 + c.1 * dx + 2.0 * c.2 * dy,
+    )
+}
+
+fn lerp_poly(a: PolyCoeffs, b: PolyCoeffs, t: f32) -> PolyCoeffs {
+    PolyCoeffs(
+        a.0 + (b.0 - a.0) * t,
+        a.1 + (b.1 - a.1) * t,
+        a.2 + (b.2 - a.2) * t,
+        a.3 + (b.3 - a.3) * t,
+        a.4 + (b.4 - a.4) * t,
+    )
 }
 
 /// Solve 6x6 system A*x = b using Gaussian elimination with partial pivoting.
@@ -786,11 +861,41 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
     let mut coeffs = Vec::with_capacity((width * height) as usize);
 
     let half_n = (poly_n / 2) as i32;
+    let side = (2 * half_n + 1) as usize;
+    // The Gaussian depends only on the offset, so each tap's weight is one
+    // number for the whole image. Interior pixels also share the Gram matrix:
+    // every offset is inside the image, and the basis does not depend on the
+    // pixel. The right-hand side still does.
+    let mut weights = vec![0.0f32; side * side];
+    for dy in -half_n..=half_n {
+        for dx in -half_n..=half_n {
+            let i = ((dy + half_n) as usize) * side + (dx + half_n) as usize;
+            weights[i] = gaussian_weight(dx as f32, dy as f32, sigma);
+        }
+    }
+    let mut a_full = [[0.0f32; 6]; 6];
+    for dy in -half_n..=half_n {
+        for dx in -half_n..=half_n {
+            let xf = dx as f32;
+            let yf = dy as f32;
+            let weight = weights[((dy + half_n) as usize) * side + (dx + half_n) as usize];
+            let basis = [xf * xf, xf * yf, yf * yf, xf, yf, 1.0];
+            for i in 0..6 {
+                for j in 0..6 {
+                    a_full[i][j] += basis[i] * basis[j] * weight;
+                }
+            }
+        }
+    }
 
     for y in 0..height {
         for x in 0..width {
             // Fit quadratic polynomial in neighborhood using weighted least squares
-            let mut a = [[0.0f32; 6]; 6];
+            let interior = x as i32 >= half_n
+                && y as i32 >= half_n
+                && (x as i32) + half_n < width as i32
+                && (y as i32) + half_n < height as i32;
+            let mut a = if interior { a_full } else { [[0.0f32; 6]; 6] };
             let mut b = [0.0f32; 6];
 
             for dy in -half_n..=half_n {
@@ -805,7 +910,7 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
                     let val = img.get_pixel(px, py)[0] as f32;
                     let xf = dx as f32;
                     let yf = dy as f32;
-                    let weight = gaussian_weight(xf, yf, sigma);
+                    let weight = weights[((dy + half_n) as usize) * side + (dx + half_n) as usize];
 
                     // Basis functions
                     let basis = [
@@ -817,10 +922,14 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
                         1.0,     // 1
                     ];
 
-                    for i in 0..6 {
-                        for j in 0..6 {
-                            a[i][j] += basis[i] * basis[j] * weight;
+                    if !interior {
+                        for i in 0..6 {
+                            for j in 0..6 {
+                                a[i][j] += basis[i] * basis[j] * weight;
+                            }
                         }
+                    }
+                    for i in 0..6 {
                         b[i] += basis[i] * val * weight;
                     }
                 }
@@ -848,7 +957,7 @@ fn polynomial_expansion(img: &GrayImage, poly_n: usize, sigma: f32) -> Polynomia
     PolynomialExpansion {
         coeffs,
         width,
-        _height: height,
+        height,
     }
 }
 
@@ -1050,6 +1159,81 @@ mod tests {
             (mean_u - shift as f64).abs() < 2.0,
             "Farneback estimated {mean_u:.3} px for a known {shift} px shift; \
              the field is well-formed but does not estimate translation"
+        );
+    }
+
+    /// Textured frame pair where `next(x, y) = prev(x - shift, y)`.
+    fn translated_texture(w: u32, h: u32, shift: i32) -> (GrayImage, GrayImage) {
+        let mut prev = GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = (x.wrapping_mul(37).wrapping_add(y.wrapping_mul(91)) % 255) as u8;
+                prev.put_pixel(x, y, Luma([v]));
+            }
+        }
+        let mut next = GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let sx = x as i32 - shift;
+                let v = if sx >= 0 && (sx as u32) < w {
+                    prev.get_pixel(sx as u32, y)[0]
+                } else {
+                    0
+                };
+                next.put_pixel(x, y, Luma([v]));
+            }
+        }
+        (prev, next)
+    }
+
+    fn mean_horizontal(flow: &crate::MotionField) -> f64 {
+        let mut sum = 0.0f64;
+        let mut n = 0u64;
+        for y in 30..70u32 {
+            for x in 40..90u32 {
+                sum += flow.get_motion(x, y).0 as f64;
+                n += 1;
+            }
+        }
+        sum / n as f64
+    }
+
+    fn farneback_mean_u(
+        prev: &GrayImage,
+        next: &GrayImage,
+        iterations: usize,
+        pyramid_levels: usize,
+    ) -> f64 {
+        let mut fb = Farneback::new();
+        fb.iterations = iterations;
+        fb.pyramid_levels = pyramid_levels;
+        mean_horizontal(&fb.compute(prev, next).unwrap())
+    }
+
+    /// Later iterations must see a residual. Sampling both polynomial expansions
+    /// at the same pixel makes every iteration recompute the full displacement
+    /// and `flow += d` scales it: 3 iterations is then exactly 3× one iteration,
+    /// and a 1 px shift comes back near 3 px.
+    #[test]
+    fn farneback_iterations_refine_residual_not_scale_flow() {
+        let (prev, next) = translated_texture(120, 100, 10);
+        let u1 = farneback_mean_u(&prev, &next, 1, 3);
+        let u3 = farneback_mean_u(&prev, &next, 3, 3);
+        assert!(
+            (u3 - 3.0 * u1).abs() > 0.5,
+            "3 iterations ({u3:.3}) is an exact multiple of 1 iteration ({u1:.3}); \
+             iterations scaled the displacement instead of refining a residual"
+        );
+
+        let (prev, next) = translated_texture(120, 100, 1);
+        let u = farneback_mean_u(&prev, &next, 3, 1);
+        assert!(
+            (u - 1.0).abs() < 0.75,
+            "1 px shift reported as {u:.3}, not near 1 px"
+        );
+        assert!(
+            (u - 3.0).abs() > 1.0,
+            "1 px shift reported as {u:.3}, which is the 3-iteration scaling"
         );
     }
 
