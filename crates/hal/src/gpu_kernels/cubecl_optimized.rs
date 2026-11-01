@@ -14,14 +14,14 @@
 //!
 //! | Claim | Reality after the port |
 //! |---|---|
-//! | shared-memory tiling for conv | **false** — no shared memory is declared anywhere; the code comments that out and launches a scalar per output element |
+//! | shared-memory tiling for conv | **true** for [`conv2d_opt::conv2d_kernel`] — one input tile plus the kernel halo is staged in shared memory, and each unit accumulates a small output block. Depthwise and transposed conv stay scalar |
 //! | warp-shuffle reductions | **false** — [`reduction_opt::warp_reduce_sum`] returns its argument unchanged; it is now a *correct* (useless) identity, not a lie |
 //! | atomic histogram | **false** — was `bins[bin] += 1` from every unit, i.e. a write race that loses counts. Now uses [`reduction_opt::histogram_kernel`] with real `Atomic<u32>::fetch_add` |
 //! | fused kernels | **true**, trivially — see [`element_wise_opt`] |
 //! | fp16 / tensor-core paths | **false** — `half::from_f32` is not a CubeCL type and `Tensor<half>` cannot be instantiated. Removed; see [`fp16_is_not_implemented`] |
 //!
-//! So the surviving kernels are correct scalar reference implementations. They
-//! are *not* faster than the ones in [`crate::gpu_kernels::cubecl_backend`].
+//! `conv2d` is the tiled kernel. The others are still correct scalar reference
+//! implementations, no faster than [`crate::gpu_kernels::cubecl_backend`].
 //! Where a defect in the original survived the port it is called out with a
 //! `BUG(original)` comment, and where it is reachable from Rust the wrapper
 //! carries the same marker.
@@ -84,8 +84,8 @@ impl<R: Runtime> OptimizedContext<R> {
         self.use_fp16
     }
 
-    /// Tile edge length this context was configured with. Currently advisory
-    /// only — no kernel here uses shared memory.
+    /// Tile edge length this context was configured with. Advisory: `conv2d`
+    /// picks its own shared-memory tile so the kernel halo fits.
     pub fn tile_size(&self) -> usize {
         self.tile_size
     }
@@ -343,10 +343,38 @@ fn fused_unary<R: Runtime>(
 // Convolution
 // ============================================================================
 //
-// "With shared memory tiling", in the original. There was no shared memory:
-// the declaration was commented out. These are the same scalar
-// one-unit-per-output-element loops as `cubecl_backend::conv2d`, so read that
-// for the flat-indexing convention.
+// `conv2d_kernel` stages one input tile, plus the halo the kernel footprint
+// needs, in shared memory. Each unit then accumulates a 2×2 block of outputs
+// from that tile. The sum is still over `(c_in, ky, kx)` in that order.
+// Depthwise and transposed conv stay one-unit-per-output.
+
+/// Units along each edge of a conv cube. 8×8 = 64, the same cube size as
+/// [`CUBE_DIM`]. The kernel hard-codes this edge.
+const CONV_THREADS: usize = 8;
+/// Outputs each unit owns along one edge. The kernel hard-codes this too.
+const CONV_BLOCK: usize = 2;
+/// Shared-memory edge, in f32 elements. 48² × 4 = 9 KiB, under the 16 KiB
+/// workgroup storage WebGPU and Vulkan guarantee.
+const CONV_SMEM_EDGE: usize = 48;
+/// `SharedMemory::new` takes one comptime `usize`. A product of two unsuffixed
+/// literals is an `i32` in a `#[cube]` kernel, so the element count is a
+/// single constant.
+const CONV_SMEM_ELEMS: usize = CONV_SMEM_EDGE * CONV_SMEM_EDGE;
+
+/// Output-tile edge for `stride`.
+///
+/// `(tile - 1) * stride` is the input span between the first and last output
+/// of the tile. Keeping that span strictly inside [`CONV_SMEM_EDGE`] leaves at
+/// least one kernel row of room, so a panel of the footprint always fits in
+/// the shared buffer next to the tile.
+fn conv_tile_edge(stride: usize) -> usize {
+    let preferred = CONV_THREADS * CONV_BLOCK;
+    if stride == 0 {
+        return 1;
+    }
+    let max_fit = (CONV_SMEM_EDGE - 1) / stride + 1;
+    preferred.min(max_fit.max(1))
+}
 
 /// Geometry check shared by the two conv wrappers: computes the output extent
 /// from the input, rejecting configurations that would underflow.
@@ -374,11 +402,28 @@ fn conv_output_extent(
 mod conv2d_opt {
     use super::*;
 
-    /// Plain 2D convolution, NCHW, one unit per output element.
+    /// Plain 2D convolution, NCHW.
     ///
     /// * `input` — `[batch, channels_in, height, width]`
     /// * `weights` — `[channels_out, channels_in, k, k]`
     /// * `output` — `[batch, channels_out, out_h, out_w]`
+    ///
+    /// One cube owns a `tile × tile` output block for a single `(batch,
+    /// channel_out)`. The cube cooperatively copies that block's input window,
+    /// including the halo `kernel_size` adds beyond the tile, into shared
+    /// memory. Each unit then accumulates a 2×2 block of outputs from the
+    /// staged window. The shared edge is 48, matching [`CONV_SMEM_EDGE`]; the
+    /// host passes a `tile` whose input span fits in that edge.
+    ///
+    /// Panels keep the sum identical to the scalar loop. A panel is a
+    /// contiguous `(ky, kx)` sub-rectangle of the footprint. Input channels
+    /// are outermost, then `ky`, then `kx`. When the whole footprint fits, the
+    /// panel is the footprint. When only the width fits, `ky` is split into
+    /// strips that still cover every `kx`. When the width does not fit, each
+    /// panel is a single `ky` and a strip of `kx`.
+    ///
+    /// Every unit runs the same number of load iterations and reaches both
+    /// `sync_cube` calls, including units whose outputs lie past the image.
     ///
     /// BUG(original): the original computed `b`, `oy`, `ox` from a single flat
     /// index divided by `(out_height * out_width)`, so every unit in every
@@ -398,8 +443,8 @@ mod conv2d_opt {
         kernel_size: usize,
         stride: usize,
         padding: usize,
+        tile: usize,
     ) {
-        let batch = input.shape(0);
         let channels_in = input.shape(1);
         let height_in = input.shape(2);
         let width_in = input.shape(3);
@@ -408,46 +453,147 @@ mod conv2d_opt {
         let height_out = output.shape(2);
         let width_out = output.shape(3);
 
-        let idx = ABSOLUTE_POS;
-        let plane = height_out * width_out;
-        let total = batch * channels_out * plane;
-        if idx >= total {
-            terminate!();
-        }
+        // 8×8 cube, 2×2 outputs per unit. These match CONV_THREADS and
+        // CONV_BLOCK. The names are passed as usize constants: an unsuffixed
+        // product is an i32 inside #[cube] and cannot size shared memory.
+        let tx = UNIT_POS_X as usize;
+        let ty = UNIT_POS_Y as usize;
+        let tid = ty * CONV_THREADS + tx;
 
-        let b = idx / (channels_out * plane);
-        let rem = idx % (channels_out * plane);
-        let c_out = rem / plane;
-        let rem2 = rem % plane;
-        let oy = rem2 / width_out;
-        let ox = rem2 % width_out;
+        let z = CUBE_POS_Z as usize;
+        let b = z / channels_out;
+        let c_out = z % channels_out;
+        let oy0 = CUBE_POS_Y as usize * tile;
+        let ox0 = CUBE_POS_X as usize * tile;
 
-        let mut sum = 0.0f32;
+        let mut acc = Array::new(4usize);
+        acc[0] = 0.0f32;
+        acc[1] = 0.0f32;
+        acc[2] = 0.0f32;
+        acc[3] = 0.0f32;
+
+        let mut smem = SharedMemory::<f32>::new(CONV_SMEM_ELEMS);
+
+        // Rows (and columns) of input between the first and last output.
+        // The host keeps this strictly below CONV_SMEM_EDGE.
+        let span = (tile - 1) * stride;
+        let room = CONV_SMEM_EDGE - span;
 
         for c_in in 0..channels_in {
-            for ky in 0..kernel_size {
-                for kx in 0..kernel_size {
-                    let in_y = oy * stride + ky;
-                    let in_x = ox * stride + kx;
+            let mut ky0 = 0usize;
+            while ky0 < kernel_size {
+                let mut ky_len = kernel_size - ky0;
+                if ky_len > room {
+                    ky_len = room;
+                }
+                // A kx split inside a multi-row ky strip would finish one kx
+                // panel for every ky in the strip before the next panel, which
+                // is not `(ky, kx)` order. One ky at a time preserves the sum.
+                if span + kernel_size > CONV_SMEM_EDGE {
+                    ky_len = 1usize;
+                }
 
-                    // Zero padding on all four sides.
-                    if in_y >= padding && in_x >= padding {
-                        let iy = in_y - padding;
-                        let ix = in_x - padding;
-                        if iy < height_in && ix < width_in {
-                            let in_off =
-                                ((b * channels_in + c_in) * height_in + iy) * width_in + ix;
-                            let w_off = ((c_out * channels_in + c_in) * kernel_size + ky)
-                                * kernel_size
-                                + kx;
-                            sum += input[in_off] * weights[w_off];
+                let mut kx0 = 0usize;
+                while kx0 < kernel_size {
+                    let mut kx_len = kernel_size - kx0;
+                    if kx_len > room {
+                        kx_len = room;
+                    }
+
+                    let panel_h = span + ky_len;
+                    let panel_w = span + kx_len;
+                    let nload = panel_h * panel_w;
+                    // Same trip count on every unit, so the barrier below stays
+                    // in uniform control flow. 8×8 = CONV_THREADS².
+                    let cube_units = CONV_THREADS * CONV_THREADS;
+                    let trips = (nload + cube_units - 1usize) / cube_units;
+                    let mut t = 0usize;
+                    while t < trips {
+                        let i = tid + t * cube_units;
+                        if i < nload {
+                            let ly = i / panel_w;
+                            let lx = i % panel_w;
+                            let in_y = oy0 * stride + ky0 + ly;
+                            let in_x = ox0 * stride + kx0 + lx;
+                            let mut v = 0.0f32;
+                            if in_y >= padding && in_x >= padding {
+                                let iy = in_y - padding;
+                                let ix = in_x - padding;
+                                if iy < height_in && ix < width_in {
+                                    v = input[((b * channels_in + c_in) * height_in + iy)
+                                        * width_in
+                                        + ix];
+                                }
+                            }
+                            smem[i] = v;
                         }
+                        t += 1;
+                    }
+                    sync_cube();
+
+                    for by in 0usize..CONV_BLOCK {
+                        for bx in 0usize..CONV_BLOCK {
+                            let local_oy = ty * CONV_BLOCK + by;
+                            let local_ox = tx * CONV_BLOCK + bx;
+                            if local_oy < tile && local_ox < tile {
+                                let oy = oy0 + local_oy;
+                                let ox = ox0 + local_ox;
+                                if oy < height_out && ox < width_out {
+                                    for ky in 0..ky_len {
+                                        for kx in 0..kx_len {
+                                            let ky_abs = ky0 + ky;
+                                            let kx_abs = kx0 + kx;
+                                            let in_y = oy * stride + ky_abs;
+                                            let in_x = ox * stride + kx_abs;
+                                            // Same zero-padding skip as the scalar loop,
+                                            // so out-of-bounds taps are not added.
+                                            if in_y >= padding && in_x >= padding {
+                                                let iy = in_y - padding;
+                                                let ix = in_x - padding;
+                                                if iy < height_in && ix < width_in {
+                                                    let sy = local_oy * stride + ky;
+                                                    let sx = local_ox * stride + kx;
+                                                    let w_off = ((c_out * channels_in + c_in)
+                                                        * kernel_size
+                                                        + ky_abs)
+                                                        * kernel_size
+                                                        + kx_abs;
+                                                    let slot = by * CONV_BLOCK + bx;
+                                                    let mut partial = acc[slot];
+                                                    partial +=
+                                                        smem[sy * panel_w + sx] * weights[w_off];
+                                                    acc[slot] = partial;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    sync_cube();
+
+                    kx0 += kx_len;
+                }
+                ky0 += ky_len;
+            }
+        }
+
+        for by in 0usize..CONV_BLOCK {
+            for bx in 0usize..CONV_BLOCK {
+                let local_oy = ty * CONV_BLOCK + by;
+                let local_ox = tx * CONV_BLOCK + bx;
+                if local_oy < tile && local_ox < tile {
+                    let oy = oy0 + local_oy;
+                    let ox = ox0 + local_ox;
+                    if oy < height_out && ox < width_out {
+                        let slot = by * CONV_BLOCK + bx;
+                        output[((b * channels_out + c_out) * height_out + oy) * width_out + ox] =
+                            acc[slot];
                     }
                 }
             }
         }
-
-        output[idx] = sum;
     }
 
     /// Depthwise convolution, NCHW, one unit per output element.
@@ -659,17 +805,27 @@ pub fn conv2d<R: Runtime>(
 
     let output = TensorHandle::empty(client, vec![batch, c_out, out_h, out_w], f32_storage());
 
+    if batch == 0 || c_out == 0 || out_h == 0 || out_w == 0 {
+        return Ok(output);
+    }
+
+    let tile = conv_tile_edge(stride);
+    let cubes_x = (out_w as u32).div_ceil(tile as u32);
+    let cubes_y = (out_h as u32).div_ceil(tile as u32);
+    let cubes_z = (batch * c_out) as u32;
+
     unsafe {
         conv2d_opt::conv2d_kernel::launch_unchecked(
             client,
-            cubes_for(batch * c_out * out_h * out_w),
-            CubeDim::new_1d(CUBE_DIM),
+            CubeCount::new_3d(cubes_x, cubes_y, cubes_z),
+            CubeDim::new_2d(CONV_THREADS as u32, CONV_THREADS as u32),
             input.as_ref().as_tensor_arg(1),
             weights.as_ref().as_tensor_arg(1),
             output.as_ref().as_tensor_arg(1),
             ScalarArg::new(k),
             ScalarArg::new(stride),
             ScalarArg::new(padding),
+            ScalarArg::new(tile),
         )
     }
     .map_err(|e| launch_err("conv2d", e))?;
