@@ -24,16 +24,24 @@ impl MatchType {
     fn distance(&self, a: &cv_core::Descriptor, b: &cv_core::Descriptor) -> f32 {
         match self {
             MatchType::BruteForce | MatchType::BruteForceHamming => a.hamming_distance(b) as f32,
-            MatchType::BruteForceL2 => a
-                .data
-                .iter()
-                .zip(&b.data)
-                .map(|(&x, &y)| {
-                    let d = x as f32 - y as f32;
-                    d * d
-                })
-                .sum::<f32>()
-                .sqrt(),
+            MatchType::BruteForceL2 => {
+                // Unequal lengths are not a match. `zip` stops at the shorter
+                // slice, so an 8-byte zero descriptor against a 128-byte zero
+                // descriptor used to report distance 0 and win. Hamming already
+                // returns this sentinel for the same reason.
+                if a.data.len() != b.data.len() {
+                    return u32::MAX as f32;
+                }
+                a.data
+                    .iter()
+                    .zip(&b.data)
+                    .map(|(&x, &y)| {
+                        let d = x as f32 - y as f32;
+                        d * d
+                    })
+                    .sum::<f32>()
+                    .sqrt()
+            }
         }
     }
 }
@@ -73,6 +81,15 @@ impl Matcher {
     }
 
     fn brute_force_match(&self, query: &Descriptors, train: &Descriptors) -> Matches {
+        // One reverse pass: the winning query index for each training
+        // descriptor. Ties keep the lower index (replace only when the new
+        // distance is strictly smaller).
+        let reverse_best = if self.cross_check {
+            self.best_query_per_train(query, train)
+        } else {
+            Vec::new()
+        };
+
         let matches: Vec<FeatureMatch> = (0..query.len())
             .into_par_iter()
             .filter_map(|query_idx| {
@@ -125,11 +142,10 @@ impl Matcher {
                         }
                     }
 
-                    if self.cross_check {
-                        let reverse_match = self.find_best_match(train, query, train_idx);
-                        if reverse_match != Some(query_idx) {
-                            keep_match = false;
-                        }
+                    if self.cross_check
+                        && reverse_best.get(train_idx).copied().flatten() != Some(query_idx)
+                    {
+                        keep_match = false;
                     }
 
                     if keep_match {
@@ -150,23 +166,26 @@ impl Matcher {
         }
     }
 
-    fn find_best_match(
-        &self,
-        query: &Descriptors,
-        train: &Descriptors,
-        query_idx: usize,
-    ) -> Option<usize> {
-        let q_desc = query.descriptors.get(query_idx)?;
-        // `None` for an empty set rather than indexing `descriptors[0]`.
-        train
-            .iter()
-            .enumerate()
-            .map(|(idx, t_desc)| (idx, self.match_type.distance(q_desc, t_desc)))
-            .fold(None, |best: Option<(usize, f32)>, (idx, d)| match best {
-                Some((_, bd)) if bd <= d => best,
-                _ => Some((idx, d)),
+    /// Winning query index for every training descriptor.
+    ///
+    /// An empty query set leaves each entry `None`. Equal distances keep the
+    /// lower query index.
+    fn best_query_per_train(&self, query: &Descriptors, train: &Descriptors) -> Vec<Option<usize>> {
+        (0..train.len())
+            .into_par_iter()
+            .map(|train_idx| {
+                let t_desc = &train.descriptors[train_idx];
+                let mut best: Option<(usize, f32)> = None;
+                for (query_idx, q_desc) in query.iter().enumerate() {
+                    let distance = self.match_type.distance(t_desc, q_desc);
+                    match best {
+                        Some((_, best_dist)) if best_dist <= distance => {}
+                        _ => best = Some((query_idx, distance)),
+                    }
+                }
+                best.map(|(idx, _)| idx)
             })
-            .map(|(idx, _)| idx)
+            .collect()
     }
 }
 
@@ -394,5 +413,33 @@ mod tests {
         let matches = vec![vec![FeatureMatch::new(0, 0, 0.1)]];
         let result = filter_matches_by_ratio_test(&matches, 0.75);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn cross_check_keeps_mutual_best_and_drops_one_way() {
+        // Query 1 is an exact copy of train 0. Query 0 prefers train 0 over
+        // train 1, but train 0's nearest query is 1, so that one-way match
+        // is dropped and the mutual match is kept.
+        let query = make_descriptors_from_bytes(&[&[10u8], &[0u8]]);
+        let train = make_descriptors_from_bytes(&[&[0u8], &[100u8]]);
+        let matches = Matcher::new(MatchType::BruteForceL2)
+            .with_cross_check()
+            .match_descriptors(&query, &train);
+        assert_eq!(matches.matches.len(), 1);
+        let m = matches.matches[0];
+        assert_eq!((m.query_idx, m.train_idx), (1, 0));
+        assert!(m.distance.abs() < 1e-6);
+    }
+
+    #[test]
+    fn cross_check_tie_keeps_the_lower_query_index() {
+        let query = make_descriptors_from_bytes(&[&[0u8], &[0u8]]);
+        let train = make_descriptors_from_bytes(&[&[0u8]]);
+        let matches = Matcher::new(MatchType::BruteForceL2)
+            .with_cross_check()
+            .match_descriptors(&query, &train);
+        assert_eq!(matches.matches.len(), 1);
+        assert_eq!(matches.matches[0].query_idx, 0);
+        assert_eq!(matches.matches[0].train_idx, 0);
     }
 }
