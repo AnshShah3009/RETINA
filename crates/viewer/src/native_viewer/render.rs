@@ -34,12 +34,19 @@ struct Uniforms {
     view: [[f32; 4]; 4],
     /// The drawable area in **pixels**, `(width, height)`.
     ///
-    /// This was `viewport` and carried `(1, 1)` - the NDC half-extent - while
-    /// the shader used it as a pixel count. A point radius of 3 therefore became
-    /// `3 / depth` in NDC units, which at depth 2.5 is 1.2: a sprite 192 px in
-    /// radius on a 320 px canvas, filling the frame with one disc. Renaming it
-    /// to `pixel_size` is the fix as much as the value is; the two units are not
-    /// interchangeable and the name said NDC while the use was pixels.
+    /// This is the size of the **callback's rect**, not of the window: egui sets
+    /// the render pass viewport to that rect, so NDC spans the rect and the
+    /// shader's `point_radius / half_extent` conversion is only right against
+    /// it. It was the window size, which scaled every sprite by
+    /// `rect_height / window_height`.
+    ///
+    /// This was also once `viewport` and carried `(1, 1)` - the NDC half-extent
+    /// while the shader used it as a pixel count. A point radius of 3 therefore
+    /// became `3 / depth` in NDC units, which at depth 2.5 is 1.2: a sprite 192
+    /// px in radius on a 320 px canvas, filling the frame with one disc.
+    /// Renaming it to `pixel_size` is the fix as much as the value is; the two
+    /// units are not interchangeable and the name said NDC while the use was
+    /// pixels.
     pixel_size: [f32; 2],
     point_radius: f32,
     _pad: f32,
@@ -307,11 +314,19 @@ impl egui_wgpu::CallbackTrait for CloudCallback {
         render_pass: &mut eframe::wgpu::RenderPass<'static>,
         _resources: &egui_wgpu::CallbackResources,
     ) {
-        self.0.draw_into(
-            render_pass,
-            [info.screen_size_px[0] as f32, info.screen_size_px[1] as f32],
-        );
+        self.0.draw_into(render_pass, sprite_viewport_px(&info));
     }
+}
+
+/// The viewport the sprite shader divides by, in **physical pixels**.
+///
+/// This is the callback's own rect, not the window: `egui_wgpu` calls
+/// `set_viewport` with exactly this rect before invoking `paint`, so NDC spans
+/// the rect and the shader's `radius_px / (pixels / 2)` conversion is only
+/// correct against it.
+fn sprite_viewport_px(info: &epaint::PaintCallbackInfo) -> [f32; 2] {
+    let vp = info.viewport_in_pixels();
+    [vp.width_px as f32, vp.height_px as f32]
 }
 
 fn build_vertices(pc: &PointCloud, min_z: f32, max_z: f32) -> Vec<Vertex> {
@@ -476,5 +491,52 @@ mod tests {
         assert_eq!(verts[0].has_color, 0.0);
         assert_eq!(verts[0].color, [0.0, 0.0, 1.0], "t = 0 is the blue end");
         assert_eq!(verts[1].color, [1.0, 0.0, 0.0], "t = 1 is the red end");
+    }
+
+    /// The sprite shader must be told the size of the **callback's viewport**,
+    /// not the size of the window.
+    ///
+    /// `egui_wgpu` calls `set_viewport(rect)` with the callback's own rect
+    /// before invoking `paint`, so NDC spans that rect. The shader turns a pixel
+    /// radius into NDC by dividing by half of the size it is given
+    /// (`point_cloud.wgsl`: `radius_ndc_x = point_radius / half_width`). Feeding
+    /// it the whole window therefore promises "half the window is 1 NDC" while
+    /// the rasteriser maps 1 NDC onto half the *rect*. The sprite comes out
+    /// scaled by `rect / window`: with the viewer's 420 pt tall canvas in an
+    /// 800 px window at ppp 1, a 4 px radius draws as `4 * 420/800 = 2.1` px,
+    /// and any other window height gives a different lie.
+    #[test]
+    fn the_sprite_viewport_is_the_canvas_rect_not_the_window() {
+        // An 800x800 window, with the canvas rect the viewer allocates (420 pt
+        // tall, full width, starting at y = 120 pt), at 1 pixel per point.
+        let info = epaint::PaintCallbackInfo {
+            viewport: egui::Rect::from_min_size(egui::pos2(0.0, 120.0), egui::vec2(800.0, 420.0)),
+            clip_rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 800.0)),
+            pixels_per_point: 1.0,
+            screen_size_px: [800, 800],
+        };
+        let got = sprite_viewport_px(&info);
+        assert_eq!(
+            got,
+            [800.0, 420.0],
+            "the shader's NDC spans the callback rect, so it must be given the \
+             rect's pixel size; the window's 800 px would scale every sprite by \
+             420/800 on this canvas"
+        );
+
+        // The contract is pixel-based, so a hidpi window doubles the rect size
+        // it must be told - half a rect is 1 NDC at any scale factor.
+        let hidpi = epaint::PaintCallbackInfo {
+            viewport: egui::Rect::from_min_size(egui::pos2(0.0, 240.0), egui::vec2(800.0, 420.0)),
+            clip_rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 800.0)),
+            pixels_per_point: 2.0,
+            screen_size_px: [1600, 1600],
+        };
+        assert_eq!(
+            sprite_viewport_px(&hidpi),
+            [1600.0, 840.0],
+            "at 2x the canvas is 1600x840 physical pixels, and a 4 px radius \
+             must stay 4 physical pixels"
+        );
     }
 }
