@@ -164,6 +164,14 @@ impl<'a> Localizer<'a> {
                 &inlier_mask,
                 intrinsics,
             );
+            // The refinement is guarded, but the *solver's* own pose is caller
+            // data too, and a non-finite one must never be returned as a
+            // successful localization. Reaching this means the solve produced
+            // something that is not a pose; the contract is a failure, not a
+            // confident-looking `Some` whose rotation is all NaN.
+            if !pose_is_finite(&pose) {
+                continue;
+            }
             let reprojection_rmse = reprojection_rmse(
                 &pose,
                 &object_points,
@@ -239,7 +247,36 @@ impl<'a> Localizer<'a> {
     }
 }
 
+/// A pose whose rotation or translation is not finite.
+///
+/// Such a pose is not a pose: it cannot project a point, so it can neither be
+/// refined nor returned. `Localizer::localize` documents that it returns `None`
+/// rather than a confident wrong answer, and an all-NaN rotation is the least
+/// confident answer possible while still looking like a `Some`.
+fn pose_is_finite(pose: &Pose) -> bool {
+    pose.translation.iter().all(|v| v.is_finite())
+        && pose
+            .rotation_matrix()
+            .iter()
+            .all(|component| component.is_finite())
+}
+
 /// Re-run PnP refinement over the inliers (no-op with fewer than 6 of them).
+///
+/// The refinement is only adopted when it is finite. A non-finite refinement is
+/// not a better estimate than the pose it started from — it is the absence of
+/// one — so falling back to the RANSAC pose keeps the result usable. This is
+/// reachable on exactly-projectable data, where the minimal-sample pose is
+/// already the true one: `cv_calib3d::pnp::solve_pnp_refine` parameterises the
+/// pose by `Rotation3::scaled_axis`, which is `NaN` for a rotation matrix whose
+/// trace rounds above 3.0 (an identity rotation stored with `1 + 4.4e-16` on its
+/// diagonal is one), and it starts from that parameterisation. Measured with 20
+/// exactly-projected correspondences at scene scale 3: the RANSAC pose's trace
+/// was `3.0000000000000013`, `scaled_axis` returned `[NaN, NaN, NaN]`, and the
+/// refinement returned an all-NaN rotation which this function used to adopt
+/// verbatim — `localize` then reported `inliers: 20` with `reprojection_rmse:
+/// NaN` and a pose that is not a rotation at all. The residual there is exactly
+/// zero, so the unrefined pose already fits the inliers perfectly.
 fn refine_pose(
     pose: Pose,
     object_points: &[Point3<f64>],
@@ -258,7 +295,10 @@ fn refine_pose(
         return pose;
     }
 
-    solve_pnp_refine(&pose, &inlier_obj, &inlier_img, intrinsics, None, 25).unwrap_or(pose)
+    match solve_pnp_refine(&pose, &inlier_obj, &inlier_img, intrinsics, None, 25) {
+        Ok(refined) if pose_is_finite(&refined) => refined,
+        _ => pose,
+    }
 }
 
 /// RMS reprojection error (pixels) of the inlier correspondences under `pose`.

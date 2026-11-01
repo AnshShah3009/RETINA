@@ -346,3 +346,150 @@ fn rank_by_descriptor_matches_degenerate_cases_are_empty() {
         .is_empty());
     assert_eq!(db.rank_by_descriptor_matches(&descriptors, 5), vec![0]);
 }
+
+/// A localization must never return a pose that is not a pose.
+///
+/// Exactly-projectable data at some scene scales produced a *successful* result
+/// — `inliers: 20`, `matches: 20` — whose rotation matrix was entirely `NaN`
+/// and whose reprojection RMSE was `NaN`. Twenty inliers that fit the data
+/// perfectly is the strongest possible claim, attached to a transform that
+/// cannot map a single point.
+///
+/// The mechanism is in the refinement, not in the matching. `Localizer` refines
+/// the RANSAC pose with `cv_calib3d::pnp::solve_pnp_refine`, which parameterises
+/// rotation as `Rotation3::scaled_axis`. For a rotation matrix whose trace rounds
+/// *above* 3.0, `scaled_axis` is `NaN` — `acos` of a value outside `[-1, 1]` —
+/// and the refinement starts from that parameterisation, so it returns an
+/// all-NaN rotation. `refine_pose` used to adopt whatever the refinement
+/// returned, and `localize` returned it unchanged.
+///
+/// The scene below is a perspective grid seen by an identity-pose camera; the
+/// landmark coordinates are uniformly scaled. Because the residual is exactly
+/// zero, the RANSAC pose is already the right answer and the refinement can only
+/// make it worse. Measured before the fix, over the scale sweep 0.25..=5.25 in
+/// steps of 0.25: scales 0.75, 1.5 and 3 returned `rot_finite = false` with
+/// `reprojection_rmse = NaN` and 20 inliers, while every other scale in the same
+/// sweep returned the exact pose. That the same scene is correct at 1.0 and
+/// poisoned at 0.75 is the tell: the defect is a rounding accident in the trace,
+/// not a property of the input.
+#[test]
+fn a_localized_pose_is_always_finite() {
+    let camera = intrinsics();
+    let extent = 51.55;
+    let mut refused = 0usize;
+
+    for step in 0..=20 {
+        let scale = 0.25 + 0.25 * step as f64;
+        let (db, keypoints, descriptors) = scaled_tiny_scene(scale, 20);
+        let localizer = Localizer::new(&db, LocalizerConfig::default());
+
+        let Some(result) = localizer.localize(&keypoints, &descriptors, &camera) else {
+            // Refusing is allowed; returning a fabricated pose is not. The
+            // control below pins that refusal is not the normal answer.
+            refused += 1;
+            continue;
+        };
+
+        let rotation = result.pose.rotation_matrix();
+        assert!(
+            rotation.iter().all(|component| component.is_finite()),
+            "scale {scale}: returned a non-finite rotation {rotation:?} with {} inliers",
+            result.inliers
+        );
+        assert!(
+            result.pose.translation.iter().all(|v| v.is_finite()),
+            "scale {scale}: returned a non-finite translation {:?}",
+            result.pose.translation
+        );
+        assert!(
+            result.reprojection_rmse.is_finite(),
+            "scale {scale}: finite pose but a non-finite reprojection RMSE {}",
+            result.reprojection_rmse
+        );
+        // A rotation matrix, not merely finite numbers: orthonormal, det +1.
+        let orthonormality = (rotation * rotation.transpose() - nalgebra::Matrix3::identity())
+            .iter()
+            .copied()
+            .fold(0.0_f64, |worst, v| worst.max(v.abs()));
+        assert!(
+            orthonormality < 1e-9,
+            "scale {scale}: returned rotation is not orthonormal (worst deviation {orthonormality:.3e})"
+        );
+        assert!(
+            (rotation.determinant() - 1.0).abs() < 1e-9,
+            "scale {scale}: returned rotation has determinant {}",
+            rotation.determinant()
+        );
+
+        // The scene is exactly projectable from the identity pose, so a
+        // returned pose must be that pose: a confidently wrong answer is no
+        // better than a NaN one.
+        let truth = Pose::identity();
+        assert!(
+            translation_error(&result.pose, &truth) < 1e-6 * extent,
+            "scale {scale}: translation error {:.3e}",
+            translation_error(&result.pose, &truth)
+        );
+        assert!(
+            rotation_error_degrees(&result.pose, &truth) < 1e-6,
+            "scale {scale}: rotation error {:.3e} deg",
+            rotation_error_degrees(&result.pose, &truth)
+        );
+    }
+
+    assert_eq!(
+        refused, 0,
+        "the guard must not turn the whole sweep into refusals; a clean scene \
+         localizes"
+    );
+
+    // Control: the un-scaled scene (`scale = 1`) still localizes exactly, so the
+    // assertions above cannot pass by rejecting everything.
+    let (db, keypoints, descriptors) = scaled_tiny_scene(1.0, 20);
+    let localizer = Localizer::new(&db, LocalizerConfig::default());
+    let result = localizer
+        .localize(&keypoints, &descriptors, &camera)
+        .expect("the scale-1 control scene must localize");
+    assert!(result.pose.rotation_matrix().iter().all(|v| v.is_finite()));
+    assert!(result.reprojection_rmse < 1e-6);
+}
+
+/// [`tiny_scene`] with every landmark position multiplied by `scale`.
+///
+/// Scaling the world is a physical no-op — the camera, its intrinsics and the
+/// projections are unchanged — so every scale must localize to the same pose.
+fn scaled_tiny_scene(scale: f64, n: usize) -> (Database, Vec<KeyPoint>, Descriptors) {
+    let camera = intrinsics();
+    let mut db = Database::new(None);
+    let mut keypoints = Vec::new();
+    let mut descriptors = Descriptors::new();
+    let mut landmark_of = Vec::new();
+
+    for i in 0..n {
+        let x = -1.0 + 0.4 * (i % 5) as f64;
+        let y = -1.0 + 0.3 * ((i / 5) % 4) as f64;
+        let z = 3.0 + 0.17 * (i as f64).sin() + 0.4 * (i % 3) as f64;
+        db.add_landmark(Landmark {
+            position: Point3::new(x * scale, y * scale, z * scale),
+            descriptors: vec![],
+        });
+        let kp = KeyPoint::new(camera.cx + camera.fx * x / z, camera.cy + camera.fy * y / z);
+        let mut bytes = vec![0u8; 32];
+        bytes[0] = i as u8;
+        bytes[1] = (i * 31) as u8;
+        bytes[2] = (i * 17 + 3) as u8;
+        descriptors.push(Descriptor::new(bytes, kp));
+        keypoints.push(kp);
+        landmark_of.push(Some(i));
+    }
+
+    db.add_image(DatabaseImage {
+        id: 0,
+        pose: Some(Pose::identity()),
+        keypoints: keypoints.clone(),
+        descriptors: descriptors.clone(),
+        landmarks: landmark_of,
+    });
+    db.build();
+    (db, keypoints, descriptors)
+}
