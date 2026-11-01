@@ -23,3 +23,7 @@ pollster = { workspace = true }
 [features]
 default = ["runtime"]
 runtime = ["dep:cv-runtime"]
+
+[[bench]]
+name = "simd_kernels"
+harness = false

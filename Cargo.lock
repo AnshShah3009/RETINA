@@ -1388,7 +1388,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "wgpu 28.0.0",
- "wide 0.7.33",
+ "wide",
 ]
 
 [[package]]
@@ -1413,7 +1413,7 @@ dependencies = [
  "rand 0.9.5",
  "rayon",
  "thiserror 2.0.21",
- "wide 0.7.33",
+ "wide",
 ]
 
 [[package]]
@@ -1516,7 +1516,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wgpu 28.0.0",
- "wide 0.7.33",
+ "wide",
 ]
 
 [[package]]
@@ -1533,7 +1533,7 @@ dependencies = [
  "rand 0.9.5",
  "rayon",
  "tracing",
- "wide 0.7.33",
+ "wide",
 ]
 
 [[package]]
@@ -5694,15 +5694,6 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "safe_arch"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
-dependencies = [
- "bytemuck",
-]
-
-[[package]]
-name = "safe_arch"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42c6efa15875e6ecb39ca61fb0b0c1a40b84fac5a5ffe71eef7d1000c8eb3f5f"
@@ -5868,7 +5859,7 @@ dependencies = [
  "approx",
  "num-complex",
  "num-traits",
- "wide 1.7.1",
+ "wide",
 ]
 
 [[package]]
@@ -7680,22 +7671,12 @@ dependencies = [
 
 [[package]]
 name = "wide"
-version = "0.7.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
-dependencies = [
- "bytemuck",
- "safe_arch 0.7.4",
-]
-
-[[package]]
-name = "wide"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d920ac99c3c8edce110cb8d07dbb324d6d026011dce85b1e9355b70f0adacc4f"
 dependencies = [
  "bytemuck",
- "safe_arch 1.2.0",
+ "safe_arch",
 ]
 
 [[package]]

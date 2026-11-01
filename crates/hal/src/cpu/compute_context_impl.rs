@@ -1308,13 +1308,13 @@ impl ComputeContext for CpuBackend {
                         if i + 8 <= n {
                             let s_v = f32x8::new(src_chunk[i..i + 8].try_into().unwrap());
                             let res = match typ {
-                                ThresholdType::Binary => s_v.cmp_gt(thresh_v).blend(max_v, zero_v),
+                                ThresholdType::Binary => s_v.simd_gt(thresh_v).select(max_v, zero_v),
                                 ThresholdType::BinaryInv => {
-                                    s_v.cmp_gt(thresh_v).blend(zero_v, max_v)
+                                    s_v.simd_gt(thresh_v).select(zero_v, max_v)
                                 }
                                 ThresholdType::Trunc => s_v.min(thresh_v),
-                                ThresholdType::ToZero => s_v.cmp_gt(thresh_v).blend(s_v, zero_v),
-                                ThresholdType::ToZeroInv => s_v.cmp_gt(thresh_v).blend(zero_v, s_v),
+                                ThresholdType::ToZero => s_v.simd_gt(thresh_v).select(s_v, zero_v),
+                                ThresholdType::ToZeroInv => s_v.simd_gt(thresh_v).select(zero_v, s_v),
                             };
                             dst_chunk[i..i + 8].copy_from_slice(&res.to_array());
                         } else {

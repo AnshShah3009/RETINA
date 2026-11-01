@@ -120,7 +120,7 @@ nalgebra = "0.35.0"
 image = { version = "0.25.10", default-features = false, features = ["rayon", "png", "jpeg", "gif", "webp", "tiff", "bmp", "ico", "qoi", "pnm", "tga", "hdr"] }
 wgpu = "28.0.0"
 bytemuck = { version = "1.25.2", features = ["derive"] }
-wide = "0.7.33"
+wide = "1.7.1"
 futures = "0.3.34"
 thiserror = "2.0.21"
 criterion = { version = "0.5", default-features = false, features = ["rayon", "cargo_bench_support", "async_tokio"] }

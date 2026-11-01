@@ -36,39 +36,32 @@ pub fn threshold_cpu(src: &GrayImage, thresh: u8, max_value: u8, typ: ThresholdT
         .for_each(|(y, row_dst)| {
             let row_src = &src_raw[y * width..(y + 1) * width];
 
-            let thresh_v = f32x8::splat(thresh as f32);
-            let max_v = f32x8::splat(max_value as f32);
-            let zero_v = f32x8::ZERO;
+            // Every threshold type is an unsigned compare-and-select (or a
+            // min) on the bytes themselves, so the vector loop stays in u8:
+            // 32 pixels per step, no widening to f32 and back.
+            let thresh_v = u8x32::splat(thresh);
+            let max_v = u8x32::splat(max_value);
+            let zero_v = u8x32::ZERO;
 
-            let len = row_src.len();
-            for i in (0..len).step_by(8) {
-                if i + 8 <= len {
-                    let s_v = f32x8::from([
-                        row_src[i] as f32,
-                        row_src[i + 1] as f32,
-                        row_src[i + 2] as f32,
-                        row_src[i + 3] as f32,
-                        row_src[i + 4] as f32,
-                        row_src[i + 5] as f32,
-                        row_src[i + 6] as f32,
-                        row_src[i + 7] as f32,
-                    ]);
-                    let res = match typ {
-                        ThresholdType::Binary => s_v.cmp_gt(thresh_v).blend(max_v, zero_v),
-                        ThresholdType::BinaryInv => s_v.cmp_gt(thresh_v).blend(zero_v, max_v),
-                        ThresholdType::Trunc => s_v.min(thresh_v),
-                        ThresholdType::ToZero => s_v.cmp_gt(thresh_v).blend(s_v, zero_v),
-                        ThresholdType::ToZeroInv => s_v.cmp_gt(thresh_v).blend(zero_v, s_v),
-                    };
-                    let res_arr: [f32; 8] = res.into();
-                    for j in 0..8 {
-                        row_dst[i + j] = res_arr[j] as u8;
-                    }
-                } else {
-                    for idx in i..len {
-                        row_dst[idx] = apply_threshold(row_src[idx], thresh, max_value, typ);
-                    }
-                }
+            let mut src_chunks = row_src.chunks_exact(32);
+            let mut dst_chunks = row_dst.chunks_exact_mut(32);
+            for (s, d) in (&mut src_chunks).zip(&mut dst_chunks) {
+                let s_v = u8x32::new(s.try_into().expect("chunk is 32 bytes"));
+                let res = match typ {
+                    ThresholdType::Binary => s_v.simd_gt(thresh_v).select(max_v, zero_v),
+                    ThresholdType::BinaryInv => s_v.simd_gt(thresh_v).select(zero_v, max_v),
+                    ThresholdType::Trunc => s_v.min(thresh_v),
+                    ThresholdType::ToZero => s_v.simd_gt(thresh_v).select(s_v, zero_v),
+                    ThresholdType::ToZeroInv => s_v.simd_gt(thresh_v).select(zero_v, s_v),
+                };
+                d.copy_from_slice(&res.to_array());
+            }
+            for (s, d) in src_chunks
+                .remainder()
+                .iter()
+                .zip(dst_chunks.into_remainder())
+            {
+                *d = apply_threshold(*s, thresh, max_value, typ);
             }
         });
 
@@ -417,6 +410,35 @@ mod tests {
         img.put_pixel(1, 0, Luma([200]));
         let out = threshold(&img, 100, 128, ThresholdType::Binary);
         assert_eq!(out.as_raw(), &[0, 128]);
+    }
+
+    /// The 32-lane loop and the scalar tail must agree with `apply_threshold`
+    /// for every byte value and every threshold, including the 127/128
+    /// boundary where an unsigned compare done as a signed one would flip.
+    #[test]
+    fn vector_and_tail_match_scalar_for_every_value() {
+        // 32 * 8 + 3: eight vector chunks and a scalar tail per row.
+        let (w, h) = (259u32, 256u32);
+        let img = GrayImage::from_fn(w, h, |x, y| Luma([(x + y) as u8]));
+        for thresh in 0..=255u8 {
+            for typ in [
+                ThresholdType::Binary,
+                ThresholdType::BinaryInv,
+                ThresholdType::Trunc,
+                ThresholdType::ToZero,
+                ThresholdType::ToZeroInv,
+            ] {
+                let out = threshold(&img, thresh, 200, typ);
+                for (i, (&s, &d)) in img.as_raw().iter().zip(out.as_raw()).enumerate() {
+                    assert_eq!(
+                        d,
+                        apply_threshold(s, thresh, 200, typ),
+                        "{typ:?} thresh {thresh} value {s} at x {}",
+                        i % w as usize
+                    );
+                }
+            }
+        }
     }
 
     #[test]
