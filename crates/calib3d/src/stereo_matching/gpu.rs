@@ -101,7 +101,7 @@ impl GpuStereoMatcher {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Stereo Pipeline Layout"),
-                bind_group_layouts: &[&params_bind_group_layout],
+                bind_group_layouts: &[Some(&params_bind_group_layout)],
                 immediate_size: 0,
             });
 
@@ -333,7 +333,9 @@ impl GpuStereoMatcher {
         map_result
             .map_err(|e| Error::AlgorithmError(format!("Stereo GPU buffer map failed: {:?}", e)))?;
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice.get_mapped_range().map_err(|e| {
+            Error::AlgorithmError(format!("Stereo GPU mapped range unavailable: {e}"))
+        })?;
         let mut disparity_data = Vec::with_capacity((width * height) as usize);
         let row_floats = width as usize;
         let padded_floats = (padded_bpr / 4) as usize;

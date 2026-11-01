@@ -248,7 +248,12 @@ pub fn farneback(
             mapped_at_creation: true,
         });
         {
-            flow_buffer.slice(..).get_mapped_range_mut().fill(0);
+            flow_buffer
+                .slice(..)
+                .get_mapped_range_mut()
+                .expect("buffer was created mapped")
+                .slice(..)
+                .fill(0);
         }
         flow_buffer.unmap();
 

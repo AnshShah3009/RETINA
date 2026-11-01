@@ -3,7 +3,7 @@
 //! Everything here was originally written against a CubeCL API that does not
 //! exist, and nothing in this file had ever been compiled or run. See the
 //! module header of [`crate::gpu_kernels::cubecl_backend`] for the porting
-//! notes; the short version is that a `ComputeClient<R>` *is* the context,
+//! notes; the short version is that a `Client` *is* the context,
 //! launches take `CubeCount`/`CubeDim`, tensors are [`TensorHandle`]s, kernels
 //! use `#[cube(launch_unchecked)]`, early exit is `terminate!()`, and
 //! `Tensor<T>` indexes a flat `usize` only.
@@ -38,7 +38,7 @@ use proto::{CUBE_DIM, cubes_for, f32_storage, u32_storage};
 // Context with Performance Settings
 // ============================================================================
 
-/// Runtime-generic wrapper around a [`ComputeClient`] plus the precision flag
+/// Wrapper around a runtime-erased [`Client`] plus the precision flag
 /// the original `OptimizedCubeCLContext` carried.
 ///
 /// The original pinned itself to `WgpuDevice`, which is both a backend-specific
@@ -46,18 +46,18 @@ use proto::{CUBE_DIM, cubes_for, f32_storage, u32_storage};
 /// Debug)]` on it could never have compiled. Both traits are kept; the device
 /// binding is not.
 #[derive(Clone)]
-pub struct OptimizedContext<R: Runtime> {
-    client: ComputeClient<R>,
+pub struct OptimizedContext {
+    client: Client,
     use_fp16: bool,
     tile_size: usize,
 }
 
-impl<R: Runtime> OptimizedContext<R> {
+impl OptimizedContext {
     /// Wrap an existing compute client.
     ///
     /// `use_fp16` is retained only so callers keep their configuration; see
     /// [`fp16_is_not_implemented`] — nothing in this module honours it yet.
-    pub fn new(client: ComputeClient<R>, use_fp16: bool) -> Self {
+    pub fn new(client: Client, use_fp16: bool) -> Self {
         Self {
             client,
             use_fp16,
@@ -66,16 +66,16 @@ impl<R: Runtime> OptimizedContext<R> {
     }
 
     /// Build a context from a device.
-    pub fn from_device(device: &R::Device, use_fp16: bool) -> Self {
+    pub fn from_device(device: &cubecl::Device, use_fp16: bool) -> Self {
         Self {
-            client: R::client(device),
+            client: device.client(),
             use_fp16,
             tile_size: 16,
         }
     }
 
     /// The underlying compute client.
-    pub fn client(&self) -> &ComputeClient<R> {
+    pub fn client(&self) -> &Client {
         &self.client
     }
 
@@ -92,26 +92,18 @@ impl<R: Runtime> OptimizedContext<R> {
 }
 
 /// Whether this device can do `Atomic<f32>` add.
-fn has_float_atomic_add<R: Runtime>(client: &ComputeClient<R>) -> bool {
+fn has_float_atomic_add(client: &Client) -> bool {
     client
         .properties()
-        .type_usage(StorageType::Atomic(ElemType::Float(
-            cubecl::ir::FloatKind::F32,
-        )))
-        .contains(cubecl::ir::features::TypeUsage::AtomicAdd)
+        .atomic_type_usage(Type::atomic(ElemType::Float(cubecl::ir::FloatKind::F32)))
+        .contains(cubecl::ir::features::AtomicUsage::Add)
 }
 
-fn has_uint_atomic_add<R: Runtime>(client: &ComputeClient<R>) -> bool {
+fn has_uint_atomic_add(client: &Client) -> bool {
     client
         .properties()
-        .type_usage(StorageType::Atomic(ElemType::UInt(
-            cubecl::ir::UIntKind::U32,
-        )))
-        .contains(cubecl::ir::features::TypeUsage::AtomicAdd)
-}
-
-fn launch_err(what: &str, e: impl std::fmt::Debug) -> crate::Error {
-    crate::Error::RuntimeError(format!("{what} launch failed: {e:?}"))
+        .atomic_type_usage(Type::atomic(ElemType::UInt(cubecl::ir::UIntKind::U32)))
+        .contains(cubecl::ir::features::AtomicUsage::Add)
 }
 
 // ============================================================================
@@ -235,54 +227,49 @@ mod fused {
 }
 
 /// `output = max(0, lhs + rhs)` — one pass over memory instead of two.
-pub fn add_relu<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    lhs: &TensorHandle<R>,
-    rhs: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
+pub fn add_relu(
+    ctx: &OptimizedContext,
+    lhs: &TensorHandle,
+    rhs: &TensorHandle,
+) -> crate::Result<TensorHandle> {
     fused_binary(ctx, lhs, rhs, FusedOp::AddRelu)
 }
 
 /// `output = sigmoid(lhs + rhs)` — one pass over memory instead of two.
-pub fn add_sigmoid<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    lhs: &TensorHandle<R>,
-    rhs: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
+pub fn add_sigmoid(
+    ctx: &OptimizedContext,
+    lhs: &TensorHandle,
+    rhs: &TensorHandle,
+) -> crate::Result<TensorHandle> {
     fused_binary(ctx, lhs, rhs, FusedOp::AddSigmoid)
 }
 
 /// Leaky ReLU with the conventional `alpha = 0.01`.
-pub fn leaky_relu<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
+pub fn leaky_relu(ctx: &OptimizedContext, input: &TensorHandle) -> crate::Result<TensorHandle> {
     fused_unary(ctx, input, 0)
 }
 
 /// ELU with the conventional `alpha = 1.0`.
-pub fn elu<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
+pub fn elu(ctx: &OptimizedContext, input: &TensorHandle) -> crate::Result<TensorHandle> {
     fused_unary(ctx, input, 1)
 }
 
-fn fused_binary<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    lhs: &TensorHandle<R>,
-    rhs: &TensorHandle<R>,
+fn fused_binary(
+    ctx: &OptimizedContext,
+    lhs: &TensorHandle,
+    rhs: &TensorHandle,
     op: FusedOp,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
-    if lhs.shape != rhs.shape {
+    if lhs.shape() != rhs.shape() {
         return Err(crate::Error::InvalidInput(format!(
             "shape mismatch: {:?} vs {:?}",
-            lhs.shape, rhs.shape
+            lhs.shape(),
+            rhs.shape()
         )));
     }
-    let n: usize = lhs.shape.iter().product();
-    let output = TensorHandle::empty(client, lhs.shape.clone(), f32_storage());
+    let n: usize = lhs.shape().iter().product();
+    let output = TensorHandle::empty(client, lhs.shape().clone(), f32_storage());
 
     let op_code = match op {
         FusedOp::AddRelu => 0u32,
@@ -294,39 +281,37 @@ fn fused_binary<R: Runtime>(
             client,
             cubes_for(n),
             CubeDim::new_1d(CUBE_DIM),
-            lhs.as_ref().as_tensor_arg(1),
-            rhs.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(n),
-            ScalarArg::new(op_code),
+            lhs.clone().into_arg(),
+            rhs.clone().into_arg(),
+            output.clone().into_arg(),
+            n,
+            op_code,
         )
-    }
-    .map_err(|e| launch_err("fused_binary", e))?;
+    };
 
     Ok(output)
 }
 
-fn fused_unary<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
+fn fused_unary(
+    ctx: &OptimizedContext,
+    input: &TensorHandle,
     op: u32,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
-    let n: usize = input.shape.iter().product();
-    let output = TensorHandle::empty(client, input.shape.clone(), f32_storage());
+    let n: usize = input.shape().iter().product();
+    let output = TensorHandle::empty(client, input.shape().clone(), f32_storage());
 
     unsafe {
         fused::fused_unary_kernel::launch_unchecked(
             client,
             cubes_for(n),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(n),
-            ScalarArg::new(op),
+            input.clone().into_arg(),
+            output.clone().into_arg(),
+            n,
+            op,
         )
-    }
-    .map_err(|e| launch_err("fused_unary", e))?;
+    };
 
     Ok(output)
 }
@@ -464,7 +449,7 @@ mod conv2d_opt {
         acc[2] = 0.0f32;
         acc[3] = 0.0f32;
 
-        let mut smem = SharedMemory::<f32>::new(CONV_SMEM_ELEMS);
+        let mut smem = Shared::<[f32]>::new_slice(CONV_SMEM_ELEMS);
 
         // Rows (and columns) of input between the first and last output.
         // The host keeps this strictly below CONV_SMEM_EDGE.
@@ -745,21 +730,18 @@ mod conv2d_opt {
     }
 }
 
-fn expect_rank4<R: Runtime>(
-    tensor: &TensorHandle<R>,
-    what: &str,
-) -> crate::Result<(usize, usize, usize, usize)> {
-    if tensor.shape.len() != 4 {
+fn expect_rank4(tensor: &TensorHandle, what: &str) -> crate::Result<(usize, usize, usize, usize)> {
+    if tensor.shape().len() != 4 {
         return Err(crate::Error::InvalidInput(format!(
             "{what} must be rank 4, got {:?}",
-            tensor.shape
+            tensor.shape()
         )));
     }
     Ok((
-        tensor.shape[0],
-        tensor.shape[1],
-        tensor.shape[2],
-        tensor.shape[3],
+        tensor.shape()[0],
+        tensor.shape()[1],
+        tensor.shape()[2],
+        tensor.shape()[3],
     ))
 }
 
@@ -771,13 +753,13 @@ fn expect_rank4<R: Runtime>(
 /// BUG(original): see [`conv2d_opt::conv2d_kernel`] — the original collapsed
 /// every output channel onto channel 0 and indexed the weight tensor with the
 /// batch index. Fixed here, and now numerically verified.
-pub fn conv2d<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
-    weights: &TensorHandle<R>,
+pub fn conv2d(
+    ctx: &OptimizedContext,
+    input: &TensorHandle,
+    weights: &TensorHandle,
     stride: usize,
     padding: usize,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let (batch, c_in, h, w) = expect_rank4(input, "conv2d input")?;
     let (c_out, wc_in, k, kw) = expect_rank4(weights, "conv2d weights")?;
@@ -811,16 +793,15 @@ pub fn conv2d<R: Runtime>(
             client,
             CubeCount::new_3d(cubes_x, cubes_y, cubes_z),
             CubeDim::new_2d(CONV_THREADS as u32, CONV_THREADS as u32),
-            input.as_ref().as_tensor_arg(1),
-            weights.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(k),
-            ScalarArg::new(stride),
-            ScalarArg::new(padding),
-            ScalarArg::new(tile),
+            input.clone().into_arg(),
+            weights.clone().into_arg(),
+            output.clone().into_arg(),
+            k,
+            stride,
+            padding,
+            tile,
         )
-    }
-    .map_err(|e| launch_err("conv2d", e))?;
+    };
 
     Ok(output)
 }
@@ -829,29 +810,29 @@ pub fn conv2d<R: Runtime>(
 ///
 /// * `input` — `[batch, channels, height, width]`
 /// * `weights` — `[channels, k, k]`
-pub fn depthwise_conv2d<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
-    weights: &TensorHandle<R>,
+pub fn depthwise_conv2d(
+    ctx: &OptimizedContext,
+    input: &TensorHandle,
+    weights: &TensorHandle,
     stride: usize,
     padding: usize,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let (batch, channels, h, w) = expect_rank4(input, "depthwise_conv2d input")?;
-    if weights.shape.len() != 3 {
+    if weights.shape().len() != 3 {
         return Err(crate::Error::InvalidInput(format!(
             "depthwise weights must be [channels, k, k], got {:?}",
-            weights.shape
+            weights.shape()
         )));
     }
-    if weights.shape[0] != channels {
+    if weights.shape()[0] != channels {
         return Err(crate::Error::InvalidInput(format!(
             "depthwise weights have {} channels, input has {channels}",
-            weights.shape[0]
+            weights.shape()[0]
         )));
     }
-    let k = weights.shape[1];
-    if weights.shape[2] != k {
+    let k = weights.shape()[1];
+    if weights.shape()[2] != k {
         return Err(crate::Error::InvalidInput(
             "depthwise_conv2d expects a square kernel".into(),
         ));
@@ -867,15 +848,14 @@ pub fn depthwise_conv2d<R: Runtime>(
             client,
             cubes_for(batch * channels * out_h * out_w),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            weights.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(k),
-            ScalarArg::new(stride),
-            ScalarArg::new(padding),
+            input.clone().into_arg(),
+            weights.clone().into_arg(),
+            output.clone().into_arg(),
+            k,
+            stride,
+            padding,
         )
-    }
-    .map_err(|e| launch_err("depthwise_conv2d", e))?;
+    };
 
     Ok(output)
 }
@@ -888,14 +868,14 @@ pub fn depthwise_conv2d<R: Runtime>(
 /// BUG(original): the original was not a transposed convolution at all; see
 /// [`conv2d_opt::transposed_conv2d_kernel`]. It is replaced with the textbook
 /// gather and numerically verified.
-pub fn transposed_conv2d<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
-    weights: &TensorHandle<R>,
+pub fn transposed_conv2d(
+    ctx: &OptimizedContext,
+    input: &TensorHandle,
+    weights: &TensorHandle,
     stride: usize,
     padding: usize,
     output_padding: usize,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let (batch, c_in, h, w) = expect_rank4(input, "transposed_conv2d input")?;
     let (wc_in, c_out, k, kw) = expect_rank4(weights, "transposed_conv2d weights")?;
@@ -930,14 +910,13 @@ pub fn transposed_conv2d<R: Runtime>(
             client,
             cubes_for(batch * c_out * out_h * out_w),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            weights.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(k),
-            ScalarArg::new(padding),
+            input.clone().into_arg(),
+            weights.clone().into_arg(),
+            output.clone().into_arg(),
+            k,
+            padding,
         )
-    }
-    .map_err(|e| launch_err("transposed_conv2d", e))?;
+    };
 
     Ok(output)
 }
@@ -1108,16 +1087,16 @@ mod reduction_opt {
 ///
 /// Returns a `[ceil(len / block_size)]` tensor of partial sums. This is **not**
 /// a full reduction — sum the result on the host, or feed it to another stage.
-pub fn partial_block_sum<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
+pub fn partial_block_sum(
+    ctx: &OptimizedContext,
+    input: &TensorHandle,
     block_size: usize,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     if block_size == 0 {
         return Err(crate::Error::InvalidInput("block_size must be > 0".into()));
     }
-    let len: usize = input.shape.iter().product();
+    let len: usize = input.shape().iter().product();
     if len == 0 {
         return Err(crate::Error::InvalidInput(
             "partial_block_sum input must be non-empty".into(),
@@ -1132,23 +1111,22 @@ pub fn partial_block_sum<R: Runtime>(
             client,
             cubes_for(blocks),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(len),
-            ScalarArg::new(block_size),
+            input.clone().into_arg(),
+            output.clone().into_arg(),
+            len,
+            block_size,
         )
-    }
-    .map_err(|e| launch_err("block_sum", e))?;
+    };
 
     Ok(output)
 }
 
 /// Allocate a zeroed `u32` tensor — `TensorHandle::empty` is uninitialised
 /// memory, which a histogram over `fetch_add` cannot tolerate.
-fn zeroed_u32<R: Runtime>(client: &ComputeClient<R>, len: usize) -> TensorHandle<R> {
+fn zeroed_u32(client: &Client, len: usize) -> TensorHandle {
     let bytes = vec![0u8; len * 4];
-    let alloc = client.create_tensor_from_slice(&bytes, &[len], 4);
-    TensorHandle::new_contiguous(vec![len], alloc.handle, u32_storage())
+    let handle = client.create_from_slice(&bytes);
+    TensorHandle::new_contiguous(vec![len], handle, u32_storage())
 }
 
 /// Histogram of `input` into `num_bins` equal-width bins over `[min, max]`.
@@ -1159,13 +1137,13 @@ fn zeroed_u32<R: Runtime>(client: &ComputeClient<R>, len: usize) -> TensorHandle
 ///
 /// Requires the device to support `Atomic<u32>` add; otherwise returns
 /// [`crate::Error::NotSupported`] rather than silently producing a racy result.
-pub fn histogram<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
+pub fn histogram(
+    ctx: &OptimizedContext,
+    input: &TensorHandle,
     num_bins: usize,
     min_val: f32,
     max_val: f32,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     if num_bins == 0 {
         return Err(crate::Error::InvalidInput("num_bins must be > 0".into()));
@@ -1175,7 +1153,7 @@ pub fn histogram<R: Runtime>(
             "max ({max_val}) must exceed min ({min_val})"
         )));
     }
-    let len: usize = input.shape.iter().product();
+    let len: usize = input.shape().iter().product();
     if len == 0 {
         return Err(crate::Error::InvalidInput(
             "histogram input must be non-empty".into(),
@@ -1194,15 +1172,14 @@ pub fn histogram<R: Runtime>(
             client,
             cubes_for(len),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            bins.as_ref().as_tensor_arg(1),
-            ScalarArg::new(len),
-            ScalarArg::new(num_bins),
-            ScalarArg::new(min_val),
-            ScalarArg::new(max_val),
+            input.clone().into_arg(),
+            bins.clone().into_arg(),
+            len,
+            num_bins,
+            min_val,
+            max_val,
         )
-    }
-    .map_err(|e| launch_err("histogram", e))?;
+    };
 
     Ok(bins)
 }
@@ -1216,12 +1193,9 @@ pub fn histogram<R: Runtime>(
 ///
 /// This is the reduction [`element_values_and_indices`] is not. That function
 /// copies the input and was the original `argmax_kernel`.
-pub fn argmax<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
-) -> crate::Result<(f32, u32)> {
+pub fn argmax(ctx: &OptimizedContext, input: &TensorHandle) -> crate::Result<(f32, u32)> {
     let client = ctx.client();
-    let len: usize = input.shape.iter().product();
+    let len: usize = input.shape().iter().product();
     if len == 0 {
         return Err(crate::Error::InvalidInput("input must be non-empty".into()));
     }
@@ -1235,14 +1209,13 @@ pub fn argmax<R: Runtime>(
             client,
             cubes_for(blocks),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            values.as_ref().as_tensor_arg(1),
-            indices.as_ref().as_tensor_arg(1),
-            ScalarArg::new(len),
-            ScalarArg::new(block_size),
+            input.clone().into_arg(),
+            values.clone().into_arg(),
+            indices.clone().into_arg(),
+            len,
+            block_size,
         )
-    }
-    .map_err(|e| launch_err("argmax", e))?;
+    };
 
     let vals = proto::tensor_to_slice(client, &values)?;
     let idxs = proto::tensor_to_slice_u32(client, &indices)?;
@@ -1262,12 +1235,12 @@ pub fn argmax<R: Runtime>(
 /// BUG(original): this function was called `argmax_kernel` and did exactly
 /// this. It is not argmax — [`argmax`] is. It is kept so the port stays
 /// complete; nothing should depend on it.
-pub fn element_values_and_indices<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    input: &TensorHandle<R>,
-) -> crate::Result<(TensorHandle<R>, TensorHandle<R>)> {
+pub fn element_values_and_indices(
+    ctx: &OptimizedContext,
+    input: &TensorHandle,
+) -> crate::Result<(TensorHandle, TensorHandle)> {
     let client = ctx.client();
-    let len: usize = input.shape.iter().product();
+    let len: usize = input.shape().iter().product();
     if len == 0 {
         return Err(crate::Error::InvalidInput("input must be non-empty".into()));
     }
@@ -1280,12 +1253,11 @@ pub fn element_values_and_indices<R: Runtime>(
             client,
             cubes_for(len),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            values.as_ref().as_tensor_arg(1),
-            indices.as_ref().as_tensor_arg(1),
+            input.clone().into_arg(),
+            values.clone().into_arg(),
+            indices.clone().into_arg(),
         )
-    }
-    .map_err(|e| launch_err("values_and_indices", e))?;
+    };
 
     Ok((values, indices))
 }
@@ -1490,18 +1462,18 @@ mod pointcloud_opt {
 /// BUG(original): the original "tiled" kernel collapsed to
 /// `output[i / block_size, i % block_size]`, writing almost nothing and
 /// overwriting the rest. See [`pointcloud_opt::pairwise_distance_kernel`].
-pub fn pairwise_squared_distance<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    points: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
+pub fn pairwise_squared_distance(
+    ctx: &OptimizedContext,
+    points: &TensorHandle,
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
-    if points.shape.len() != 2 || points.shape[1] != 3 {
+    if points.shape().len() != 2 || points.shape()[1] != 3 {
         return Err(crate::Error::InvalidInput(format!(
             "points must be [n, 3], got {:?}",
-            points.shape
+            points.shape()
         )));
     }
-    let num_points = points.shape[0];
+    let num_points = points.shape()[0];
     let total = num_points * num_points;
     if (total as u64) > (u32::MAX as u64) {
         return Err(crate::Error::InvalidInput(
@@ -1516,12 +1488,11 @@ pub fn pairwise_squared_distance<R: Runtime>(
             client,
             cubes_for(total),
             CubeDim::new_1d(CUBE_DIM),
-            points.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(num_points),
+            points.clone().into_arg(),
+            output.clone().into_arg(),
+            num_points,
         )
-    }
-    .map_err(|e| launch_err("pairwise_distance", e))?;
+    };
 
     Ok(output)
 }
@@ -1531,18 +1502,18 @@ pub fn pairwise_squared_distance<R: Runtime>(
 /// * `points` — `[num_points, 3]`
 /// * `num_bits` — 1..=10; the code is `3 * num_bits` bits wide
 /// * returns `[num_points]` u32
-pub fn morton_codes<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    points: &TensorHandle<R>,
+pub fn morton_codes(
+    ctx: &OptimizedContext,
+    points: &TensorHandle,
     min_bound: f32,
     max_bound: f32,
     num_bits: u32,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
-    if points.shape.len() != 2 || points.shape[1] != 3 {
+    if points.shape().len() != 2 || points.shape()[1] != 3 {
         return Err(crate::Error::InvalidInput(format!(
             "points must be [n, 3], got {:?}",
-            points.shape
+            points.shape()
         )));
     }
     if num_bits == 0 || num_bits > 10 {
@@ -1555,7 +1526,7 @@ pub fn morton_codes<R: Runtime>(
             "max_bound ({max_bound}) must exceed min_bound ({min_bound})"
         )));
     }
-    let num_points = points.shape[0];
+    let num_points = points.shape()[0];
 
     let codes = TensorHandle::empty(client, vec![num_points], u32_storage());
 
@@ -1564,15 +1535,14 @@ pub fn morton_codes<R: Runtime>(
             client,
             cubes_for(num_points),
             CubeDim::new_1d(CUBE_DIM),
-            points.as_ref().as_tensor_arg(1),
-            codes.as_ref().as_tensor_arg(1),
-            ScalarArg::new(num_points),
-            ScalarArg::new(min_bound),
-            ScalarArg::new(max_bound),
-            ScalarArg::new(num_bits),
+            points.clone().into_arg(),
+            codes.clone().into_arg(),
+            num_points,
+            min_bound,
+            max_bound,
+            num_bits,
         )
-    }
-    .map_err(|e| launch_err("morton_code", e))?;
+    };
 
     Ok(codes)
 }
@@ -1588,33 +1558,33 @@ pub fn morton_codes<R: Runtime>(
 /// BUG(original): see [`pointcloud_opt::knn_early_stop_kernel`] — the
 /// "early stop" never stopped anything and the insertion sort could not have
 /// expanded.
-pub fn knn<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    points: &TensorHandle<R>,
-    queries: &TensorHandle<R>,
+pub fn knn(
+    ctx: &OptimizedContext,
+    points: &TensorHandle,
+    queries: &TensorHandle,
     k: usize,
     max_search_radius: f32,
-) -> crate::Result<(TensorHandle<R>, TensorHandle<R>)> {
+) -> crate::Result<(TensorHandle, TensorHandle)> {
     let client = ctx.client();
     if k == 0 || k > 32 {
         return Err(crate::Error::InvalidInput(
             "knn requires 1 <= k <= 32".into(),
         ));
     }
-    if points.shape.len() != 2 || points.shape[1] != 3 {
+    if points.shape().len() != 2 || points.shape()[1] != 3 {
         return Err(crate::Error::InvalidInput(format!(
             "points must be [n, 3], got {:?}",
-            points.shape
+            points.shape()
         )));
     }
-    if queries.shape.len() != 2 || queries.shape[1] != 3 {
+    if queries.shape().len() != 2 || queries.shape()[1] != 3 {
         return Err(crate::Error::InvalidInput(format!(
             "queries must be [n, 3], got {:?}",
-            queries.shape
+            queries.shape()
         )));
     }
-    let num_points = points.shape[0];
-    let num_queries = queries.shape[0];
+    let num_points = points.shape()[0];
+    let num_queries = queries.shape()[0];
 
     let distances = TensorHandle::empty(client, vec![num_queries, k], f32_storage());
     let indices = TensorHandle::empty(client, vec![num_queries, k], u32_storage());
@@ -1624,17 +1594,16 @@ pub fn knn<R: Runtime>(
             client,
             cubes_for(num_queries),
             CubeDim::new_1d(CUBE_DIM),
-            points.as_ref().as_tensor_arg(1),
-            queries.as_ref().as_tensor_arg(1),
-            distances.as_ref().as_tensor_arg(1),
-            indices.as_ref().as_tensor_arg(1),
-            ScalarArg::new(k),
-            ScalarArg::new(num_points),
-            ScalarArg::new(num_queries),
-            ScalarArg::new(max_search_radius),
+            points.clone().into_arg(),
+            queries.clone().into_arg(),
+            distances.clone().into_arg(),
+            indices.clone().into_arg(),
+            k,
+            num_points,
+            num_queries,
+            max_search_radius,
         )
-    }
-    .map_err(|e| launch_err("knn", e))?;
+    };
 
     Ok((distances, indices))
 }
@@ -1787,19 +1756,20 @@ mod icp_opt {
 /// BUG(original): the original paired the residual against `target[idx]` rather
 /// than the target point it had actually found. See
 /// [`icp_opt::point_to_plane_icp_kernel`].
-pub fn point_to_plane_icp<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    source: &TensorHandle<R>,
-    target: &TensorHandle<R>,
-    target_normals: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
+pub fn point_to_plane_icp(
+    ctx: &OptimizedContext,
+    source: &TensorHandle,
+    target: &TensorHandle,
+    target_normals: &TensorHandle,
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let num_points = expect_points(source, "source")?;
     let num_target = expect_points(target, "target")?;
-    if target_normals.shape != target.shape {
+    if target_normals.shape() != target.shape() {
         return Err(crate::Error::InvalidInput(format!(
             "target_normals {:?} must match target {:?}",
-            target_normals.shape, target.shape
+            target_normals.shape(),
+            target.shape()
         )));
     }
     if num_target == 0 {
@@ -1815,15 +1785,14 @@ pub fn point_to_plane_icp<R: Runtime>(
             client,
             cubes_for(num_points),
             CubeDim::new_1d(CUBE_DIM),
-            source.as_ref().as_tensor_arg(1),
-            target.as_ref().as_tensor_arg(1),
-            target_normals.as_ref().as_tensor_arg(1),
-            residuals.as_ref().as_tensor_arg(1),
-            ScalarArg::new(num_points),
-            ScalarArg::new(num_target),
+            source.clone().into_arg(),
+            target.clone().into_arg(),
+            target_normals.clone().into_arg(),
+            residuals.clone().into_arg(),
+            num_points,
+            num_target,
         )
-    }
-    .map_err(|e| launch_err("point_to_plane_icp", e))?;
+    };
 
     Ok(residuals)
 }
@@ -1837,19 +1806,20 @@ pub fn point_to_plane_icp<R: Runtime>(
 /// was dishonest: it described work that was not done. This returns the rows
 /// themselves (no atomics needed) and documents that the reduction to `jt_j` /
 /// `jt_r` belongs on the host.
-pub fn icp_jacobian_rows<R: Runtime>(
-    ctx: &OptimizedContext<R>,
-    source: &TensorHandle<R>,
-    target: &TensorHandle<R>,
-    target_normals: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
+pub fn icp_jacobian_rows(
+    ctx: &OptimizedContext,
+    source: &TensorHandle,
+    target: &TensorHandle,
+    target_normals: &TensorHandle,
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let num_points = expect_points(source, "source")?;
     let num_target = expect_points(target, "target")?;
-    if target_normals.shape != target.shape {
+    if target_normals.shape() != target.shape() {
         return Err(crate::Error::InvalidInput(format!(
             "target_normals {:?} must match target {:?}",
-            target_normals.shape, target.shape
+            target_normals.shape(),
+            target.shape()
         )));
     }
     if num_target == 0 {
@@ -1865,15 +1835,14 @@ pub fn icp_jacobian_rows<R: Runtime>(
             client,
             cubes_for(num_points),
             CubeDim::new_1d(CUBE_DIM),
-            source.as_ref().as_tensor_arg(1),
-            target.as_ref().as_tensor_arg(1),
-            target_normals.as_ref().as_tensor_arg(1),
-            jacobian.as_ref().as_tensor_arg(1),
-            ScalarArg::new(num_points),
-            ScalarArg::new(num_target),
+            source.clone().into_arg(),
+            target.clone().into_arg(),
+            target_normals.clone().into_arg(),
+            jacobian.clone().into_arg(),
+            num_points,
+            num_target,
         )
-    }
-    .map_err(|e| launch_err("jacobian_row", e))?;
+    };
 
     Ok(jacobian)
 }
@@ -1884,10 +1853,10 @@ pub fn icp_jacobian_rows<R: Runtime>(
 /// Exists so the caller that used to get two silently-zero tensors gets the
 /// real thing. The device-side reduction that the original comment promised is
 /// not attempted — see [`icp_opt::jacobian_row_kernel`].
-pub fn accumulate_normal_equations<R: Runtime>(
-    client: &ComputeClient<R>,
-    jacobian: &TensorHandle<R>,
-    residuals: &TensorHandle<R>,
+pub fn accumulate_normal_equations(
+    client: &Client,
+    jacobian: &TensorHandle,
+    residuals: &TensorHandle,
 ) -> crate::Result<([f32; 36], [f32; 6])> {
     let j = proto::tensor_to_slice(client, jacobian)?;
     let r = proto::tensor_to_slice(client, residuals)?;
@@ -1913,14 +1882,14 @@ pub fn accumulate_normal_equations<R: Runtime>(
     Ok((jtj, jtr))
 }
 
-fn expect_points<R: Runtime>(t: &TensorHandle<R>, what: &str) -> crate::Result<usize> {
-    if t.shape.len() != 2 || t.shape[1] != 3 {
+fn expect_points(t: &TensorHandle, what: &str) -> crate::Result<usize> {
+    if t.shape().len() != 2 || t.shape()[1] != 3 {
         return Err(crate::Error::InvalidInput(format!(
             "{what} must be [n, 3], got {:?}",
-            t.shape
+            t.shape()
         )));
     }
-    Ok(t.shape[0])
+    Ok(t.shape()[0])
 }
 
 // ============================================================================
@@ -1982,7 +1951,7 @@ pub fn calculate_launch_config(num_elements: usize) -> (u32, u32, u32) {
 /// Used to decide whether a device-side normal-equation accumulation is even
 /// possible. Requires a concrete runtime to answer, so this is the
 /// runtime-generic form.
-pub fn has_float_atomic_add_on<R: Runtime>(client: &ComputeClient<R>) -> bool {
+pub fn has_float_atomic_add_on(client: &Client) -> bool {
     has_float_atomic_add(client)
 }
 

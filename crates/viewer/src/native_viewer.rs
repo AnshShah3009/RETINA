@@ -376,7 +376,7 @@ impl NativeViewer {
         // The rect is tested directly against the pointer position instead.
         let hover_pos = ctx.input(|i| i.pointer.hover_pos());
         let scroll = match hover_pos {
-            Some(pos) if response.rect.contains(pos) => ctx.input(|i| i.raw_scroll_delta.y),
+            Some(pos) if response.rect.contains(pos) => raw_wheel_delta_y(ctx),
             _ => 0.0,
         };
         if scroll != 0.0 {
@@ -598,9 +598,49 @@ impl NativeViewer {
     }
 }
 
+/// This frame's wheel movement along y, in points, before any smoothing.
+///
+/// egui 0.34 removed `InputState::raw_scroll_delta` and only exposes the
+/// smoothed delta, which spreads one wheel notch over several frames. The
+/// dolly wants the notch as it arrived, so this is the old field recomputed
+/// the way egui 0.33 did: every `MouseWheel` event this frame, converted to
+/// points, with the horizontal/vertical scroll modifiers applied.
+fn raw_wheel_delta_y(ctx: &egui::Context) -> f32 {
+    let options = ctx.options(|o| o.input_options.clone());
+    ctx.input(|i| {
+        let mut total = egui::Vec2::ZERO;
+        for event in &i.events {
+            if let egui::Event::MouseWheel {
+                unit,
+                delta,
+                modifiers,
+                ..
+            } = event
+            {
+                let mut delta = match unit {
+                    egui::MouseWheelUnit::Point => *delta,
+                    egui::MouseWheelUnit::Line => options.line_scroll_speed * *delta,
+                    egui::MouseWheelUnit::Page => i.viewport_rect().height() * *delta,
+                };
+                let is_horizontal = modifiers.matches_any(options.horizontal_scroll_modifier);
+                let is_vertical = modifiers.matches_any(options.vertical_scroll_modifier);
+                if is_horizontal && !is_vertical {
+                    delta = egui::vec2(delta.x + delta.y, 0.0);
+                }
+                if !is_horizontal && is_vertical {
+                    delta = egui::vec2(0.0, delta.x + delta.y);
+                }
+                total += delta;
+            }
+        }
+        total.y
+    })
+}
+
 impl eframe::App for NativeViewer {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &ui.ctx().clone();
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("Point cloud viewer");
 
             ui.horizontal_wrapped(|ui| {
@@ -871,6 +911,21 @@ pub use render::PointCloudRenderer;
 mod tests {
     use super::*;
 
+    /// One egui pass, with the frame's texture uploads discarded.
+    ///
+    /// egui 0.37 asserts (in debug builds) that a `FullOutput`'s texture
+    /// deltas are handed to a painter before it is dropped. These tests have
+    /// no painter, so the deltas are cleared on purpose.
+    fn run_frame(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        run_ui: impl FnMut(&mut egui::Ui),
+    ) -> egui::FullOutput {
+        let mut output = ctx.run_ui(input, run_ui);
+        output.textures_delta.clear();
+        output
+    }
+
     /// The camera basis puts the whole demo scene in front of the viewer.
     ///
     /// The shader reads depth as `-eye.z`, so a point at positive z is behind
@@ -940,12 +995,15 @@ mod tests {
     fn the_pipeline_actually_draws_pixels() {
         use eframe::wgpu::util::DeviceExt;
 
-        let instance = eframe::wgpu::Instance::new(&eframe::wgpu::InstanceDescriptor::default());
+        let instance = eframe::wgpu::Instance::new(
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
         let adapter = pollster::block_on(instance.request_adapter(
             &eframe::wgpu::RequestAdapterOptions {
                 power_preference: eframe::wgpu::PowerPreference::None,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             },
         ));
         // A GPU-less runner has no adapter at all; that is a skip, not a failure.
@@ -1135,8 +1193,8 @@ mod tests {
         });
         let pl = device.create_pipeline_layout(&eframe::wgpu::PipelineLayoutDescriptor {
             label: None,
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
         });
         // Rebuild the pipeline with the explicit layout, since it needs a bind group.
         let pipeline = device.create_render_pipeline(&eframe::wgpu::RenderPipelineDescriptor {
@@ -1158,7 +1216,7 @@ mod tests {
                 // instance leaves this demo scene with 62 lit pixels of 76,800
                 // (measured) against the 20,664 it draws with the correct mode,
                 // and the assertion below fails.
-                buffers: &[super::render::vertex_layout()],
+                buffers: &[Some(super::render::vertex_layout())],
             },
             primitive: eframe::wgpu::PrimitiveState::default(),
             depth_stencil: None,
@@ -1178,7 +1236,7 @@ mod tests {
                     write_mask: eframe::wgpu::ColorWrites::ALL,
                 })],
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -1213,6 +1271,7 @@ mod tests {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bg, &[]);
@@ -1266,7 +1325,9 @@ mod tests {
             .expect("the map callback should fire")
             .expect("readback");
 
-        let data = slice.get_mapped_range();
+        let data = slice
+            .get_mapped_range()
+            .expect("the buffer was just mapped for reading");
         let mut lit = 0u32;
         for y in 0..height {
             for x in 0..width {
@@ -1662,8 +1723,8 @@ mod tests {
         // test assert against a gesture that cannot exist.
 
         let mut viewer = headless_viewer();
-        ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_frame(&ctx, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading("Point cloud viewer");
                 ui.separator();
                 let (_, response) = ui.allocate_exact_size(
@@ -1671,27 +1732,28 @@ mod tests {
                     egui::Sense::click_and_drag(),
                 );
                 assert!(
-                    !viewer.handle_camera(&response, ctx),
+                    !viewer.handle_camera(&response, ui.ctx()),
                     "the frame the button goes down has no drag delta yet"
                 );
             });
         });
 
         // Second frame: the pointer moves while the button is held.
-        ctx.run(
+        let _ = run_frame(
+            &ctx,
             egui::RawInput {
                 screen_rect: screen,
                 events: vec![egui::Event::PointerMoved(from + egui::vec2(40.0, 20.0))],
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let (_, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 420.0),
                         egui::Sense::click_and_drag(),
                     );
                     assert!(
-                        viewer.handle_camera(&response, ctx),
+                        viewer.handle_camera(&response, ui.ctx()),
                         "a drag over the canvas must move the camera"
                     );
                 });
@@ -1721,13 +1783,13 @@ mod tests {
             ],
             ..Default::default()
         };
-        ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_frame(&ctx, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let (_, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 420.0),
                     egui::Sense::click_and_drag(),
                 );
-                viewer.handle_camera(&response, ctx);
+                viewer.handle_camera(&response, ui.ctx());
             });
         });
         assert!(
@@ -1764,20 +1826,22 @@ mod tests {
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
                     delta: egui::vec2(0.0, -50.0),
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
                     modifiers: egui::Modifiers::default(),
                 },
             ],
             ..Default::default()
         };
 
-        ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_frame(&ctx, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let (_, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 420.0),
                     egui::Sense::click_and_drag(),
                 );
                 assert!(
-                    viewer.handle_camera(&response, ctx),
+                    viewer.handle_camera(&response, ui.ctx()),
                     "a wheel over the canvas must dolly"
                 );
             });
@@ -1817,19 +1881,21 @@ mod tests {
                 egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Point,
                     delta: egui::vec2(0.0, 50.0),
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
                     modifiers: egui::Modifiers::default(),
                 },
             ],
             ..Default::default()
         };
 
-        ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_frame(&ctx, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let (_, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 420.0),
                     egui::Sense::click_and_drag(),
                 );
-                viewer.handle_camera(&response, ctx);
+                viewer.handle_camera(&response, ui.ctx());
             });
         });
 
@@ -1866,13 +1932,13 @@ mod tests {
             ],
             ..Default::default()
         };
-        let _ = ctx.run(press, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let _ = run_frame(&ctx, press, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 let (_, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), 420.0),
                     egui::Sense::click_and_drag(),
                 );
-                viewer.handle_camera(&response, ctx);
+                viewer.handle_camera(&response, ui.ctx());
             });
         });
 
@@ -1883,13 +1949,13 @@ mod tests {
                 events: vec![egui::Event::PointerMoved(pos)],
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let _ = run_frame(&ctx, input, |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
                     let (_, response) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), 420.0),
                         egui::Sense::click_and_drag(),
                     );
-                    viewer.handle_camera(&response, ctx);
+                    viewer.handle_camera(&response, ui.ctx());
                 });
             });
         }
@@ -2015,8 +2081,8 @@ mod tests {
             )),
             ..Default::default()
         };
-        let output = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = run_frame(&ctx, input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
                 ui.heading("Point cloud viewer");
                 ui.separator();
                 let (r, _) = ui.allocate_exact_size(

@@ -7,7 +7,7 @@
 //!
 //! Ported from an API that never existed; see the module header of
 //! [`crate::gpu_kernels::cubecl_backend`] for the full list of differences.
-//! The short version: a `ComputeClient<R>` is the context, launches take
+//! The short version: a `Client` is the context, launches take
 //! `CubeCount`/`CubeDim`, tensors are [`TensorHandle`]s, kernels use
 //! `#[cube(launch_unchecked)]`, early exit is `terminate!()`, and `Tensor<T>`
 //! indexes a flat `usize` only — so every kernel here derives its own
@@ -30,35 +30,31 @@ use proto::{CUBE_DIM, cubes_for, f32_storage};
 
 /// A device client plus the CUDA fallback flag the backend wrapper carries.
 ///
-/// This module is runtime-generic, so it does not define its own context type
-/// (CubeCL 0.9 has none). Callers with a `ComputeClient<R>` can pass one here
+/// The client is runtime-erased, so this module does not define its own
+/// context type (CubeCL has none). Callers with a `Client` can pass one here
 /// with [`AdvancedContext::new`].
 #[derive(Clone)]
-pub struct AdvancedContext<R: Runtime> {
-    client: ComputeClient<R>,
+pub struct AdvancedContext {
+    client: Client,
 }
 
-impl<R: Runtime> AdvancedContext<R> {
+impl AdvancedContext {
     /// Wrap an existing compute client.
-    pub fn new(client: ComputeClient<R>) -> Self {
+    pub fn new(client: Client) -> Self {
         Self { client }
     }
 
     /// Build a context from a device.
-    pub fn from_device(device: &R::Device) -> Self {
+    pub fn from_device(device: &cubecl::Device) -> Self {
         Self {
-            client: R::client(device),
+            client: device.client(),
         }
     }
 
     /// The underlying compute client.
-    pub fn client(&self) -> &ComputeClient<R> {
+    pub fn client(&self) -> &Client {
         &self.client
     }
-}
-
-fn launch_err(what: &str, e: impl std::fmt::Debug) -> crate::Error {
-    crate::Error::RuntimeError(format!("{what} launch failed: {e:?}"))
 }
 
 // ============================================================================
@@ -136,20 +132,20 @@ mod icp {
 /// checked that the transform was 4x4 or that the point clouds were
 /// `[n, 3]`, so a mismatched transform read out of bounds; those are checked
 /// here.
-pub fn icp_residuals<R: Runtime>(
-    ctx: &AdvancedContext<R>,
-    source: &TensorHandle<R>,
-    target: &TensorHandle<R>,
-    transform: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
+pub fn icp_residuals(
+    ctx: &AdvancedContext,
+    source: &TensorHandle,
+    target: &TensorHandle,
+    transform: &TensorHandle,
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
 
     let num_points = expect_points(source, "icp_residuals source")?;
     let num_target = expect_points(target, "icp_residuals target")?;
-    if transform.shape != [4, 4] {
+    if transform.shape()[..] != [4, 4] {
         return Err(crate::Error::InvalidInput(format!(
             "icp_residuals transform must be [4, 4], got {:?}",
-            transform.shape
+            transform.shape()
         )));
     }
     if num_target == 0 {
@@ -165,37 +161,36 @@ pub fn icp_residuals<R: Runtime>(
             client,
             cubes_for(num_points),
             CubeDim::new_1d(CUBE_DIM),
-            source.as_ref().as_tensor_arg(1),
-            target.as_ref().as_tensor_arg(1),
-            transform.as_ref().as_tensor_arg(1),
-            residuals.as_ref().as_tensor_arg(1),
-            ScalarArg::new(num_points as u32),
-            ScalarArg::new(num_target as u32),
+            source.clone().into_arg(),
+            target.clone().into_arg(),
+            transform.clone().into_arg(),
+            residuals.clone().into_arg(),
+            num_points as u32,
+            num_target as u32,
         )
-    }
-    .map_err(|e| launch_err("icp_residual", e))?;
+    };
 
     Ok(residuals)
 }
 
-fn expect_points<R: Runtime>(tensor: &TensorHandle<R>, what: &str) -> crate::Result<usize> {
-    if tensor.shape.len() != 2 || tensor.shape[1] != 3 {
+fn expect_points(tensor: &TensorHandle, what: &str) -> crate::Result<usize> {
+    if tensor.shape().len() != 2 || tensor.shape()[1] != 3 {
         return Err(crate::Error::InvalidInput(format!(
             "{what} must be [n, 3], got {:?}",
-            tensor.shape
+            tensor.shape()
         )));
     }
-    Ok(tensor.shape[0])
+    Ok(tensor.shape()[0])
 }
 
-fn expect_image<R: Runtime>(tensor: &TensorHandle<R>, what: &str) -> crate::Result<(usize, usize)> {
-    if tensor.shape.len() != 2 {
+fn expect_image(tensor: &TensorHandle, what: &str) -> crate::Result<(usize, usize)> {
+    if tensor.shape().len() != 2 {
         return Err(crate::Error::InvalidInput(format!(
             "{what} must be rank 2 [height, width], got {:?}",
-            tensor.shape
+            tensor.shape()
         )));
     }
-    let (h, w) = (tensor.shape[0], tensor.shape[1]);
+    let (h, w) = (tensor.shape()[0], tensor.shape()[1]);
     if w == 0 || h == 0 {
         return Err(crate::Error::InvalidInput(format!(
             "{what} must be non-empty, got {h}x{w}"
@@ -204,15 +199,12 @@ fn expect_image<R: Runtime>(tensor: &TensorHandle<R>, what: &str) -> crate::Resu
     Ok((h, w))
 }
 
-fn expect_same_shape<R: Runtime>(
-    a: &TensorHandle<R>,
-    b: &TensorHandle<R>,
-    what: &str,
-) -> crate::Result<()> {
-    if a.shape != b.shape {
+fn expect_same_shape(a: &TensorHandle, b: &TensorHandle, what: &str) -> crate::Result<()> {
+    if a.shape() != b.shape() {
         return Err(crate::Error::InvalidInput(format!(
             "{what}: shape mismatch {:?} vs {:?}",
-            a.shape, b.shape
+            a.shape(),
+            b.shape()
         )));
     }
     Ok(())
@@ -375,10 +367,10 @@ mod optical_flow {
 ///
 /// The gradient is a three-point central difference, not a Sobel stencil —
 /// see [`optical_flow::gradient_kernel`].
-pub fn compute_gradients<R: Runtime>(
-    ctx: &AdvancedContext<R>,
-    image: &TensorHandle<R>,
-) -> crate::Result<(TensorHandle<R>, TensorHandle<R>)> {
+pub fn compute_gradients(
+    ctx: &AdvancedContext,
+    image: &TensorHandle,
+) -> crate::Result<(TensorHandle, TensorHandle)> {
     let client = ctx.client();
     let (h, w) = expect_image(image, "compute_gradients image")?;
 
@@ -390,14 +382,13 @@ pub fn compute_gradients<R: Runtime>(
             client,
             cubes_for(h * w),
             CubeDim::new_1d(CUBE_DIM),
-            image.as_ref().as_tensor_arg(1),
-            grad_x.as_ref().as_tensor_arg(1),
-            grad_y.as_ref().as_tensor_arg(1),
-            ScalarArg::new(w as u32),
-            ScalarArg::new(h as u32),
+            image.clone().into_arg(),
+            grad_x.clone().into_arg(),
+            grad_y.clone().into_arg(),
+            w as u32,
+            h as u32,
         )
-    }
-    .map_err(|e| launch_err("gradient", e))?;
+    };
 
     Ok((grad_x, grad_y))
 }
@@ -409,12 +400,12 @@ pub fn compute_gradients<R: Runtime>(
 ///   left at zero flow
 ///
 /// Returns `[height, width, 2]` flow (dx, dy per pixel).
-pub fn lucas_kanade_flow<R: Runtime>(
-    ctx: &AdvancedContext<R>,
-    prev: &TensorHandle<R>,
-    next: &TensorHandle<R>,
+pub fn lucas_kanade_flow(
+    ctx: &AdvancedContext,
+    prev: &TensorHandle,
+    next: &TensorHandle,
     window_size: usize,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
 
     let (h, w) = expect_image(prev, "lucas_kanade_flow prev")?;
@@ -439,17 +430,16 @@ pub fn lucas_kanade_flow<R: Runtime>(
             client,
             cubes_for(h * w),
             CubeDim::new_1d(CUBE_DIM),
-            prev.as_ref().as_tensor_arg(1),
-            next.as_ref().as_tensor_arg(1),
-            grad_x.as_ref().as_tensor_arg(1),
-            grad_y.as_ref().as_tensor_arg(1),
-            flow.as_ref().as_tensor_arg(1),
-            ScalarArg::new(w as u32),
-            ScalarArg::new(h as u32),
-            ScalarArg::new(window_size as u32),
+            prev.clone().into_arg(),
+            next.clone().into_arg(),
+            grad_x.clone().into_arg(),
+            grad_y.clone().into_arg(),
+            flow.clone().into_arg(),
+            w as u32,
+            h as u32,
+            window_size as u32,
         )
-    }
-    .map_err(|e| launch_err("lk_flow", e))?;
+    };
 
     Ok(flow)
 }
@@ -656,12 +646,12 @@ mod normals {
 /// BUG(original): see [`normals::depth_to_normal_kernel`] — the normals point
 /// into the scene (`t x b` with `+x`/`+y` tangents), which is the ICP
 /// convention but the opposite of the OpenGL/viewer convention.
-pub fn depth_to_normals<R: Runtime>(
-    ctx: &AdvancedContext<R>,
-    depth: &TensorHandle<R>,
+pub fn depth_to_normals(
+    ctx: &AdvancedContext,
+    depth: &TensorHandle,
     fx: f32,
     fy: f32,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let (h, w) = expect_image(depth, "depth_to_normals depth")?;
     if fx == 0.0 || fy == 0.0 {
@@ -677,15 +667,14 @@ pub fn depth_to_normals<R: Runtime>(
             client,
             cubes_for(h * w),
             CubeDim::new_1d(CUBE_DIM),
-            depth.as_ref().as_tensor_arg(1),
-            normals.as_ref().as_tensor_arg(1),
-            ScalarArg::new(w as u32),
-            ScalarArg::new(h as u32),
-            ScalarArg::new(fx),
-            ScalarArg::new(fy),
+            depth.clone().into_arg(),
+            normals.clone().into_arg(),
+            w as u32,
+            h as u32,
+            fx,
+            fy,
         )
-    }
-    .map_err(|e| launch_err("depth_to_normal", e))?;
+    };
 
     Ok(normals)
 }
@@ -813,10 +802,7 @@ mod image {
 /// * `input` — `[height, width]`
 ///
 /// Returns `[height, width]`. Borders within 2 pixels are copied through.
-pub fn gaussian_blur<R: Runtime>(
-    ctx: &AdvancedContext<R>,
-    input: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
+pub fn gaussian_blur(ctx: &AdvancedContext, input: &TensorHandle) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let (h, w) = expect_image(input, "gaussian_blur input")?;
 
@@ -827,13 +813,12 @@ pub fn gaussian_blur<R: Runtime>(
             client,
             cubes_for(h * w),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(w as u32),
-            ScalarArg::new(h as u32),
+            input.clone().into_arg(),
+            output.clone().into_arg(),
+            w as u32,
+            h as u32,
         )
-    }
-    .map_err(|e| launch_err("gaussian_blur", e))?;
+    };
 
     Ok(output)
 }
@@ -841,12 +826,12 @@ pub fn gaussian_blur<R: Runtime>(
 /// 7x7 bilateral filter.
 ///
 /// * `sigma_space`, `sigma_range` must be non-zero; they are divisors.
-pub fn bilateral_filter<R: Runtime>(
-    ctx: &AdvancedContext<R>,
-    input: &TensorHandle<R>,
+pub fn bilateral_filter(
+    ctx: &AdvancedContext,
+    input: &TensorHandle,
     sigma_space: f32,
     sigma_range: f32,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let (h, w) = expect_image(input, "bilateral_filter input")?;
     if sigma_space == 0.0 || sigma_range == 0.0 {
@@ -862,15 +847,14 @@ pub fn bilateral_filter<R: Runtime>(
             client,
             cubes_for(h * w),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(w as u32),
-            ScalarArg::new(h as u32),
-            ScalarArg::new(sigma_space),
-            ScalarArg::new(sigma_range),
+            input.clone().into_arg(),
+            output.clone().into_arg(),
+            w as u32,
+            h as u32,
+            sigma_space,
+            sigma_range,
         )
-    }
-    .map_err(|e| launch_err("bilateral_filter", e))?;
+    };
 
     Ok(output)
 }
@@ -1027,12 +1011,12 @@ fn pooled_shape(
 ///
 /// * `input` — `[height, width]`
 /// * returns `[out_h, out_w]` with `out = (in - pool_size) / stride + 1`
-pub fn max_pool2d<R: Runtime>(
-    ctx: &AdvancedContext<R>,
-    input: &TensorHandle<R>,
+pub fn max_pool2d(
+    ctx: &AdvancedContext,
+    input: &TensorHandle,
     pool_size: usize,
     stride: usize,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let (h, w) = expect_image(input, "max_pool2d input")?;
     let (out_h, out_w) = pooled_shape(w, h, pool_size, stride)?;
@@ -1044,15 +1028,14 @@ pub fn max_pool2d<R: Runtime>(
             client,
             cubes_for(out_w * out_h),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(w),
-            ScalarArg::new(h),
-            ScalarArg::new(pool_size),
-            ScalarArg::new(stride),
+            input.clone().into_arg(),
+            output.clone().into_arg(),
+            w,
+            h,
+            pool_size,
+            stride,
         )
-    }
-    .map_err(|e| launch_err("max_pool2d", e))?;
+    };
 
     Ok(output)
 }
@@ -1061,12 +1044,12 @@ pub fn max_pool2d<R: Runtime>(
 ///
 /// * `input` — `[height, width]`
 /// * returns `[out_h, out_w]` with `out = (in - pool_size) / stride + 1`
-pub fn avg_pool2d<R: Runtime>(
-    ctx: &AdvancedContext<R>,
-    input: &TensorHandle<R>,
+pub fn avg_pool2d(
+    ctx: &AdvancedContext,
+    input: &TensorHandle,
     pool_size: usize,
     stride: usize,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let client = ctx.client();
     let (h, w) = expect_image(input, "avg_pool2d input")?;
     let (out_h, out_w) = pooled_shape(w, h, pool_size, stride)?;
@@ -1078,25 +1061,24 @@ pub fn avg_pool2d<R: Runtime>(
             client,
             cubes_for(out_w * out_h),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(w),
-            ScalarArg::new(h),
-            ScalarArg::new(pool_size),
-            ScalarArg::new(stride),
+            input.clone().into_arg(),
+            output.clone().into_arg(),
+            w,
+            h,
+            pool_size,
+            stride,
         )
-    }
-    .map_err(|e| launch_err("avg_pool2d", e))?;
+    };
 
     Ok(output)
 }
 
 /// Upload a `f32` slice as a `[height, width]` image tensor.
-pub fn image_from_slice<R: Runtime>(
-    ctx: &AdvancedContext<R>,
+pub fn image_from_slice(
+    ctx: &AdvancedContext,
     data: &[f32],
     height: usize,
     width: usize,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     proto::tensor_from_slice(ctx.client(), data, vec![height, width])
 }

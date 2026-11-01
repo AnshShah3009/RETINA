@@ -329,11 +329,11 @@ impl GpuContext {
 
     pub async fn new_with_policy(preference: PowerPreference) -> crate::Result<Self> {
         // Create instance with conservative flags to avoid driver panics on integrated GPUs
-        let instance = Instance::new(&wgpu::InstanceDescriptor {
+        let instance = Instance::new(wgpu::InstanceDescriptor {
             backends: Backends::all(),
             flags: wgpu::InstanceFlags::default()
                 .difference(wgpu::InstanceFlags::DEBUG | wgpu::InstanceFlags::VALIDATION),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         // Request adapter
@@ -342,6 +342,7 @@ impl GpuContext {
                 power_preference: preference,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|e| {
@@ -364,7 +365,7 @@ impl GpuContext {
         // default would otherwise be sufficient.
         let adapter_limits = adapter.limits();
         let limits = wgpu::Limits {
-            max_storage_buffer_binding_size: (256u32 * 1024 * 1024)
+            max_storage_buffer_binding_size: (256u64 * 1024 * 1024)
                 .min(adapter_limits.max_storage_buffer_binding_size),
             max_buffer_size: (256u64 * 1024 * 1024).min(adapter_limits.max_buffer_size),
             ..wgpu::Limits::downlevel_defaults()
@@ -405,9 +406,9 @@ impl GpuContext {
 
     /// Check if a GPU is available asynchronously.
     pub async fn is_available_async() -> bool {
-        let instance = Instance::new(&wgpu::InstanceDescriptor {
+        let instance = Instance::new(wgpu::InstanceDescriptor {
             backends: Backends::all(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         !instance
             .enumerate_adapters(Backends::all())
@@ -417,9 +418,9 @@ impl GpuContext {
 
     /// Enumerate all available adapters.
     pub async fn enumerate_adapters() -> Vec<wgpu::Adapter> {
-        let instance = Instance::new(&wgpu::InstanceDescriptor {
+        let instance = Instance::new(wgpu::InstanceDescriptor {
             backends: Backends::all(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         instance.enumerate_adapters(Backends::all()).await
     }

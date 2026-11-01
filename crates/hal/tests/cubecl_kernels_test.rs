@@ -25,31 +25,29 @@
 
 use cubecl::prelude::*;
 use cubecl::std::tensor::TensorHandle;
-use cubecl_wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_wgpu::WgpuDevice;
 
 use cv_hal::gpu_kernels::cubecl_advanced as adv;
 use cv_hal::gpu_kernels::cubecl_backend as be;
 use cv_hal::gpu_kernels::cubecl_optimized as opt;
 use cv_hal::gpu_kernels::cubecl_proto as proto;
 
-type Rt = WgpuRuntime;
-
 /// A live compute client, or a loud failure.
 ///
 /// There is no `skip` here on purpose: a test suite that quietly turns itself
 /// off on the CI machine is exactly the failure mode this crate is trying to
 /// avoid. If the client cannot be built the test fails and says why.
-fn client() -> ComputeClient<Rt> {
-    <Rt as Runtime>::client(&WgpuDevice::DefaultDevice)
+fn client() -> Client {
+    cubecl::Device::Wgpu(WgpuDevice::default()).client()
 }
 
-fn ctx_be(c: &ComputeClient<Rt>) -> be::CubeCLContext<Rt> {
+fn ctx_be(c: &Client) -> be::CubeCLContext {
     be::CubeCLContext::new(c.clone())
 }
-fn ctx_adv(c: &ComputeClient<Rt>) -> adv::AdvancedContext<Rt> {
+fn ctx_adv(c: &Client) -> adv::AdvancedContext {
     adv::AdvancedContext::new(c.clone())
 }
-fn ctx_opt(c: &ComputeClient<Rt>) -> opt::OptimizedContext<Rt> {
+fn ctx_opt(c: &Client) -> opt::OptimizedContext {
     opt::OptimizedContext::new(c.clone(), false)
 }
 
@@ -57,23 +55,23 @@ fn ctx_opt(c: &ComputeClient<Rt>) -> opt::OptimizedContext<Rt> {
 // Small helpers: upload, download, compare, deterministic data
 // ---------------------------------------------------------------------------
 
-fn up(c: &ComputeClient<Rt>, data: &[f32], shape: Vec<usize>) -> TensorHandle<Rt> {
+fn up(c: &Client, data: &[f32], shape: Vec<usize>) -> TensorHandle {
     proto::tensor_from_slice(c, data, shape).expect("upload")
 }
-fn up_u32(c: &ComputeClient<Rt>, data: &[u32], shape: Vec<usize>) -> TensorHandle<Rt> {
+fn up_u32(c: &Client, data: &[u32], shape: Vec<usize>) -> TensorHandle {
     let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
     let handle = c.create_from_slice(&bytes);
     TensorHandle::new_contiguous(shape, handle, proto::u32_storage())
 }
-fn upz(c: &ComputeClient<Rt>, shape: Vec<usize>) -> TensorHandle<Rt> {
+fn upz(c: &Client, shape: Vec<usize>) -> TensorHandle {
     let bytes: Vec<u8> = vec![0u8; shape.iter().product::<usize>() * 4];
     let handle = c.create_from_slice(&bytes);
     TensorHandle::new_contiguous(shape, handle, proto::f32_storage())
 }
-fn down(c: &ComputeClient<Rt>, t: &TensorHandle<Rt>) -> Vec<f32> {
+fn down(c: &Client, t: &TensorHandle) -> Vec<f32> {
     proto::tensor_to_slice(c, t).expect("readback")
 }
-fn down_u32(c: &ComputeClient<Rt>, t: &TensorHandle<Rt>) -> Vec<u32> {
+fn down_u32(c: &Client, t: &TensorHandle) -> Vec<u32> {
     proto::tensor_to_slice_u32(c, t).expect("readback")
 }
 
@@ -779,7 +777,7 @@ fn backend_knn_matches_cpu() {
     }
 }
 
-fn down_val<R: Runtime>(c: &ComputeClient<R>, t: &TensorHandle<R>, i: usize) -> f32 {
+fn down_val(c: &Client, t: &TensorHandle, i: usize) -> f32 {
     proto::tensor_to_slice(c, t).expect("readback")[i]
 }
 
@@ -1658,7 +1656,7 @@ fn upload_download_roundtrip_is_bit_exact() {
     let c = client();
     let a = data(1024, 401);
     let t = up(&c, &a, vec![32, 32]);
-    assert_eq!(t.shape, vec![32, 32]);
+    assert_eq!(t.shape()[..], [32, 32]);
     let got = down(&c, &t);
     assert_close("roundtrip", &got, &a, 0.0);
 }

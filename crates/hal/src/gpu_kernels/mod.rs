@@ -549,7 +549,9 @@ pub mod buffer_utils {
         map_result
             .map_err(|e| crate::Error::DeviceError(format!("Buffer mapping failed: {:?}", e)))?;
 
-        let data = slice.get_mapped_range();
+        let data = slice.get_mapped_range().map_err(|e| {
+            crate::Error::DeviceError(format!("Readback mapped range unavailable: {e}"))
+        })?;
         let result_full: Vec<T> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         staging_buffer.unmap();
