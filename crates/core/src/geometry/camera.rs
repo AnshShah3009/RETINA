@@ -53,12 +53,24 @@ impl PinholeModel {
         ))
     }
 
-    /// Unproject a pixel at `depth`, or an error when the focal length cannot
-    /// define a ray.
+    /// Unproject a pixel at `depth`, or an error when the pixel has no ray.
     ///
     /// A zero or non-finite focal length used to return the optical axis
     /// `(0, 0, depth)`, which is what unprojecting the principal point looks
     /// like. `fx = 500` is unchanged.
+    ///
+    /// A pixel the distortion model cannot invert is an error too. This used
+    /// `Distortion::remove`, which reports non-convergence by returning its
+    /// input unchanged, so the *distorted* normalised coordinate was passed off
+    /// as the corrected one. Measured with `k1 = -0.5` (an ordinary wide-angle
+    /// barrel term, whose forward map `r -> r(1 - 0.5 r^2)` turns over at
+    /// `r = 1/sqrt(3)`), pixel `(620, 240)` at `fx = 500, cx = 320` came back as
+    /// the ray `(0.6, 0, 1)` - finite, plausible, and wrong: projecting it
+    /// forward gives `0.492`, not the `0.6` it was unprojected from.
+    /// `cv-calib3d::undistort_points` rejects the same pixel, same intrinsics,
+    /// same coefficients, so the two crates disagreed on one input. Preferring
+    /// `remove_checked` here makes both say "no inverse" rather than one saying
+    /// so and the other inventing an answer.
     pub fn try_unproject(&self, pixel: &Point2<f64>, depth: f64) -> crate::Result<Point3<f64>> {
         let fx = self.intrinsics.fx;
         let fy = self.intrinsics.fy;
@@ -69,7 +81,13 @@ impl PinholeModel {
         }
         let x = (pixel.x - self.intrinsics.cx) / fx;
         let y = (pixel.y - self.intrinsics.cy) / fy;
-        let (xu, yu) = self.distortion.remove(x, y);
+        let (xu, yu) = self.distortion.remove_checked(x, y).ok_or_else(|| {
+            crate::Error::InvalidInput(format!(
+                "cannot unproject pixel ({}, {}): the distortion model has no inverse at \
+                 normalised ({x}, {y})",
+                pixel.x, pixel.y
+            ))
+        })?;
         Ok(Point3::new(xu * depth, yu * depth, depth))
     }
 }
@@ -128,7 +146,8 @@ impl PinholeModelF32 {
         ))
     }
 
-    /// `f32` twin of [`PinholeModel::try_unproject`].
+    /// `f32` twin of [`PinholeModel::try_unproject`], including the refusal to
+    /// invent a ray for a pixel the distortion model cannot invert.
     pub fn try_unproject(&self, pixel: &Point2<f32>, depth: f32) -> crate::Result<Point3<f32>> {
         let fx = self.intrinsics.fx;
         let fy = self.intrinsics.fy;
@@ -139,7 +158,13 @@ impl PinholeModelF32 {
         }
         let x = (pixel.x - self.intrinsics.cx) / fx;
         let y = (pixel.y - self.intrinsics.cy) / fy;
-        let (xu, yu) = self.distortion.remove(x, y);
+        let (xu, yu) = self.distortion.remove_checked(x, y).ok_or_else(|| {
+            crate::Error::InvalidInput(format!(
+                "cannot unproject pixel ({}, {}): the distortion model has no inverse at \
+                 normalised ({x}, {y})",
+                pixel.x, pixel.y
+            ))
+        })?;
         Ok(Point3::new(xu * depth, yu * depth, depth))
     }
 }
@@ -454,6 +479,33 @@ mod projection_guard_tests {
         assert!((ray.x - 2.72).abs() < 1e-12, "x {}", ray.x);
         assert!((ray.y - 2.24).abs() < 1e-12, "y {}", ray.y);
         assert!((ray.z - 2.0).abs() < 1e-12, "z {}", ray.z);
+    }
+
+    /// A pixel whose distortion model has no inverse must not come back as a
+    /// ray. `remove` reports that by returning its input, so the old code built
+    /// the ray from the *distorted* coordinate - a finite, plausible answer
+    /// that does not even reproject to the pixel it came from.
+    #[test]
+    fn pixel_with_no_distortion_inverse_is_not_a_ray() {
+        // r -> r(1 - 0.5 r^2) peaks at r = 1/sqrt(3) with value 0.5443, so a
+        // distorted radius of 0.6 has no preimage.
+        let model = PinholeModel::new(
+            CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480),
+            Distortion::new(-0.5, 0.0, 0.0, 0.0, 0.0),
+        );
+        // (620 - 320) / 500 = 0.6
+        let pixel = Point2::new(620.0, 240.0);
+        let ray = model.try_unproject(&pixel, 1.0);
+        assert!(
+            ray.is_err(),
+            "a pixel with no distortion inverse unprojected to {ray:?}"
+        );
+        // The old fallback ray does not reproject to the pixel it came from.
+        assert!((model.distortion.apply(0.6, 0.0).0 - 0.6).abs() > 0.1);
+
+        // A reachable radius still unprojects, so this is not a blanket refusal.
+        let ok = model.try_unproject(&Point2::new(520.0, 240.0), 1.0);
+        assert!(ok.is_ok(), "reachable pixel was refused: {ok:?}");
     }
 
     #[test]
