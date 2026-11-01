@@ -105,13 +105,27 @@ pub fn convex_hull(polygon: &Polygon<f64>) -> Polygon<f64> {
 
 /// Simplify a polygon using Ramer-Douglas-Peucker algorithm.
 pub fn simplify(polygon: &Polygon<f64>, epsilon: f64) -> Polygon<f64> {
-    polygon.simplify(&epsilon)
+    polygon.simplify(epsilon)
 }
 
 /// Buffer a polygon by a given distance.
-/// Returns a MultiPolygon as buffering can create disjoint shapes or holes.
+///
+/// Returns a [`geo::MultiPolygon`] because a buffer can split a polygon or
+/// close its holes. Positive `distance` grows the polygon, negative shrinks it;
+/// holes are offset the opposite way, and self-intersections from shrinking a
+/// concave shape are resolved. Corners are mitered (sharp, as the straight
+/// skeleton `geo-buffer` produced), clipped only below a 0.01 rad corner.
+///
+/// This used `geo-buffer`, which pins `geo` 0.24; that old `geo` pulls
+/// `rstar` 0.10 and `heapless` 0.7, whose `atomic-polyfill` dependency is
+/// unmaintained. `geo` 0.33's own `Buffer` (via `i_overlay`) replaces it.
 pub fn buffer(polygon: &Polygon<f64>, distance: f64) -> geo::MultiPolygon<f64> {
-    geo_buffer::buffer_polygon(polygon, distance)
+    use geo::Buffer;
+    use geo::algorithm::buffer::{BufferStyle, LineJoin};
+    if distance == 0.0 {
+        return polygon.clone().into();
+    }
+    polygon.buffer_with_style(BufferStyle::new(distance).line_join(LineJoin::Miter(0.01)))
 }
 
 /// Vectorized IoU computation using ndarray.
@@ -358,6 +372,60 @@ mod tests {
         let area = buffered.unsigned_area();
         assert!(area > 100.0);
         assert!(area < 144.0 + 1.0); // Simple check
+    }
+
+    /// Mitered buffer of a square is exactly the larger square, whichever way
+    /// the ring winds; a hole shrinks as the polygon grows; shrinking a
+    /// concave L-shape yields a valid polygon of the expected area.
+    #[test]
+    fn test_buffer_shape_properties() {
+        use geo::{Area, Validation};
+        let square = make_square(0.0, 0.0, 10.0);
+        assert!((buffer(&square, 1.0).unsigned_area() - 144.0).abs() < 1e-6);
+        assert!((buffer(&square, -1.0).unsigned_area() - 64.0).abs() < 1e-6);
+
+        let mut cw = square.clone();
+        cw.exterior_mut(|ring| ring.0.reverse());
+        assert!(
+            (buffer(&cw, 1.0).unsigned_area() - 144.0).abs() < 1e-6,
+            "CW ring must grow"
+        );
+
+        let with_hole = Polygon::new(
+            square.exterior().clone(),
+            vec![geo::LineString::from(vec![
+                (4.0, 4.0),
+                (6.0, 4.0),
+                (6.0, 6.0),
+                (4.0, 6.0),
+                (4.0, 4.0),
+            ])],
+        );
+        // 12x12 outer minus a hole that shrank from 2x2 to 0: it closes.
+        assert!((buffer(&with_hole, 1.0).unsigned_area() - 144.0).abs() < 1e-6);
+        // 8x8 inner minus the hole grown to 4x4.
+        assert!((buffer(&with_hole, -1.0).unsigned_area() - 48.0).abs() < 1e-6);
+
+        let l_shape = Polygon::new(
+            geo::LineString::from(vec![
+                (0.0, 0.0),
+                (10.0, 0.0),
+                (10.0, 4.0),
+                (4.0, 4.0),
+                (4.0, 10.0),
+                (0.0, 10.0),
+                (0.0, 0.0),
+            ]),
+            vec![],
+        );
+        let shrunk = buffer(&l_shape, -1.0);
+        assert!(shrunk.is_valid());
+        // Arms 2 wide: 8x2 + 2x6 = 28.
+        assert!(
+            (shrunk.unsigned_area() - 28.0).abs() < 1e-6,
+            "{}",
+            shrunk.unsigned_area()
+        );
     }
 
     #[test]

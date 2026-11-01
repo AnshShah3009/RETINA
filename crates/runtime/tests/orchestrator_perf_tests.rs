@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 // Global lock to prevent modes from interfering across tests
-static PERF_TEST_LOCK: Mutex<()> = parking_lot::const_mutex(());
+static PERF_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn perf_test_orchestrator_throughput() {
