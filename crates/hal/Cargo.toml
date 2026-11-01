@@ -33,6 +33,9 @@ tokio = { workspace = true, features = ["sync"] }
 rstar = { workspace = true }
 hashbrown = { workspace = true }
 tracing = { workspace = true }
+cubecl = { version = "0.9.0", optional = true, features = ["wgpu"] }
+cubecl-wgpu = { version = "0.9.0", optional = true }
+cubecl-cuda = { version = "0.9.0", optional = true }
 
 [features]
 default = ["full-precision"]
@@ -43,6 +46,8 @@ tensorrt = []
 directml = []
 webgpu = []
 mlx = []
+cubecl = ["dep:cubecl", "dep:cubecl-wgpu"]
+wgpu_backend = []
 full-precision = ["cv-core/full-precision"]
 half-precision = ["cv-core/half-precision"]
 all-precision = ["full-precision", "half-precision"]
