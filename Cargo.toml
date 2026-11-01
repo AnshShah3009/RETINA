@@ -116,7 +116,7 @@ members = [
 rayon = "1.12"
 approx = "0.5.1"
 half = "2.7.1"
-nalgebra = "0.33.2"
+nalgebra = "0.35.0"
 image = { version = "0.25.10", default-features = false, features = ["rayon", "png", "jpeg", "gif", "webp", "tiff", "bmp", "ico", "qoi", "pnm", "tga", "hdr"] }
 wgpu = "28.0.0"
 bytemuck = { version = "1.25.2", features = ["derive"] }
