@@ -16,8 +16,8 @@ wgpu = { workspace = true }
 pollster = { workspace = true }
 futures = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
-ndarray-npy = "0.8"
-ndarray = "0.15"
+ndarray-npy = { version = "0.10", default-features = false }
+ndarray = { workspace = true }
 
 [dependencies]
 cv-core = { workspace = true }

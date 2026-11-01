@@ -6,7 +6,7 @@ use cv_videoio::{VideoCapture, open_video};
 use pyo3::prelude::*;
 use std::sync::Arc;
 
-#[pyclass]
+#[pyclass(unsendable)]
 pub struct PyVideoCapture {
     inner: Box<dyn VideoCapture>,
 }

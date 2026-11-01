@@ -20,7 +20,7 @@ fn inpaint_telea(
     // Release the GIL across the compute-heavy section so other Python
     // threads keep running.
     let result = py
-        .allow_threads(|| cv_photo::inpaint_telea(&img_tensor, &mask_tensor, radius))
+        .detach(|| cv_photo::inpaint_telea(&img_tensor, &mask_tensor, radius))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
     result
@@ -48,7 +48,7 @@ fn inpaint_ns(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
     let result = py
-        .allow_threads(|| cv_photo::inpaint_ns(&img_tensor, &mask_tensor, radius, iterations))
+        .detach(|| cv_photo::inpaint_ns(&img_tensor, &mask_tensor, radius, iterations))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
     result
@@ -70,7 +70,7 @@ fn tonemap_reinhard(
     let tensor = CpuTensor::<f64>::from_vec(hdr_data, TensorShape::new(channels, height, width))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     let result = py
-        .allow_threads(|| cv_photo::tonemap_reinhard(&tensor, gamma))
+        .detach(|| cv_photo::tonemap_reinhard(&tensor, gamma))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     result
         .as_slice()
@@ -94,7 +94,7 @@ fn merge_mertens(
     let tensors =
         tensors.map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     let result = py
-        .allow_threads(|| cv_photo::merge_mertens(&tensors))
+        .detach(|| cv_photo::merge_mertens(&tensors))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     result
         .as_slice()
@@ -117,9 +117,7 @@ fn fast_nl_means_denoising(
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     // O(H·W·template²·search²) — seconds per megapixel; must not hold the GIL.
     let result = py
-        .allow_threads(|| {
-            cv_photo::fast_nl_means_denoising(&tensor, h, template_window, search_window)
-        })
+        .detach(|| cv_photo::fast_nl_means_denoising(&tensor, h, template_window, search_window))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     result
         .as_slice()
@@ -150,7 +148,7 @@ fn distance_transform(
     let tensor = CpuTensor::<f32>::from_vec(binary, TensorShape::new(1, height, width))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     let result = py
-        .allow_threads(|| cv_imgproc::distance_transform::distance_transform(&tensor, dt))
+        .detach(|| cv_imgproc::distance_transform::distance_transform(&tensor, dt))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
     result
         .as_slice()

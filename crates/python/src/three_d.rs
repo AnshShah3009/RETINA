@@ -98,7 +98,7 @@ fn estimate_normals_auto(
     k: usize,
 ) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
-        py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_auto(&pts_from_py(&points), k)))
+        py.detach(|| normals_to_py(cv_3d::estimate_normals_auto(&pts_from_py(&points), k)))
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
@@ -112,7 +112,7 @@ fn estimate_normals_cpu(
     k: usize,
 ) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
-        py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_cpu(&pts_from_py(&points), k)))
+        py.detach(|| normals_to_py(cv_3d::estimate_normals_cpu(&pts_from_py(&points), k)))
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
@@ -126,7 +126,7 @@ fn estimate_normals_gpu(
     k: usize,
 ) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
-        py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_gpu(&pts_from_py(&points), k)))
+        py.detach(|| normals_to_py(cv_3d::estimate_normals_gpu(&pts_from_py(&points), k)))
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }
@@ -140,7 +140,7 @@ fn estimate_normals_hybrid(
     k: usize,
 ) -> PyResult<Vec<(f32, f32, f32)>> {
     std::panic::catch_unwind(|| {
-        py.allow_threads(|| normals_to_py(cv_3d::estimate_normals_hybrid(&pts_from_py(&points), k)))
+        py.detach(|| normals_to_py(cv_3d::estimate_normals_hybrid(&pts_from_py(&points), k)))
     })
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(panic_payload_to_string(e)))
 }

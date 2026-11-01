@@ -106,7 +106,7 @@ impl PyDnnNet {
 
         // Full DNN inference — release the GIL for the compute.
         let outputs = py
-            .allow_threads(|| self.inner.forward(&input_tensor))
+            .detach(|| self.inner.forward(&input_tensor))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let mut py_outputs = Vec::with_capacity(outputs.len());
