@@ -84,6 +84,17 @@ fn distance(a: &[f64], b: &[f64], metric: DistanceMetric) -> f64 {
             .map(|(x, y)| (x - y).abs())
             .fold(0.0f64, f64::max),
         DistanceMetric::Minkowski(p) => {
+            // The p -> infinity limit is the Chebyshev distance. Evaluating
+            // the formula literally would compute `inf^0`, which is `1`, so
+            // any pair with a nonzero difference would report 1 instead of
+            // the largest coordinate difference.
+            if p == f64::INFINITY {
+                return a
+                    .iter()
+                    .zip(b.iter())
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0.0f64, f64::max);
+            }
             let s: f64 = a
                 .iter()
                 .zip(b.iter())
@@ -549,6 +560,37 @@ mod tests {
         assert!(approx_eq(
             distance(&a, &b, DistanceMetric::Minkowski(2.0)),
             5.0,
+            1e-12
+        ));
+    }
+
+    /// The p -> infinity limit of Minkowski is the Chebyshev distance: the
+    /// largest absolute coordinate difference. Evaluating the formula as
+    /// written gives `inf^0`, i.e. `1`, for any pair with a nonzero
+    /// difference, so a difference of 4 came back as 1.
+    #[test]
+    fn test_minkowski_infinite_p_is_chebyshev() {
+        let a = vec![0.0, 0.0];
+        let b = vec![3.0, 4.0];
+        assert!(approx_eq(
+            distance(&a, &b, DistanceMetric::Minkowski(f64::INFINITY)),
+            4.0,
+            1e-12
+        ));
+
+        // A lone coordinate differing by 4 must not come back as 1.
+        let c = vec![4.0];
+        let d = vec![0.0];
+        assert!(approx_eq(
+            distance(&c, &d, DistanceMetric::Minkowski(f64::INFINITY)),
+            4.0,
+            1e-12
+        ));
+
+        // Identical points stay at 0.
+        assert!(approx_eq(
+            distance(&c, &c, DistanceMetric::Minkowski(f64::INFINITY)),
+            0.0,
             1e-12
         ));
     }
