@@ -1126,32 +1126,48 @@ pub fn voronoi_diagram(points: &[Point2D], bounds: (f64, f64, f64, f64)) -> Vec<
 }
 
 /// Clip a convex polygon by the half-plane: nx*(x-pt.x) + ny*(y-pt.y) <= 0.
+///
+/// The value tested is a length². A vertex is treated as on the boundary when
+/// it is within `EPS * |n| * |v - pt|`, i.e. within a relative angle `EPS` of
+/// the line, so the result does not depend on the units. An absolute `EPS`
+/// meant no vertex was ever outside once the coordinates and their spacing
+/// were small: two sites one micron apart produced cells that were each the
+/// whole bounding box.
 fn clip_by_halfplane(poly: &[Point2D], pt: &Point2D, nx: f64, ny: f64) -> Vec<Point2D> {
     let n = poly.len();
     if n == 0 {
         return vec![];
     }
+    let n_len = nx.hypot(ny);
+    let tol = |q: &Point2D| -> f64 {
+        let dx = q.x - pt.x;
+        let dy = q.y - pt.y;
+        EPS * n_len * dx.hypot(dy)
+    };
     let mut output = Vec::new();
     let mut s = &poly[n - 1];
     let mut s_val = nx * (s.x - pt.x) + ny * (s.y - pt.y);
+    let mut s_tol = tol(s);
 
     for e in poly {
         let e_val = nx * (e.x - pt.x) + ny * (e.y - pt.y);
-        if e_val <= EPS {
+        let e_tol = tol(e);
+        if e_val <= e_tol {
             // e is inside
-            if s_val > EPS {
+            if s_val > s_tol {
                 // s is outside -> crossing
                 let t = s_val / (s_val - e_val);
                 output.push(Point2D::new(s.x + t * (e.x - s.x), s.y + t * (e.y - s.y)));
             }
             output.push(e.clone());
-        } else if s_val <= EPS {
+        } else if s_val <= s_tol {
             // s is inside, e is outside -> crossing
             let t = s_val / (s_val - e_val);
             output.push(Point2D::new(s.x + t * (e.x - s.x), s.y + t * (e.y - s.y)));
         }
         s = e;
         s_val = e_val;
+        s_tol = e_tol;
     }
     output
 }
