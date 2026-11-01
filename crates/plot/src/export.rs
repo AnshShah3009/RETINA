@@ -497,12 +497,12 @@ fn format_tick_value(v: f64, step: f64) -> String {
     }
     if a >= 1e5 || a < 1e-4 {
         let s = format!("{:.3e}", v);
-        // Trim a trailing zero in the exponent: 1.200e4 -> 1.2e4
-        return s
-            .replace('e', "e")
-            .trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string();
+        // Trim the mantissa, never the exponent: `1.000e10` must become
+        // `1e10`, not `1.000e1`. Trimming the whole string ate zeros off the
+        // exponent, so a tick around ten billion was labelled `10`.
+        let (mantissa, exponent) = s.split_once('e').unwrap_or((s.as_str(), ""));
+        let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
+        return format!("{mantissa}e{exponent}");
     }
     let decimals = step_decimals(step);
     let s = format!("{:.*}", decimals, v);
