@@ -1436,6 +1436,21 @@ impl ComputeContext for CpuBackend {
         let (kh, kw) = kernel.shape.hw();
         let (cx, cy) = (kw / 2, kh / 2);
 
+        // `Open` and `Close` are compositions, not one min/max pass: open is
+        // erode-then-dilate and close is dilate-then-erode. `is_max` below is
+        // "not Erode", so without this branch *both* ran a plain dilate - the
+        // GPU kernel has always branched here (`gpu_kernels/morphology.rs`).
+        // Recursing is the definition itself, iteration count included.
+        if typ == MorphologyType::Open || typ == MorphologyType::Close {
+            let (first, second) = if typ == MorphologyType::Open {
+                (MorphologyType::Erode, MorphologyType::Dilate)
+            } else {
+                (MorphologyType::Dilate, MorphologyType::Erode)
+            };
+            let tmp = self.morphology(input, first, kernel, iterations)?;
+            return self.morphology(&tmp, second, kernel, iterations);
+        }
+
         // Identity element: does not affect min (erode) or max (dilate)
         let identity = if typ == MorphologyType::Erode {
             255u8
