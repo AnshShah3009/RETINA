@@ -12,7 +12,8 @@
 //! ```
 
 use cv_core::{Error, Result};
-use nalgebra::{Point3, Vector3};
+use nalgebra::{Matrix4, Point3, Vector3};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// A simple triangle mesh extracted from glTF.
@@ -25,11 +26,20 @@ pub struct GltfMesh {
     pub tex_coords: Option<Vec<[f32; 2]>>,
 }
 
-/// Read all triangle meshes from a glTF or GLB file.
+/// Read triangle meshes from a glTF or GLB file.
+///
+/// One [`GltfMesh`] is returned per primitive of each node that instantiates a
+/// document mesh. The node's world transform — its own `node.transform()`
+/// composed with every ancestor — is applied to the positions and normals, so
+/// a mesh authored at the origin with the translation on the node comes back
+/// in world coordinates. A mesh referenced by several nodes is returned once
+/// per node, so none of those transforms is dropped. A mesh that no node
+/// references is returned once, in mesh-local coordinates.
 pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
     let (document, buffers, _images) = gltf::import(path.as_ref())
         .map_err(|e| cv_core::Error::IoError(format!("Failed to load glTF: {}", e)))?;
 
+    let placements = mesh_world_transforms(&document);
     let mut meshes = Vec::new();
 
     for mesh in document.meshes() {
@@ -37,75 +47,162 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
             .name()
             .unwrap_or(&format!("mesh_{}", mesh.index()))
             .to_string();
+        let identity = [Matrix4::identity()];
+        let worlds = match placements.get(&mesh.index()) {
+            Some(list) if !list.is_empty() => list.as_slice(),
+            _ => &identity,
+        };
 
-        for primitive in mesh.primitives() {
-            if primitive.mode() != gltf::mesh::Mode::Triangles {
-                continue;
-            }
-
-            let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-
-            // Positions (required)
-            let positions: Vec<Point3<f32>> = match reader.read_positions() {
-                Some(iter) => iter.map(|p| Point3::new(p[0], p[1], p[2])).collect(),
-                None => continue,
-            };
-
-            // Normals (optional)
-            let normals: Option<Vec<Vector3<f32>>> = reader
-                .read_normals()
-                .map(|iter| iter.map(|n| Vector3::new(n[0], n[1], n[2])).collect());
-
-            // Tex coords (optional)
-            let tex_coords: Option<Vec<[f32; 2]>> = reader
-                .read_tex_coords(0)
-                .map(|iter| iter.into_f32().collect());
-
-            // Indices
-            //
-            // A primitive's `indices` accessor is a *separate* accessor from
-            // `POSITION`, and nothing in the file ties it to the vertex count:
-            // an index of 5000 against a POSITION accessor of one vertex is a
-            // perfectly loadable file. The conversion below did no check at
-            // all, so such an index survived into `GltfMesh::faces`, and from
-            // there into `TriangleMesh`, which stores no bound either - the
-            // panic surfaced much later in `cv_3d`, at
-            // `TriangleMesh::compute_face_normals`'s `self.vertices[face[0]]`.
-            // `read_obj` already rejects out-of-range face indices; do the same.
-            let faces: Vec<[usize; 3]> = if let Some(indices) = reader.read_indices() {
-                let idx: Vec<usize> = indices.into_u32().map(|i| i as usize).collect();
-                for &i in &idx {
-                    if i >= positions.len() {
-                        return Err(cv_core::Error::ParseError(format!(
-                            "glTF: face index {i} is out of range: mesh {:?} has only {} \
-                             vertex/vertices in its POSITION accessor",
-                            mesh_name,
-                            positions.len()
-                        )));
-                    }
+        for world in worlds {
+            for primitive in mesh.primitives() {
+                if primitive.mode() != gltf::mesh::Mode::Triangles {
+                    continue;
                 }
-                idx.chunks(3)
-                    .filter(|c| c.len() == 3)
-                    .map(|c| [c[0], c[1], c[2]])
-                    .collect()
-            } else {
-                // Non-indexed: every 3 vertices form a triangle
-                (0..positions.len() / 3)
-                    .map(|i| [i * 3, i * 3 + 1, i * 3 + 2])
-                    .collect()
-            };
 
-            meshes.push(GltfMesh {
-                name: mesh_name.clone(),
-                vertices: positions,
-                normals,
-                faces,
-                tex_coords,
-            });
+                let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+
+                // Positions (required). `world` is the node's transform in the
+                // scene; a mesh left at the origin with the translation on the
+                // node is the usual export, and the bytes alone are mesh-local.
+                let positions: Vec<Point3<f32>> = match reader.read_positions() {
+                    Some(iter) => iter
+                        .map(|p| transform_position(world, Point3::new(p[0], p[1], p[2])))
+                        .collect(),
+                    None => continue,
+                };
+
+                // Normals (optional). The linear part of the same node transform,
+                // so a rotated node does not leave them in mesh-local space.
+                let normals: Option<Vec<Vector3<f32>>> = reader.read_normals().map(|iter| {
+                    iter.map(|n| transform_normal(world, Vector3::new(n[0], n[1], n[2])))
+                        .collect()
+                });
+
+                // Tex coords (optional)
+                let tex_coords: Option<Vec<[f32; 2]>> = reader
+                    .read_tex_coords(0)
+                    .map(|iter| iter.into_f32().collect());
+
+                // Indices
+                //
+                // A primitive's `indices` accessor is a *separate* accessor from
+                // `POSITION`, and nothing in the file ties it to the vertex count:
+                // an index of 5000 against a POSITION accessor of one vertex is a
+                // perfectly loadable file. The conversion below did no check at
+                // all, so such an index survived into `GltfMesh::faces`, and from
+                // there into `TriangleMesh`, which stores no bound either - the
+                // panic surfaced much later in `cv_3d`, at
+                // `TriangleMesh::compute_face_normals`'s `self.vertices[face[0]]`.
+                // `read_obj` already rejects out-of-range face indices; do the same.
+                let faces: Vec<[usize; 3]> = if let Some(indices) = reader.read_indices() {
+                    let idx: Vec<usize> = indices.into_u32().map(|i| i as usize).collect();
+                    for &i in &idx {
+                        if i >= positions.len() {
+                            return Err(cv_core::Error::ParseError(format!(
+                                "glTF: face index {i} is out of range: mesh {:?} has only {} \
+                             vertex/vertices in its POSITION accessor",
+                                mesh_name,
+                                positions.len()
+                            )));
+                        }
+                    }
+                    idx.chunks(3)
+                        .filter(|c| c.len() == 3)
+                        .map(|c| [c[0], c[1], c[2]])
+                        .collect()
+                } else {
+                    // Non-indexed: every 3 vertices form a triangle
+                    (0..positions.len() / 3)
+                        .map(|i| [i * 3, i * 3 + 1, i * 3 + 2])
+                        .collect()
+                };
+
+                meshes.push(GltfMesh {
+                    name: mesh_name.clone(),
+                    vertices: positions,
+                    normals,
+                    faces,
+                    tex_coords,
+                });
+            }
         }
     }
 
     Ok(meshes)
+}
+
+/// Column-major glTF matrix (`m[column][row]`) as a nalgebra matrix.
+fn gltf_to_matrix(m: [[f32; 4]; 4]) -> Matrix4<f32> {
+    Matrix4::from_column_slice(&[
+        m[0][0], m[0][1], m[0][2], m[0][3], m[1][0], m[1][1], m[1][2], m[1][3], m[2][0], m[2][1],
+        m[2][2], m[2][3], m[3][0], m[3][1], m[3][2], m[3][3],
+    ])
+}
+
+fn transform_position(world: &Matrix4<f32>, p: Point3<f32>) -> Point3<f32> {
+    let h = world * p.to_homogeneous();
+    Point3::new(h.x, h.y, h.z)
+}
+
+fn transform_normal(world: &Matrix4<f32>, n: Vector3<f32>) -> Vector3<f32> {
+    Vector3::new(
+        world[(0, 0)] * n.x + world[(0, 1)] * n.y + world[(0, 2)] * n.z,
+        world[(1, 0)] * n.x + world[(1, 1)] * n.y + world[(1, 2)] * n.z,
+        world[(2, 0)] * n.x + world[(2, 1)] * n.y + world[(2, 2)] * n.z,
+    )
+}
+
+/// World transform of every node that instantiates a mesh, keyed by mesh index.
+///
+/// A node may sit under a transformed parent. The matrix stored here is the
+/// product of the ancestor chain and the node's own transform, so a translation
+/// on either is applied. Nodes are visited in document order.
+fn mesh_world_transforms(document: &gltf::Document) -> HashMap<usize, Vec<Matrix4<f32>>> {
+    let nodes: Vec<_> = document.nodes().collect();
+    let mut local: HashMap<usize, Matrix4<f32>> = HashMap::new();
+    let mut parent_of: HashMap<usize, usize> = HashMap::new();
+    for node in &nodes {
+        local.insert(node.index(), gltf_to_matrix(node.transform().matrix()));
+        for child in node.children() {
+            parent_of.insert(child.index(), node.index());
+        }
+    }
+
+    let mut out: HashMap<usize, Vec<Matrix4<f32>>> = HashMap::new();
+    for node in &nodes {
+        let Some(mesh) = node.mesh() else {
+            continue;
+        };
+        let world = world_matrix(node.index(), &local, &parent_of);
+        out.entry(mesh.index()).or_default().push(world);
+    }
+    out
+}
+
+fn world_matrix(
+    index: usize,
+    local: &HashMap<usize, Matrix4<f32>>,
+    parent_of: &HashMap<usize, usize>,
+) -> Matrix4<f32> {
+    let mut chain = Vec::new();
+    let mut cursor = index;
+    loop {
+        chain.push(cursor);
+        if chain.len() > local.len().saturating_add(1) {
+            break;
+        }
+        match parent_of.get(&cursor).copied() {
+            Some(parent) => cursor = parent,
+            None => break,
+        }
+    }
+    let mut world = Matrix4::identity();
+    for idx in chain.iter().rev() {
+        if let Some(m) = local.get(idx) {
+            world *= *m;
+        }
+    }
+    world
 }
 
 /// Convert a GltfMesh to RETINA's TriangleMesh.
@@ -335,4 +432,76 @@ pub fn write_glb<P: AsRef<Path>>(
     file.write_all(&bin_buffer)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!(
+                "cv_io_gltf_{tag}_{}_{}_{nanos}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).expect("temp dir");
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A mesh whose only vertex is the origin, with the translation `(1, 2, 3)`
+    /// on the node. Blender exports this way: the POSITION accessor stays in
+    /// mesh-local coordinates and the node carries the placement. The point
+    /// returned is the transformed one.
+    #[test]
+    fn read_gltf_applies_node_translation_to_an_origin_vertex() {
+        let dir = TempDir::new("node_translation");
+        let gltf = r#"{
+  "asset": {"version": "2.0"},
+  "scene": 0,
+  "scenes": [{"nodes": [0, 1]}],
+  "nodes": [
+    {"mesh": 0, "translation": [1.0, 2.0, 3.0]},
+    {"mesh": 0, "translation": [4.0, 5.0, 6.0]}
+  ],
+  "meshes": [{"name": "origin", "primitives": [{"attributes": {"POSITION": 0}, "indices": 1, "mode": 4}]}],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "count": 1, "type": "VEC3", "min": [0.0, 0.0, 0.0], "max": [0.0, 0.0, 0.0]},
+    {"bufferView": 1, "componentType": 5125, "count": 3, "type": "SCALAR"}
+  ],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 12},
+    {"buffer": 0, "byteOffset": 12, "byteLength": 12}
+  ],
+  "buffers": [{"byteLength": 24, "uri": "mesh.bin"}]
+}
+"#;
+        fs::write(dir.0.join("model.gltf"), gltf).expect("write gltf");
+        fs::write(dir.0.join("mesh.bin"), [0u8; 24]).expect("write bin");
+
+        let meshes = read_gltf(dir.0.join("model.gltf")).expect("load gltf");
+        // One result per node. Both reference the same document mesh, and each
+        // node's translation is kept.
+        assert_eq!(meshes.len(), 2);
+        assert_eq!(meshes[0].vertices, vec![Point3::new(1.0, 2.0, 3.0)]);
+        assert_eq!(meshes[1].vertices, vec![Point3::new(4.0, 5.0, 6.0)]);
+    }
 }
