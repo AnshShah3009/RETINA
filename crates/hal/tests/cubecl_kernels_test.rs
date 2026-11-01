@@ -160,6 +160,41 @@ fn proto_binary_elemwise_matches_cpu() {
     assert_close("mul", &got, &want, 1e-5);
 }
 
+/// One-unit-per-element launches past 65535 cubes.
+///
+/// WebGPU caps every dispatch axis at 65535 workgroups, and these launches
+/// used a 1-D cube count, so anything over 65535 * 64 = 4,194,240 elements (a
+/// 16-channel 640x480 conv output, a 4M-point cloud) was a wgpu validation
+/// error that poisoned the device. The count now spreads over y.
+#[test]
+fn elementwise_and_naive_conv_launches_past_65535_cubes_match_cpu() {
+    let c = client();
+    let ctx = ctx_be(&c);
+
+    let n = 65535 * proto::CUBE_DIM as usize + 1001;
+    let a = data(n, 11);
+    let b = data(n, 12);
+    let ta = up(&c, &a, vec![n]);
+    let tb = up(&c, &b, vec![n]);
+    let got = down(&c, &be::add(&ctx, &ta, &tb).unwrap());
+    let want: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
+    assert_close("add past 65535 cubes", &got, &want, 0.0);
+
+    let got = down(&c, &be::relu(&ctx, &ta).unwrap());
+    let want: Vec<f32> = a.iter().map(|x| x.max(0.0)).collect();
+    assert_close("relu past 65535 cubes", &got, &want, 0.0);
+
+    // 8 * 600 * 900 = 4.32M outputs, one unit each.
+    let (batch, ci, co, h, w, k, stride, pad) = (1, 1, 8, 600, 900, 3, 1, 1);
+    let input = data(batch * ci * h * w, 13);
+    let weights = data(co * ci * k * k, 14);
+    let ti = up(&c, &input, vec![batch, ci, h, w]);
+    let tw = up(&c, &weights, vec![co, ci, k, k]);
+    let got = down(&c, &be::conv2d(&ctx, &ti, &tw, stride, pad).unwrap());
+    let want = cpu_conv2d(&input, &weights, batch, ci, co, h, w, k, stride, pad);
+    assert_close("naive conv2d past 65535 cubes", &got, &want, 1e-4);
+}
+
 #[test]
 fn proto_unary_elemwise_matches_cpu() {
     let c = client();

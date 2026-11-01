@@ -21,10 +21,26 @@ pub fn u32_storage() -> ElemType {
 /// Units per cube for element-wise launches.
 pub const CUBE_DIM: u32 = 64;
 
-/// Number of cubes needed to cover `n` working units in 1D.
+/// WebGPU's guaranteed `maxComputeWorkgroupsPerDimension`.
+pub const MAX_CUBES_PER_DIM: u32 = 65535;
+
+/// Cubes covering `n` working units of a kernel indexed by `ABSOLUTE_POS`.
+///
+/// Up to [`MAX_CUBES_PER_DIM`] cubes this is a 1-D count. Beyond it the
+/// count spreads over y as `(65535, ceil(cubes / 65535), 1)`: a 1-D count of
+/// more than 65535 is a wgpu validation error (it poisoned the device for any
+/// launch over 4,194,240 units). `ABSOLUTE_POS` is linear over the whole grid,
+/// so the kernels need no change; the surplus cubes of the last row fall past
+/// `n` and every kernel launched with this bounds-checks `ABSOLUTE_POS`.
 #[inline]
 pub fn cubes_for(n: usize) -> CubeCount {
-    CubeCount::new_1d((n as u32).div_ceil(CUBE_DIM).max(1))
+    let cubes = (n.div_ceil(CUBE_DIM as usize)).max(1);
+    let cubes = u32::try_from(cubes).expect("cube count fits in u32");
+    if cubes <= MAX_CUBES_PER_DIM {
+        CubeCount::new_1d(cubes)
+    } else {
+        CubeCount::new_2d(MAX_CUBES_PER_DIM, cubes.div_ceil(MAX_CUBES_PER_DIM))
+    }
 }
 
 /// Upload `data` to a new contiguous `f32` tensor.

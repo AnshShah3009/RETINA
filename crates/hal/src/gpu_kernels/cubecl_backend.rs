@@ -50,16 +50,8 @@ use cubecl::std::tensor::TensorHandle;
 
 use crate::gpu_kernels::cubecl_proto as proto;
 
-use proto::{f32_storage, u32_storage};
+use proto::{CUBE_DIM, cubes_for, f32_storage, u32_storage};
 
-/// Units per cube for element-wise launches.
-const CUBE_DIM: u32 = 64;
-
-/// Number of cubes needed to cover `n` working units in 1D.
-#[inline]
-fn cubes_for(n: usize) -> CubeCount {
-    CubeCount::new_1d((n as u32).div_ceil(CUBE_DIM).max(1))
-}
 // ============================================================================
 // Context
 // ============================================================================

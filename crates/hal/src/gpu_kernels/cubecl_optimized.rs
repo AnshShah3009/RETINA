@@ -1940,6 +1940,9 @@ pub const fn fp16_is_not_implemented() -> &'static str {
 /// triple that mixed a count and two sizes. The intent (query the device, pick
 /// a good cube size) was never implemented; the returned triple now actually
 /// describes the launch `proto::cubes_for` / `CubeDim::new_1d` produce.
+///
+/// The first value is the *total* cube count. `proto::cubes_for` lays a count
+/// above `proto::MAX_CUBES_PER_DIM` out over two axes; the total is the same.
 pub fn calculate_launch_config(num_elements: usize) -> (u32, u32, u32) {
     let block_size = proto::CUBE_DIM;
     let grid_size = (num_elements as u32).div_ceil(block_size).max(1);
