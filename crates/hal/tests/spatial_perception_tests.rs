@@ -10,11 +10,7 @@ fn get_gpu_context() -> Option<&'static GpuContext> {
     }
 
     // Initialize if not initialized yet
-    if let Ok(ctx) = pollster::block_on(GpuContext::init_global()) {
-        Some(ctx)
-    } else {
-        None
-    }
+    pollster::block_on(GpuContext::init_global()).ok()
 }
 
 #[test]

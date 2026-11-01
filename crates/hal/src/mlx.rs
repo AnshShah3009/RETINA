@@ -4,7 +4,7 @@ use crate::context::{
 };
 use crate::cpu::CpuBackend;
 use crate::{BackendType, DeviceId, Result};
-use cv_core::{storage::Storage, Float, Tensor};
+use cv_core::{Float, Tensor, storage::Storage};
 
 /// Experimental MLX context for Apple Silicon.
 ///

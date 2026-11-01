@@ -4,7 +4,7 @@
 use cv_core::CameraIntrinsics;
 use cv_features::matcher::{MatchType, Matcher};
 use cv_features::orb::orb_detect_and_compute;
-use cv_sfm::mapper::{map_views, MapperConfig, PairSelection, View};
+use cv_sfm::mapper::{MapperConfig, PairSelection, View, map_views};
 
 type Pos = (i64, i64);
 

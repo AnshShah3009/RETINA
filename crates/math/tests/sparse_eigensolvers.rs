@@ -11,7 +11,7 @@
 //!
 //! Each test carries a CONTROL assertion.
 
-use cv_math::sparse::{eigs_power, eigsh, CsrMatrix, EigWhich};
+use cv_math::sparse::{CsrMatrix, EigWhich, eigs_power, eigsh};
 
 fn laplacian2() -> CsrMatrix {
     // [[2,-1],[-1,2]]: eigenvalues 1 and 3. Its all-ones vector is an

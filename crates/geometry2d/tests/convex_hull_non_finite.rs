@@ -20,7 +20,7 @@
 //! where the finite input gives seven. So non-finite points are now dropped -
 //! the hull is computed over the points that actually have a position.
 
-use cv_geometry2d::geometry2d::{convex_hull, Point2D};
+use cv_geometry2d::geometry2d::{Point2D, convex_hull};
 
 fn point(x: f64, y: f64) -> Point2D {
     Point2D { x, y }

@@ -22,7 +22,7 @@
 //! photometric term is weighted ~65000x more heavily than `lambda` suggests.
 
 use super::{
-    exponential_map_se3, find_correspondences, fitness_and_rmse, point_to_plane_row, SimpleNN,
+    SimpleNN, exponential_map_se3, find_correspondences, fitness_and_rmse, point_to_plane_row,
 };
 use cv_core::point_cloud::PointCloud;
 use nalgebra::{Matrix3, Matrix4, Point3, Vector3, Vector6};

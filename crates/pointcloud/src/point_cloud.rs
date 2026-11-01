@@ -2,7 +2,7 @@ use cv_core::PointCloud;
 use nalgebra::{Matrix3, Point3, Vector3};
 use rayon::prelude::*;
 use rstar::PointDistance;
-use rstar::{RTree, RTreeObject, AABB};
+use rstar::{AABB, RTree, RTreeObject};
 
 /// Analytic minimum eigenvector of a 3×3 symmetric matrix.
 ///
@@ -125,15 +125,11 @@ pub fn voxel_down_sample(pc: &PointCloud, voxel_size: f32) -> PointCloud {
         }
 
         sum_p += pc.points[idx].coords;
-        if has_colors {
-            if let Some(colors) = &pc.colors {
-                sum_c += colors[idx].coords;
-            }
+        if has_colors && let Some(colors) = &pc.colors {
+            sum_c += colors[idx].coords;
         }
-        if has_normals {
-            if let Some(normals) = &pc.normals {
-                sum_n += normals[idx];
-            }
+        if has_normals && let Some(normals) = &pc.normals {
+            sum_n += normals[idx];
         }
         count += 1;
     }
@@ -411,11 +407,7 @@ pub fn compute_normals_from_depth(
             }
             // Orient toward camera (-Z in camera space means facing viewer).
             let normal = n / len;
-            if normal.z > 0.0 {
-                -normal
-            } else {
-                normal
-            }
+            if normal.z > 0.0 { -normal } else { normal }
         })
         .collect()
 }
@@ -519,15 +511,15 @@ pub fn remove_statistical_outliers(
         if dist <= threshold {
             inliers.push(i);
             new_points.push(pc.points[i]);
-            if let Some(c) = &pc.colors {
-                if let Some(nc) = &mut new_colors {
-                    nc.push(c[i]);
-                }
+            if let Some(c) = &pc.colors
+                && let Some(nc) = &mut new_colors
+            {
+                nc.push(c[i]);
             }
-            if let Some(n) = &pc.normals {
-                if let Some(nn) = &mut new_normals {
-                    nn.push(n[i]);
-                }
+            if let Some(n) = &pc.normals
+                && let Some(nn) = &mut new_normals
+            {
+                nn.push(n[i]);
             }
         }
     }
@@ -598,15 +590,15 @@ pub fn remove_radius_outliers(
         if is_inlier {
             inliers.push(i);
             new_points.push(pc.points[i]);
-            if let Some(c) = &pc.colors {
-                if let Some(nc) = &mut new_colors {
-                    nc.push(c[i]);
-                }
+            if let Some(c) = &pc.colors
+                && let Some(nc) = &mut new_colors
+            {
+                nc.push(c[i]);
             }
-            if let Some(n) = &pc.normals {
-                if let Some(nn) = &mut new_normals {
-                    nn.push(n[i]);
-                }
+            if let Some(n) = &pc.normals
+                && let Some(nn) = &mut new_normals
+            {
+                nn.push(n[i]);
             }
         }
     }
@@ -692,7 +684,7 @@ pub fn segment_plane(
         .inliers
         .iter()
         .enumerate()
-        .filter(|(_, &is_inlier)| is_inlier)
+        .filter(|&(_, &is_inlier)| is_inlier)
         .map(|(i, _)| i)
         .collect();
 
@@ -1147,11 +1139,7 @@ mod tests {
                 let dx = (i % w) as f32 - cx;
                 let dy = (i / w) as f32 - cy;
                 let r2 = (dx * dx + dy * dy) / (cx * cx);
-                if r2 < 1.0 {
-                    (1.0 - r2).sqrt()
-                } else {
-                    0.0
-                }
+                if r2 < 1.0 { (1.0 - r2).sqrt() } else { 0.0 }
             })
             .collect();
         let normals = compute_normals_from_depth(

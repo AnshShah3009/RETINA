@@ -377,7 +377,7 @@ mod tests {
             })
             .collect();
         assert!(
-            ring.iter().any(|&v| v == 255) && ring.iter().any(|&v| v == 0),
+            ring.contains(&255) && ring.contains(&0),
             "the ring at the square's corner must straddle the edge, got {ring:?}"
         );
 

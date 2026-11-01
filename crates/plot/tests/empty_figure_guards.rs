@@ -6,7 +6,7 @@
 
 use cv_plot::chart::{Figure, PlotType, Series, SubPlot};
 use cv_plot::three_d::{Plot3D, PointCloud3D};
-use cv_plot::{save_html as fig_save_html, PlotError};
+use cv_plot::{PlotError, save_html as fig_save_html};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Unique temp path per test: tests run concurrently in one process, and this

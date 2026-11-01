@@ -6,9 +6,9 @@
 //!   must agree within that kernel's own f32 accumulation error;
 //! * the exact-match property `CcoeffNormed == 1` (it used to exceed 1).
 
+use cv_core::TensorShape;
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
-use cv_core::TensorShape;
 use cv_hal::context::{ComputeContext, TemplateMatchMethod};
 use cv_hal::cpu::CpuBackend;
 use std::time::Instant;
@@ -23,7 +23,7 @@ const METHODS: [TemplateMatchMethod; 6] = [
 ];
 
 fn noise(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = seed.wrapping_add(0x9E3779B97F4A7C15);
+    let mut s = seed.wrapping_add(0x9e3779b97f4a7c15);
     (0..n)
         .map(|_| {
             s ^= s << 13;

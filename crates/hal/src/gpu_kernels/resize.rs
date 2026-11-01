@@ -1,8 +1,8 @@
-use crate::gpu::GpuContext;
 use crate::GpuTensor;
 use crate::Result;
-use cv_core::storage::Storage;
+use crate::gpu::GpuContext;
 use cv_core::TensorShape;
+use cv_core::storage::Storage;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;

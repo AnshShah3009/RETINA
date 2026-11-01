@@ -36,7 +36,7 @@ fn a_stale_index_does_not_panic_and_yields_no_centroid() {
 fn indices_beyond_the_slice_are_skipped_not_trusted() {
     // Directly exercise the documented behaviour by shrinking the slice: build a
     // grid against a full array, then average against a prefix of it.
-    let full = vec![
+    let full = [
         Point3::new(0.0, 0.0, 0.0),
         Point3::new(0.05, 0.0, 0.0),
         Point3::new(0.9, 0.9, 0.9),

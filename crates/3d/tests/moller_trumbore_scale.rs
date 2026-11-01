@@ -19,7 +19,7 @@
 //! that simply deleted the guard would pass the scale tests and fail these.
 
 use cv_3d::mesh::TriangleMesh;
-use cv_3d::raycasting::{cast_ray_mesh, point_inside_mesh, Ray};
+use cv_3d::raycasting::{Ray, cast_ray_mesh, point_inside_mesh};
 use nalgebra::{Point3, Vector3};
 
 /// Scales spanning five orders of magnitude. The two lower entries are the ones

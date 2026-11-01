@@ -9,11 +9,11 @@
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
 use cv_core::{DataType, TensorShape};
+use cv_hal::GpuTensor;
 use cv_hal::context::ComputeContext;
 use cv_hal::cpu::CpuBackend;
 use cv_hal::gpu::GpuContext;
 use cv_hal::storage::{GpuStorage, WgpuGpuStorage};
-use cv_hal::GpuTensor;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -54,7 +54,7 @@ fn create_random_pointcloud(n: usize, seed: u64) -> Vec<f32> {
 fn copy_to_gpu(ctx: &GpuContext, tensor: &Tensor<f32, CpuStorage<f32>>) -> GpuTensor<f32> {
     let data = tensor.as_slice().unwrap();
     let shape = tensor.shape;
-    let byte_size = (data.len() * std::mem::size_of::<f32>()) as u64;
+    let byte_size = std::mem::size_of_val(data) as u64;
 
     let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Perf Test Buffer"),
@@ -272,8 +272,14 @@ mod optical_flow_perf {
 
         println!("\n=== CPU Lucas-Kanade 512x512 (100 points) ===");
         time_fn("cpu_lk_512x512_100pts", || {
-            cpu.optical_flow_lk(&[frame1.clone()], &[frame2.clone()], &points, 21, 30)
-                .unwrap()
+            cpu.optical_flow_lk(
+                std::slice::from_ref(&frame1),
+                std::slice::from_ref(&frame2),
+                &points,
+                21,
+                30,
+            )
+            .unwrap()
         });
     }
 
@@ -312,7 +318,7 @@ mod icp_perf {
 
     fn copy_pointcloud_to_gpu(ctx: &GpuContext, data: &[f32]) -> Tensor<f32, GpuStorage<f32>> {
         let n = data.len() / 3;
-        let byte_size = (data.len() * std::mem::size_of::<f32>()) as u64;
+        let byte_size = std::mem::size_of_val(data) as u64;
 
         let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ICP PointCloud Buffer"),
@@ -401,7 +407,7 @@ mod spatial_icp_perf {
 
     fn copy_pointcloud_to_gpu(ctx: &GpuContext, data: &[f32]) -> Tensor<f32, GpuStorage<f32>> {
         let n = data.len() / 3;
-        let byte_size = (data.len() * std::mem::size_of::<f32>()) as u64;
+        let byte_size = std::mem::size_of_val(data) as u64;
 
         let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Spatial ICP PointCloud Buffer"),
@@ -486,11 +492,11 @@ mod spatial_icp_perf {
 
 mod tvl1_perf {
     use super::*;
-    use cv_hal::gpu_kernels::optical_flow::tvl1_optical_flow;
     use cv_hal::gpu_kernels::optical_flow::Tvl1Config;
+    use cv_hal::gpu_kernels::optical_flow::tvl1_optical_flow;
 
     fn copy_image_to_gpu(ctx: &GpuContext, data: &[f32], w: usize, h: usize) -> GpuTensor<f32> {
-        let byte_size = (data.len() * std::mem::size_of::<f32>()) as u64;
+        let byte_size = std::mem::size_of_val(data) as u64;
 
         let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TVL1 Image Buffer"),
@@ -647,7 +653,7 @@ mod colored_icp_perf {
 
         let points_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ColoredICP Points"),
-            size: (points.len() * std::mem::size_of::<f32>()) as u64,
+            size: std::mem::size_of_val(points) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -656,7 +662,7 @@ mod colored_icp_perf {
 
         let colors_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ColoredICP Colors"),
-            size: (colors.len() * std::mem::size_of::<f32>()) as u64,
+            size: std::mem::size_of_val(colors) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -688,9 +694,9 @@ mod colored_icp_perf {
         let (src_points, src_colors) = create_pointcloud_with_colors(1000, 42);
         let (tgt_points, tgt_colors) = create_pointcloud_with_colors(1000, 43);
 
-        let (src_pts_gpu, src_clr_gpu) =
+        let (_src_pts_gpu, _src_clr_gpu) =
             copy_pointcloud_with_colors_to_gpu(&ctx, &src_points, &src_colors);
-        let (tgt_pts_gpu, tgt_clr_gpu) =
+        let (_tgt_pts_gpu, _tgt_clr_gpu) =
             copy_pointcloud_with_colors_to_gpu(&ctx, &tgt_points, &tgt_colors);
 
         println!("\n=== GPU Colored-ICP Kernel 1K points ===");
@@ -708,9 +714,9 @@ mod colored_icp_perf {
         let (src_points, src_colors) = create_pointcloud_with_colors(10000, 42);
         let (tgt_points, tgt_colors) = create_pointcloud_with_colors(10000, 43);
 
-        let (src_pts_gpu, src_clr_gpu) =
+        let (_src_pts_gpu, _src_clr_gpu) =
             copy_pointcloud_with_colors_to_gpu(&ctx, &src_points, &src_colors);
-        let (tgt_pts_gpu, tgt_clr_gpu) =
+        let (_tgt_pts_gpu, _tgt_clr_gpu) =
             copy_pointcloud_with_colors_to_gpu(&ctx, &tgt_points, &tgt_colors);
 
         println!("\n=== GPU Colored-ICP Kernel 10K points ===");
@@ -726,7 +732,7 @@ mod generalized_icp_perf {
 
     fn copy_pointcloud_to_gpu(ctx: &GpuContext, data: &[f32]) -> Tensor<f32, GpuStorage<f32>> {
         let n = data.len() / 3;
-        let byte_size = (data.len() * std::mem::size_of::<f32>()) as u64;
+        let byte_size = std::mem::size_of_val(data) as u64;
 
         let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("G-ICP PointCloud Buffer"),
@@ -754,8 +760,8 @@ mod generalized_icp_perf {
         let source_data = create_random_pointcloud(1000, 42);
         let target_data = create_random_pointcloud(1000, 43);
 
-        let source_gpu = copy_pointcloud_to_gpu(&ctx, &source_data);
-        let target_gpu = copy_pointcloud_to_gpu(&ctx, &target_data);
+        let _source_gpu = copy_pointcloud_to_gpu(&ctx, &source_data);
+        let _target_gpu = copy_pointcloud_to_gpu(&ctx, &target_data);
 
         println!("\n=== GPU Generalized-ICP Kernel 1K points ===");
         time_fn("gpu_gicp_1k", || {
@@ -772,8 +778,8 @@ mod generalized_icp_perf {
         let source_data = create_random_pointcloud(10000, 42);
         let target_data = create_random_pointcloud(10000, 43);
 
-        let source_gpu = copy_pointcloud_to_gpu(&ctx, &source_data);
-        let target_gpu = copy_pointcloud_to_gpu(&ctx, &target_data);
+        let _source_gpu = copy_pointcloud_to_gpu(&ctx, &source_data);
+        let _target_gpu = copy_pointcloud_to_gpu(&ctx, &target_data);
 
         println!("\n=== GPU Generalized-ICP Kernel 10K points ===");
         time_fn("gpu_gicp_10k", || {

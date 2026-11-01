@@ -68,7 +68,7 @@ fn a_non_finite_destination_is_refused_too() {
 
 #[test]
 fn the_fundamental_solver_has_the_same_exposure() {
-    let (mut a, mut b) = good_pairs(20);
+    let (mut a, b) = good_pairs(20);
     assert!(
         solve_dlt_fundamental(&a, &b).is_some(),
         "a finite set must produce a fundamental matrix"

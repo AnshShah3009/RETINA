@@ -4,7 +4,7 @@
 
 use crate::Result;
 use cv_core::{CameraIntrinsics, Distortion, FisheyeDistortion};
-use cv_imgproc::{remap, BorderMode, Interpolation};
+use cv_imgproc::{BorderMode, Interpolation, remap};
 use image::GrayImage;
 use nalgebra::{Matrix3, Vector3};
 use rayon::prelude::*;
@@ -246,8 +246,8 @@ pub fn undistort_image_ex_ctx(
     group: &cv_runtime::orchestrator::RuntimeRunner,
 ) -> Result<GrayImage> {
     // 1. Try direct fused GPU undistort (fastest)
-    if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(result) = undistort_gpu(
+    if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = group.device()
+        && let Ok(result) = undistort_gpu(
             gpu,
             src,
             intrinsics,
@@ -256,9 +256,9 @@ pub fn undistort_image_ex_ctx(
             new_intrinsics,
             interpolation,
             border,
-        ) {
-            return Ok(result);
-        }
+        )
+    {
+        return Ok(result);
     }
 
     // 2. Fallback to CPU precompute + remap
@@ -313,7 +313,7 @@ fn undistort_gpu(
         other => {
             return Err(cv_hal::Error::NotSupported(format!(
                 "GPU undistort supports Nearest and Linear; got {other:?}"
-            )))
+            )));
         }
     };
 

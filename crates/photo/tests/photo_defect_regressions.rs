@@ -143,18 +143,15 @@ fn bm3d_zero_sigma_is_rejected_not_all_nan() {
 fn bm3d_negative_sigma_is_rejected() {
     let img = step_image(16, 16);
     let out = cv_photo::bm3d(&img, -0.1f32, 8, 8, 4);
-    match out {
-        Ok(o) => {
-            let d = o.as_slice().unwrap();
-            let lo = d.iter().cloned().fold(f32::INFINITY, f32::min);
-            let hi = d.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            panic!(
-                "bm3d(sigma = -0.1) must be rejected, not return {lo} .. {hi}: a negative \
-                 sigma admits no block matches at all, so this is the reference block \
-                 averaged with itself (HEAD returned 0.2556 .. 0.6784 for a 0.3/0.7 step)"
-            );
-        }
-        Err(_) => {}
+    if let Ok(o) = out {
+        let d = o.as_slice().unwrap();
+        let lo = d.iter().cloned().fold(f32::INFINITY, f32::min);
+        let hi = d.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        panic!(
+            "bm3d(sigma = -0.1) must be rejected, not return {lo} .. {hi}: a negative \
+             sigma admits no block matches at all, so this is the reference block \
+             averaged with itself (HEAD returned 0.2556 .. 0.6784 for a 0.3/0.7 step)"
+        );
     }
 }
 
@@ -165,7 +162,7 @@ fn bm3d_zero_block_size_is_rejected_not_panic() {
     let img = step_image(16, 16);
     let r = std::panic::catch_unwind(|| cv_photo::bm3d(&img, 0.1f32, 0, 4, 4).is_ok());
     assert!(
-        !matches!(r, Err(_)),
+        !r.is_err(),
         "bm3d(block_size = 0) must be rejected, not panic \
          (HEAD panicked: 'chunk size must be non-zero' at denoise.rs:621)"
     );
@@ -450,7 +447,7 @@ fn stitch_three_frames_is_wider_than_two() {
 fn stitch_single_image_is_unchanged() {
     let a = ramp_frame(8, 10);
     let mut s = cv_photo::Stitcher::new();
-    let out = s.stitch(&[a.clone()]).unwrap();
+    let out = s.stitch(std::slice::from_ref(&a)).unwrap();
     assert_eq!(out.dimensions(), a.dimensions());
     assert_eq!(out.as_raw(), a.as_raw());
 }
@@ -561,6 +558,6 @@ fn stitch_never_panics_on_odd_shapes() {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             s.stitch(&[a.clone(), b.clone()])
         }));
-        assert!(!matches!(r, Err(_)), "stitch panicked on {w}x{h} inputs");
+        assert!(!r.is_err(), "stitch panicked on {w}x{h} inputs");
     }
 }

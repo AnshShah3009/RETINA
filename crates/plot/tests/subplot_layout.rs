@@ -10,7 +10,7 @@
 //! subplot fix, so the file can be compiled against the unfixed crate to show
 //! that it fails there.
 
-use cv_plot::{Figure, PlotError, PlotType, Series, Style, SubPlot, COLORS};
+use cv_plot::{COLORS, Figure, PlotError, PlotType, Series, Style, SubPlot};
 
 /// Unique-enough path for a save that is expected to succeed; the process id
 /// and a counter keep concurrent tests off each other's files.
@@ -684,7 +684,7 @@ fn marker_style_selects_the_marker_shape() {
     // Being explicit about what is being excluded is the fix: a marker line has a
     // stroke and no tick class; a tick has the class and no stroke; a panel axis line
     // has neither in the form matched here.
-    let cross_lines = tags_with(&crosses, "<line")
+    let _cross_lines = tags_with(&crosses, "<line")
         .into_iter()
         .filter(|t| !t.contains("class=\"tick"))
         .count();

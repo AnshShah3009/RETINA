@@ -2,7 +2,7 @@ use crate::runtime::PyWorkloadHint;
 use cv_core::CameraIntrinsics;
 use cv_runtime::orchestrator::scheduler;
 use cv_slam::Slam as RustSlam;
-use cv_videoio::{open_video, VideoCapture};
+use cv_videoio::{VideoCapture, open_video};
 use pyo3::prelude::*;
 use std::sync::Arc;
 

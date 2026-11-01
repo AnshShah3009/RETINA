@@ -464,11 +464,7 @@ fn eigenvectors_from_eigenvalues(a: &DMatrix<f64>, eigenvalues: &[(f64, f64)]) -
         // Fix the arbitrary complex phase: make the largest component real
         // and positive, which also makes real eigenvectors exactly real.
         let (kmax, _) = v.iter().enumerate().fold((0, -1.0), |acc, (k, c)| {
-            if c.norm() > acc.1 {
-                (k, c.norm())
-            } else {
-                acc
-            }
+            if c.norm() > acc.1 { (k, c.norm()) } else { acc }
         });
         let phase = v[kmax] / v[kmax].norm();
         for c in &mut v {

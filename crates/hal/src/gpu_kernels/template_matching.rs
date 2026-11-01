@@ -1,7 +1,7 @@
+use crate::Result;
 use crate::context::TemplateMatchMethod;
 use crate::gpu::GpuContext;
 use crate::storage::WgpuGpuStorage;
-use crate::Result;
 use cv_core::{Float, TensorShape};
 use std::marker::PhantomData;
 use std::sync::Arc;

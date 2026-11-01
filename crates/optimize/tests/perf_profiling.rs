@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-use cv_optimize::general::{minimize_nelder_mead, NelderMeadConfig};
+use cv_optimize::general::{NelderMeadConfig, minimize_nelder_mead};
 use std::time::Instant;
 
 #[test]

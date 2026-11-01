@@ -24,8 +24,8 @@
 
 use cv_core::storage::CpuStorage;
 use cv_core::{CameraIntrinsics, CpuTensor, Pose, Tensor, TensorShape};
-use cv_slam::tracking::{Tracker, TrackingState};
 use cv_slam::WorldMap;
+use cv_slam::tracking::{Tracker, TrackingState};
 use nalgebra::{Rotation3, UnitQuaternion, Vector3};
 
 const W: usize = 320;
@@ -60,13 +60,13 @@ fn scene() -> Vec<Aabb> {
 }
 
 fn hash(a: i64, b: i64, seed: u32) -> f64 {
-    let mut h = (a as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ (b as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
-        ^ (seed as u64).wrapping_mul(0x1656_67B1_9E37_79F9);
+    let mut h = (a as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (b as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f)
+        ^ (seed as u64).wrapping_mul(0x1656_67b1_9e37_79f9);
     h ^= h >> 31;
-    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h = h.wrapping_mul(0xbf58_476d_1ce4_e5b9);
     h ^= h >> 29;
-    (h & 0xFF) as f64
+    (h & 0xff) as f64
 }
 
 /// Two octaves of random-intensity cells: plenty of corners, and the
@@ -107,7 +107,7 @@ fn cast(origin: &Vector3<f64>, dir: &Vector3<f64>, scene: &[Aabb]) -> Option<(f6
         if t_near > t_far || t_near <= 1e-6 {
             continue;
         }
-        if best.map_or(true, |(d, _)| t_near < d) {
+        if best.is_none_or(|(d, _)| t_near < d) {
             let p = origin + dir * t_near;
             let (u, v) = match axis {
                 0 => (p.y, p.z),
@@ -194,7 +194,7 @@ fn rgbd_bootstrap_then_tracks_known_trajectory() {
             let k = k as f64;
             camera_pose(
                 Vector3::new(0.06 * k, -0.02 * k, 0.04 * k),
-                (-1.0f64 * k).to_radians(),
+                (-k).to_radians(),
                 (0.5f64 * k).to_radians(),
             )
         })
@@ -249,7 +249,7 @@ fn monocular_two_view_init_then_tracks_known_trajectory() {
             let k = k as f64;
             camera_pose(
                 Vector3::new(0.15 * k, -0.03 * k, 0.05 * k),
-                (-1.0f64 * k).to_radians(),
+                (-k).to_radians(),
                 0.0,
             )
         })

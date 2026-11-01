@@ -6,9 +6,9 @@
 //! - **Navier-Stokes:** Iterative PDE-based diffusion that propagates isophote (edge) directions
 //!   into the inpainting region.
 
+use cv_core::Result;
 use cv_core::float::Float;
 use cv_core::tensor::{CpuTensor, TensorShape};
-use cv_core::Result;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -413,7 +413,7 @@ pub fn inpaint_ns<T: Float + Default + 'static>(
                         - 4.0 * prev[(y + 1) * width + x];
                     let lap_left = prev[(y - 1) * width + x.saturating_sub(1)]
                         + prev[(y + 1) * width + x.saturating_sub(1)]
-                        + prev[y * width + x.saturating_sub(2).max(0)]
+                        + prev[y * width + x.saturating_sub(2)]
                         + prev[y * width + x]
                         - 4.0 * prev[y * width + x.saturating_sub(1)];
                     let lap_right = prev[(y - 1) * width + (x + 1).min(width - 1)]

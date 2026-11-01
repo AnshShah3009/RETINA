@@ -52,7 +52,7 @@ impl Default for SyntheticConfig {
             image_width: 640,
             image_height: 480,
             focal: 500.0,
-            seed: 0xC0FFEE,
+            seed: 0xc0ffee,
         }
     }
 }
@@ -191,7 +191,7 @@ impl SyntheticScene {
     /// A query that shares no landmarks with the database: random descriptors
     /// and random pixel coordinates, so it cannot match anything.
     pub fn no_overlap_query(&self, seed: u64) -> Query {
-        let mut rng = Rng::new(seed ^ 0xA5A5_5A5A_A5A5_5A5A);
+        let mut rng = Rng::new(seed ^ 0xa5a5_5a5a_a5a5_5a5a);
         let n = self.query.keypoints.len().max(30);
         let mut keypoints = Vec::with_capacity(n);
         let mut descriptors = Descriptors::new();
@@ -379,7 +379,7 @@ impl Rng {
     fn new(seed: u64) -> Self {
         Self {
             state: if seed == 0 {
-                0x9E37_79B9_7F4A_7C15
+                0x9e37_79b9_7f4a_7c15
             } else {
                 seed
             },
@@ -392,7 +392,7 @@ impl Rng {
         x ^= x << 25;
         x ^= x >> 27;
         self.state = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
 
     /// Uniform sample in `[0, 1)`.
@@ -414,6 +414,6 @@ impl Rng {
 
     /// `n` random bytes.
     fn bytes(&mut self, n: usize) -> Vec<u8> {
-        (0..n).map(|_| (self.next_u64() & 0xFF) as u8).collect()
+        (0..n).map(|_| (self.next_u64() & 0xff) as u8).collect()
     }
 }

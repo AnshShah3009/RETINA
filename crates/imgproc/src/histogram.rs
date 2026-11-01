@@ -117,11 +117,7 @@ pub fn clahe(image: &GrayImage, clip_limit: f32, tile_grid: (u32, u32)) -> GrayI
         }
         let period = 2 * (n - 1);
         let m = i % period;
-        if m < n {
-            m
-        } else {
-            period - m
-        }
+        if m < n { m } else { period - m }
     };
 
     let tile_area = (tw * th) as i64;

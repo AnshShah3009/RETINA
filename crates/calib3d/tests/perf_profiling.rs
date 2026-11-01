@@ -23,8 +23,8 @@ fn profile_calib3d_algorithms() {
     let elapsed = start.elapsed();
 
     println!("Stereo Block Match (720p, range 0-64): {:?}", elapsed);
-    assert_eq!(disparity.width, width as u32);
-    assert_eq!(disparity.height, height as u32);
+    assert_eq!(disparity.width, width);
+    assert_eq!(disparity.height, height);
 
     // --- Undistort Profiling ---
     let width_1080 = 1920;

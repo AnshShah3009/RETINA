@@ -1,5 +1,5 @@
 use cv_core::{CameraIntrinsics, Pose};
-use cv_runtime::orchestrator::{scheduler, ResourceGroup};
+use cv_runtime::orchestrator::{ResourceGroup, scheduler};
 use nalgebra::{DMatrix, DVector, Point2, Point3, Rotation3, UnitQuaternion, Vector3};
 use rayon::prelude::*;
 
@@ -304,9 +304,9 @@ impl SfMState {
                     e_i[i] = s;
                     e_i += ds * w;
                     let dk = skew_of(e_i);
-                    let dpc = (2.0 * da * (k_mat * p_vec)
+                    let dpc = 2.0 * da * (k_mat * p_vec)
                         + 2.0 * a * (dk * p_vec)
-                        + 2.0 * ((dk * k_mat + k_mat * dk) * p_vec));
+                        + 2.0 * ((dk * k_mat + k_mat * dk) * p_vec);
                     let dx = dx_dxc * dpc.x + dx_dyc * dpc.y + dx_dzc * dpc.z;
                     let dy = dy_dxc * dpc.x + dy_dyc * dpc.y + dy_dzc * dpc.z;
                     let col = 6 * cam_idx + i;
@@ -476,11 +476,7 @@ impl SfMState {
             count += 1;
         }
 
-        if count > 0 {
-            error / count as f64
-        } else {
-            0.0
-        }
+        if count > 0 { error / count as f64 } else { 0.0 }
     }
 
     pub fn remove_outliers(&mut self, threshold: f64) {
@@ -563,15 +559,14 @@ pub fn bundle_adjust(state: &mut SfMState, config: &BundleAdjustmentConfig) {
         return;
     }
 
-    if let Ok(s) = scheduler() {
-        if let Ok(group) = s.get_default_group() {
-            if bundle_adjust_ctx(state, config, &group) {
-                return;
-            }
-            // Ctx path unavailable (no compute device / solver failure):
-            // fall through to the sequential CPU implementation.
-        }
+    if let Ok(s) = scheduler()
+        && let Ok(group) = s.get_default_group()
+        && bundle_adjust_ctx(state, config, &group)
+    {
+        return;
     }
+    // Ctx path unavailable (no compute device / solver failure):
+    // fall through to the sequential CPU implementation.
     bundle_adjust_sequential(state, config);
 }
 
@@ -747,7 +742,7 @@ mod tests {
         let mut state = SfMState::new(intrinsics);
 
         let pose = create_test_pose(Vector3::zeros());
-        let id1 = state.add_camera(pose.clone());
+        let id1 = state.add_camera(pose);
         assert_eq!(id1, 0);
         assert_eq!(state.cameras.len(), 1);
 
@@ -1274,7 +1269,7 @@ mod tests {
         let r = state.residuals();
 
         let (lhs_sparse, jtr_sparse) = j_sparse.normal_equations_sparse(&r);
-        let (lhs_dense, jtr_dense) = j_sparse.normal_equations(&r);
+        let (_lhs_dense, jtr_dense) = j_sparse.normal_equations(&r);
 
         assert_eq!(jtr_sparse.len(), jtr_dense.len());
         for i in 0..jtr_sparse.len() {

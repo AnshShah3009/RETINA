@@ -72,23 +72,23 @@ pub fn dispatch_size_3d(width: u32, height: u32, depth: u32) -> (u32, u32, u32) 
 
 /// Encode 3D coordinates to Morton code
 pub fn morton_encode(x: u32, y: u32, z: u32) -> u32 {
-    let mut mx = x & 0x000003FFu32;
-    let mut my = y & 0x000003FFu32;
-    let mut mz = z & 0x000003FFu32;
+    let mut mx = x & 0x000003ffu32;
+    let mut my = y & 0x000003ffu32;
+    let mut mz = z & 0x000003ffu32;
 
-    mx = (mx | (mx << 16)) & 0x030000FF;
-    mx = (mx | (mx << 8)) & 0x0300F00F;
-    mx = (mx | (mx << 4)) & 0x030C30C3;
+    mx = (mx | (mx << 16)) & 0x030000ff;
+    mx = (mx | (mx << 8)) & 0x0300f00f;
+    mx = (mx | (mx << 4)) & 0x030c30c3;
     mx = (mx | (mx << 2)) & 0x09249249;
 
-    my = (my | (my << 16)) & 0x030000FF;
-    my = (my | (my << 8)) & 0x0300F00F;
-    my = (my | (my << 4)) & 0x030C30C3;
+    my = (my | (my << 16)) & 0x030000ff;
+    my = (my | (my << 8)) & 0x0300f00f;
+    my = (my | (my << 4)) & 0x030c30c3;
     my = (my | (my << 2)) & 0x09249249;
 
-    mz = (mz | (mz << 16)) & 0x030000FF;
-    mz = (mz | (mz << 8)) & 0x0300F00F;
-    mz = (mz | (mz << 4)) & 0x030C30C3;
+    mz = (mz | (mz << 16)) & 0x030000ff;
+    mz = (mz | (mz << 8)) & 0x0300f00f;
+    mz = (mz | (mz << 4)) & 0x030c30c3;
     mz = (mz | (mz << 2)) & 0x09249249;
 
     mx | (my << 1) | (mz << 2)
@@ -407,10 +407,10 @@ pub mod buffer_utils {
             };
 
             let usage_map = buckets.entry((dev_key, usage)).or_insert_with(HashMap::new);
-            if let Some(pool) = usage_map.get_mut(&bucket_size) {
-                if let Some(buffer) = pool.pop() {
-                    return buffer;
-                }
+            if let Some(pool) = usage_map.get_mut(&bucket_size)
+                && let Some(buffer) = pool.pop()
+            {
+                return buffer;
             }
 
             device.create_buffer(&BufferDescriptor {
@@ -674,7 +674,7 @@ mod tests {
 /// GPU-accelerated point cloud operations
 pub mod pointcloud_gpu {
     use crate::gpu::GpuContext;
-    use crate::gpu_kernels::{pointcloud, WORKGROUP_SIZE_1D};
+    use crate::gpu_kernels::{WORKGROUP_SIZE_1D, pointcloud};
     use crate::tensor_ext::{TensorToCpu, TensorToGpu};
     use nalgebra::{Matrix4, Point3, Vector3};
     /// Transform point cloud on GPU

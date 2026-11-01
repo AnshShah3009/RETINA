@@ -112,14 +112,14 @@ fn radix_sort_a_million_keys_with_many_duplicates_matches_cpu_sort() {
     let n = 1_000_000usize;
     // Mix: fully random keys, a few hundred distinct values (heavy
     // duplication), and keys that share all but one digit.
-    let r = random_keys(n, 0xDEAD_BEEF);
+    let r = random_keys(n, 0xdead_beef);
     let keys: Vec<u32> = r
         .iter()
         .enumerate()
         .map(|(i, &x)| match i % 3 {
             0 => x,
             1 => (x % 300).wrapping_mul(0x0101_0101),
-            _ => 0xAB00_00CD | ((x & 0xFF) << 8),
+            _ => 0xab00_00cd | ((x & 0xff) << 8),
         })
         .collect();
     assert_sorted_equal("1e6 keys", &gpu_sort(gpu, &keys), &keys);

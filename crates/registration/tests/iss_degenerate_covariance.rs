@@ -12,7 +12,7 @@
 //! test fails on a timeout instead of wedging the whole suite.
 
 use cv_core::PointCloud;
-use cv_registration::registration::global::{compute_iss_features, ISSDetector, ISSFeature};
+use cv_registration::registration::global::{ISSDetector, ISSFeature, compute_iss_features};
 use nalgebra::Point3;
 use std::sync::mpsc;
 use std::time::Duration;

@@ -1,4 +1,4 @@
-use cv_core::{storage::Storage, Tensor};
+use cv_core::{Tensor, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::context::TemplateMatchMethod;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
@@ -63,10 +63,10 @@ pub fn match_template_ctx(
     let out_h = image.height() - templ.height() + 1;
 
     // Check for GPU acceleration
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(res) = match_template_gpu(gpu, image, templ, method) {
-            return res;
-        }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+        && let Ok(res) = match_template_gpu(gpu, image, templ, method)
+    {
+        return res;
     }
 
     let mut out = vec![0.0f32; (out_w * out_h) as usize];
@@ -117,20 +117,12 @@ pub fn match_template_ctx(
                         TemplateMatchMethod::SqDiffNormed => {
                             let sqdiff = sum_i_sq + t_sq_sum - 2.0 * cross;
                             let denom = (sum_i_sq * t_sq_sum).sqrt();
-                            if denom > 1e-12 {
-                                sqdiff / denom
-                            } else {
-                                0.0
-                            }
+                            if denom > 1e-12 { sqdiff / denom } else { 0.0 }
                         }
                         TemplateMatchMethod::Ccorr => cross,
                         TemplateMatchMethod::CcorrNormed => {
                             let denom = (sum_i_sq * t_sq_sum).sqrt();
-                            if denom > 1e-12 {
-                                cross / denom
-                            } else {
-                                0.0
-                            }
+                            if denom > 1e-12 { cross / denom } else { 0.0 }
                         }
                         TemplateMatchMethod::Ccoeff => {
                             // sum((I - meanI) * (T - meanT)) = <I,T> - N*meanI*meanT
@@ -140,11 +132,7 @@ pub fn match_template_ctx(
                             let coeff = cross - n * i_mean * t_mean;
                             let i_var = sum_i_sq - n * i_mean * i_mean;
                             let denom = (i_var * t_var_sum).sqrt();
-                            if denom > 1e-12 {
-                                coeff / denom
-                            } else {
-                                0.0
-                            }
+                            if denom > 1e-12 { coeff / denom } else { 0.0 }
                         }
                     };
                 }

@@ -4,8 +4,8 @@
 //! Supports ASCII and binary DATA formats.
 
 use crate::Result;
-use cv_core::point_cloud::PointCloud;
 use cv_core::Error;
+use cv_core::point_cloud::PointCloud;
 use nalgebra::{Point3, Vector3};
 use std::io::{BufRead, Read, Write};
 
@@ -400,9 +400,9 @@ where
                     }
                     _ => values[column_of[field]].to_bits(),
                 };
-                let r = ((packed >> 16) & 0xFF) as f32 / 255.0;
-                let g = ((packed >> 8) & 0xFF) as f32 / 255.0;
-                let b = (packed & 0xFF) as f32 / 255.0;
+                let r = ((packed >> 16) & 0xff) as f32 / 255.0;
+                let g = ((packed >> 8) & 0xff) as f32 / 255.0;
+                let b = (packed & 0xff) as f32 / 255.0;
                 c.push(Point3::new(r, g, b));
             } else if let (Some(ri), Some(gi), Some(bi)) = (r_field, g_field, b_field) {
                 // Normalise by the *declared* (TYPE, SIZE) pair, not by
@@ -429,11 +429,7 @@ where
                         .copied()
                         .is_some_and(|t| matches!(t, 'U' | 'I'));
                     let v = values[column_of[idx]];
-                    if is_integer {
-                        v / 255.0
-                    } else {
-                        v
-                    }
+                    if is_integer { v / 255.0 } else { v }
                 };
                 c.push(Point3::new(norm(ri), norm(gi), norm(bi)));
             }
@@ -449,15 +445,15 @@ where
     // `points`. Guard anyway: a `Some` whose length disagrees with the point
     // count is a landmine for the first `colors[i]` in a consumer.
     let mut cloud = PointCloud::new(points);
-    if let Some(c) = colors {
-        if c.len() == cloud.len() {
-            cloud.colors = Some(c);
-        }
+    if let Some(c) = colors
+        && c.len() == cloud.len()
+    {
+        cloud.colors = Some(c);
     }
-    if let Some(n) = normals {
-        if n.len() == cloud.len() {
-            cloud.normals = Some(n);
-        }
+    if let Some(n) = normals
+        && n.len() == cloud.len()
+    {
+        cloud.normals = Some(n);
     }
 
     Ok(cloud)
@@ -590,9 +586,9 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
                     let bytes: [u8; 4] =
                         point_data[offset..offset + 4].try_into().unwrap_or([0; 4]);
                     let packed = u32::from_le_bytes(bytes);
-                    let r = ((packed >> 16) & 0xFF) as f32 / 255.0;
-                    let g = ((packed >> 8) & 0xFF) as f32 / 255.0;
-                    let b = (packed & 0xFF) as f32 / 255.0;
+                    let r = ((packed >> 16) & 0xff) as f32 / 255.0;
+                    let g = ((packed >> 8) & 0xff) as f32 / 255.0;
+                    let b = (packed & 0xff) as f32 / 255.0;
                     cols.push(Point3::new(r, g, b));
                 }
                 // A packed `rgb` field of any other declared SIZE is not
@@ -633,15 +629,15 @@ fn parse_pcd_binary<R: Read>(mut reader: R, header: &PcdHeader) -> Result<PointC
     // does not cover the cloud is dropped rather than published, exactly as
     // read_ply.rs does.
     let mut cloud = PointCloud::new(points);
-    if let Some(c) = colors {
-        if c.len() == cloud.len() {
-            cloud.colors = Some(c);
-        }
+    if let Some(c) = colors
+        && c.len() == cloud.len()
+    {
+        cloud.colors = Some(c);
     }
-    if let Some(n) = normals {
-        if n.len() == cloud.len() {
-            cloud.normals = Some(n);
-        }
+    if let Some(n) = normals
+        && n.len() == cloud.len()
+    {
+        cloud.normals = Some(n);
     }
 
     Ok(cloud)

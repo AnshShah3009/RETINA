@@ -1,7 +1,7 @@
+use crate::Result;
 use crate::context::{BorderMode, Interpolation};
 use crate::gpu::GpuContext;
 use crate::storage::GpuStorage;
-use crate::Result;
 use cv_core::{Tensor, TensorShape};
 use std::marker::PhantomData;
 use std::sync::Arc;

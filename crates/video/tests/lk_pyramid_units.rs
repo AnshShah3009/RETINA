@@ -104,7 +104,7 @@ fn pyramid_depth_does_not_change_the_units_of_the_result() {
 /// A single-level tracker is the reference: its output is unambiguous.
 #[test]
 fn a_single_level_tracker_reports_level_0_pixels() {
-    let base = textured(160, 160, 0xABCD_EF01);
+    let base = textured(160, 160, 0xabcd_ef01);
     let shifted = translate(&base, 6, 3);
     let start = (80.0f32, 80.0f32);
 
@@ -141,7 +141,7 @@ fn a_single_level_tracker_reports_level_0_pixels() {
 /// this file was written to check.
 #[test]
 fn a_shift_larger_than_the_window_is_still_recovered_at_every_depth() {
-    let base = textured(320, 320, 0x1357_9BDF);
+    let base = textured(320, 320, 0x1357_9bdf);
     let shift = 40i32;
     let shifted = translate(&base, shift, 0);
     let start = (160.0f32, 160.0f32);
@@ -166,7 +166,7 @@ fn a_shift_larger_than_the_window_is_still_recovered_at_every_depth() {
 /// the true displacement is nothing.
 #[test]
 fn a_still_image_tracks_to_zero() {
-    let base = textured(120, 120, 0x5555_AAAA);
+    let base = textured(120, 120, 0x5555_aaaa);
     let start = (60.0f32, 60.0f32);
     for levels in 1..=3usize {
         let lk = LucasKanade::new()

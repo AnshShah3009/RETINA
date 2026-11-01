@@ -97,11 +97,7 @@ fn residual(
 }
 
 fn huber_weight(r: f64) -> f64 {
-    if r <= HUBER_PX {
-        1.0
-    } else {
-        HUBER_PX / r
-    }
+    if r <= HUBER_PX { 1.0 } else { HUBER_PX / r }
 }
 
 fn scalar_robust(r: f64) -> f64 {
@@ -216,11 +212,7 @@ fn rms(k: &CameraIntrinsics, poses: &[Pose], pts: &[Vector3<f64>], obs: &[Obs]) 
             None => (s, n),
         }
     });
-    if n == 0 {
-        0.0
-    } else {
-        (s / n as f64).sqrt()
-    }
+    if n == 0 { 0.0 } else { (s / n as f64).sqrt() }
 }
 
 /// Adjust the newest `window` keyframes and every map point they observe.
@@ -653,7 +645,7 @@ pub fn local_bundle_adjust(
     let mut outliers_removed = 0;
     for o in &obs {
         let bad = residual(k, &poses[o.cam], &pts[o.point], &o.uv)
-            .map_or(true, |(r, _)| r.norm() > OUTLIER_PX);
+            .is_none_or(|(r, _)| r.norm() > OUTLIER_PX);
         if !bad {
             continue;
         }

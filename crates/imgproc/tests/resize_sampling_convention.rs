@@ -51,7 +51,7 @@
 
 #![forbid(unsafe_code)]
 
-use cv_imgproc::resize::{resize, Interpolation};
+use cv_imgproc::resize::{Interpolation, resize};
 use image::{GrayImage, Luma};
 
 /// `half-pixel`: output pixel `x` samples source `(x + 0.5)·w/nw − 0.5`.

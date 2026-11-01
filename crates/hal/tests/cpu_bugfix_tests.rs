@@ -2,9 +2,9 @@
 //!
 //! Each test targets one specific fix so a regression is caught immediately.
 
+use cv_core::TensorShape;
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
-use cv_core::TensorShape;
 use cv_hal::context::ComputeContext;
 use cv_hal::cpu::CpuBackend;
 
@@ -35,7 +35,7 @@ fn test_canny_strong_edges_are_255() {
     let out = edges.as_slice().unwrap();
 
     assert!(
-        out.iter().any(|&v| v == 255.0),
+        out.contains(&255.0),
         "expected at least one strong edge at 255"
     );
     assert!(

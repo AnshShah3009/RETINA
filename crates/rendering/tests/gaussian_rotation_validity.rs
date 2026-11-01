@@ -13,7 +13,7 @@
 //! optimizer all produce - is untouched by either guard.
 
 use cv_rendering::gaussian_splatting::{Gaussian, SphericalHarmonics};
-use nalgebra::{Point3, Rotation3, UnitQuaternion, Vector3, Vector4};
+use nalgebra::{Point3, UnitQuaternion, Vector3, Vector4};
 
 fn gaussian_with_rotation(rotation: Vector4<f32>) -> Gaussian {
     Gaussian {

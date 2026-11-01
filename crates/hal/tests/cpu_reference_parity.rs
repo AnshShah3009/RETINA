@@ -19,9 +19,9 @@
 //! All tests here are pure computation: **no GPU, no adapter, no fixtures.** CI
 //! runners without an adapter run them unchanged.
 
+use cv_core::TensorShape;
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
-use cv_core::TensorShape;
 use cv_hal::context::{BorderMode, ComputeContext, MorphologyType, ThresholdType};
 use cv_hal::cpu::CpuBackend;
 
@@ -40,7 +40,7 @@ fn u8_tensor(data: &[u8], w: usize, h: usize, c: usize) -> Tensor<u8, CpuStorage
 /// Deterministic xorshift so a failure is always reproducible. Returns
 /// values spread over `[0, 1)` from a seed, so no test depends on entropy.
 fn noise(seed: u64, n: usize) -> Vec<f32> {
-    let mut s = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
+    let mut s = if seed == 0 { 0x9e3779b97f4a7c15 } else { seed };
     (0..n)
         .map(|_| {
             s ^= s << 13;
@@ -122,7 +122,7 @@ fn threshold_matches_reference_for_every_block_remainder() {
 
     for n in lengths {
         // Include the exact threshold value so the `>` vs `>=` boundary is hit.
-        let src = noise(0x5EED_0000 ^ n as u64, n)
+        let src = noise(0x5eed_0000 ^ n as u64, n)
             .into_iter()
             .map(|v| v * 200.0)
             .chain(std::iter::once(75.0).take(if n > 8 { 1 } else { 0 }))
@@ -455,9 +455,9 @@ fn convolve_reference(
 fn convolve_matches_reference_for_odd_and_even_kernels() {
     let cpu = CpuBackend::new().unwrap();
     for &(w, h) in &[(9usize, 7usize), (16, 16), (17, 5)] {
-        let src = noise(0xC0FFEE ^ (w * 31 + h) as u64, w * h);
+        let src = noise(0xc0ffee ^ (w * 31 + h) as u64, w * h);
         for &(kw, kh) in &[(1usize, 1usize), (3, 3), (5, 5), (2, 2), (4, 3)] {
-            let kernel: Vec<f32> = noise(0xBEEF ^ (kw * 17 + kh) as u64, kw * kh)
+            let kernel: Vec<f32> = noise(0xbeef ^ (kw * 17 + kh) as u64, kw * kh)
                 .into_iter()
                 .map(|v| v - 0.5)
                 .collect();
@@ -614,7 +614,7 @@ fn pyramid_down_matches_reference_including_odd_dimensions() {
         (8, 8),
         (3, 3),
     ] {
-        let src = noise(0xA11CE ^ (w * 7 + h) as u64, w * h);
+        let src = noise(0xa11ce ^ (w * 7 + h) as u64, w * h);
         let got = cpu.pyramid_down(&f32_tensor(&src, w, h, 1)).unwrap();
         let want = pyramid_reference(&src, w, h);
 

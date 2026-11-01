@@ -1,7 +1,7 @@
+use crate::Result;
 use crate::gpu::GpuContext;
 use crate::gpu_kernels::radix_sort::radix_sort_key_value_u32;
 use crate::storage::GpuStorage;
-use crate::Result;
 use cv_core::{DataType, Tensor, TensorShape};
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -11,12 +11,11 @@ pub fn compute_normals_morton_gpu_or_cpu(
     points: &[nalgebra::Vector3<f32>],
     k: u32,
 ) -> Vec<nalgebra::Vector3<f32>> {
-    if let Ok(gpu) = GpuContext::global() {
-        if let Ok(normals) =
+    if let Ok(gpu) = GpuContext::global()
+        && let Ok(normals) =
             crate::gpu_kernels::pointcloud_gpu::compute_normals_morton_gpu(gpu, points, k)
-        {
-            return normals;
-        }
+    {
+        return normals;
     }
     // CPU fallback: brute-force kNN + PCA eigensolver (see below).
     normals_cpu_analytic(points, k as usize)

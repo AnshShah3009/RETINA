@@ -13,11 +13,11 @@
 
 use cv_core::storage::Storage;
 use cv_core::{CpuTensor, Tensor, TensorShape};
+use cv_hal::Error;
 use cv_hal::context::ComputeContext;
 use cv_hal::cpu::CpuBackend;
 use cv_hal::gpu::GpuContext;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
-use cv_hal::Error;
 use nalgebra::Matrix4;
 use pollster::block_on;
 

@@ -188,11 +188,11 @@ fn no_crack_at_block_seams() {
             let mut hit = false;
             'search: for dx in -1..=1 {
                 for dy in -1..=1 {
-                    if let Some(ts) = buckets.get(&(kx + dx, ky + dy)) {
-                        if ts.iter().any(|t| covers(t, x, y)) {
-                            hit = true;
-                            break 'search;
-                        }
+                    if let Some(ts) = buckets.get(&(kx + dx, ky + dy))
+                        && ts.iter().any(|t| covers(t, x, y))
+                    {
+                        hit = true;
+                        break 'search;
                     }
                 }
             }

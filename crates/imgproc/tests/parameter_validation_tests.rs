@@ -14,11 +14,11 @@
 use cv_core::{CpuTensor, TensorShape};
 use cv_imgproc::convolve::BorderMode;
 use cv_imgproc::distance_transform::{
-    distance_transform, distance_transform_with_labels, DistanceType,
+    DistanceType, distance_transform, distance_transform_with_labels,
 };
 use cv_imgproc::edges::sobel_ex;
 use cv_imgproc::hough::{hough_lines, hough_lines_p};
-use cv_imgproc::local_threshold::{local_threshold, LocalThresholdMethod};
+use cv_imgproc::local_threshold::{LocalThresholdMethod, local_threshold};
 use cv_imgproc::threshold::ThresholdType;
 use image::{GrayImage, Luma};
 
@@ -112,16 +112,18 @@ fn defect01_sauvola_r_zero_is_rejected_instead_of_returning_black() {
 #[test]
 fn defect01_block_size_zero_is_rejected() {
     let img = uniform_image(100, 8);
-    assert!(local_threshold(
-        &img,
-        255,
-        LocalThresholdMethod::Niblack,
-        ThresholdType::Binary,
-        0,
-        0.2,
-        128.0,
-    )
-    .is_err());
+    assert!(
+        local_threshold(
+            &img,
+            255,
+            LocalThresholdMethod::Niblack,
+            ThresholdType::Binary,
+            0,
+            0.2,
+            128.0,
+        )
+        .is_err()
+    );
 }
 
 // ---------------------------------------------------------------------------

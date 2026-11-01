@@ -4,7 +4,7 @@ use crate::database::{Database, DatabaseImage};
 use cv_calib3d::pnp::{solve_pnp_ransac, solve_pnp_refine};
 use cv_core::{CameraIntrinsics, Descriptors, KeyPoint, Matches, Pose};
 use cv_features::matcher::match_descriptors;
-use cv_features::retrieval::{descriptors_to_bytes, BowVector};
+use cv_features::retrieval::{BowVector, descriptors_to_bytes};
 use nalgebra::{Point2, Point3};
 
 /// Tunable knobs for the localization pipeline.

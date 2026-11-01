@@ -54,7 +54,7 @@ fn tick_labels(svg: &str) -> Vec<String> {
 fn tick_numbers_for(svg: &str, axis_class: &str) -> Vec<f64> {
     let needle = format!("class=\"tick {axis_class}\"");
     let mut out = Vec::new();
-    let mut rest = svg;
+    let _rest = svg;
     for line in svg.lines() {
         // The class and the text must be on the **same line**, and the element
         // must be a <text>. My first version scanned 200 characters *ahead* of the
@@ -66,10 +66,10 @@ fn tick_numbers_for(svg: &str, axis_class: &str) -> Vec<f64> {
         let after_class = &line[line.find(&needle).unwrap() + needle.len()..];
         if let Some(gt) = after_class.find('>') {
             let tail = &after_class[gt + 1..];
-            if let Some(end) = tail.find('<') {
-                if let Ok(v) = tail[..end].trim().parse::<f64>() {
-                    out.push(v);
-                }
+            if let Some(end) = tail.find('<')
+                && let Ok(v) = tail[..end].trim().parse::<f64>()
+            {
+                out.push(v);
             }
         }
     }

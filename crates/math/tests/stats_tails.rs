@@ -13,11 +13,7 @@
 use cv_math::stats::*;
 
 fn rel(a: f64, b: f64) -> f64 {
-    if a == b {
-        0.0
-    } else {
-        ((a - b) / b).abs()
-    }
+    if a == b { 0.0 } else { ((a - b) / b).abs() }
 }
 
 #[test]

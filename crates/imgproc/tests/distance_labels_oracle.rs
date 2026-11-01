@@ -9,7 +9,7 @@
 //! observable - in particular the tie-break: the smallest flat index wins.
 
 use cv_core::{CpuTensor, TensorShape};
-use cv_imgproc::distance_transform::{distance_transform_with_labels, DistanceType};
+use cv_imgproc::distance_transform::{DistanceType, distance_transform_with_labels};
 
 fn make_binary(data: Vec<f32>, width: usize, height: usize) -> CpuTensor<f32> {
     CpuTensor::from_vec(data, TensorShape::new(1, height, width)).unwrap()

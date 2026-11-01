@@ -10,7 +10,7 @@ fn main() {
     // cubic lattice is made of. Distances here are distinct with overwhelming
     // probability, so the k-th boundary is never ambiguous and the neighbour
     // *set* is fully determined.
-    let mut s: u64 = 0x5EED_1234_ABCD_0001;
+    let mut s: u64 = 0x5eed_1234_abcd_0001;
     let mut next = || {
         s = s
             .wrapping_mul(6364136223846793005)

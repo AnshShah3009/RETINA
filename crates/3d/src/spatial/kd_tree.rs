@@ -182,13 +182,13 @@ impl<T: Clone> KDTree<T> {
             (&node.right, &node.left)
         };
 
-        if let Some(ref child) = first {
+        if let Some(child) = first {
             Self::nearest_recursive(child, query, best);
         }
-        if diff * diff < best.2 {
-            if let Some(ref child) = second {
-                Self::nearest_recursive(child, query, best);
-            }
+        if diff * diff < best.2
+            && let Some(child) = second
+        {
+            Self::nearest_recursive(child, query, best);
         }
     }
 
@@ -219,16 +219,16 @@ impl<T: Clone> KDTree<T> {
             (&node.right, &node.left)
         };
 
-        if let Some(ref child) = first {
+        if let Some(child) = first {
             Self::radius_recursive(child, query, radius_sq, results);
         }
         // `<=`, matching the inclusive accept test: with `<` a point exactly
         // on the sphere in the far subtree (e.g. a duplicate of a boundary
         // point) was pruned while its twin in the near subtree was returned.
-        if diff * diff <= radius_sq {
-            if let Some(ref child) = second {
-                Self::radius_recursive(child, query, radius_sq, results);
-            }
+        if diff * diff <= radius_sq
+            && let Some(child) = second
+        {
+            Self::radius_recursive(child, query, radius_sq, results);
         }
     }
 
@@ -280,7 +280,7 @@ impl<T: Clone> KDTree<T> {
             (&node.right, &node.left)
         };
 
-        if let Some(ref child) = first {
+        if let Some(child) = first {
             Self::knn_recursive(child, query, k, heap);
         }
 
@@ -290,10 +290,10 @@ impl<T: Clone> KDTree<T> {
         } else {
             heap.peek().unwrap().dist_sq
         };
-        if diff * diff < worst {
-            if let Some(ref child) = second {
-                Self::knn_recursive(child, query, k, heap);
-            }
+        if diff * diff < worst
+            && let Some(child) = second
+        {
+            Self::knn_recursive(child, query, k, heap);
         }
     }
 }
@@ -317,8 +317,9 @@ mod tests {
         ];
         let tree = KDTree::build(&mut items);
         // k == 0 must not panic (previously hit `heap.peek().unwrap()`).
-        assert!(tree
-            .k_nearest_neighbors(&Point3::new(0.5, 0.0, 0.0), 0)
-            .is_empty());
+        assert!(
+            tree.k_nearest_neighbors(&Point3::new(0.5, 0.0, 0.0), 0)
+                .is_empty()
+        );
     }
 }

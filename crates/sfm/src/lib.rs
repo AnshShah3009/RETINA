@@ -32,8 +32,8 @@ pub mod mapper;
 pub mod triangulation;
 
 pub use mapper::{
-    map_views, MapperConfig, Mapping, MappingReport, PairSelection, Reconstruction,
-    RegistrationFailure, View, ViewOutcome,
+    MapperConfig, Mapping, MappingReport, PairSelection, Reconstruction, RegistrationFailure, View,
+    ViewOutcome, map_views,
 };
 pub use triangulation::*;
 

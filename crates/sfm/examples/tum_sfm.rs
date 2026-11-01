@@ -27,7 +27,7 @@ use cv_core::{CameraIntrinsics, Pose};
 use cv_eval::{Alignment, Trajectory};
 use cv_features::orb::{orb_detect_and_compute, orb_detect_and_compute_scale_aware};
 use cv_io::datasets::tum;
-use cv_sfm::mapper::{map_views, MapperConfig, Mapping, PairSelection, View};
+use cv_sfm::mapper::{MapperConfig, Mapping, PairSelection, View, map_views};
 use nalgebra::{Point3, UnitQuaternion, Vector3};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -885,28 +885,28 @@ fn print_report(mapping: &Mapping, ground_truth: &[Pose], views: &[View], args: 
         pose_alignment.map(|(_, _, t)| t.z).unwrap_or(0.0)
     );
 
-    if let Some(mut point_errors) = point_errors {
-        if !point_errors.is_empty() {
-            point_errors.sort_by(|a, b| a.total_cmp(b));
-            let mean = point_errors.iter().sum::<f64>() / point_errors.len() as f64;
-            let median = point_errors[point_errors.len() / 2];
-            let within_3 = point_errors.iter().filter(|&&e| e <= 3.0).count();
-            let within_5 = point_errors.iter().filter(|&&e| e <= 5.0).count();
-            let total = point_errors.len() as f64;
-            println!();
-            println!("3D point accuracy through the ground-truth cameras (pose-aligned)");
-            println!("  observations       : {}", point_errors.len());
-            println!("  mean error         : {mean:.3} px");
-            println!("  median error       : {median:.3} px");
-            println!(
-                "  within 3 px        : {within_3} ({:.2} %)",
-                within_3 as f64 / total * 100.0
-            );
-            println!(
-                "  within 5 px        : {within_5} ({:.2} %)",
-                within_5 as f64 / total * 100.0
-            );
-        }
+    if let Some(mut point_errors) = point_errors
+        && !point_errors.is_empty()
+    {
+        point_errors.sort_by(|a, b| a.total_cmp(b));
+        let mean = point_errors.iter().sum::<f64>() / point_errors.len() as f64;
+        let median = point_errors[point_errors.len() / 2];
+        let within_3 = point_errors.iter().filter(|&&e| e <= 3.0).count();
+        let within_5 = point_errors.iter().filter(|&&e| e <= 5.0).count();
+        let total = point_errors.len() as f64;
+        println!();
+        println!("3D point accuracy through the ground-truth cameras (pose-aligned)");
+        println!("  observations       : {}", point_errors.len());
+        println!("  mean error         : {mean:.3} px");
+        println!("  median error       : {median:.3} px");
+        println!(
+            "  within 3 px        : {within_3} ({:.2} %)",
+            within_3 as f64 / total * 100.0
+        );
+        println!(
+            "  within 5 px        : {within_5} ({:.2} %)",
+            within_5 as f64 / total * 100.0
+        );
     }
 }
 
@@ -1179,8 +1179,13 @@ fn load_colmap_sequence(
         eprintln!(
             "contiguous selection: {} views spanning the densest chain (radius {max_step} m);              consecutive steps: {:?}",
             entries.len(),
-            entries.windows(2)
-                .map(|w| ((w[1].1.inverse().translation - w[0].1.inverse().translation).norm() * 100.0).round() as i64)
+            entries
+                .windows(2)
+                .map(
+                    |w| ((w[1].1.inverse().translation - w[0].1.inverse().translation).norm()
+                        * 100.0)
+                        .round() as i64
+                )
                 .collect::<Vec<_>>()
         );
     }
@@ -1257,7 +1262,7 @@ fn measure_texture(dir: &Path, name: &str) -> Option<f64> {
 /// Trying every start and keeping the longest is 16 chains of at most 16 steps,
 /// which is trivial, and it removes the dependence on a good guess. Ties are
 /// broken by image name so the result is deterministic.
-fn greedy_chain_order(entries: &[(String, Pose)], max_step: f64, texture: &[f64]) -> Vec<usize> {
+fn greedy_chain_order(entries: &[(String, Pose)], max_step: f64, _texture: &[f64]) -> Vec<usize> {
     if entries.is_empty() {
         return Vec::new();
     }

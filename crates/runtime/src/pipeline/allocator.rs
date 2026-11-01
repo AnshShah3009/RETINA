@@ -1,10 +1,10 @@
 use super::BufferId;
-use crate::device_registry::{registry, BackendContext};
 use crate::Result;
+use crate::device_registry::{BackendContext, registry};
 use cv_core::Tensor;
+use cv_hal::DeviceId;
 use cv_hal::gpu::GpuContext;
 use cv_hal::storage::WgpuGpuStorage;
-use cv_hal::DeviceId;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
@@ -277,10 +277,10 @@ impl TransientBufferPool {
 
         {
             let mut free_lists = self.free_lists.write();
-            if let Some(pool) = free_lists.get_mut(&bucket) {
-                if let Some(buffer) = pool.pop() {
-                    return Ok(Arc::new(buffer));
-                }
+            if let Some(pool) = free_lists.get_mut(&bucket)
+                && let Some(buffer) = pool.pop()
+            {
+                return Ok(Arc::new(buffer));
             }
         }
 

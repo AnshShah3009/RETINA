@@ -889,7 +889,7 @@ fn ensure_plottable(figure: &Figure) -> Result<(), crate::PlotError> {
                         "series `{}` is a {:?}, which this renderer does not draw; \
                          no output can be produced for it",
                         series.label, series.plot_type
-                    )))
+                    )));
                 }
             }
         }

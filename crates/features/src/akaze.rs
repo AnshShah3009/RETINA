@@ -5,9 +5,9 @@
 
 #![allow(deprecated)]
 
-use crate::descriptor::{Descriptor, Descriptors};
 use crate::Result;
-use cv_core::{storage::Storage, CpuTensor, Error, KeyPoint, KeyPoints, Tensor};
+use crate::descriptor::{Descriptor, Descriptors};
+use cv_core::{CpuTensor, Error, KeyPoint, KeyPoints, Tensor, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::context::ComputeContext;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
@@ -534,7 +534,7 @@ struct EvolutionLevel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cv_core::{storage::CpuStorage, TensorShape};
+    use cv_core::{TensorShape, storage::CpuStorage};
     use cv_hal::cpu::CpuBackend;
 
     fn create_test_image() -> Tensor<u8, CpuStorage<u8>> {
@@ -559,6 +559,6 @@ mod tests {
         let kps = akaze
             .detect_ctx(&device, &tensor)
             .expect("detect_ctx failed");
-        assert!(kps.len() > 0);
+        assert!(!kps.is_empty());
     }
 }

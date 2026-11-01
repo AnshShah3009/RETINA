@@ -10,7 +10,7 @@
 use cv_hal::context::ComputeContext;
 use cv_hal::gpu::GpuContext;
 use cv_imgproc::hough::{hough_lines, hough_lines_ctx};
-use cv_imgproc::{canny_with_options_ctx, CannyOptions};
+use cv_imgproc::{CannyOptions, canny_with_options_ctx};
 use cv_runtime::orchestrator::{ResourceGroup, RuntimeRunner};
 use image::GrayImage;
 use std::sync::{Arc, OnceLock};

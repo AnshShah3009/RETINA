@@ -104,7 +104,7 @@ use cv_core::{CameraIntrinsics, Descriptors, KeyPoint, Pose};
 use cv_features::matcher::{MatchType, Matcher};
 use nalgebra::{Matrix3, Matrix3x4, Point2, Point3, Vector3};
 
-use crate::bundle_adjustment::{bundle_adjust, BundleAdjustmentConfig, SfMState};
+use crate::bundle_adjustment::{BundleAdjustmentConfig, SfMState, bundle_adjust};
 
 /// A single input view: its keypoints, their descriptors and the image size.
 ///
@@ -577,7 +577,7 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
                 verified.push(pair);
             }
             done += 1;
-            if done % 10 == 0 {
+            if done.is_multiple_of(10) {
                 progress(format_args!(
                     "verify: {done}/{} pairs, {} verified",
                     pairs.len(),
@@ -688,7 +688,7 @@ pub fn map_views(views: &[View], intrinsics: &CameraIntrinsics, config: &MapperC
         mut outcomes,
         ba_runs,
         local_ba_runs,
-        loop_closures,
+        loop_closures: _,
         seed,
     } = best;
     report.seed = Some((seed.a, seed.b));
@@ -1095,12 +1095,12 @@ fn gather_correspondences_matching(
         // Prefer an observation from the view most recently added, but any one
         // will do; take the first registered observation deterministically.
         for &(view, kp) in &est.track_obs[track] {
-            if est.cam_of_view[view].is_some() {
-                if let Some(d) = views[view].descriptors.descriptors.get(kp) {
-                    map_descs.push(d.clone());
-                    map_point.push(point);
-                    break;
-                }
+            if est.cam_of_view[view].is_some()
+                && let Some(d) = views[view].descriptors.descriptors.get(kp)
+            {
+                map_descs.push(d.clone());
+                map_point.push(point);
+                break;
             }
         }
     }
@@ -1182,7 +1182,7 @@ fn retrieval_pairs(
     neighbours: usize,
     seed: u64,
 ) -> Vec<(usize, usize)> {
-    use cv_features::retrieval::{descriptors_to_bytes, BowVector, Vocabulary};
+    use cv_features::retrieval::{BowVector, Vocabulary, descriptors_to_bytes};
 
     let bytes: Vec<Vec<Vec<u8>>> = views
         .iter()
@@ -1351,7 +1351,7 @@ fn verify_pair(
         &points_b,
         config.h_ransac_threshold_px,
         config.h_ransac_iters,
-        pair_seed(a, b) ^ 0xD1B5_4A32_D192_ED03,
+        pair_seed(a, b) ^ 0xd1b5_4a32_d192_ed03,
     )
     .unwrap_or((Matrix3::identity(), vec![false; points_a.len()]));
     let inlier_points_a: Vec<Point2<f64>> = mask
@@ -1435,8 +1435,8 @@ fn verify_pair(
 /// Deterministic RANSAC seed for a view pair.
 fn pair_seed(a: usize, b: usize) -> u64 {
     (a as u64)
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add((b as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F))
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add((b as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f))
 }
 
 /// Deterministic RANSAC for the fundamental matrix.
@@ -1759,7 +1759,7 @@ fn sample_unique_indices(n: usize, k: usize, seed: u64) -> Vec<usize> {
     }
     let mut out = Vec::with_capacity(k);
     let mut used = vec![false; n];
-    let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+    let mut state = seed ^ 0x9e37_79b9_7f4a_7c15;
     let mut attempts = 0usize;
     let budget = 64 * n + 64;
     while out.len() < k && attempts < budget {
@@ -1985,17 +1985,15 @@ fn seed_candidates(
     }
 
     // A forced seed may be a pair below `min_seed_inliers`; build it anyway.
-    if let Some(requested) = config.seed_pair {
-        if forced.is_none() {
-            if let Some(pair) = verified.iter().find(|pair| {
-                (pair.a, pair.b) == requested && !pair.model.planar && pair.inliers.len() >= 8
-            }) {
-                if let Some((good, choice)) = seed_from_pair(pair, views, intrinsics, config) {
-                    diagnostics.push((pair.a, pair.b, good));
-                    forced = Some(choice);
-                }
-            }
-        }
+    if let Some(requested) = config.seed_pair
+        && forced.is_none()
+        && let Some(pair) = verified.iter().find(|pair| {
+            (pair.a, pair.b) == requested && !pair.model.planar && pair.inliers.len() >= 8
+        })
+        && let Some((good, choice)) = seed_from_pair(pair, views, intrinsics, config)
+    {
+        diagnostics.push((pair.a, pair.b, good));
+        forced = Some(choice);
     }
 
     let qualified: Vec<(usize, SeedChoice)> = scored
@@ -2944,7 +2942,7 @@ mod tests {
     /// Returns the views and the ground-truth camera-to-world poses.
     fn synthetic_scene(n_views: usize, n_points: usize) -> (Vec<View>, Vec<Pose>) {
         let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
-        let mut rng = 0x1234_5678_9ABC_DEF0u64;
+        let mut rng = 0x1234_5678_9abc_def0u64;
         let mut next = || {
             rng = rng
                 .wrapping_mul(6364136223846793005)
@@ -2985,8 +2983,8 @@ mod tests {
                 // Descriptor bytes encode the point id, so descriptor distance is
                 // zero exactly between observations of the same point.
                 let mut data = vec![0u8; 32];
-                data[0] = (id & 0xFF) as u8;
-                data[1] = ((id >> 8) & 0xFF) as u8;
+                data[0] = (id & 0xff) as u8;
+                data[1] = ((id >> 8) & 0xff) as u8;
                 keypoints.push(KeyPoint::new(projected.x, projected.y));
                 descriptors.push(Descriptor::new(
                     data,
@@ -3019,8 +3017,8 @@ mod tests {
                     );
                     keypoints.push(KeyPoint::new(projected.x, projected.y));
                     let mut data = vec![0u8; 32];
-                    data[0] = (id & 0xFF) as u8;
-                    data[1] = ((id >> 8) & 0xFF) as u8;
+                    data[0] = (id & 0xff) as u8;
+                    data[1] = ((id >> 8) & 0xff) as u8;
                     descriptors.push(Descriptor::new(
                         data,
                         KeyPoint::new(projected.x, projected.y),
@@ -3104,9 +3102,11 @@ mod tests {
         // graph and can become a multi-view track.
         let tracks = build_tracks(&views, std::slice::from_ref(&pair));
         assert_eq!(tracks.len(), points.len());
-        assert!(tracks
-            .iter()
-            .all(|track| track.len() == 2 && track[0].0 == 0 && track[1].0 == 1));
+        assert!(
+            tracks
+                .iter()
+                .all(|track| track.len() == 2 && track[0].0 == 0 && track[1].0 == 1)
+        );
         let (seeds, _) = seed_candidates(std::slice::from_ref(&pair), &views, &intrinsics, &config);
         assert!(
             seeds.is_empty(),
@@ -3176,11 +3176,13 @@ mod tests {
         assert_eq!(mapping.report.registered, 0);
         assert_eq!(mapping.report.registration_rate, 0.0);
         assert_eq!(mapping.report.outcomes.len(), 4);
-        assert!(mapping
-            .report
-            .outcomes
-            .iter()
-            .all(|outcome| outcome.failure == Some(RegistrationFailure::Unreachable)));
+        assert!(
+            mapping
+                .report
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.failure == Some(RegistrationFailure::Unreachable))
+        );
     }
 
     #[test]
@@ -3504,7 +3506,7 @@ mod tests {
     fn two_view_case(
         a: usize,
         b: usize,
-        step: f64,
+        _step: f64,
         t: f64,
         n_points: usize,
     ) -> (Vec<Vec<(usize, usize)>>, Vec<View>, CameraIntrinsics) {
@@ -3515,7 +3517,7 @@ mod tests {
             nalgebra::Matrix3::<f64>::identity(),
             nalgebra::Vector3::new(t, 0.0, 0.0),
         );
-        let mut rng = 0x5EED_1234_ABCD_0001u64;
+        let mut rng = 0x5eed_1234_abcd_0001u64;
         let mut next = || {
             rng = rng
                 .wrapping_mul(6364136223846793005)
@@ -3549,7 +3551,7 @@ mod tests {
     /// x, so the ground-truth baseline of pair (a, b) is `(b - a) * step`.
     fn chain_views(step: f64, n: usize, n_points: usize) -> (Vec<View>, CameraIntrinsics) {
         let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
-        let mut rng = 0xFEED_7777_0000_0001u64;
+        let mut rng = 0xfeed_7777_0000_0001u64;
         let mut next = || {
             rng = rng
                 .wrapping_mul(6364136223846793005)
@@ -3663,7 +3665,7 @@ mod tests {
     #[test]
     fn an_orbit_registers_views_facing_away_from_the_seed() {
         let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
-        let mut rng = 0x0DDB_A11u64;
+        let mut rng = 0x0ddb_a11u64;
         let mut next = || {
             rng = rng
                 .wrapping_mul(6364136223846793005)
@@ -3696,8 +3698,8 @@ mod tests {
                     continue;
                 }
                 let mut data = vec![0u8; 32];
-                data[0] = (id & 0xFF) as u8;
-                data[1] = ((id >> 8) & 0xFF) as u8;
+                data[0] = (id & 0xff) as u8;
+                data[1] = ((id >> 8) & 0xff) as u8;
                 keypoints.push(KeyPoint::new(px.x, px.y));
                 descriptors.push(Descriptor::new(data, KeyPoint::new(px.x, px.y)));
             }
@@ -3808,7 +3810,7 @@ mod tests {
     #[test]
     fn a_closed_orbit_shares_no_keypoint_between_two_landmarks() {
         let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
-        let mut rng = 0x0DDB_A11u64;
+        let mut rng = 0x0ddb_a11u64;
         let mut next = || {
             rng = rng
                 .wrapping_mul(6364136223846793005)
@@ -3843,8 +3845,8 @@ mod tests {
                     continue;
                 }
                 let mut data = vec![0u8; 32];
-                data[0] = (id & 0xFF) as u8;
-                data[1] = ((id >> 8) & 0xFF) as u8;
+                data[0] = (id & 0xff) as u8;
+                data[1] = ((id >> 8) & 0xff) as u8;
                 keypoints.push(KeyPoint::new(px.x, px.y));
                 descriptors.push(Descriptor::new(data, KeyPoint::new(px.x, px.y)));
             }

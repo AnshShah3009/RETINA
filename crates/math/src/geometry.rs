@@ -4,7 +4,7 @@ use geo::algorithm::simplify::Simplify;
 use geo::{Area, BooleanOps, EuclideanDistance, MultiPolygon, Polygon};
 use ndarray::Array2;
 use rayon::prelude::*;
-use rstar::{PointDistance, RTree, RTreeObject, AABB};
+use rstar::{AABB, PointDistance, RTree, RTreeObject};
 
 /// Wrapper for a Polygon that implements RTreeObject.
 #[derive(Debug, Clone)]

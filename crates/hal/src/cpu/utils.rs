@@ -7,8 +7,8 @@ pub(crate) fn get_val_cpu<T: Float>(src: &[T], w: usize, h: usize, x: i32, y: i3
 }
 
 pub(crate) fn get_pixel_cpu(src: &[f32], w: usize, h: usize, x: i32, y: i32) -> f32 {
-    let cx = (x as i32).clamp(0, w as i32 - 1) as usize;
-    let cy = (y as i32).clamp(0, h as i32 - 1) as usize;
+    let cx = x.clamp(0, w as i32 - 1) as usize;
+    let cy = y.clamp(0, h as i32 - 1) as usize;
     src[cy * w + cx]
 }
 
@@ -29,10 +29,10 @@ pub(crate) fn has_9_contiguous_generic<T: Float>(vals: &[T; 16], high: T, low: T
     let d_mask_ext = d_mask | (d_mask << 16);
 
     for i in 0..16 {
-        if (b_mask_ext >> i) & 0x1FF == 0x1FF {
+        if (b_mask_ext >> i) & 0x1ff == 0x1ff {
             return true;
         }
-        if (d_mask_ext >> i) & 0x1FF == 0x1FF {
+        if (d_mask_ext >> i) & 0x1ff == 0x1ff {
             return true;
         }
     }

@@ -1,9 +1,10 @@
-use cv_runtime::distributed::{ShmCoordinator, SHM_TOTAL_SIZE};
+use cv_runtime::distributed::{SHM_TOTAL_SIZE, ShmCoordinator};
 
 #[test]
 fn test_vram_budgeting_automatic_integration() {
     let shm_name = format!("test_vram_auto_{}", std::process::id());
-    std::env::set_var("CV_RUNTIME_SHM", &shm_name);
+    // FIXME: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("CV_RUNTIME_SHM", &shm_name) };
 
     let coord =
         ShmCoordinator::new(&shm_name, SHM_TOTAL_SIZE).expect("Failed to create coordinator");

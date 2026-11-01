@@ -199,7 +199,7 @@ pub fn solve_pnp_dlt(
         if rot.determinant() < 0.0 {
             // Flip the least-significant direction and redo.
             let u_fixed = {
-                let mut u2 = ru.clone();
+                let mut u2 = ru;
                 for c in 0..3 {
                     u2[(c, 2)] = -u2[(c, 2)];
                 }
@@ -824,13 +824,13 @@ impl PnpSolver {
 
         let t1 = pmul(&npoly, &npoly); // scaled by a² below
         let t2 = pmul(&npoly, &dpoly_d); // scaled by −2a²cb below
-                                         // T3 = (a² − b²·d) · D²  where  a² appears ONLY in the constant term.
+        // T3 = (a² − b²·d) · D²  where  a² appears ONLY in the constant term.
         let t3 = {
             let t = [sa * sa - sb * sb, 2.0 * sb * sb * ca, -sb * sb];
             pmul(&t, &pmul(&dpoly_d, &dpoly_d))
         };
 
-        let mut coeff = vec![0.0f64; 5];
+        let mut coeff = [0.0f64; 5];
         for (deg, &v) in t1.iter().enumerate() {
             coeff[deg] += sa * sa * v;
         }
@@ -1218,7 +1218,7 @@ impl PnpSolver {
 fn sample_unique_indices(n: usize, k: usize, seed: u64) -> Vec<usize> {
     let mut out = Vec::with_capacity(k);
     let mut used = vec![false; n];
-    let mut state = seed ^ 0x9E3779B97F4A7C15;
+    let mut state = seed ^ 0x9e3779b97f4a7c15;
     while out.len() < k {
         state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         // The low bits of a power-of-two-modulus LCG have short periods: with

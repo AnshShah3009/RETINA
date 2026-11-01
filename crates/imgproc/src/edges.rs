@@ -1,4 +1,4 @@
-use cv_core::{storage::Storage, Tensor};
+use cv_core::{Tensor, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 use cv_runtime::orchestrator::RuntimeRunner;
@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use tracing::{info, warn};
 
 use crate::convolve::{
-    convolve_with_border_into_ctx, gaussian_blur_with_border_into_ctx, BorderMode, Kernel,
+    BorderMode, Kernel, convolve_with_border_into_ctx, gaussian_blur_with_border_into_ctx,
 };
 
 fn sobel_kernels_1d(ksize: usize) -> Option<(Vec<f32>, Vec<f32>)> {
@@ -119,17 +119,18 @@ pub fn sobel_ex_ctx(
         // after readback.  A full fix requires either (a) rewriting the WGSL shader to
         // accept f32 storage buffers, or (b) packing u8 pixels into u32 on the host before
         // upload.  Until then, all other cases fall through to the CPU separable path.
-        if ksize == 3 && ((dx == 1 && dy == 0) || (dx == 0 && dy == 1)) {
-            if let Ok(result) = sobel_gpu(gpu, src, ksize) {
-                info!(
-                    "GPU sobel_ex: executed on GPU ({}x{})",
-                    src.width(),
-                    src.height()
-                );
-                let (gx, gy) = result;
-                let target = if dx == 1 { gx } else { gy };
-                return Ok(apply_linear_transform(target, scale, delta));
-            }
+        if ksize == 3
+            && ((dx == 1 && dy == 0) || (dx == 0 && dy == 1))
+            && let Ok(result) = sobel_gpu(gpu, src, ksize)
+        {
+            info!(
+                "GPU sobel_ex: executed on GPU ({}x{})",
+                src.width(),
+                src.height()
+            );
+            let (gx, gy) = result;
+            let target = if dx == 1 { gx } else { gy };
+            return Ok(apply_linear_transform(target, scale, delta));
         }
     }
 

@@ -19,7 +19,7 @@
 //! are reported.
 
 use cv_core::CameraIntrinsics;
-use cv_localization::benchmark::{run, BenchmarkConfig};
+use cv_localization::benchmark::{BenchmarkConfig, run};
 use std::path::PathBuf;
 
 /// TUM RGB-D published intrinsics for the 640x480 rgb stream (fr1 / fr2 series

@@ -2,9 +2,9 @@
 //! Covers: balanced KDTree, BVH, HashGrid, ICP, raycasting, Poisson, MC tables.
 
 use cv_3d::mesh::reconstruction::poisson_reconstruction;
+use cv_3d::spatial::KDTree;
 use cv_3d::spatial::bvh::Bvh;
 use cv_3d::spatial::hash_grid::HashGrid;
-use cv_3d::spatial::KDTree;
 use cv_core::PointCloud;
 use nalgebra::{Point3, Vector3};
 
@@ -128,9 +128,10 @@ fn test_bvh_ray_miss() {
     // Ray parallel to triangle should miss
     let origin = Point3::new(0.0, 0.0, -2.0);
     let dir = Vector3::new(1.0, 0.0, 0.0);
-    assert!(bvh
-        .intersect_ray(&origin, &dir, &vertices, &faces)
-        .is_none());
+    assert!(
+        bvh.intersect_ray(&origin, &dir, &vertices, &faces)
+            .is_none()
+    );
 }
 
 #[test]

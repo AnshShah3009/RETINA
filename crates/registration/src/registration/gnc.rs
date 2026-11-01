@@ -393,7 +393,7 @@ pub fn registration_gnc(
     // the point count that vanished (1 of 60 here) is only visible by comparing
     // `fitness` against 59/60. That is an accident of `exp`, not a contract, and
     // a loss whose weight does not saturate would poison the covariance instead.
-    for (i, &(src_idx, tgt_idx)) in correspondences.iter().enumerate() {
+    for &(src_idx, tgt_idx) in correspondences.iter() {
         let src_finite = source
             .get(src_idx)
             .is_some_and(|p| p.coords.iter().all(|v| v.is_finite()));
@@ -404,7 +404,7 @@ pub fn registration_gnc(
             return None;
         }
     }
-    for (i, p) in source.iter().chain(target.iter()).enumerate() {
+    for p in source.iter().chain(target.iter()) {
         if !p.coords.iter().all(|v| v.is_finite()) {
             return None;
         }

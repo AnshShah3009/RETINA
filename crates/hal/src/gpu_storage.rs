@@ -4,8 +4,8 @@
 //! The actual data lives in the GPU device runtime, while GpuStorage holds only
 //! a handle, device_id, and shape metadata.
 
-use cv_core::storage::{GpuStorageMarker, Storage};
 use cv_core::BufferHandle;
+use cv_core::storage::{GpuStorageMarker, Storage};
 use std::any::Any;
 use std::fmt::Debug;
 

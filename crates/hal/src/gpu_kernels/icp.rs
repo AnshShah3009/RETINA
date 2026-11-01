@@ -1,6 +1,6 @@
+use crate::Result;
 use crate::gpu::GpuContext;
 use crate::storage::GpuStorage;
-use crate::Result;
 use cv_core::Tensor;
 use wgpu::util::DeviceExt;
 
@@ -44,8 +44,8 @@ pub fn icp_correspondences(
     });
 
     let params = ICPParams {
-        num_src: num_src as u32,
-        num_tgt: num_tgt as u32,
+        num_src,
+        num_tgt,
         max_dist_sq: max_dist * max_dist,
         _pad: 0,
     };

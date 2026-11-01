@@ -8,7 +8,7 @@
 //! they fail loudly if the assembly or the retraction convention drifts.
 
 use cv_optimize::factor_graph::{
-    numerical_jacobians, FactorGraph, GNConfig, Key, LMParams, NoiseModel, Values, Variable,
+    FactorGraph, GNConfig, Key, LMParams, NoiseModel, Values, Variable, numerical_jacobians,
 };
 use cv_optimize::factors::{BetweenFactor, PriorFactor, ProjectionFactor, RangeFactor};
 use nalgebra::{DMatrix, DVector, Isometry3, Point3, Vector3};

@@ -46,11 +46,11 @@ impl BatchExecutor {
 
     /// Submit all recorded commands
     pub fn flush(&mut self) {
-        if let Some(encoder) = self.encoder.take() {
-            if self.pending_ops > 0 {
-                self.queue.submit(std::iter::once(encoder.finish()));
-                self.pending_ops = 0;
-            }
+        if let Some(encoder) = self.encoder.take()
+            && self.pending_ops > 0
+        {
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.pending_ops = 0;
         }
     }
 }

@@ -1,5 +1,5 @@
-use cv_runtime::orchestrator::{reset_execution_mode, TaskPriority};
 use cv_runtime::GroupPolicy;
+use cv_runtime::orchestrator::{TaskPriority, reset_execution_mode};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -140,8 +140,8 @@ fn test_multiple_groups() {
         let s = create_scheduler();
         let policy = GroupPolicy::default();
 
-        s.create_group("g1", 2, None, policy.clone()).unwrap();
-        s.create_group("g2", 2, None, policy.clone()).unwrap();
+        s.create_group("g1", 2, None, policy).unwrap();
+        s.create_group("g2", 2, None, policy).unwrap();
         s.create_group("g3", 2, None, policy).unwrap();
 
         assert!(s.get_group("g1").unwrap().is_some());

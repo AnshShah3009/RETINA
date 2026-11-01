@@ -26,13 +26,13 @@
 //! reported as such rather than papered over.
 
 use crate::localizer::{LocalizationResult, Localizer, LocalizerConfig};
-use crate::{evaluate_localization, Database, DatabaseImage, Landmark};
+use crate::{Database, DatabaseImage, Landmark, evaluate_localization};
 use cv_calib3d::triangulate_points;
 use cv_core::{CameraIntrinsics, Descriptors, KeyPoint, Pose};
 use cv_eval::retrieval::{hit_rate_at_k, mean_average_precision, recall_at_k};
 use cv_features::matcher::{MatchType, Matcher};
 use cv_features::orb::orb_detect_and_compute;
-use cv_features::retrieval::{descriptors_to_bytes, BowVector, Vocabulary};
+use cv_features::retrieval::{BowVector, Vocabulary, descriptors_to_bytes};
 use cv_io::datasets::tum;
 use nalgebra::{Matrix3x4, Point3};
 use std::path::{Path, PathBuf};

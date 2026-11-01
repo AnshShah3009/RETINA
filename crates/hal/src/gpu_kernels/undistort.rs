@@ -1,7 +1,7 @@
+use crate::Result;
 use crate::context::{BorderMode, Interpolation};
 use crate::gpu::GpuContext;
 use crate::storage::GpuStorage;
-use crate::Result;
 use cv_core::{CameraIntrinsics, Distortion, Tensor, TensorShape};
 use nalgebra::Matrix3;
 use std::marker::PhantomData;
@@ -144,7 +144,7 @@ pub fn undistort(
             other => {
                 return Err(crate::Error::NotSupported(format!(
                     "GPU undistort supports Nearest and Linear; got {other:?}"
-                )))
+                )));
             }
         },
         border_mode: b_mode,

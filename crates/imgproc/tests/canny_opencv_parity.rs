@@ -8,7 +8,7 @@
 //! right/down (`>=`), strict on both diagonal neighbours, thresholds strict
 //! (`m > low`, `m > high`). Reference tables are cv2 output, row-major, hex.
 
-use cv_imgproc::{canny, canny_with_options, CannyOptions};
+use cv_imgproc::{CannyOptions, canny, canny_with_options};
 use image::GrayImage;
 
 fn rand_img(w: u32, h: u32, seed: u32) -> GrayImage {

@@ -122,10 +122,10 @@ const _: () = assert!(std::mem::size_of::<ProcessSlot>() == PROCESS_SLOT_SIZE);
 // mapped base address is 64-byte aligned (page-aligned), so every region offset and
 // per-element stride must also be a multiple of 64 for the casts to satisfy the
 // `align(64)` of the target types.
-const _: () = assert!(DEVICE_REGION_OFFSET % 64 == 0);
-const _: () = assert!(SLOT_REGION_OFFSET % 64 == 0);
-const _: () = assert!(DEVICE_STATE_SIZE % 64 == 0);
-const _: () = assert!(PROCESS_SLOT_SIZE % 64 == 0);
+const _: () = assert!(DEVICE_REGION_OFFSET.is_multiple_of(64));
+const _: () = assert!(SLOT_REGION_OFFSET.is_multiple_of(64));
+const _: () = assert!(DEVICE_STATE_SIZE.is_multiple_of(64));
+const _: () = assert!(PROCESS_SLOT_SIZE.is_multiple_of(64));
 
 /// A shared-memory mapping, accessed only through a base pointer that
 /// carries write provenance.
@@ -191,7 +191,9 @@ impl ShmMap {
     /// Only while initializing: the caller holds the region lock and the
     /// header has not been published, so no one else accesses the bytes.
     unsafe fn zero(&self) {
-        std::ptr::write_bytes(self.base.as_ptr(), 0, self.len);
+        unsafe {
+            std::ptr::write_bytes(self.base.as_ptr(), 0, self.len);
+        }
     }
 
     /// A shared view of the `T` at `offset`.
@@ -202,9 +204,11 @@ impl ShmMap {
     /// that is never mutated after publication), `offset + size_of::<T>()`
     /// must be within `len`, and `offset` must be a multiple of 64.
     unsafe fn view<T>(&self, offset: usize) -> &T {
-        debug_assert!(offset + std::mem::size_of::<T>() <= self.len);
-        debug_assert_eq!(offset % std::mem::align_of::<T>(), 0);
-        &*(self.base.as_ptr().add(offset) as *const T)
+        unsafe {
+            debug_assert!(offset + std::mem::size_of::<T>() <= self.len);
+            debug_assert_eq!(offset % std::mem::align_of::<T>(), 0);
+            &*(self.base.as_ptr().add(offset) as *const T)
+        }
     }
 }
 
@@ -574,9 +578,9 @@ impl ShmCoordinator {
                 .is_ok()
             {
                 // We won the slot. Initialize it.
-                let gen = slot.generation.load(Ordering::Relaxed);
+                let r#gen = slot.generation.load(Ordering::Relaxed);
                 slot.generation
-                    .store(gen.wrapping_add(1), Ordering::Relaxed);
+                    .store(r#gen.wrapping_add(1), Ordering::Relaxed);
                 slot.pid.store(pid, Ordering::Relaxed);
                 slot.owner_token.store(token, Ordering::Relaxed);
                 slot.heartbeat_ns.store(now_ns, Ordering::Relaxed);
@@ -643,7 +647,7 @@ impl ShmCoordinator {
                             "Device {} over budget: used={}MB + requested={}MB overflows",
                             device_idx, current, memory_mb
                         ),
-                    ))
+                    ));
                 }
             };
             if requested > total {
@@ -1015,12 +1019,12 @@ impl ShmCoordinator {
         // `used_memory_mb` near u32::MAX and the device full forever.
         for d in 0..MAX_DEVICES {
             let budget = slot.memory_budget_mb[d].swap(0, Ordering::AcqRel);
-            if budget > 0 {
-                if let Some(dev) = Self::device_ptr(mmap, d) {
-                    saturating_sub_atomic(&dev.used_memory_mb, budget);
-                    dev.owner_mask
-                        .fetch_and(!Self::slot_bit(i), Ordering::AcqRel);
-                }
+            if budget > 0
+                && let Some(dev) = Self::device_ptr(mmap, d)
+            {
+                saturating_sub_atomic(&dev.used_memory_mb, budget);
+                dev.owner_mask
+                    .fetch_and(!Self::slot_bit(i), Ordering::AcqRel);
             }
             slot.compute_budget_pct[d].store(0, Ordering::Release);
             slot.load_count[d].store(0, Ordering::Release);
@@ -1114,10 +1118,10 @@ impl ShmCoordinator {
     /// Blocks until the thread exits. Safe to call multiple times.
     pub fn stop_heartbeat(&self) {
         self.heartbeat_stop.store(1, Ordering::Release);
-        if let Ok(mut guard) = self.heartbeat_thread.lock() {
-            if let Some(handle) = guard.take() {
-                let _ = handle.join();
-            }
+        if let Ok(mut guard) = self.heartbeat_thread.lock()
+            && let Some(handle) = guard.take()
+        {
+            let _ = handle.join();
         }
     }
 
@@ -1196,10 +1200,10 @@ impl ShmCoordinator {
     pub fn active_slot_count(&self) -> usize {
         let mut count = 0;
         for i in 0..MAX_SLOTS {
-            if let Some(slot) = Self::slot_ptr(&self.mmap, i) {
-                if slot.state.load(Ordering::Acquire) == SLOT_ACTIVE {
-                    count += 1;
-                }
+            if let Some(slot) = Self::slot_ptr(&self.mmap, i)
+                && slot.state.load(Ordering::Acquire) == SLOT_ACTIVE
+            {
+                count += 1;
             }
         }
         count
@@ -1624,15 +1628,17 @@ mod tests {
         let fake_idx = (coord1.slot_index + 1) % MAX_SLOTS;
         let fake_slot = ShmCoordinator::slot_ptr(&coord1.mmap, fake_idx).unwrap();
         // CAS EMPTY -> ACQUIRING -> ACTIVE
-        assert!(fake_slot
-            .state
-            .compare_exchange(
-                SLOT_EMPTY,
-                SLOT_ACQUIRING,
-                Ordering::AcqRel,
-                Ordering::Relaxed
-            )
-            .is_ok());
+        assert!(
+            fake_slot
+                .state
+                .compare_exchange(
+                    SLOT_EMPTY,
+                    SLOT_ACQUIRING,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed
+                )
+                .is_ok()
+        );
         fake_slot.pid.store(88888, Ordering::Release);
         fake_slot
             .heartbeat_ns

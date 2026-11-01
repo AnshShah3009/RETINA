@@ -255,8 +255,8 @@ fn main() {
     // here has varying normals and a well-conditioned system.
     println!("#CASE icp");
     {
-        use cv_3d::gpu::registration::icp_point_to_plane;
         use cv_3d::PointCloud;
+        use cv_3d::gpu::registration::icp_point_to_plane;
         use nalgebra::{Matrix3, Matrix4};
 
         // h(u,v) = A sin(2 pi u) + B cos(2 pi v); non-zero in both derivatives

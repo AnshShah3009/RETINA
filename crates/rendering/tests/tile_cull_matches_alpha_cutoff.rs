@@ -195,7 +195,7 @@ fn the_rendered_alpha_does_not_depend_on_the_tile_size() {
              loses everything between the two depending on which tile a pixel landed in. \
              First few: {:?}",
             missing_in_annulus.len(),
-            &missing_in_annulus
+            missing_in_annulus
                 .iter()
                 .take(6)
                 .map(|(x, y, s, a)| (*x, *y, *s, *a))

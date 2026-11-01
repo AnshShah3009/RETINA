@@ -93,8 +93,8 @@ pub use async_ops::{
 };
 
 pub use batch::{
-    bench as batch_bench, mesh as batch_mesh, point_cloud as batch_point_cloud,
-    raycasting as batch_raycasting, registration as batch_registration, BatchConfig,
+    BatchConfig, bench as batch_bench, mesh as batch_mesh, point_cloud as batch_point_cloud,
+    raycasting as batch_raycasting, registration as batch_registration,
 };
 
 pub use cv_core::PointCloud;
@@ -104,10 +104,10 @@ pub use gpu::{
     tsdf as gpu_tsdf,
 };
 pub use mesh::TriangleMesh;
-pub use odometry::{compute_rgbd_odometry, OdometryMethod, OdometryResult};
+pub use odometry::{OdometryMethod, OdometryResult, compute_rgbd_odometry};
 pub use raycasting::{
-    cast_ray_mesh, cast_rays_mesh, closest_point_on_mesh, closest_points_on_mesh,
-    mesh_to_mesh_distance, point_inside_mesh, Ray, RayHit,
+    Ray, RayHit, cast_ray_mesh, cast_rays_mesh, closest_point_on_mesh, closest_points_on_mesh,
+    mesh_to_mesh_distance, point_inside_mesh,
 };
 pub use spatial::{Bvh, HashGrid, KDTree, Octree, VoxelGrid};
 pub use tsdf::{CameraIntrinsics, TSDFVolume, Triangle, VoxelBlock};

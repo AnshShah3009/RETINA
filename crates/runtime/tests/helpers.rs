@@ -32,6 +32,12 @@ impl TestContext {
     }
 }
 
+impl Default for TestContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for TestContext {
     fn drop(&mut self) {
         reset_runtime_state();

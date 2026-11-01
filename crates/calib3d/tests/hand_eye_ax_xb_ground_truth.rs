@@ -48,7 +48,7 @@
 //! the implementation it is checking.
 
 use cv_calib3d::{
-    calibrate_hand_eye, calibrate_robot_world_hand_eye, HandEyeMethod, RobotWorldHandEyeMethod,
+    HandEyeMethod, RobotWorldHandEyeMethod, calibrate_hand_eye, calibrate_robot_world_hand_eye,
 };
 use nalgebra::{Matrix3, Rotation3, Unit, Vector3};
 
@@ -96,14 +96,14 @@ impl Rigid {
     fn inverse(&self) -> Rigid {
         Rigid {
             r: self.r.transpose(),
-            t: -(self.r.transpose() * &self.t),
+            t: -(self.r.transpose() * self.t),
         }
     }
     /// Composition `self . other`, i.e. apply `other` first.
     fn then(&self, other: &Rigid) -> Rigid {
         Rigid {
-            r: &self.r * &other.r,
-            t: &self.t + &self.r * &other.t,
+            r: self.r * other.r,
+            t: self.t + self.r * other.t,
         }
     }
 }
@@ -176,7 +176,7 @@ fn split(v: &[Rigid]) -> (Vec<Matrix3<f64>>, Vec<Vector3<f64>>) {
 /// than its own tests claim.
 #[test]
 fn calibrate_hand_eye_recovers_planted_transform_across_all_method_variants() {
-    let mut rng = Lcg(0x5EED_0001);
+    let mut rng = Lcg(0x5eed_0001);
     let x_true = Rigid {
         r: rng.rotation(1.2),
         t: Vector3::new(0.05, -0.02, 0.10),
@@ -226,7 +226,7 @@ fn calibrate_hand_eye_recovers_planted_transform_across_all_method_variants() {
 /// and solve for A_i. Tolerance 1e-6 rad / 1e-6 m, matching the sibling test.
 #[test]
 fn calibrate_robot_world_hand_eye_recovers_planted_x_and_z() {
-    let mut rng = Lcg(0x5EED_0003);
+    let mut rng = Lcg(0x5eed_0003);
     let x_true = Rigid {
         r: rng.rotation(1.0),
         t: Vector3::new(0.3, 0.0, -0.1),

@@ -3,9 +3,9 @@
 //! These tests verify that algorithms produce mathematically correct results
 //! by comparing against reference implementations.
 
+use cv_core::TensorShape;
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
-use cv_core::TensorShape;
 use cv_hal::context::{BorderMode, ComputeContext};
 use cv_hal::cpu::CpuBackend;
 use std::path::PathBuf;
@@ -19,7 +19,7 @@ fn fixtures_dir() -> PathBuf {
 fn load_fixture_f32(path: &str) -> Vec<f32> {
     let path = fixtures_dir().join(path);
     let arr: ndarray::Array2<f32> =
-        ndarray_npy::read_npy(&path).expect(&format!("Failed to read {:?}", path));
+        ndarray_npy::read_npy(&path).unwrap_or_else(|_| panic!("Failed to read {:?}", path));
     let len = arr.len();
     arr.into_owned().into_shape(len).unwrap().into_raw_vec()
 }
@@ -420,7 +420,7 @@ mod tvl1_reference_tests {
         if let Some(reference) = load_flow_reference("tvl1_translation_3x2_tvl1_ref") {
             assert!(!reference.is_empty(), "TVL1 reference should not be empty");
 
-            let (mean_x, mean_y) = compute_mean_flow(&reference);
+            let (mean_x, _mean_y) = compute_mean_flow(&reference);
             assert!(
                 mean_x > 2.0 && mean_x < 4.0,
                 "TVL1 reference X should be ~3, got {}",
@@ -441,14 +441,16 @@ mod tvl1_reference_tests {
                 "Farnebäck reference should not be empty"
             );
 
-            let (mean_x, mean_y) = compute_mean_flow(&reference);
+            let (mean_x, _mean_y) = compute_mean_flow(&reference);
             assert!(
                 mean_x > 2.0 && mean_x < 4.0,
                 "Farnebäck reference X should be ~3, got {}",
                 mean_x
             );
         } else {
-            println!("Note: Farnebäck reference fixture not found (run generate_fixtures.py with OpenCV)");
+            println!(
+                "Note: Farnebäck reference fixture not found (run generate_fixtures.py with OpenCV)"
+            );
         }
     }
 }

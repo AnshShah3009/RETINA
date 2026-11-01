@@ -375,11 +375,7 @@ fn build_kmeans_model(
         .zip(mask.iter())
         .filter_map(|(&px, &m)| {
             let is_fg = m == GC_FGD || m == GC_PR_FGD;
-            if foreground == is_fg {
-                Some(px)
-            } else {
-                None
-            }
+            if foreground == is_fg { Some(px) } else { None }
         })
         .collect();
 
@@ -631,7 +627,7 @@ mod tests {
         assert_eq!(zeros, 0, "all pixels should be labelled or boundary");
 
         // The left seed region should dominate left columns, right seed the right columns
-        assert_eq!(m[5 * w + 0], 1);
+        assert_eq!(m[(5 * w)], 1);
         assert_eq!(m[5 * w + 9], 2);
 
         // There should be at least one boundary pixel (-1) somewhere in the middle

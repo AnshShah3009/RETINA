@@ -158,7 +158,7 @@ mod tests {
         let radius = 1;
 
         let mut dst_simd = vec![0.0f32; 8];
-        let mut dst_scalar = vec![0.0f32; 8];
+        let mut dst_scalar = [0.0f32; 8];
 
         // SIMD
         convolve_row_1d(&src, &mut dst_simd, &kernel, radius);

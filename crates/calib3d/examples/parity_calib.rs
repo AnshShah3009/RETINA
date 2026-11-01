@@ -19,10 +19,10 @@
 use std::io::Write;
 
 use cv_calib3d::{
-    calibrate_camera_planar_with_options, find_essential_mat, find_essential_mat_ransac,
-    find_fundamental_mat, find_fundamental_mat_ransac, generate_chessboard_object_points,
-    project_points, project_points_with_distortion, recover_pose_from_essential,
-    CameraCalibrationOptions, HomographySolver,
+    CameraCalibrationOptions, HomographySolver, calibrate_camera_planar_with_options,
+    find_essential_mat, find_essential_mat_ransac, find_fundamental_mat,
+    find_fundamental_mat_ransac, generate_chessboard_object_points, project_points,
+    project_points_with_distortion, recover_pose_from_essential,
 };
 use cv_core::geometry::{
     CameraIntrinsics, CameraIntrinsicsF32, CameraModel, Distortion, DistortionF32,
@@ -717,7 +717,7 @@ fn main() {
     {
         let r_true = rodrigues([0.041, -0.037, 0.026]);
         let t_true = Vector3::new(0.31, 0.048, 0.055);
-        let p2 = Pose::new(r_true.clone(), t_true.clone());
+        let p2 = Pose::new(r_true, t_true);
         emit_pose("ep_relpose", &p2);
 
         // 24 synthetic 3D points on a deterministic lattice, all in front of

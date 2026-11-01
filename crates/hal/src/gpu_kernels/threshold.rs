@@ -1,7 +1,7 @@
-use crate::context::ThresholdType;
-use crate::gpu::GpuContext;
 use crate::GpuTensor;
 use crate::Result;
+use crate::context::ThresholdType;
+use crate::gpu::GpuContext;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -53,7 +53,7 @@ pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
         Ok(_) => {
             return Err(crate::Error::NotSupported(
                 "Unsupported threshold precision type".into(),
-            ))
+            ));
         }
         _ => {
             include_str!("../../shaders/threshold_f32.wgsl")

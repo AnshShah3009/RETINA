@@ -172,7 +172,6 @@ fn rect(ii: &[f64], stride: usize, x0: usize, y0: usize, x1: usize, y1: usize) -
 mod tests {
     use super::*;
     use image::Luma;
-    use rayon::prelude::*;
 
     /// The previous body: a fresh f32 sum of the clipped window at every pixel.
     fn sliding_window(

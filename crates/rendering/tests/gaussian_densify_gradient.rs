@@ -214,13 +214,15 @@ fn training_with_densification_stays_bounded_and_fits() {
         .render(&truth)
         .color;
 
-    let mut cloud = GaussianCloud::from_gaussians(vec![Gaussian::new(
-        Point3::new(0.0, 0.0, 3.0),
-        Vector3::new(0.1, 0.1, 0.1),
-        Vector4::new(0.0, 0.0, 0.0, 1.0),
-        Vector3::new(0.5, 0.5, 0.5),
-    )
-    .with_opacity(0.5)]);
+    let mut cloud = GaussianCloud::from_gaussians(vec![
+        Gaussian::new(
+            Point3::new(0.0, 0.0, 3.0),
+            Vector3::new(0.1, 0.1, 0.1),
+            Vector4::new(0.0, 0.0, 0.0, 1.0),
+            Vector3::new(0.5, 0.5, 0.5),
+        )
+        .with_opacity(0.5),
+    ]);
 
     let mut config = TrainingConfig::default();
     config.iterations = 600;

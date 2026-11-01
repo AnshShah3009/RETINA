@@ -115,11 +115,10 @@ impl KernelFuser {
                 if let Some(pattern) = self.detect_pattern(&window) {
                     let all_fusible = window.iter().all(|n| self.is_fusible(n));
 
-                    if all_fusible {
-                        if let Ok(fused) = self.create_fused_kernel(&window, i, &pattern) {
-                            best_fusion = Some((depth, fused));
-                            break;
-                        }
+                    if all_fusible && let Ok(fused) = self.create_fused_kernel(&window, i, &pattern)
+                    {
+                        best_fusion = Some((depth, fused));
+                        break;
                     }
                 }
             }
@@ -235,16 +234,16 @@ impl KernelFuser {
             // Emit each fused kernel at the position of its first original node,
             // then skip the original nodes it replaces. Emitting it here (rather
             // than appending at the end) preserves producer/consumer order.
-            if let Some(f) = fused_iter.peek() {
-                if f.original_nodes.first() == Some(&i) {
-                    let fused_kernel = fused_iter.next().unwrap();
-                    optimized.push(PipelineNode::Kernel {
-                        name: fused_kernel.name,
-                        inputs: fused_kernel.inputs,
-                        outputs: fused_kernel.outputs,
-                        params: fused_kernel.combined_params,
-                    });
-                }
+            if let Some(f) = fused_iter.peek()
+                && f.original_nodes.first() == Some(&i)
+            {
+                let fused_kernel = fused_iter.next().unwrap();
+                optimized.push(PipelineNode::Kernel {
+                    name: fused_kernel.name,
+                    inputs: fused_kernel.inputs,
+                    outputs: fused_kernel.outputs,
+                    params: fused_kernel.combined_params,
+                });
             }
 
             if skip_indices.contains(&i) {

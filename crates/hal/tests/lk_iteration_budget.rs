@@ -38,8 +38,8 @@
 
 #![forbid(unsafe_code)]
 
-use cv_core::storage::CpuStorage;
 use cv_core::Tensor;
+use cv_core::storage::CpuStorage;
 use cv_hal::compute::ComputeDevice;
 use nalgebra::Vector2;
 
@@ -80,7 +80,7 @@ fn frames(
     }
     let shape = cv_core::TensorShape::new(1, h, w);
     (
-        Tensor::from_vec(a, shape.clone()).expect("prev"),
+        Tensor::from_vec(a, shape).expect("prev"),
         Tensor::from_vec(b, shape).expect("next"),
     )
 }

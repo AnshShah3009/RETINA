@@ -754,15 +754,14 @@ impl eframe::App for NativeViewer {
 /// a cloud into vertices once, and re-uploading is the only way to change a
 /// colour: the renderer has no "recolour in place" entry point.
 fn colors_for(pc: &PointCloud, mode: ColorMode) -> Vec<nalgebra::Point3<f32>> {
-    if mode == ColorMode::PerPoint {
-        if let Some(existing) = pc.colors.as_ref() {
-            if existing.len() >= pc.points.len() {
-                return existing.clone();
-            }
-        }
-        // Falls through to the ramp rather than erroring: a cloud whose colour
-        // array is short should still draw.
+    if mode == ColorMode::PerPoint
+        && let Some(existing) = pc.colors.as_ref()
+        && existing.len() >= pc.points.len()
+    {
+        return existing.clone();
     }
+    // Falls through to the ramp rather than erroring: a cloud whose colour
+    // array is short should still draw.
     let (min, max) = z_range(pc);
     pc.points
         .iter()

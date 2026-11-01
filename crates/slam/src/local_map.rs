@@ -164,7 +164,7 @@ pub(crate) fn match_by_projection(
             continue;
         }
         let slot = &mut best_for_query[best.1];
-        if slot.map_or(true, |(d, _)| best.0 < d) {
+        if slot.is_none_or(|(d, _)| best.0 < d) {
             *slot = Some((best.0, mi));
         }
     }
@@ -222,7 +222,7 @@ pub(crate) fn refine_pose(
             .iter()
             .zip(image)
             .zip(&inliers)
-            .filter(|(_, &ok)| ok)
+            .filter(|&(_, &ok)| ok)
             .map(|((o, i), _)| (*o, *i))
             .unzip();
         if o.len() < 6 {
@@ -326,11 +326,7 @@ fn sampson(e: &Matrix3<f64>, a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
     let etb = e.transpose() * b;
     let num = b.dot(&ea).powi(2);
     let den = ea.x * ea.x + ea.y * ea.y + etb.x * etb.x + etb.y * etb.y;
-    if den > 0.0 {
-        num / den
-    } else {
-        f64::INFINITY
-    }
+    if den > 0.0 { num / den } else { f64::INFINITY }
 }
 
 /// `|E a|²` on the first two coordinates. One per old feature, reused for
@@ -344,11 +340,7 @@ fn essential_xy2(e: &Matrix3<f64>, a: &Vector3<f64>) -> f64 {
 fn sampson_precomputed(a: &Vector3<f64>, l: &Vector3<f64>, ea_xy2: f64) -> f64 {
     let num = a.dot(l).powi(2);
     let den = ea_xy2 + l.x * l.x + l.y * l.y;
-    if den > 0.0 {
-        num / den
-    } else {
-        f64::INFINITY
-    }
+    if den > 0.0 { num / den } else { f64::INFINITY }
 }
 
 /// The Sampson distance is `num / (|E a|_xy² + |l|_xy²)`. `|E a|_xy²` is at
@@ -422,7 +414,7 @@ pub(crate) fn triangulate_new_points(
             let t = new_pose.translation - r * old_pose.translation;
             let e = skew(&t) * r;
 
-            let free = |m: &Vec<Option<u64>>, i: usize| m.get(i).map_or(false, |x| x.is_none());
+            let free = |m: &Vec<Option<u64>>, i: usize| m.get(i).is_some_and(|x| x.is_none());
             let old_free: Vec<(usize, Vector3<f64>, f64)> = old
                 .descriptors
                 .descriptors
@@ -472,7 +464,7 @@ pub(crate) fn triangulate_new_points(
                     continue;
                 }
                 let slot = &mut best_for_old[best.1];
-                if slot.map_or(true, |(d, _)| best.0 < d) {
+                if slot.is_none_or(|(d, _)| best.0 < d) {
                     *slot = Some((best.0, qi));
                 }
             }

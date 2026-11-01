@@ -227,7 +227,7 @@ fn obj_ngon_fan_triangulation_is_consistent() {
         file.push_str(&format!("v {i} 0 0\n"));
     }
     file.push_str("f 1 2 3 4 5 6 7 8\n");
-    let m = obj_mesh(&file.as_bytes()).expect_ok("n-gon");
+    let m = obj_mesh(file.as_bytes()).expect_ok("n-gon");
     assert_eq!(m.faces.len(), 6, "an 8-gon fans into 6 triangles");
     assert_mesh_consistent(&m, "8-gon");
 }

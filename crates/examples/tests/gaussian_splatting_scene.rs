@@ -15,7 +15,7 @@
 mod gaussian_splatting_scene;
 
 use gaussian_splatting_scene::{
-    demo_camera, demo_cloud, non_black_pixels, render_demo, SCENE_DEPTH,
+    SCENE_DEPTH, demo_camera, demo_cloud, non_black_pixels, render_demo,
 };
 
 #[test]

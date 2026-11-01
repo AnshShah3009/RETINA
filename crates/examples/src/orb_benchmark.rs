@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 use cv_core::{Tensor, TensorShape};
-use cv_features::orb::{detect_and_compute_ctx, orb_detect_and_compute, Orb};
+use cv_features::orb::{Orb, detect_and_compute_ctx, orb_detect_and_compute};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::gpu::GpuContext;
 use cv_runtime::orchestrator::scheduler;
@@ -15,7 +15,7 @@ fn create_benchmark_image(width: u32, height: u32) -> GrayImage {
             let is_white = ((x / 16) + (y / 16)) % 2 == 0;
             let noise = (rand::random::<u8>() % 32) as i32 - 16;
             let val = if is_white { 200 } else { 50 };
-            img.put_pixel(x, y, Luma([(val as i32 + noise).clamp(0, 255) as u8]));
+            img.put_pixel(x, y, Luma([(val + noise).clamp(0, 255) as u8]));
         }
     }
     img

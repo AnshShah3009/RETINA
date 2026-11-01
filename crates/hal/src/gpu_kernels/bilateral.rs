@@ -1,5 +1,5 @@
-use crate::gpu::GpuContext;
 use crate::Result;
+use crate::gpu::GpuContext;
 use cv_core::storage::Storage;
 use std::marker::PhantomData;
 use std::sync::Arc;

@@ -3,7 +3,7 @@
 //! Tests that feature detection (SIFT, ORB, AKAZE) work correctly on GPU
 //! with the StorageFactory bounds propagation.
 
-use cv_core::{storage::CpuStorage, Tensor, TensorShape};
+use cv_core::{Tensor, TensorShape, storage::CpuStorage};
 use cv_features::{AkazeParams, DiffusivityType, Orb, Sift};
 use cv_hal::context::ComputeContext;
 use cv_hal::gpu::GpuContext;

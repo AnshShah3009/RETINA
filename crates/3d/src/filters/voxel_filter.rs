@@ -79,7 +79,7 @@ pub fn voxel_downsample(
         out_points.push(Point3::from(sum / n));
 
         // Average normals (then re-normalise).
-        if let (Some(norms), Some(ref mut out_n)) = (&normals, &mut out_normals) {
+        if let (Some(norms), Some(out_n)) = (&normals, &mut out_normals) {
             let mut nsum = Vector3::zeros();
             // Indices come from the voxel keys, and the caller may pass fewer
             // normals than points. `voxel_downsample(&[P;2], Some(&[n;1]),
@@ -110,7 +110,7 @@ pub fn voxel_downsample(
         }
 
         // Average colors.
-        if let (Some(cols), Some(ref mut out_c)) = (&colors, &mut out_colors) {
+        if let (Some(cols), Some(out_c)) = (&colors, &mut out_colors) {
             let mut csum = Vector3::zeros();
             for &i in indices {
                 if let Some(c) = cols.get(i) {

@@ -53,7 +53,7 @@ fn test_dyn_storage_trait_object() {
     assert_eq!(downcast_storage.handle(), cpu_storage.handle());
 
     // Verify data type name matches
-    assert_eq!(downcast_storage.data_type_name().contains("i32"), true);
+    assert!(downcast_storage.data_type_name().contains("i32"));
 }
 
 /// Test 3: StorageFactory trait - from_vec() factory method

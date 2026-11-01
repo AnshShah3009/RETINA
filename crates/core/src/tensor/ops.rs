@@ -118,7 +118,7 @@ impl<T: Clone + Copy + fmt::Debug + 'static> CpuTensor<T> {
                 _ => {
                     return Err(crate::Error::InvalidInput(
                         "Invalid dimension for concat (must be 0, 1, or 2)".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -505,7 +505,7 @@ impl<T: Float + 'static, S: crate::storage::StorageFactory<T>> Tensor<T, S> {
         // Deinterleave HWC pixel data into the CHW plane layout that
         // TensorShape::new(3, h, w) documents (index = c*(H*W) + y*W + x).
         let mut float_data = vec![T::ZERO; 3 * width * height];
-        for (i, chunk) in data.chunks_exact(3).enumerate() {
+        for (i, chunk) in data.as_chunks::<3>().0.iter().enumerate() {
             let px = i % width;
             let py = i / width;
             let plane = width * height;

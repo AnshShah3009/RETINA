@@ -5,7 +5,7 @@
 //! - `fit_ellipse`: Standard ellipse fitting
 
 use cv_core::geometry::RotatedRect;
-use nalgebra::{DMatrix, DVector, Matrix3, Matrix6, Point2, Point3, Vector3};
+use nalgebra::{DMatrix, DVector, Matrix3, Matrix6, Point2};
 
 /// Result of ellipse fitting — returns RotatedRect bounding the ellipse
 #[derive(Debug, Clone, Copy)]
@@ -227,7 +227,7 @@ fn solve_direct_eigen(s: &Matrix6<f64>, c: &Matrix6<f64>) -> Option<[f64; 6]> {
 
     let s22_inv = s22.try_inverse()?;
     let s12t = s12.transpose();
-    let tmp = s11 - &s12 * &s22_inv * s12t;
+    let tmp = s11 - s12 * s22_inv * s12t;
     // C1⁻¹·S' is NOT symmetric; symmetric_eigen previously solved the wrong
     // problem. Solve the 3x3 eigenproblem exactly via its characteristic
     // cubic (trigonometric form) and pick the LARGEST positive eigenvalue.

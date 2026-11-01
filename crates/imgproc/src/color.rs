@@ -1,6 +1,6 @@
 use image::{GrayImage, RgbImage};
-use rayon::prelude::*;
 use rayon::ThreadPool;
+use rayon::prelude::*;
 
 pub fn convert_gray_to_rgb(gray: &GrayImage) -> RgbImage {
     convert_gray_to_rgb_in_pool(gray, None)

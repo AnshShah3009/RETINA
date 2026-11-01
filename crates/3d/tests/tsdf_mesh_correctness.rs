@@ -192,7 +192,7 @@ fn triangle_colours_come_from_the_volume_not_a_constant() {
     );
     let ys: Vec<i32> = observed.iter().map(|c| c.y as i32).collect();
     let zs: Vec<i32> = observed.iter().map(|c| c.z as i32).collect();
-    let y_lo = *ys.iter().min().unwrap();
+    let _y_lo = *ys.iter().min().unwrap();
     let y_hi = *ys.iter().max().unwrap();
     let z_lo = *zs.iter().min().unwrap();
     let z_hi = *zs.iter().max().unwrap();

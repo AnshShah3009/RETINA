@@ -20,8 +20,8 @@
 //! No randomness anywhere: every input is a closed-form function of (x, y).
 
 use cv_imgproc::{
-    create_morph_kernel, dilate_with_border, erode_with_border, gaussian_blur_with_border,
-    gaussian_kernel_1d, sobel_ex, BorderMode, MorphShape,
+    BorderMode, MorphShape, create_morph_kernel, dilate_with_border, erode_with_border,
+    gaussian_blur_with_border, gaussian_kernel_1d, sobel_ex,
 };
 use image::{GrayImage, Luma};
 
@@ -161,7 +161,7 @@ fn main() {
     // u8 discrepancy between the two sides to either a different kernel or
     // only to the round-to-nearest vs truncate-on-cast quantisation step.
     for &sigma in &sigmas {
-        let size = (((sigma * 6.0).ceil() as usize) | 1);
+        let size = ((sigma * 6.0).ceil() as usize) | 1;
         let k = gaussian_kernel_1d(sigma, size);
         emit_f32_row(&format!("kernel1d_s{sigma:?}"), &k);
         println!("#FK s{sigma:?} {:.17e} {}", k.iter().sum::<f32>(), k.len());

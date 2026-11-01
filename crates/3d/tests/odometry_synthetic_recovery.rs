@@ -10,7 +10,7 @@
 
 #![forbid(unsafe_code)]
 
-use cv_3d::odometry::{compute_rgbd_odometry, OdometryMethod};
+use cv_3d::odometry::{OdometryMethod, compute_rgbd_odometry};
 use cv_3d::tsdf::CameraIntrinsics;
 use nalgebra::{Matrix4, Point3, Vector3};
 

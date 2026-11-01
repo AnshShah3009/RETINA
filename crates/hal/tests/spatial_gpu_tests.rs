@@ -160,7 +160,7 @@ fn test_voxel_grid_empty() -> Result<(), Box<dyn Error>> {
     };
 
     let points: Vec<Vector3<f32>> = vec![];
-    let result = cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(&ctx, &points, 0.1)?;
+    let result = cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(ctx, &points, 0.1)?;
 
     assert!(result.is_empty(), "Empty input should give empty output");
     Ok(())
@@ -173,7 +173,7 @@ fn test_voxel_grid_single_point() -> Result<(), Box<dyn Error>> {
     };
 
     let points = vec![Vector3::new(1.0, 2.0, 3.0)];
-    let result = cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(&ctx, &points, 0.5)?;
+    let result = cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(ctx, &points, 0.5)?;
 
     assert_eq!(result.len(), 1, "Single point should give single voxel");
     assert!(
@@ -195,7 +195,7 @@ fn test_voxel_grid_known_voxel_size() -> Result<(), Box<dyn Error>> {
         Vector3::new(0.1, 0.1, 0.1), // Same voxel with 0.5 size
     ];
 
-    let result = cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(&ctx, &points, 0.5)?;
+    let result = cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(ctx, &points, 0.5)?;
 
     // Should be 1 voxel with average position
     assert_eq!(result.len(), 1, "Points in same voxel should merge");
@@ -219,7 +219,7 @@ fn test_voxel_grid_different_voxels() -> Result<(), Box<dyn Error>> {
     // Two points far apart should give two voxels
     let points = vec![Vector3::new(0.0, 0.0, 0.0), Vector3::new(10.0, 10.0, 10.0)];
 
-    let result = cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(&ctx, &points, 0.5)?;
+    let result = cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(ctx, &points, 0.5)?;
 
     assert_eq!(result.len(), 2, "Far points should be in different voxels");
 
@@ -245,7 +245,7 @@ fn test_voxel_grid_vs_cpu() -> Result<(), Box<dyn Error>> {
     let voxel_size = 2.0;
 
     let gpu_result =
-        cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(&ctx, &points, voxel_size)?;
+        cv_hal::gpu_kernels::spatial_gpu::voxel_grid_downsample(ctx, &points, voxel_size)?;
     let cpu_result = voxel_grid_downsample_cpu(&points, voxel_size);
 
     // Should have fewer points after downsampling
@@ -281,9 +281,9 @@ fn test_knn_empty() -> Result<(), Box<dyn Error>> {
     let points = vec![Vector3::new(0.0, 0.0, 0.0)];
     let queries: Vec<Vector3<f32>> = vec![];
 
-    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(&ctx, &points)?;
+    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(ctx, &points)?;
     let result =
-        cv_hal::gpu_kernels::spatial_gpu::batch_nearest_neighbors(&ctx, &kdtree, &queries, 3)?;
+        cv_hal::gpu_kernels::spatial_gpu::batch_nearest_neighbors(ctx, &kdtree, &queries, 3)?;
 
     assert!(result.is_empty(), "Empty queries should give empty result");
     Ok(())
@@ -303,9 +303,9 @@ fn test_knn_single_query() -> Result<(), Box<dyn Error>> {
 
     let queries = vec![Vector3::new(0.1, 0.1, 0.0)];
 
-    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(&ctx, &points)?;
+    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(ctx, &points)?;
     let result =
-        cv_hal::gpu_kernels::spatial_gpu::batch_nearest_neighbors(&ctx, &kdtree, &queries, 2)?;
+        cv_hal::gpu_kernels::spatial_gpu::batch_nearest_neighbors(ctx, &kdtree, &queries, 2)?;
 
     assert_eq!(result.len(), 1, "Should have one query result");
     assert_eq!(result[0].len(), 2, "Should return k=2 nearest");
@@ -339,9 +339,9 @@ fn test_knn_vs_cpu() -> Result<(), Box<dyn Error>> {
 
     let k = 3usize;
 
-    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(&ctx, &points)?;
+    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(ctx, &points)?;
     let gpu_result = cv_hal::gpu_kernels::spatial_gpu::batch_nearest_neighbors(
-        &ctx, &kdtree, &queries, k as u32,
+        ctx, &kdtree, &queries, k as u32,
     )?;
     let cpu_result = knn_cpu(&points, &queries, k);
 
@@ -374,9 +374,9 @@ fn test_radius_search_empty() -> Result<(), Box<dyn Error>> {
     let points = vec![Vector3::new(0.0, 0.0, 0.0)];
     let queries: Vec<Vector3<f32>> = vec![];
 
-    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(&ctx, &points)?;
+    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(ctx, &points)?;
     let result =
-        cv_hal::gpu_kernels::spatial_gpu::batch_radius_search(&ctx, &kdtree, &queries, 1.0)?;
+        cv_hal::gpu_kernels::spatial_gpu::batch_radius_search(ctx, &kdtree, &queries, 1.0)?;
 
     assert!(result.is_empty());
     Ok(())
@@ -398,9 +398,9 @@ fn test_radius_search_all_within() -> Result<(), Box<dyn Error>> {
     let queries = vec![Vector3::new(0.0, 0.0, 0.0)];
     let radius = 10.0;
 
-    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(&ctx, &points)?;
+    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(ctx, &points)?;
     let result =
-        cv_hal::gpu_kernels::spatial_gpu::batch_radius_search(&ctx, &kdtree, &queries, radius)?;
+        cv_hal::gpu_kernels::spatial_gpu::batch_radius_search(ctx, &kdtree, &queries, radius)?;
 
     assert_eq!(result[0].len(), 3, "All points within large radius");
 
@@ -421,9 +421,9 @@ fn test_radius_search_none_within() -> Result<(), Box<dyn Error>> {
     let queries = vec![Vector3::new(0.0, 0.0, 0.0)];
     let radius = 1.0;
 
-    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(&ctx, &points)?;
+    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(ctx, &points)?;
     let result =
-        cv_hal::gpu_kernels::spatial_gpu::batch_radius_search(&ctx, &kdtree, &queries, radius)?;
+        cv_hal::gpu_kernels::spatial_gpu::batch_radius_search(ctx, &kdtree, &queries, radius)?;
 
     assert!(result[0].is_empty(), "No points within small radius");
 
@@ -448,9 +448,9 @@ fn test_radius_search_vs_cpu() -> Result<(), Box<dyn Error>> {
 
     let radius = 0.6;
 
-    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(&ctx, &points)?;
+    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(ctx, &points)?;
     let gpu_result =
-        cv_hal::gpu_kernels::spatial_gpu::batch_radius_search(&ctx, &kdtree, &queries, radius)?;
+        cv_hal::gpu_kernels::spatial_gpu::batch_radius_search(ctx, &kdtree, &queries, radius)?;
     let cpu_result = radius_search_cpu(&points, &queries, radius);
 
     assert_eq!(gpu_result.len(), cpu_result.len());
@@ -481,13 +481,13 @@ fn test_kdtree_preserves_points() -> Result<(), Box<dyn Error>> {
 
     let points = vec![Vector3::new(1.5, 2.5, 3.5), Vector3::new(10.0, 20.0, 30.0)];
 
-    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(&ctx, &points)?;
+    let kdtree = cv_hal::gpu_kernels::spatial_gpu::build_kdtree(ctx, &points)?;
 
     // Query at original positions
     let queries = vec![Vector3::new(1.5, 2.5, 3.5), Vector3::new(10.0, 20.0, 30.0)];
 
     let result =
-        cv_hal::gpu_kernels::spatial_gpu::batch_nearest_neighbors(&ctx, &kdtree, &queries, 1)?;
+        cv_hal::gpu_kernels::spatial_gpu::batch_nearest_neighbors(ctx, &kdtree, &queries, 1)?;
 
     // First query should find point 0 as nearest
     assert_eq!(result[0][0].0, 0, "First query should find first point");

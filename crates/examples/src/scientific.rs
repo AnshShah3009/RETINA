@@ -3,7 +3,7 @@
 //!
 //! Run with: cargo run --example scientific
 
-use cv_scientific::{integrate, mean, special, std as cv_std, Interp1d};
+use cv_scientific::{Interp1d, integrate, mean, special, std as cv_std};
 
 fn main() {
     println!("=== Scientific Computing Example ===\n");

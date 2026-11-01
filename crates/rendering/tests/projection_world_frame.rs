@@ -191,7 +191,10 @@ fn rotating_the_world_does_not_change_the_projected_splat() {
         .zip(out1.alpha.iter())
         .filter(|(a, b)| (*a - *b).abs() > 1e-4)
         .count();
-    println!("alpha error = {alpha_err:e}, colour error = {colour_err:e}, differing pixels = {differing}/{}", out0.alpha.len());
+    println!(
+        "alpha error = {alpha_err:e}, colour error = {colour_err:e}, differing pixels = {differing}/{}",
+        out0.alpha.len()
+    );
     assert!(
         alpha_err < 1e-3 && colour_err < 1e-3,
         "a world-frame change must not change the rendered image: alpha {alpha_err:e}, \

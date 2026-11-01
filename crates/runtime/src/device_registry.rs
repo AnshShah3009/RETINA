@@ -1,7 +1,7 @@
+use crate::Result;
 use crate::executor::ExecutorPool;
 use crate::memory_manager::MemoryManager;
-use crate::Result;
-pub use cv_hal::{context::ComputeContext, BackendType, ComputeBackend, DeviceId, SubmissionIndex};
+pub use cv_hal::{BackendType, ComputeBackend, DeviceId, SubmissionIndex, context::ComputeContext};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -129,7 +129,7 @@ impl DeviceRuntime {
     pub fn compute_device(&self) -> Result<cv_hal::compute::ComputeDevice<'static>> {
         match &self.context {
             BackendContext::Cpu(cpu) => Ok(cv_hal::compute::ComputeDevice::Cpu(
-                *self.static_cpu.get_or_init(|| leak_for_process(cpu)),
+                self.static_cpu.get_or_init(|| leak_for_process(cpu)),
             )),
             BackendContext::Gpu(_) | BackendContext::Mlx(_) => {
                 cv_hal::compute::get_device_by_id(self.id).map_err(|e| {

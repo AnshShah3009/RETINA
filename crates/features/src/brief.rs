@@ -2,7 +2,7 @@ use crate::descriptor::{Descriptor, DescriptorExtractor, Descriptors};
 use cv_core::KeyPoints;
 use image::GrayImage;
 use rand::Rng;
-use rand::{rng, rngs::StdRng, SeedableRng};
+use rand::SeedableRng;
 
 /// BRIEF binary descriptor extractor.
 ///
@@ -24,7 +24,7 @@ impl BriefDescriptor {
         // Deterministic seeded RNG (rand 0.9): BRIEF requires ONE fixed
         // sampling pattern — descriptors from an unseeded thread-RNG are
         // incomparable across instances/processes.
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0x5DEECE66D);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0x5deece66d);
         let mut pairs = Vec::with_capacity(num_pairs);
 
         let half_size = patch_size / 2;

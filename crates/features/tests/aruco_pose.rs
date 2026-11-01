@@ -39,7 +39,7 @@
 //! pose does not reproduce the four corners, the solve is not a pose and the
 //! function reports that it cannot solve instead of returning it.
 
-use cv_features::aruco::{estimate_marker_pose, DetectedMarker};
+use cv_features::aruco::{DetectedMarker, estimate_marker_pose};
 
 const MARKER: f64 = 0.05;
 const F: f64 = 200.0;

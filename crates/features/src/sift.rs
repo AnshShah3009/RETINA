@@ -1,6 +1,6 @@
 #![allow(deprecated)]
 
-use cv_core::{storage::Storage, Descriptors, Error, KeyPoint, KeyPoints, Tensor};
+use cv_core::{Descriptors, Error, KeyPoint, KeyPoints, Tensor, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::context::ComputeContext;
 use cv_hal::tensor_ext::TensorToCpu;
@@ -268,22 +268,22 @@ impl Sift {
 
                 for y in 1..h - 1 {
                     for x in 1..w - 1 {
-                        if cand_slice[y * cand_stride + x] > 0 {
-                            if let Some(refined) = refine_point(
+                        if cand_slice[y * cand_stride + x] > 0
+                            && let Some(refined) = refine_point(
                                 dog_layers,
                                 s,
                                 x,
                                 y,
                                 self.n_layers,
                                 self.contrast_threshold,
-                            ) {
-                                let scale = 2.0f64.powi(octave as i32);
-                                let kp = KeyPoint::new(refined.x * scale, refined.y * scale)
-                                    .with_size(refined.size * scale)
-                                    .with_octave(octave as i32)
-                                    .with_response(refined.response);
-                                all_kps.push(kp);
-                            }
+                            )
+                        {
+                            let scale = 2.0f64.powi(octave as i32);
+                            let kp = KeyPoint::new(refined.x * scale, refined.y * scale)
+                                .with_size(refined.size * scale)
+                                .with_octave(octave as i32)
+                                .with_response(refined.response);
+                            all_kps.push(kp);
                         }
                     }
                 }
@@ -388,7 +388,7 @@ impl Sift {
                         })?;
                     octave_kps
                         .into_iter()
-                        .zip(orientations.into_iter())
+                        .zip(orientations)
                         .map(|(kp, angle)| kp.with_angle(angle as f64))
                         .collect::<Vec<_>>()
                 }
@@ -653,10 +653,9 @@ fn refine_point(
 
         let hessian = Matrix3::new(dxx, dxy, dxs, dxy, dyy, dys, dxs, dys, dss);
 
-        if let Some(inv_h) = hessian.try_inverse() {
+        {
+            let inv_h = hessian.try_inverse()?;
             offset = -inv_h * grad;
-        } else {
-            return None;
         }
 
         if offset.x.abs() < 0.5 && offset.y.abs() < 0.5 && offset.z.abs() < 0.5 {
@@ -789,7 +788,7 @@ fn convert_to_f32_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
             _ => {
                 return Err(Error::AlgorithmError(
                     "GpuStorage requires GPU context".into(),
-                ))
+                ));
             }
         };
         input_gpu
@@ -832,7 +831,7 @@ pub fn sift_detect_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cv_core::{storage::CpuStorage, Result, TensorShape};
+    use cv_core::{Result, TensorShape, storage::CpuStorage};
     use cv_hal::cpu::CpuBackend;
 
     fn create_test_image() -> Result<Tensor<u8, CpuStorage<u8>>> {
@@ -856,7 +855,7 @@ mod tests {
         let tensor = create_test_image().unwrap();
         let sift = Sift::new();
         let (kps, _) = sift.detect_and_refine(&device, &tensor).unwrap();
-        assert!(kps.len() > 0);
+        assert!(!kps.is_empty());
     }
 
     #[test]

@@ -439,18 +439,18 @@ pub fn write_glb<P: AsRef<Path>>(
         .map_err(|e| cv_core::Error::IoError(format!("Failed to create GLB: {}", e)))?;
 
     // Header
-    file.write_all(&0x46546C67u32.to_le_bytes())?; // magic "glTF"
+    file.write_all(&0x46546c67u32.to_le_bytes())?; // magic "glTF"
     file.write_all(&2u32.to_le_bytes())?; // version
     file.write_all(&total_length.to_le_bytes())?;
 
     // JSON chunk
     file.write_all(&(json_padded.len() as u32).to_le_bytes())?;
-    file.write_all(&0x4E4F534Au32.to_le_bytes())?; // "JSON"
+    file.write_all(&0x4e4f534au32.to_le_bytes())?; // "JSON"
     file.write_all(&json_padded)?;
 
     // BIN chunk
     file.write_all(&(total_bin_len as u32).to_le_bytes())?;
-    file.write_all(&0x004E4942u32.to_le_bytes())?; // "BIN\0"
+    file.write_all(&0x004e4942u32.to_le_bytes())?; // "BIN\0"
     file.write_all(&bin_buffer)?;
 
     Ok(())

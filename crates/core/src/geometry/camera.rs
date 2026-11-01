@@ -374,6 +374,28 @@ impl From<CameraIntrinsics> for CameraIntrinsicsF32 {
     }
 }
 
+impl From<CameraIntrinsicsF32> for CameraIntrinsics {
+    /// Convert single-precision camera intrinsics to double-precision.
+    ///
+    /// # Example
+    /// ```
+    /// # use cv_core::{CameraIntrinsics, CameraIntrinsicsF32};
+    /// let intrinsics_f32 = CameraIntrinsicsF32::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+    /// let intrinsics: CameraIntrinsics = intrinsics_f32.into();
+    /// assert!((intrinsics.fx - 500.0).abs() < 1e-10);
+    /// ```
+    fn from(c: CameraIntrinsicsF32) -> Self {
+        CameraIntrinsics::new(
+            c.fx as f64,
+            c.fy as f64,
+            c.cx as f64,
+            c.cy as f64,
+            c.width,
+            c.height,
+        )
+    }
+}
+
 #[cfg(test)]
 mod projection_guard_tests {
     use super::*;
@@ -520,27 +542,5 @@ mod projection_guard_tests {
         assert!((ok.x - 2.72).abs() < 1e-5, "x {}", ok.x);
         assert!((ok.y - 2.24).abs() < 1e-5, "y {}", ok.y);
         assert!((ok.z - 2.0).abs() < 1e-5, "z {}", ok.z);
-    }
-}
-
-impl From<CameraIntrinsicsF32> for CameraIntrinsics {
-    /// Convert single-precision camera intrinsics to double-precision.
-    ///
-    /// # Example
-    /// ```
-    /// # use cv_core::{CameraIntrinsics, CameraIntrinsicsF32};
-    /// let intrinsics_f32 = CameraIntrinsicsF32::new(500.0, 500.0, 320.0, 240.0, 640, 480);
-    /// let intrinsics: CameraIntrinsics = intrinsics_f32.into();
-    /// assert!((intrinsics.fx - 500.0).abs() < 1e-10);
-    /// ```
-    fn from(c: CameraIntrinsicsF32) -> Self {
-        CameraIntrinsics::new(
-            c.fx as f64,
-            c.fy as f64,
-            c.cx as f64,
-            c.cy as f64,
-            c.width,
-            c.height,
-        )
     }
 }

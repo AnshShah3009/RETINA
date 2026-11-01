@@ -26,7 +26,7 @@ use cubecl::std::tensor::TensorHandle;
 
 use crate::gpu_kernels::cubecl_proto as proto;
 
-use proto::{cubes_for, f32_storage, CUBE_DIM};
+use proto::{CUBE_DIM, cubes_for, f32_storage};
 
 /// A device client plus the CUDA fallback flag the backend wrapper carries.
 ///

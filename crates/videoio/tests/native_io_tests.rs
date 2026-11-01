@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 use cv_videoio::{
-    backends::{PngSequenceCapture, PngSequenceWriter},
     VideoCapture, VideoWriter,
+    backends::{PngSequenceCapture, PngSequenceWriter},
 };
 use image::{GrayImage, Luma};
 use tempfile::tempdir;

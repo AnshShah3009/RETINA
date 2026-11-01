@@ -273,14 +273,14 @@ mod tests {
         index.insert(1, [0u8, 0, 0, 0]);
         index.insert(0, [0u8, 0, 0, 0]);
         // Overwrite id 0. The old zero-bucket must not still name it.
-        index.insert(0, [0xFFu8, 0xFF, 0xFF, 0xFF]);
+        index.insert(0, [0xffu8, 0xff, 0xff, 0xff]);
 
         assert_eq!(
             index.query([0u8, 0, 0, 0], 4),
             vec![(1, 0)],
             "query of the overwritten zeros still returned id 0"
         );
-        assert_eq!(index.query([0xFFu8, 0xFF, 0xFF, 0xFF], 4), vec![(0, 0)]);
+        assert_eq!(index.query([0xffu8, 0xff, 0xff, 0xff], 4), vec![(0, 0)]);
     }
 
     #[test]

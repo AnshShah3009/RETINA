@@ -1,8 +1,8 @@
 use cv_hal::DeviceId;
-use cv_runtime::distributed::{ShmCoordinator, SHM_TOTAL_SIZE};
+use cv_runtime::distributed::{SHM_TOTAL_SIZE, ShmCoordinator};
 use cv_runtime::orchestrator::{
-    scheduler, set_execution_mode, AdaptiveLevel, ExecutionMode, RuntimeRunner, TaskPriority,
-    WorkloadHint,
+    AdaptiveLevel, ExecutionMode, RuntimeRunner, TaskPriority, WorkloadHint, scheduler,
+    set_execution_mode,
 };
 use cv_runtime::{Error, GroupPolicy};
 use parking_lot::Mutex;

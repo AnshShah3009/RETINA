@@ -1,9 +1,9 @@
+use crate::Result;
 use crate::context::MorphologyType;
 use crate::gpu::GpuContext;
 use crate::storage::GpuStorage;
-use crate::Result;
-use cv_core::storage::Storage;
 use cv_core::Tensor;
+use cv_core::storage::Storage;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;

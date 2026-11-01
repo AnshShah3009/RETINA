@@ -57,7 +57,7 @@ fn forward_motion_over_a_dominant_plane() {
             .iter()
             .zip(&p2)
             .zip(&mask)
-            .filter(|(_, &m)| m)
+            .filter(|&(_, &m)| m)
             .map(|((a, b), _)| (*a, *b))
             .unzip();
         let pose = recover_pose_from_essential(&e, &i1, &i2, &k).unwrap();

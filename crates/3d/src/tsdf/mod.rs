@@ -197,15 +197,15 @@ impl TSDFVolume {
                 depth_image.len()
             )));
         }
-        if let Some(colors) = color_image {
-            if colors.len() < expected {
-                return Err(cv_core::Error::InvalidInput(format!(
-                    "color_image has {} samples but the frame is declared {width}x{height} \
+        if let Some(colors) = color_image
+            && colors.len() < expected
+        {
+            return Err(cv_core::Error::InvalidInput(format!(
+                "color_image has {} samples but the frame is declared {width}x{height} \
                      ({expected}); the missing samples would be replaced with a \
                      fabricated mid-grey",
-                    colors.len()
-                )));
-            }
+                colors.len()
+            )));
         }
 
         // A zero focal length makes the backprojection below divide by zero, so

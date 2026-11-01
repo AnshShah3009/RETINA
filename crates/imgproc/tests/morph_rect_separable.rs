@@ -3,7 +3,7 @@
 //! mode. `dense` below is that loop, verbatim apart from packaging.
 
 use cv_imgproc::{
-    create_morph_kernel, dilate_with_border_into, erode_with_border_into, BorderMode, MorphShape,
+    BorderMode, MorphShape, create_morph_kernel, dilate_with_border_into, erode_with_border_into,
 };
 use image::GrayImage;
 use std::time::Instant;
@@ -58,7 +58,7 @@ fn dense(src: &GrayImage, kernel: &[(i32, i32)], border: BorderMode, is_max: boo
 }
 
 fn noise(w: u32, h: u32, seed: u64) -> GrayImage {
-    let mut s = seed.wrapping_add(0x9E3779B97F4A7C15);
+    let mut s = seed.wrapping_add(0x9e3779b97f4a7c15);
     GrayImage::from_fn(w, h, |_, _| {
         s ^= s << 13;
         s ^= s >> 7;

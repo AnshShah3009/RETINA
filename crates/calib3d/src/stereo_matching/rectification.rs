@@ -83,8 +83,8 @@ fn compute_rectification_transforms(
     let m = r_right * r_left.transpose();
 
     // Camera centers under the world→camera convention (X_c = R·X_w + t ⇒ C = −Rᵀ·t).
-    let c_left = -r_left.transpose() * &left_extrinsics.translation;
-    let c_right = -r_right.transpose() * &right_extrinsics.translation;
+    let c_left = -r_left.transpose() * left_extrinsics.translation;
+    let c_right = -r_right.transpose() * right_extrinsics.translation;
 
     // Baseline direction (left → right) in the left camera's frame.
     let b_left = r_left * (c_right - c_left);

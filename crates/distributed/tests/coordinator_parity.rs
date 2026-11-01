@@ -10,8 +10,8 @@
 //! `FileCoordinator` returned `{3: 7, 5: 2}`.
 
 use cv_distributed::{
-    create_coordinator, CoordinatorType, FileCoordinator, LoadCoordinator, ShmCoordinator,
-    SHM_TOTAL_SIZE,
+    CoordinatorType, FileCoordinator, LoadCoordinator, SHM_TOTAL_SIZE, ShmCoordinator,
+    create_coordinator,
 };
 use cv_hal::DeviceId;
 use std::collections::HashMap;
@@ -41,7 +41,7 @@ fn sorted(map: &HashMap<DeviceId, usize>) -> Vec<(u32, usize)> {
 fn nonzero(map: &HashMap<DeviceId, usize>) -> Vec<(u32, usize)> {
     let mut v: Vec<(u32, usize)> = map
         .iter()
-        .filter(|(_, &l)| l > 0)
+        .filter(|&(_, &l)| l > 0)
         .map(|(k, &l)| (k.0, l))
         .collect();
     v.sort();

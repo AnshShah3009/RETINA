@@ -7,7 +7,7 @@
 //! #W <name> <width> <height> <v0> ...   # warped/resampled image (row-major)
 //! ```
 
-use cv_imgproc::{remap_ex, resize, resize_rgb, warp_affine_ex, BorderMode, Interpolation};
+use cv_imgproc::{BorderMode, Interpolation, remap_ex, resize, resize_rgb, warp_affine_ex};
 use image::{GrayImage, Luma, Rgb, RgbImage};
 
 const W: u32 = 48;
@@ -28,7 +28,7 @@ fn emit_image_rgb(name: &str, img: &RgbImage) {
     for c in 0..3 {
         let mut line = format!("#IM {name}_c{c} {} {}", img.width(), img.height());
         for p in img.pixels() {
-            line.push_str(&format!(" {:.1}", p[0 + c] as f64));
+            line.push_str(&format!(" {:.1}", p[c] as f64));
         }
         println!("{line}");
     }

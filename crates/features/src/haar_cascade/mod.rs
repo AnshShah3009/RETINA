@@ -3,7 +3,7 @@
 //! Implementation of the Viola-Jones object detection framework
 //! using Haar-like features and boosted cascades.
 
-use cv_core::{Error, Rect, Result, Tensor};
+use cv_core::{Rect, Result};
 use image::GrayImage;
 
 /// Squared integral image for variance normalization (uses u64 to avoid overflow).

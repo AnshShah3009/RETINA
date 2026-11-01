@@ -3,7 +3,7 @@
 //! This module provides GPU-accelerated implementations of all major 3D algorithms.
 //! Optimized for minimal GPU-CPU data transfers following Open3D patterns.
 
-use cv_core::{storage::Storage, Tensor};
+use cv_core::{Tensor, storage::Storage};
 use cv_hal::context::ComputeContext;
 use cv_hal::gpu::GpuContext;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
@@ -118,25 +118,25 @@ pub mod point_cloud {
         let k = k.min(points.len().saturating_sub(1)).max(3);
 
         let runner = cv_runtime::best_runner().ok().map(|(r, _)| r);
-        if let Some(ref r) = runner {
-            if let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = r.device() {
-                let pts: Vec<nalgebra::Vector3<f32>> = points.iter().map(|p| p.coords).collect();
-                match cv_hal::gpu_kernels::pointcloud_gpu::compute_normals_tiled_gpu(
-                    gpu, &pts, k as u32,
-                ) {
-                    Ok(n) => {
-                        info!(
-                            "GPU compute_normals_gpu_tiled: executed on GPU ({} points)",
-                            points.len()
-                        );
-                        return n;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "GPU tiled normals kernel failed: {:?}, falling back to CPU",
-                            e
-                        );
-                    }
+        if let Some(ref r) = runner
+            && let Ok(cv_hal::compute::ComputeDevice::Gpu(gpu)) = r.device()
+        {
+            let pts: Vec<nalgebra::Vector3<f32>> = points.iter().map(|p| p.coords).collect();
+            match cv_hal::gpu_kernels::pointcloud_gpu::compute_normals_tiled_gpu(
+                gpu, &pts, k as u32,
+            ) {
+                Ok(n) => {
+                    info!(
+                        "GPU compute_normals_gpu_tiled: executed on GPU ({} points)",
+                        points.len()
+                    );
+                    return n;
+                }
+                Err(e) => {
+                    warn!(
+                        "GPU tiled normals kernel failed: {:?}, falling back to CPU",
+                        e
+                    );
                 }
             }
         }
@@ -473,11 +473,7 @@ pub mod point_cloud {
                 let v1 = Vector3::new(p1.x - c.x, p1.y - c.y, p1.z - c.z);
                 let n = v0.cross(&v1);
                 let len = n.norm();
-                if len < 1e-10 {
-                    Vector3::z()
-                } else {
-                    n / len
-                }
+                if len < 1e-10 { Vector3::z() } else { n / len }
             })
             .collect()
     }
@@ -576,11 +572,7 @@ pub mod point_cloud {
                     acc += a.cross(&b);
                 }
                 let len = acc.norm();
-                if len < 1e-10 {
-                    Vector3::z()
-                } else {
-                    acc / len
-                }
+                if len < 1e-10 { Vector3::z() } else { acc / len }
             })
             .collect()
     }

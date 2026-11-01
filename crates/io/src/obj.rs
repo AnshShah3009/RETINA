@@ -2,10 +2,10 @@
 //!
 //! OBJ is a common format for storing 3D mesh geometry.
 
-use crate::mesh::TriangleMesh;
 use crate::Result;
-use cv_core::point_cloud::PointCloud;
+use crate::mesh::TriangleMesh;
 use cv_core::Error;
+use cv_core::point_cloud::PointCloud;
 use nalgebra::{Point3, Vector3};
 use std::io::{BufRead, Write};
 
@@ -242,7 +242,7 @@ impl ObjMesh {
                                         "OBJ relative face index {i} reaches before the first \
                                          vertex: only {} read so far (in: {line:?})",
                                         mesh.vertices.len()
-                                    )))
+                                    )));
                                 }
                             }
                         };

@@ -33,8 +33,8 @@
 //! The CPU path is therefore unreachable: an algorithm that asks a CPU runner
 //! for its device gets an error instead of the CPU kernel it should run.
 
-use cv_hal::compute::ComputeDevice;
 use cv_hal::BackendType;
+use cv_hal::compute::ComputeDevice;
 use cv_runtime::orchestrator::{GroupPolicy, RuntimeRunner, TaskScheduler};
 
 /// A scheduler whose only device is the default CPU group - what a CPU-only

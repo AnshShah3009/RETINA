@@ -73,14 +73,15 @@ impl Metrics {
 
     /// Get average submission latency in milliseconds
     pub fn avg_submission_latency_ms(&self) -> f64 {
-        if let Ok(latencies) = self.submission_latencies.lock() {
-            if latencies.is_empty() {
-                return 0.0;
+        match self.submission_latencies.lock() {
+            Ok(latencies) => {
+                if latencies.is_empty() {
+                    return 0.0;
+                }
+                let sum: u64 = latencies.iter().sum();
+                sum as f64 / latencies.len() as f64
             }
-            let sum: u64 = latencies.iter().sum();
-            sum as f64 / latencies.len() as f64
-        } else {
-            0.0
+            _ => 0.0,
         }
     }
 

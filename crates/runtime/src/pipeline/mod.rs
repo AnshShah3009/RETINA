@@ -8,12 +8,12 @@ pub use fusion::{FusedKernel, FusionPattern, KernelFuser};
 pub use graph::{ExecutionGraph, NodeDependency, NodeId};
 pub use handle::{AsyncPipelineHandle, ExecutionEvent, PipelineResult};
 
+use crate::Result;
 use crate::device_registry::registry;
 use crate::orchestrator::RuntimeRunner;
-use crate::Result;
 use cv_core::Tensor;
-use cv_hal::context::ComputeContext;
 use cv_hal::DeviceId;
+use cv_hal::context::ComputeContext;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -356,44 +356,6 @@ fn split_linear_workgroups(groups: u32) -> (u32, u32, u32) {
     (MAX, y, z.max(1))
 }
 
-#[cfg(test)]
-mod workgroup_tests {
-    use super::*;
-
-    #[test]
-    fn kernel_workgroups_splits_518400_groups_inside_the_wgpu_limit() {
-        // 3840×2160 RGBA is 33_177_600 bytes, one group per 64 bytes.
-        const BYTES: usize = 3840 * 2160 * 4;
-        const LINEAR: u32 = 518_400;
-        assert_eq!(BYTES, 33_177_600);
-        assert_eq!((BYTES as u64).div_ceil(64), LINEAR as u64);
-
-        let (x, y, z) = split_linear_workgroups(LINEAR);
-        assert_eq!(
-            x as u64 * y as u64 * z as u64,
-            LINEAR as u64,
-            "the grid must cover every linear group"
-        );
-        assert!(x <= cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM);
-        assert!(y <= cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM);
-        assert!(z <= cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM);
-
-        let mut buffers = HashMap::new();
-        buffers.insert(BufferId(0), BYTES);
-        assert_eq!(kernel_workgroups(&buffers, &[BufferId(0)]), (x, y, z));
-
-        // Counts that already fit stay a 1-D grid, including the limit itself.
-        assert_eq!(split_linear_workgroups(100), (100, 1, 1));
-        assert_eq!(
-            split_linear_workgroups(cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM),
-            (cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM, 1, 1)
-        );
-        let mut small = HashMap::new();
-        small.insert(BufferId(1), 64 * 100);
-        assert_eq!(kernel_workgroups(&small, &[BufferId(1)]), (100, 1, 1));
-    }
-}
-
 /// After a dispatch: the kernel's outputs now live on the GPU.
 pub(crate) fn finish_kernel(pool: &TransientBufferPool, outputs: &[BufferId]) -> Result<()> {
     outputs
@@ -446,4 +408,42 @@ impl Default for Pipeline {
 
 pub trait PipelineBuilder {
     fn build_pipeline(&self) -> Result<Pipeline>;
+}
+
+#[cfg(test)]
+mod workgroup_tests {
+    use super::*;
+
+    #[test]
+    fn kernel_workgroups_splits_518400_groups_inside_the_wgpu_limit() {
+        // 3840×2160 RGBA is 33_177_600 bytes, one group per 64 bytes.
+        const BYTES: usize = 3840 * 2160 * 4;
+        const LINEAR: u32 = 518_400;
+        assert_eq!(BYTES, 33_177_600);
+        assert_eq!((BYTES as u64).div_ceil(64), LINEAR as u64);
+
+        let (x, y, z) = split_linear_workgroups(LINEAR);
+        assert_eq!(
+            x as u64 * y as u64 * z as u64,
+            LINEAR as u64,
+            "the grid must cover every linear group"
+        );
+        assert!(x <= cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM);
+        assert!(y <= cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM);
+        assert!(z <= cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM);
+
+        let mut buffers = HashMap::new();
+        buffers.insert(BufferId(0), BYTES);
+        assert_eq!(kernel_workgroups(&buffers, &[BufferId(0)]), (x, y, z));
+
+        // Counts that already fit stay a 1-D grid, including the limit itself.
+        assert_eq!(split_linear_workgroups(100), (100, 1, 1));
+        assert_eq!(
+            split_linear_workgroups(cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM),
+            (cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM, 1, 1)
+        );
+        let mut small = HashMap::new();
+        small.insert(BufferId(1), 64 * 100);
+        assert_eq!(kernel_workgroups(&small, &[BufferId(1)]), (100, 1, 1));
+    }
 }

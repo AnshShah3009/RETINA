@@ -610,7 +610,7 @@ fn rotate_90(code: u64, side: usize) -> u64 {
 fn dictionary_codes(dict: ArucoDictionary) -> Vec<u64> {
     let side = dict.marker_size();
     let bits = side * side;
-    let nb = (bits + 7) / 8;
+    let nb = bits.div_ceil(8);
     let count = dict.dict_size();
 
     let (table, stride): (&[u8], usize) = match side {

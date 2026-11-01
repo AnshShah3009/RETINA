@@ -3,8 +3,8 @@ use crate::types::{KeyFrame, MapPoint, WorldMap};
 use crate::{local_ba, local_map};
 use cv_calib3d::{recover_pose_from_essential, solve_pnp_ransac, triangulate_points};
 use cv_core::storage::CpuStorage;
-use cv_core::{storage::Storage, CameraIntrinsics, KeyPoints, Pose, Tensor};
-use cv_features::{detect_and_compute_ctx, Descriptors, Orb};
+use cv_core::{CameraIntrinsics, KeyPoints, Pose, Tensor, storage::Storage};
+use cv_features::{Descriptors, Orb, detect_and_compute_ctx};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::cpu::CpuBackend;
 use cv_runtime::orchestrator::ResourceGroup;
@@ -169,7 +169,7 @@ impl Tracker {
         // The device must be chosen to match where the *data* is, not just what
         // the resource group happens to be bound to. See
         // `device_for_u8_tensor` for why.
-        let device = device_for_u8_tensor::<S>(&image, &self.group)?;
+        let device = device_for_u8_tensor::<S>(image, &self.group)?;
 
         let (keypoints, descriptors) =
             detect_and_compute_ctx(&self.detector, &device, &self.group, image);
@@ -232,8 +232,8 @@ impl Tracker {
                     );
                 }
             }
-            if self.local_ba_window > 0 {
-                if local_ba::local_bundle_adjust(
+            if self.local_ba_window > 0
+                && local_ba::local_bundle_adjust(
                     &self.intrinsics,
                     map,
                     self.local_ba_window,
@@ -241,17 +241,16 @@ impl Tracker {
                     LOCAL_BA_ITERATIONS,
                 )
                 .is_some()
-                {
-                    // The new keyframe is this frame: report its adjusted pose.
-                    if let Some(kf) = map.keyframes.last() {
-                        let kf = kf.read().unwrap_or_else(|e| e.into_inner());
-                        frame.pose = local_map::keyframe_world_to_camera(&kf.pose);
-                    }
-                    self.velocity = match (&self.current_frame, was_tracking) {
-                        (Some(prev), true) => Some(frame.pose.compose(&prev.pose.inverse())),
-                        _ => None,
-                    };
+            {
+                // The new keyframe is this frame: report its adjusted pose.
+                if let Some(kf) = map.keyframes.last() {
+                    let kf = kf.read().unwrap_or_else(|e| e.into_inner());
+                    frame.pose = local_map::keyframe_world_to_camera(&kf.pose);
                 }
+                self.velocity = match (&self.current_frame, was_tracking) {
+                    (Some(prev), true) => Some(frame.pose.compose(&prev.pose.inverse())),
+                    _ => None,
+                };
             }
             // After the pose is settled: fusion uses the refined points, and
             // culling removes the observations the adjustment just rejected.
@@ -609,7 +608,7 @@ impl Tracker {
         let (mut pose, tracked_indices) = self.track(image, Some(&depth_cpu), map)?;
 
         // Attempt ICP refinement if we have GPU support and previous depth data
-        if let (Some(ref last_depth), Some(ref last_frame)) = (&self.last_depth, &self.last_frame) {
+        if let (Some(last_depth), Some(last_frame)) = (&self.last_depth, &self.last_frame) {
             let prev_pose = last_frame.pose;
             // Try to refine pose using dense ICP
             if let Err(e) = self.refine_pose_with_icp(&mut pose, &prev_pose, last_depth, &depth_cpu)
@@ -1105,15 +1104,11 @@ fn essential_ransac_5point(
         let etb = e.transpose() * b;
         let num = b.dot(&ea).powi(2);
         let den = ea.x * ea.x + ea.y * ea.y + etb.x * etb.x + etb.y * etb.y;
-        if den > 0.0 {
-            num / den
-        } else {
-            f64::INFINITY
-        }
+        if den > 0.0 { num / den } else { f64::INFINITY }
     };
 
     // Deterministic sampling, so a sequence tracks the same way every run.
-    let mut state: u64 = 0x9E37_79B9_7F4A_7C15 ^ n as u64;
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15 ^ n as u64;
     let mut next = || {
         state = state
             .wrapping_mul(6364136223846793005)

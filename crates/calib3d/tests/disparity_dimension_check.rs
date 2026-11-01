@@ -5,7 +5,7 @@
 //! the two (an ordinary caller mistake: a matcher and an image from different
 //! captures) panicked inside `image::GrayImage::get_pixel`.
 
-use cv_calib3d::stereo_matching::{disparity_to_pointcloud, DisparityMap, StereoParams};
+use cv_calib3d::stereo_matching::{DisparityMap, StereoParams, disparity_to_pointcloud};
 use image::{GrayImage, Luma};
 
 /// Unique temp path per test: the harness runs tests concurrently inside a

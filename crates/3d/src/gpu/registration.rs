@@ -39,28 +39,27 @@ pub fn icp_point_to_plane(
                 },
                 |(mut ata, mut atb, mut count), sp| {
                     let tp = transform.transform_point(sp);
-                    if let Some((closest, idx, dist_sq)) = tree.nearest_neighbor(&tp) {
-                        if dist_sq <= max_dist_sq {
-                            let n = nalgebra::Vector3::new(
-                                target_normals[idx].x as f64,
-                                target_normals[idx].y as f64,
-                                target_normals[idx].z as f64,
-                            );
-                            let p = nalgebra::Vector3::new(tp.x as f64, tp.y as f64, tp.z as f64);
-                            let q = nalgebra::Vector3::new(
-                                closest.x as f64,
-                                closest.y as f64,
-                                closest.z as f64,
-                            );
-                            let d = p - q;
-                            let cross = p.cross(&n);
-                            let row =
-                                nalgebra::Vector6::new(cross.x, cross.y, cross.z, n.x, n.y, n.z);
-                            let rhs = -n.dot(&d);
-                            ata += row * row.transpose();
-                            atb += row * rhs;
-                            count += 1;
-                        }
+                    if let Some((closest, idx, dist_sq)) = tree.nearest_neighbor(&tp)
+                        && dist_sq <= max_dist_sq
+                    {
+                        let n = nalgebra::Vector3::new(
+                            target_normals[idx].x as f64,
+                            target_normals[idx].y as f64,
+                            target_normals[idx].z as f64,
+                        );
+                        let p = nalgebra::Vector3::new(tp.x as f64, tp.y as f64, tp.z as f64);
+                        let q = nalgebra::Vector3::new(
+                            closest.x as f64,
+                            closest.y as f64,
+                            closest.z as f64,
+                        );
+                        let d = p - q;
+                        let cross = p.cross(&n);
+                        let row = nalgebra::Vector6::new(cross.x, cross.y, cross.z, n.x, n.y, n.z);
+                        let rhs = -n.dot(&d);
+                        ata += row * row.transpose();
+                        atb += row * rhs;
+                        count += 1;
                     }
                     (ata, atb, count)
                 },

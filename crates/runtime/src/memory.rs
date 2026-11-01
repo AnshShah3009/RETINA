@@ -1,11 +1,11 @@
-use crate::device_registry::{registry, SubmissionIndex};
-use crate::memory_manager::RetiredBuffer;
 use crate::Result;
+use crate::device_registry::{SubmissionIndex, registry};
+use crate::memory_manager::RetiredBuffer;
 use cv_core::BufferHandle;
 use cv_hal::DeviceId;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use wgpu::BufferUsages;
 
 /// Atomic counter for generating unique BufferHandle IDs for UnifiedBuffer.
@@ -179,10 +179,11 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
     }
 
     pub fn sync_to_device(&mut self, target_id: DeviceId) -> Result<()> {
-        if let Some((did, dv)) = self.device_version {
-            if did == target_id && dv >= self.host_version {
-                return Ok(());
-            }
+        if let Some((did, dv)) = self.device_version
+            && did == target_id
+            && dv >= self.host_version
+        {
+            return Ok(());
         }
 
         let reg = registry()?;
@@ -202,27 +203,26 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
             // If we are switching devices or the reservation amount changed, release old one
             if self.reserved_mb > 0
                 && (self.target_device_id != Some(target_id) || self.reserved_mb != needed_mb)
+                && let Some(old_id) = self.target_device_id
             {
-                if let Some(old_id) = self.target_device_id {
-                    if let Ok(s) = crate::orchestrator::scheduler() {
-                        if let Err(e) = s.release_device((old_id.0 & 0xFF) as u8) {
-                            #[cfg(feature = "tracing")]
-                            tracing::warn!("Failed to release device reservation: {}", e);
-                            let _ = e; // suppress unused variable warning when tracing is disabled
-                        }
-                    }
-                    self.reserved_mb = 0;
-                    self.target_device_id = None;
+                if let Ok(s) = crate::orchestrator::scheduler()
+                    && let Err(e) = s.release_device((old_id.0 & 0xff) as u8)
+                {
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!("Failed to release device reservation: {}", e);
+                    let _ = e; // suppress unused variable warning when tracing is disabled
                 }
+                self.reserved_mb = 0;
+                self.target_device_id = None;
             }
 
             // Reserve on new device if not already reserved
-            if self.reserved_mb == 0 {
-                if let Ok(s) = crate::orchestrator::scheduler() {
-                    s.reserve_device((target_id.0 & 0xFF) as u8, needed_mb)?;
-                    self.reserved_mb = needed_mb;
-                    self.target_device_id = Some(target_id);
-                }
+            if self.reserved_mb == 0
+                && let Ok(s) = crate::orchestrator::scheduler()
+            {
+                s.reserve_device((target_id.0 & 0xff) as u8, needed_mb)?;
+                self.reserved_mb = needed_mb;
+                self.target_device_id = Some(target_id);
             }
         }
 
@@ -232,15 +232,14 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                 if b.size() >= size && self.device_id == Some(target_id) {
                     b.clone()
                 } else {
-                    if let Some(old_b) = self.device_data.take() {
-                        if let Some(old_id) = self.device_id {
-                            if let Some(old_runtime) = reg.get_device(old_id) {
-                                old_runtime.memory().retire_buffer(
-                                    old_b,
-                                    self.last_write_submission.max(self.last_read_submission),
-                                );
-                            }
-                        }
+                    if let Some(old_b) = self.device_data.take()
+                        && let Some(old_id) = self.device_id
+                        && let Some(old_runtime) = reg.get_device(old_id)
+                    {
+                        old_runtime.memory().retire_buffer(
+                            old_b,
+                            self.last_write_submission.max(self.last_read_submission),
+                        );
                     }
 
                     let device = match runtime.context() {
@@ -248,7 +247,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                         _ => {
                             return Err(crate::Error::NotSupported(
                                 "sync_to_device only supports GPU".into(),
-                            ))
+                            ));
                         }
                     };
 
@@ -260,7 +259,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                     _ => {
                         return Err(crate::Error::NotSupported(
                             "sync_to_device only supports GPU".into(),
-                        ))
+                        ));
                     }
                 };
 
@@ -289,7 +288,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                     return Err(crate::Error::NotSupported(format!(
                         "sync_to_device not implemented for {:?}",
                         runtime.backend()
-                    )))
+                    )));
                 }
             }
 
@@ -304,7 +303,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
             && self.target_device_id == Some(target_id)
         {
             if let Ok(s) = crate::orchestrator::scheduler() {
-                let _ = s.release_device((target_id.0 & 0xFF) as u8);
+                let _ = s.release_device((target_id.0 & 0xff) as u8);
             }
             self.reserved_mb = 0;
             self.target_device_id = None;
@@ -351,7 +350,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
             _ => {
                 return Err(crate::Error::NotSupported(
                     "sync_slice_to_device only supports GPU".into(),
-                ))
+                ));
             }
         }
 
@@ -397,7 +396,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                 return Err(crate::Error::NotSupported(format!(
                     "sync_to_host not implemented for {:?}",
                     runtime.backend()
-                )))
+                )));
             }
         };
 
@@ -445,7 +444,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                 return Err(crate::Error::NotSupported(format!(
                     "sync_to_host not implemented for {:?}",
                     runtime.backend()
-                )))
+                )));
             }
         };
 
@@ -545,19 +544,19 @@ impl<T> Drop for UnifiedBuffer<T> {
                 let _ = sender.send(RetiredBuffer { buffer, safe_after });
             } else {
                 // Fallback if sender is missing (should be rare)
-                if let Ok(reg) = registry() {
-                    if let Some(runtime) = reg.get_device(_id) {
-                        runtime.memory().retire_buffer(buffer, safe_after);
-                    }
+                if let Ok(reg) = registry()
+                    && let Some(runtime) = reg.get_device(_id)
+                {
+                    runtime.memory().retire_buffer(buffer, safe_after);
                 }
             }
         }
 
         // Release VRAM reservation if we held one
-        if let (Some(id), true) = (target_device_id, self.reserved_mb > 0) {
-            if let Ok(s) = crate::orchestrator::scheduler() {
-                let _ = s.release_device((id.0 & 0xFF) as u8);
-            }
+        if let (Some(id), true) = (target_device_id, self.reserved_mb > 0)
+            && let Ok(s) = crate::orchestrator::scheduler()
+        {
+            let _ = s.release_device((id.0 & 0xff) as u8);
         }
     }
 }
@@ -578,7 +577,7 @@ mod tests {
     fn test_unified_buffer_creation() {
         let buf: UnifiedBuffer<f32> = UnifiedBuffer::new(100);
         assert_eq!(buf.len(), 100);
-        assert!(buf.is_empty() == false);
+        assert!(!buf.is_empty());
     }
 
     #[test]

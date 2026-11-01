@@ -3,7 +3,7 @@
 //! theta = pi, where the old matrix -> rvec conversion divided by sin(theta)
 //! and produced noise (|J - FD| = 5.3e5 at pi - 1e-7).
 
-use cv_calib3d::{project_points_with_jacobian, ProjectPointsOptions};
+use cv_calib3d::{ProjectPointsOptions, project_points_with_jacobian};
 use cv_core::{CameraIntrinsics, Distortion, Pose};
 use nalgebra::{Point3, Rotation3, Unit, Vector3};
 

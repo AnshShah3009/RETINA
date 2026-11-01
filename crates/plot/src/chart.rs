@@ -1,7 +1,7 @@
 //! Chart and Plot types
 
-use crate::style::Style;
 use crate::PlotError;
+use crate::style::Style;
 
 /// Type of plot to create
 ///

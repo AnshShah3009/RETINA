@@ -139,7 +139,7 @@ impl Database {
         } else {
             // Fixed layout/seed keeps the index (and therefore query results)
             // fully deterministic.
-            let mut lsh = LshIndex::new(dim, 8, 16, 0x5EED_1DEA);
+            let mut lsh = LshIndex::new(dim, 8, 16, 0x5eed_1dea);
             for (id, descriptor) in flat.iter().enumerate() {
                 lsh.insert(id, descriptor.data.as_slice());
             }

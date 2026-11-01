@@ -26,7 +26,7 @@ pub fn read_gpu_max_bytes_from_env() -> crate::Result<Option<usize>> {
         Err(e) => {
             return Err(Error::MemoryError(format!(
                 "Failed to read RUSTCV_GPU_MAX_BYTES: {e}"
-            )))
+            )));
         }
     };
 
@@ -128,14 +128,14 @@ pub fn check_gpu_alloc(ctx: &crate::gpu::GpuContext, required_bytes: usize) -> c
         )));
     }
 
-    if let Ok(Some(budget)) = read_gpu_max_bytes_from_env() {
-        if required_bytes > budget {
-            return Err(Error::MemoryError(format!(
-                "GPU allocation of {} bytes exceeds RUSTCV_GPU_MAX_BYTES budget ({} bytes). \
+    if let Ok(Some(budget)) = read_gpu_max_bytes_from_env()
+        && required_bytes > budget
+    {
+        return Err(Error::MemoryError(format!(
+            "GPU allocation of {} bytes exceeds RUSTCV_GPU_MAX_BYTES budget ({} bytes). \
                  Increase budget or use CPU fallback.",
-                required_bytes, budget
-            )));
-        }
+            required_bytes, budget
+        )));
     }
 
     Ok(())

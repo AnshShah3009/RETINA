@@ -1,6 +1,4 @@
-use cv_3d::{
-    estimate_normals_auto, estimate_normals_cpu, estimate_normals_gpu, estimate_normals_hybrid,
-};
+use cv_3d::{estimate_normals_cpu, estimate_normals_hybrid};
 use cv_hal::gpu::GpuContext;
 use nalgebra::Point3;
 use std::time::Instant;
@@ -21,11 +19,10 @@ fn profile_3d_algorithms() {
     )
     .unwrap()
     .is_none()
+        && let Some(gpu) = cv_runtime::registry().unwrap().default_gpu()
     {
-        if let Some(gpu) = cv_runtime::registry().unwrap().default_gpu() {
-            let policy = cv_runtime::GroupPolicy::default();
-            let _ = s.create_group_with_device("gpu_perf", 1, None, policy, gpu.id());
-        }
+        let policy = cv_runtime::GroupPolicy::default();
+        let _ = s.create_group_with_device("gpu_perf", 1, None, policy, gpu.id());
     }
 
     // Check if we are on Unified Memory Architecture
@@ -37,8 +34,8 @@ fn profile_3d_algorithms() {
     // Deterministic pseudo-random distribution avoids O(n²) worst case
     let mut points = Vec::with_capacity(num_points);
     let scale = 100.0;
-    let prime_x: f32 = 0.75487766;
-    let prime_y: f32 = 0.56984029;
+    let prime_x: f32 = 0.754_877_7;
+    let prime_y: f32 = 0.569_840_3;
     let prime_z: f32 = 0.31876543;
     for i in 0..num_points {
         let fi = i as f32;
@@ -51,7 +48,7 @@ fn profile_3d_algorithms() {
 
     // 1. CPU Normal Estimation (Optimized Grid-Link-List)
     let start = Instant::now();
-    let normals_cpu = estimate_normals_cpu(&points, 15);
+    let _normals_cpu = estimate_normals_cpu(&points, 15);
     let elapsed_cpu = start.elapsed();
     println!("1. CPU Normal Estimation (500k):      {:?}", elapsed_cpu);
 
@@ -75,7 +72,7 @@ fn profile_3d_algorithms() {
 
     // 3. Hybrid Normal Estimation (CPU kNN + GPU PCA)
     let start = Instant::now();
-    let normals_hybrid = estimate_normals_hybrid(&points, 15);
+    let _normals_hybrid = estimate_normals_hybrid(&points, 15);
     let elapsed_hybrid = start.elapsed();
     println!("3. Hybrid Normal Estimation (500k):   {:?}", elapsed_hybrid);
 
@@ -84,7 +81,7 @@ fn profile_3d_algorithms() {
     let num_points_large = 1_000_000;
     let mut points_large = Vec::with_capacity(num_points_large);
     let prime2_x: f32 = 0.35715926;
-    let prime2_y: f32 = 0.95141372;
+    let prime2_y: f32 = 0.951_413_7;
     let prime2_z: f32 = 0.62831853;
     for i in 0..num_points_large {
         let fi = i as f32;

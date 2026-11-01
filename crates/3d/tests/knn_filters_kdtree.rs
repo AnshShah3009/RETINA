@@ -67,18 +67,14 @@ fn brute_normals(points: &[Point3<f64>], k: usize) -> Vec<Vector3<f64>> {
             let v = p.coords - c;
             cov += v * v.transpose();
             let n = cv_math::linalg::min_eigenvector_3x3(&cov);
-            if n.z < 0.0 {
-                -n
-            } else {
-                n
-            }
+            if n.z < 0.0 { -n } else { n }
         })
         .collect()
 }
 
 /// A noisy, curved surface patch plus scattered far outliers.
 fn cloud(n: usize, outliers: usize, seed: u64) -> Vec<Point3<f64>> {
-    let mut s = seed.wrapping_add(0x9E3779B97F4A7C15);
+    let mut s = seed.wrapping_add(0x9e3779b97f4a7c15);
     let mut r = move || {
         s ^= s << 13;
         s ^= s >> 7;
@@ -171,10 +167,12 @@ fn knn_filters_timing() {
         let want_n = brute_normals(&pts, 20);
         let b_nrm = t.elapsed().as_secs_f64() * 1e3;
         assert_eq!(idx, want);
-        assert!(normals
-            .iter()
-            .zip(&want_n)
-            .all(|(a, b)| (a - b).amax() < 1e-9));
+        assert!(
+            normals
+                .iter()
+                .zip(&want_n)
+                .all(|(a, b)| (a - b).amax() < 1e-9)
+        );
         println!(
             "n={:6}: statistical_outlier_removal brute {b_sor:9.2} ms, kd-tree {t_sor:7.2} ms; \
              estimate_normals_knn brute {b_nrm:9.2} ms, kd-tree {t_nrm:7.2} ms",

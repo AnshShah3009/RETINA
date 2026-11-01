@@ -50,11 +50,11 @@ pub fn open_video(path: &str) -> Result<Box<dyn VideoCapture>> {
     let p = std::path::Path::new(path);
 
     // 1. Try Pure Rust GIF
-    if let Some(ext) = p.extension() {
-        if ext.to_string_lossy().to_lowercase() == "gif" {
-            let cap = backends::GifCapture::new(path)?;
-            return Ok(Box::new(cap));
-        }
+    if let Some(ext) = p.extension()
+        && ext.to_string_lossy().to_lowercase() == "gif"
+    {
+        let cap = backends::GifCapture::new(path)?;
+        return Ok(Box::new(cap));
     }
 
     // 2. Try Pure Rust Image Sequence (Directory)

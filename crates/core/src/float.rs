@@ -89,7 +89,7 @@ pub trait Float:
 }
 
 macro_rules! impl_float {
-    ($t:ty, $pi:expr, $epsilon:expr) => {
+    ($t:ty, $pi:expr_2021, $epsilon:expr_2021) => {
         impl Float for $t {
             const ZERO: Self = 0.0;
             const ONE: Self = 1.0;

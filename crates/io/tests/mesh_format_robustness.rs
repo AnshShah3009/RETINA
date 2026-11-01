@@ -255,7 +255,7 @@ mod gltf {
     use nalgebra::Point3;
     use std::fs;
 
-    use super::{temp, triangle, TempPath};
+    use super::{TempPath, temp, triangle};
 
     /// Byte offset of the BIN chunk's payload inside a GLB written by
     /// `write_glb`.

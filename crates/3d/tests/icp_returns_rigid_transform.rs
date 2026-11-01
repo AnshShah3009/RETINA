@@ -129,7 +129,7 @@ fn icp_returns_a_proper_rotation() {
     );
 
     // Orthogonality, to f32 round-off (eps ~1.2e-7).
-    let ortho = &r * r.transpose();
+    let ortho = r * r.transpose();
     let mut worst: f32 = 0.0;
     for i in 0..3 {
         for j in 0..3 {

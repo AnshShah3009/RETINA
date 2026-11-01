@@ -280,7 +280,7 @@ pub fn butter_highpass(order: usize, cutoff: f64, sample_rate: f64) -> (Vec<f64>
     for k in 0..n {
         let theta = PI * (2 * k + n + 1) as f64 / (2 * n) as f64;
         let lp_pole = Complex::new(theta.cos(), theta.sin()); // unit Butterworth pole
-                                                              // Lowpass to highpass in analog: s -> wc / s  =>  pole_hp = wc / pole_lp
+        // Lowpass to highpass in analog: s -> wc / s  =>  pole_hp = wc / pole_lp
         let hp_pole = Complex::new(wc, 0.0) / lp_pole;
         poles.push(hp_pole);
     }
@@ -760,26 +760,26 @@ pub fn find_peaks(
     }
 
     // Enforce minimum distance (greedy, prefer taller peaks)
-    if let Some(dist) = min_distance {
-        if dist > 0 {
-            // Sort by height descending
-            let mut sorted: Vec<usize> = peaks.clone();
-            sorted.sort_by(|&a, &b| data[b].partial_cmp(&data[a]).unwrap());
+    if let Some(dist) = min_distance
+        && dist > 0
+    {
+        // Sort by height descending
+        let mut sorted: Vec<usize> = peaks.clone();
+        sorted.sort_by(|&a, &b| data[b].partial_cmp(&data[a]).unwrap());
 
-            let mut keep = vec![false; data.len()];
-            let mut result = Vec::new();
-            for &idx in &sorted {
-                let too_close = result
-                    .iter()
-                    .any(|&r: &usize| (idx as isize - r as isize).unsigned_abs() < dist);
-                if !too_close {
-                    keep[idx] = true;
-                    result.push(idx);
-                }
+        let mut keep = vec![false; data.len()];
+        let mut result = Vec::new();
+        for &idx in &sorted {
+            let too_close = result
+                .iter()
+                .any(|&r: &usize| (idx as isize - r as isize).unsigned_abs() < dist);
+            if !too_close {
+                keep[idx] = true;
+                result.push(idx);
             }
-            // Return in original order
-            peaks.retain(|i| keep[*i]);
         }
+        // Return in original order
+        peaks.retain(|i| keep[*i]);
     }
 
     peaks
@@ -808,7 +808,7 @@ pub fn resample(x: &[f64], num: usize) -> Vec<f64> {
     if num > n {
         // Zero-pad: copy positive freqs, then negative freqs
         let half = n.div_ceil(2); // positive freq bins including DC
-                                  // Copy positive frequencies
+        // Copy positive frequencies
         new_spectrum[..half].copy_from_slice(&spectrum[..half]);
         // Copy negative frequencies at the end
         let neg_start_src = half;

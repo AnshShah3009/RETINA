@@ -16,10 +16,12 @@ fn test_point_cloud_result_handling() {
     let bad_colors = vec![Point3::new(1.0, 0.0, 0.0)];
     let cloud_bad_colors = cloud.clone().with_colors(bad_colors);
     assert!(cloud_bad_colors.is_err());
-    assert!(cloud_bad_colors
-        .unwrap_err()
-        .to_string()
-        .contains("Color count"));
+    assert!(
+        cloud_bad_colors
+            .unwrap_err()
+            .to_string()
+            .contains("Color count")
+    );
 
     // 3. Valid normals
     let normals = vec![Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.0, 0.0, 1.0)];
@@ -30,8 +32,10 @@ fn test_point_cloud_result_handling() {
     let bad_normals = vec![Vector3::new(0.0, 0.0, 1.0)];
     let cloud_bad_normals = cloud.with_normals(bad_normals);
     assert!(cloud_bad_normals.is_err());
-    assert!(cloud_bad_normals
-        .unwrap_err()
-        .to_string()
-        .contains("Normal count"));
+    assert!(
+        cloud_bad_normals
+            .unwrap_err()
+            .to_string()
+            .contains("Normal count")
+    );
 }

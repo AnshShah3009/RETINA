@@ -63,7 +63,7 @@ fn cached_matches_points(cached: &[u8], points: &[Arc<RwLock<MapPoint>>]) -> boo
             .clone();
         let len = d.len().min(32);
         let slot = &cached[i * 32..i * 32 + 32];
-        if &slot[..len] != &d[..len] {
+        if slot[..len] != d[..len] {
             return false;
         }
         // The padding must be zero too: a stale tail would otherwise pass.

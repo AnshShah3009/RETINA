@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-use cv_core::{storage::Storage, CpuTensor, Tensor, TensorShape};
+use cv_core::{CpuTensor, Tensor, TensorShape, storage::Storage};
 use cv_hal::context::{ColorConversion, ComputeContext, ThresholdType};
 use cv_hal::cpu::CpuBackend;
 use cv_hal::gpu::GpuContext;

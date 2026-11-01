@@ -2,8 +2,8 @@
 //!
 //! STL is a common format for 3D printing and CAD.
 
-use crate::mesh::TriangleMesh;
 use crate::Result;
+use crate::mesh::TriangleMesh;
 use cv_core::Error;
 use nalgebra::Point3;
 use std::io::{BufRead, Write};

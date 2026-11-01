@@ -131,7 +131,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{luma_frame, FrameError};
+    use super::{FrameError, luma_frame};
 
     /// Regression: an oversized buffer used to be accepted and then silently
     /// truncated to the first `width * height` bytes.

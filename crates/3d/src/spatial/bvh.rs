@@ -68,10 +68,10 @@ impl Aabb {
         // produced a third that still looked empty but could no longer be told
         // apart from a real degenerate box.
         if other.is_empty {
-            return self.clone();
+            return *self;
         }
         if self.is_empty {
-            return other.clone();
+            return *other;
         }
         Aabb {
             is_empty: false,
@@ -339,15 +339,14 @@ impl Bvh {
                         &vertices[f[0]],
                         &vertices[f[1]],
                         &vertices[f[2]],
-                    ) {
-                        if t > 1e-6 {
-                            let replace = match best {
-                                None => true,
-                                Some((bt, _, _, _)) => t < *bt,
-                            };
-                            if replace {
-                                *best = Some((t, fi, u, v));
-                            }
+                    ) && t > 1e-6
+                    {
+                        let replace = match best {
+                            None => true,
+                            Some((bt, _, _, _)) => t < *bt,
+                        };
+                        if replace {
+                            *best = Some((t, fi, u, v));
                         }
                     }
                 }

@@ -20,14 +20,14 @@ pub mod gltf_io;
 pub mod las_io;
 
 #[cfg(feature = "gltf")]
-pub use gltf_io::{gltf_to_triangle_mesh, read_gltf, write_glb, GltfMesh};
+pub use gltf_io::{GltfMesh, gltf_to_triangle_mesh, read_gltf, write_glb};
 #[cfg(feature = "las")]
 pub use las_io::{
-    filter_by_classification, filter_by_mask, las_to_point_cloud, point_cloud_to_las, read_las,
-    write_las, LasData,
+    LasData, filter_by_classification, filter_by_mask, las_to_point_cloud, point_cloud_to_las,
+    read_las, write_las,
 };
-pub use obj::{read_obj, write_obj, ObjMesh};
-pub use pcd::{read_pcd, write_pcd, write_pcd_binary, write_pcd_binary_compressed, PcdData};
+pub use obj::{ObjMesh, read_obj, write_obj};
+pub use pcd::{PcdData, read_pcd, write_pcd, write_pcd_binary, write_pcd_binary_compressed};
 pub use ply::{read_ply, write_ply};
 pub use stl::{read_stl, write_stl, write_stl_ascii, write_stl_binary};
 // TriangleMesh is now the authoritative definition from cv-3d, re-exported here for convenience

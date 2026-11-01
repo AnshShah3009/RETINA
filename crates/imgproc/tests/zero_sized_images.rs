@@ -8,7 +8,7 @@
 
 use cv_imgproc::*;
 use image::{GrayImage, RgbImage};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const SHAPES: [(u32, u32); 3] = [(0, 0), (0, 7), (7, 0)];
 

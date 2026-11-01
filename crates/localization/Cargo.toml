@@ -1,7 +1,7 @@
 [package]
 name = "cv-localization"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "End-to-end visual localization: retrieval + 2D-3D matching + PnP pose estimation against a landmark database"
 

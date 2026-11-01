@@ -188,12 +188,12 @@ fn look_at_w2c(eye: [f32; 3], target: [f32; 3]) -> [[f32; 4]; 4] {
         r[2] * f[0] - r[0] * f[2],
         r[0] * f[1] - r[1] * f[0],
     ]; // camera +y = r x f
-       // c2w rows are [r; u; f] with translation `eye`. w2c transposes the rotation
-       // and negates the rotated translation. The translation must be negated
-       // *after* the transpose is complete - negating `-R^T * eye` per row while
-       // still filling the transpose in gives `R * eye` instead, which for a
-       // rotated camera is a different point entirely (it came out as the norm of
-       // the eye offset by a rotation of it, not the eye).
+    // c2w rows are [r; u; f] with translation `eye`. w2c transposes the rotation
+    // and negates the rotated translation. The translation must be negated
+    // *after* the transpose is complete - negating `-R^T * eye` per row while
+    // still filling the transpose in gives `R * eye` instead, which for a
+    // rotated camera is a different point entirely (it came out as the norm of
+    // the eye offset by a rotation of it, not the eye).
     let c2w = [r, u, f];
     let mut w2c = [[0.0f32; 4]; 4];
     for ri in 0..3 {
@@ -667,7 +667,6 @@ fn integrate_bindings_are_not_aliased_to_one_buffer() {
             .split("resource: ")
             .nth(1)
             .unwrap_or("")
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("")

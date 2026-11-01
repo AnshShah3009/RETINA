@@ -22,17 +22,13 @@ use nalgebra::{Matrix3, Vector3};
 /// All variants currently resolve to the same Park–Martin-style estimator; the
 /// variant is accepted for OpenCV API compatibility and does not change the
 /// result.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum HandEyeMethod {
+    #[default]
     Tsai,
     Park,
     Horaud,
     Andreff,
-}
-impl Default for HandEyeMethod {
-    fn default() -> Self {
-        Self::Tsai
-    }
 }
 
 /// Method selector for [`calibrate_robot_world_hand_eye`].
@@ -40,15 +36,11 @@ impl Default for HandEyeMethod {
 /// All variants currently resolve to the same Park–Martin-style estimator; the
 /// variant is accepted for OpenCV API compatibility and does not change the
 /// result.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum RobotWorldHandEyeMethod {
+    #[default]
     Shah,
     Li,
-}
-impl Default for RobotWorldHandEyeMethod {
-    fn default() -> Self {
-        Self::Shah
-    }
 }
 
 /// Eye-in-hand calibration: solve A·X = X·B for X = `cam2gripper`.
@@ -104,12 +96,11 @@ pub fn calibrate_hand_eye(
         for j in (i + 1)..n {
             // A = G_j⁻¹ · G_i
             a_rot.push(r_gripper2base[j].transpose() * r_gripper2base[i]);
-            a_tr.push(r_gripper2base[j].transpose() * (&t_gripper2base[i] - &t_gripper2base[j]));
+            a_tr.push(r_gripper2base[j].transpose() * (t_gripper2base[i] - t_gripper2base[j]));
             // B = T_j · T_i⁻¹
             b_rot.push(r_target2cam[j] * r_target2cam[i].transpose());
             b_tr.push(
-                &t_target2cam[j]
-                    - r_target2cam[j] * (r_target2cam[i].transpose() * &t_target2cam[i]),
+                t_target2cam[j] - r_target2cam[j] * (r_target2cam[i].transpose() * t_target2cam[i]),
             );
         }
     }
@@ -249,15 +240,15 @@ pub fn calibrate_robot_world_hand_eye(
         for j in (i + 1)..n {
             // A_j · A_i⁻¹
             let ai_inv_rot = r_world2cam[i].transpose();
-            let ai_inv_tr = -(ai_inv_rot * &t_world2cam[i]);
+            let ai_inv_tr = -(ai_inv_rot * t_world2cam[i]);
             rel_a_rot.push(r_world2cam[j] * ai_inv_rot);
-            rel_a_tr.push(&t_world2cam[j] + r_world2cam[j] * ai_inv_tr);
+            rel_a_tr.push(t_world2cam[j] + r_world2cam[j] * ai_inv_tr);
 
             // B_j · B_i⁻¹
             let bi_inv_rot = r_base2gripper[i].transpose();
-            let bi_inv_tr = -(bi_inv_rot * &t_base2gripper[i]);
+            let bi_inv_tr = -(bi_inv_rot * t_base2gripper[i]);
             rel_b_rot.push(r_base2gripper[j] * bi_inv_rot);
-            rel_b_tr.push(&t_base2gripper[j] + r_base2gripper[j] * bi_inv_tr);
+            rel_b_tr.push(t_base2gripper[j] + r_base2gripper[j] * bi_inv_tr);
         }
     }
 
@@ -268,12 +259,12 @@ pub fn calibrate_robot_world_hand_eye(
     let mut x_translations = Vec::with_capacity(n);
     for i in 0..n {
         let ai_inv_rot = r_world2cam[i].transpose();
-        let ai_inv_tr = -(ai_inv_rot * &t_world2cam[i]);
+        let ai_inv_tr = -(ai_inv_rot * t_world2cam[i]);
         // (A⁻¹·Z): rotation m and translation m_t
         let m = ai_inv_rot * z.0;
-        let m_t = ai_inv_tr + ai_inv_rot * &z.1;
+        let m_t = ai_inv_tr + ai_inv_rot * z.1;
         x_rots.push(m * r_base2gripper[i]);
-        x_translations.push(m_t + m * &t_base2gripper[i]);
+        x_translations.push(m_t + m * t_base2gripper[i]);
     }
     let x_rot = average_rotations(&x_rots)?;
     let x_t = average_translations(&x_translations);
@@ -390,7 +381,7 @@ mod tests {
             let g_inv_t = -(g_inv_rot * g.1);
             // X⁻¹:
             let x_inv_rot = x_true_rot.transpose();
-            let x_inv_t = -(x_inv_rot * &x_true_t);
+            let x_inv_t = -(x_inv_rot * x_true_t);
             // M = X⁻¹ · G⁻¹ · b2t  (this is target2cam)
             let m1_rot = x_inv_rot * g_inv_rot;
             let m1_t = x_inv_t + x_inv_rot * g_inv_t;
@@ -440,7 +431,7 @@ mod tests {
                 Vector3::new(rng.next_f64(), rng.next_f64(), rng.next_f64()),
             );
             let x_inv_rot = x_true_rot.transpose();
-            let x_inv_t = -(x_inv_rot * &x_true_t);
+            let x_inv_t = -(x_inv_rot * x_true_t);
             let m1_rot = z_true_rot * b.0;
             let m1_t = z_true_t + z_true_rot * b.1;
             r_w2c.push(m1_rot * x_inv_rot);

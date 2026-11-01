@@ -34,7 +34,7 @@
 //! [`dense_matches_peak_rss_stays_linear`] is the one place a large `n` is used,
 //! and it deliberately does *not* call the oracle.
 
-use cv_io::datasets::tum::{associate, IndexEntry};
+use cv_io::datasets::tum::{IndexEntry, associate};
 
 /// A process-unique suffix, for the temp file this file writes.
 ///
@@ -69,10 +69,10 @@ impl Rng {
 
     fn next_u64(&mut self) -> u64 {
         // splitmix64
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     }
 
@@ -193,7 +193,8 @@ impl Case {
         let want = associate_reference(&self.a, &self.b, self.max_dt);
 
         assert_eq!(
-            got, want,
+            got,
+            want,
             "implementation and reference disagree for case {:?}\n  a timestamps: [{}]\n  b timestamps: [{}]\n  max_dt: {:?}",
             self.name,
             Self::ts(&self.a),
@@ -566,7 +567,7 @@ fn v_shaped_windows() {
 /// `(diff, i, j)` order.
 #[test]
 fn unsorted_inputs_with_ties() {
-    let mut rng = Rng::new(0xA55E_C0DE);
+    let mut rng = Rng::new(0xa55e_c0de);
     for trial in 0..64 {
         let n = 6 + rng.below(6) as usize;
         let m = 6 + rng.below(6) as usize;
@@ -601,7 +602,7 @@ fn unsorted_inputs_with_ties() {
 /// wide enough that every cross pair is a candidate.
 #[test]
 fn randomised_corpus_matches_the_reference() {
-    let mut rng = Rng::new(0x1234_5678_9ABC_DEF0);
+    let mut rng = Rng::new(0x1234_5678_9abc_def0);
     let mut total_matches = 0usize;
     let mut cases = 0usize;
 
@@ -698,7 +699,7 @@ fn exhaustive_small_alphabet() {
     // Four stamps with plenty of symmetry, so ties, duplicates and V-shaped
     // windows all occur.
     const STAMPS: [f64; 4] = [0.0, 1.0, 1.0, 3.0];
-    let mut rng = Rng::new(0xFEED_FACE);
+    let mut rng = Rng::new(0xfeed_face);
     let mut pairs_checked = 0usize;
 
     for trial in 0..500 {

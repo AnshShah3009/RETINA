@@ -51,7 +51,7 @@ pub mod stats {
 pub use cv_math::Error;
 pub use cv_math::Result;
 
-pub use cv_math::{lerp, mean, std, Interp1d};
+pub use cv_math::{Interp1d, lerp, mean, std};
 
 pub use geometry::*;
 pub use integrate::*;

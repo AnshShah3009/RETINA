@@ -41,7 +41,7 @@ pub mod point_cloud {
 
         let futures: Vec<_> = point_clouds
             .into_iter()
-            .zip(transforms.into_iter())
+            .zip(transforms)
             .map(|(points, transform)| transform_async(points, transform))
             .collect();
 
@@ -174,8 +174,8 @@ pub mod registration {
     ) -> crate::Result<Vec<Option<Matrix4<f32>>>> {
         let futures: Vec<_> = sources
             .into_iter()
-            .zip(targets.into_iter())
-            .zip(target_normals.into_iter())
+            .zip(targets)
+            .zip(target_normals)
             .map(|((src, tgt), normals)| icp_async(src, tgt, normals, max_distance, max_iterations))
             .collect();
 

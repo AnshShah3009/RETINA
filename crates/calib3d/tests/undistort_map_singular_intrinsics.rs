@@ -15,7 +15,7 @@
 //! destinations still mapped *inside* the source image, so the result passed any
 //! bounds check and looked perfectly valid.
 
-use cv_calib3d::{init_undistort_rectify_map, CameraCalibrationOptions};
+use cv_calib3d::init_undistort_rectify_map;
 use cv_core::{CameraIntrinsics, Distortion};
 use nalgebra::Matrix3;
 
@@ -76,20 +76,19 @@ fn a_singular_rectification_rotation_is_rejected() {
 /// failure mode was a map that looked entirely well formed.
 #[test]
 fn no_map_is_returned_for_degenerate_intrinsics() {
-    match init_undistort_rectify_map(
+    if let Ok((mx, my)) = init_undistort_rectify_map(
         (8, 6),
         &good(),
         &Distortion::none(),
         &Matrix3::identity(),
         &degenerate(),
     ) {
-        Ok((mx, my)) => panic!(
+        panic!(
             "expected an error, got a {}x{} map whose first row is {:?}",
             mx.len(),
             my.len(),
             &mx[..8]
-        ),
-        Err(_) => {}
+        )
     }
 }
 

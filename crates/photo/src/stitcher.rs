@@ -211,11 +211,7 @@ fn mean_abs_diff(canvas: &GrayImage, weight: &[f32], candidate: &GrayImage, s: u
             n += 1;
         }
     }
-    if n == 0 {
-        0.0
-    } else {
-        (sum / n as f64) as f32
-    }
+    if n == 0 { 0.0 } else { (sum / n as f64) as f32 }
 }
 
 /// Widen `src` from `old_w` to `new_w` columns. New columns are left at zero and

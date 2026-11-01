@@ -1,7 +1,8 @@
 use cv_core::tensor::{CpuTensor, TensorShape};
 use cv_imgproc::{
-    distance_transform::{distance_transform, DistanceType},
-    gaussian_blur, threshold, ThresholdType,
+    ThresholdType,
+    distance_transform::{DistanceType, distance_transform},
+    gaussian_blur, threshold,
 };
 use image::{GrayImage, Luma};
 use std::time::Instant;

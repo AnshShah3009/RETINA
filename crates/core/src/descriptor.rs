@@ -101,14 +101,14 @@ mod tests {
     fn descriptor_hamming_identical_is_zero() {
         let kp = KeyPoint::new(0.0, 0.0);
         let bytes = vec![0b10101010u8, 0b11110000, 0b00001111];
-        let d = Descriptor::new(bytes.clone(), kp.clone());
+        let d = Descriptor::new(bytes.clone(), kp);
         assert_eq!(d.hamming_distance(&d), 0);
     }
 
     #[test]
     fn descriptor_hamming_all_different_is_max() {
         let kp = KeyPoint::new(0.0, 0.0);
-        let a = Descriptor::new(vec![0xFFu8; 4], kp.clone());
+        let a = Descriptor::new(vec![0xffu8; 4], kp);
         let b = Descriptor::new(vec![0x00u8; 4], kp);
         assert_eq!(a.hamming_distance(&b), 32); // 4 bytes × 8 bits
     }
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn descriptor_hamming_partial_overlap() {
         let kp = KeyPoint::new(0.0, 0.0);
-        let a = Descriptor::new(vec![0b11110000u8], kp.clone());
+        let a = Descriptor::new(vec![0b11110000u8], kp);
         let b = Descriptor::new(vec![0b00001111u8], kp);
         assert_eq!(a.hamming_distance(&b), 8); // all 8 bits differ
     }
@@ -155,7 +155,7 @@ mod tests {
     fn descriptors_iter() {
         let mut ds = Descriptors::new();
         let kp = KeyPoint::new(0.0, 0.0);
-        ds.push(Descriptor::new(vec![0u8; 8], kp.clone()));
+        ds.push(Descriptor::new(vec![0u8; 8], kp));
         ds.push(Descriptor::new(vec![1u8; 8], kp));
         let collected: Vec<_> = ds.iter().collect();
         assert_eq!(collected.len(), 2);
@@ -190,7 +190,7 @@ mod hamming_length_tests {
         let short = desc(vec![0x00; 8]);
         let long_same_prefix = desc({
             let mut v = vec![0x00u8; 32];
-            v[31] = 0xFF; // differs only in the tail the old code never read
+            v[31] = 0xff; // differs only in the tail the old code never read
             v
         });
 
@@ -201,7 +201,7 @@ mod hamming_length_tests {
     /// Equal lengths must be unaffected - the guard is not a shortcut.
     #[test]
     fn equal_lengths_still_measure_the_real_distance() {
-        let a = desc(vec![0b1010_1010, 0xFF]);
+        let a = desc(vec![0b1010_1010, 0xff]);
         assert_eq!(a.hamming_distance(&a), 0);
 
         let mut b = a.data.clone();

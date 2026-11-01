@@ -20,8 +20,8 @@ pub use dlt::{enforce_rank2, hartley_normalize, solve_dlt_fundamental, solve_dlt
 
 pub mod project;
 pub use project::{
-    project_points, project_points_with_distortion, project_points_with_jacobian,
-    ProjectPointsOptions, ProjectPointsResult,
+    ProjectPointsOptions, ProjectPointsResult, project_points, project_points_with_distortion,
+    project_points_with_jacobian,
 };
 
 pub mod pattern;
@@ -41,11 +41,11 @@ pub use triangulation::{recover_pose_from_essential, triangulate_points};
 
 pub mod calibration;
 pub use calibration::{
+    CalibrationFileReport, CameraCalibrationOptions, CameraCalibrationResult,
     calibrate_camera_from_chessboard_files, calibrate_camera_from_chessboard_files_with_options,
     calibrate_camera_from_chessboard_images, calibrate_camera_from_chessboard_images_with_options,
     calibrate_camera_planar, calibrate_camera_planar_with_options,
-    generate_chessboard_object_points, refine_camera_calibration_iterative, CalibrationFileReport,
-    CameraCalibrationOptions, CameraCalibrationResult,
+    generate_chessboard_object_points, refine_camera_calibration_iterative,
 };
 
 pub mod essential;
@@ -58,10 +58,10 @@ pub use multiview::{
 
 pub mod stereo;
 pub use stereo::{
+    StereoCalibrationFileReport, StereoCalibrationResult, StereoRectifyMatrices,
     stereo_calibrate_from_chessboard_files, stereo_calibrate_from_chessboard_files_with_options,
     stereo_calibrate_from_chessboard_images, stereo_calibrate_from_chessboard_images_with_options,
     stereo_calibrate_planar, stereo_calibrate_planar_with_options, stereo_rectify_matrices,
-    StereoCalibrationFileReport, StereoCalibrationResult, StereoRectifyMatrices,
 };
 
 pub mod stereo_matching;
@@ -69,5 +69,5 @@ pub use stereo_matching::*;
 
 pub mod hand_eye;
 pub use hand_eye::{
-    calibrate_hand_eye, calibrate_robot_world_hand_eye, HandEyeMethod, RobotWorldHandEyeMethod,
+    HandEyeMethod, RobotWorldHandEyeMethod, calibrate_hand_eye, calibrate_robot_world_hand_eye,
 };

@@ -47,8 +47,6 @@
 //! invariants, the round trips, and the fact that the validation runs at all
 //! (a mismatched list is still rejected, and the cloud is left untouched).
 
-use cv_native::core::PyPointCloud;
-
 // ── PyPointCloud: normals must stay one-per-point ──────────────────────────
 
 // Gated: these reference PyO3 symbols, which only link when

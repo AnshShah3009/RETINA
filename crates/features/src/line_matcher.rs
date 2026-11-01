@@ -56,14 +56,14 @@ impl LineMatcher {
                 }
             }
 
-            if let Some(ti) = best_idx {
-                if (best_dist as f32) < self.threshold {
-                    matches.push(LineMatch {
-                        query_idx: qi,
-                        train_idx: ti,
-                        distance: best_dist as f32,
-                    });
-                }
+            if let Some(ti) = best_idx
+                && (best_dist as f32) < self.threshold
+            {
+                matches.push(LineMatch {
+                    query_idx: qi,
+                    train_idx: ti,
+                    distance: best_dist as f32,
+                });
             }
         }
 

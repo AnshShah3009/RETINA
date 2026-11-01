@@ -13,10 +13,10 @@ fn p(x: f64, y: f64) -> Point2D {
 
 fn ring(v: &[(f64, f64)]) -> Polygon {
     let mut pts: Vec<Point2D> = v.iter().map(|&(x, y)| p(x, y)).collect();
-    if let (Some(f), Some(l)) = (pts.first().cloned(), pts.last().cloned()) {
-        if f.x != l.x || f.y != l.y {
-            pts.push(f);
-        }
+    if let (Some(f), Some(l)) = (pts.first().cloned(), pts.last().cloned())
+        && (f.x != l.x || f.y != l.y)
+    {
+        pts.push(f);
     }
     Polygon::new(pts, vec![])
 }

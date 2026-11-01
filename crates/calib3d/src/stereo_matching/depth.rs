@@ -3,7 +3,7 @@
 //! Convert disparity values to 3D depth and point clouds.
 
 use super::{DisparityMap, StereoParams};
-use cv_core::{project_point, CameraIntrinsics, Error, PointCloudf64 as PointCloud};
+use cv_core::{CameraIntrinsics, Error, PointCloudf64 as PointCloud, project_point};
 use nalgebra::{Point2, Point3};
 
 /// Compute depth map from disparity map

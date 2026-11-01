@@ -363,7 +363,7 @@ impl MarkerGpuContext {
         // Create dictionary buffer (convert u64 to pairs of u32)
         let dict_data: Vec<u32> = dictionary
             .iter()
-            .flat_map(|&code| [(code & 0xFFFFFFFF) as u32, (code >> 32) as u32])
+            .flat_map(|&code| [(code & 0xffffffff) as u32, (code >> 32) as u32])
             .collect();
 
         let dictionary_buffer = self

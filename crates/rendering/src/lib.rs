@@ -9,7 +9,7 @@
 pub mod gaussian_splatting;
 
 pub use gaussian_splatting::{
-    read_ply_gaussian_cloud, write_ply_gaussian_cloud, Camera, DensificationConfig,
-    DifferentiableRasterizer, Gaussian, GaussianCloud, GaussianOptimizer, GaussianRasterizer,
-    GaussianTrainer, ProjectedGaussian, RasterizationResult, SphericalHarmonics, TrainingConfig,
+    Camera, DensificationConfig, DifferentiableRasterizer, Gaussian, GaussianCloud,
+    GaussianOptimizer, GaussianRasterizer, GaussianTrainer, ProjectedGaussian, RasterizationResult,
+    SphericalHarmonics, TrainingConfig, read_ply_gaussian_cloud, write_ply_gaussian_cloud,
 };

@@ -135,7 +135,7 @@ fn test_resize_preserves_value_range() {
     let output = result.as_slice().unwrap();
 
     for &val in output.iter() {
-        assert!(val >= 0.0 && val <= 150.0, "Value {} out of range", val);
+        assert!((0.0..=150.0).contains(&val), "Value {} out of range", val);
     }
 }
 
@@ -317,7 +317,7 @@ fn test_pyramid_down_preserves_range() {
 
     let output = result.as_slice().unwrap();
     for &val in output.iter().take(4) {
-        assert!(val >= 0.0 && val <= 255.0, "Value {} out of range", val);
+        assert!((0.0..=255.0).contains(&val), "Value {} out of range", val);
     }
 }
 

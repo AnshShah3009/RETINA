@@ -1,8 +1,8 @@
 //! Tests for error propagation.
 
 use cv_hal::DeviceId;
-use cv_runtime::orchestrator::RuntimeRunner;
 use cv_runtime::Result;
+use cv_runtime::orchestrator::RuntimeRunner;
 
 #[test]
 fn test_error_propagation_on_failure() {

@@ -94,7 +94,7 @@ pub fn threshold_otsu(src: &GrayImage, max_value: u8, typ: ThresholdType) -> (u8
     let mode_level = hist
         .iter()
         .enumerate()
-        .max_by_key(|(_, &c)| c)
+        .max_by_key(|&(_, &c)| c)
         .map(|(i, _)| i as u8)
         .unwrap_or(0);
 
@@ -294,13 +294,13 @@ fn opencv_gaussian_kernel(n: usize) -> Vec<f32> {
         7 => {
             return vec![
                 0.03125, 0.109375, 0.21875, 0.28125, 0.21875, 0.109375, 0.03125,
-            ]
+            ];
         }
         9 => {
             return [4.0, 13.0, 30.0, 51.0, 60.0, 51.0, 30.0, 13.0, 4.0]
                 .iter()
                 .map(|v| v / 256.0)
-                .collect()
+                .collect();
         }
         _ => {}
     }
@@ -439,7 +439,7 @@ mod tests {
         let (thresh, result) = threshold_otsu(&img, 255, ThresholdType::Binary);
         // Verify the result properly segments the bimodal histogram
         assert!(
-            thresh >= 50 && thresh <= 200,
+            (50..=200).contains(&thresh),
             "threshold should be in reasonable range: {}",
             thresh
         );

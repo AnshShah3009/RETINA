@@ -187,16 +187,16 @@ fn parse_bindings(src: &str) -> Vec<Binding> {
 
         if depth == 0 && (c == 'v' || c == 'V') && starts_with_word(&bytes, i, "var") {
             let rest: String = bytes[i..].iter().collect();
-            if let Some((space, var_name, _)) = parse_var_decl(&rest) {
-                if let Some((group, bind)) = pending {
-                    bindings.push(Binding {
-                        group,
-                        binding: bind,
-                        name: var_name,
-                        space,
-                    });
-                    pending = None;
-                }
+            if let Some((space, var_name, _)) = parse_var_decl(&rest)
+                && let Some((group, bind)) = pending
+            {
+                bindings.push(Binding {
+                    group,
+                    binding: bind,
+                    name: var_name,
+                    space,
+                });
+                pending = None;
             }
             i += 1;
             continue;
@@ -818,11 +818,7 @@ fn bind_group_entries(src: &str, group: u32) -> Option<String> {
         out.push('\n');
         cursor = after + start + end;
     }
-    if found {
-        Some(out)
-    } else {
-        None
-    }
+    if found { Some(out) } else { None }
 }
 /// Coverage guard: the corpus this file checks must be the whole shader set,
 /// not just `shaders/*`. The original `every_shader_compiles`-style coverage

@@ -141,7 +141,7 @@ fn angle_to(m: &Matrix3<f64>, want: &Matrix3<f64>) -> f64 {
 #[test]
 fn the_returned_pose_is_a_rotation_along_the_true_baseline() {
     let k = intrinsics();
-    let mut rng = Rng(0x5EED_1234_ABCD_0001);
+    let mut rng = Rng(0x5eed_1234_abcd_0001);
 
     for i in 0..TRIALS {
         let r = rng.rotation();
@@ -189,7 +189,7 @@ fn the_returned_pose_is_a_rotation_along_the_true_baseline() {
 #[test]
 fn cheirality_selects_the_baseline_sign_from_the_points() {
     let k = intrinsics();
-    let mut rng = Rng(0x5EED_1234_ABCD_0003);
+    let mut rng = Rng(0x5eed_1234_abcd_0003);
     let mut checked = 0usize;
 
     for i in 0..TRIALS {
@@ -257,7 +257,7 @@ fn control_projecting_with_the_true_pose_lands_on_the_observed_pixels() {
 #[test]
 fn both_baseline_signs_are_rigid_transforms() {
     let k = intrinsics();
-    let mut rng = Rng(0x5EED_1234_ABCD_0005);
+    let mut rng = Rng(0x5eed_1234_abcd_0005);
 
     for i in 0..TRIALS {
         let r = rng.rotation();
@@ -285,7 +285,7 @@ fn both_baseline_signs_are_rigid_transforms() {
 #[test]
 fn too_few_points_are_refused() {
     let k = intrinsics();
-    let mut rng = Rng(0x5EED_1234_ABCD_0006);
+    let mut rng = Rng(0x5eed_1234_abcd_0006);
     let r = rng.rotation();
     let t = rng.unit3();
     let e = essential_from_extrinsics(&Pose::new(r, t));

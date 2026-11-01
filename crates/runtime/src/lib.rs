@@ -10,16 +10,16 @@ pub mod pipeline;
 
 pub use cv_distributed::distributed;
 
-pub use device_registry::{registry, DeviceRegistry, DeviceRuntime, SubmissionIndex};
+pub use device_registry::{DeviceRegistry, DeviceRuntime, SubmissionIndex, registry};
 pub use error::ErrorContext;
 pub use memory::UnifiedBuffer;
 pub use observe::{
-    observability, DispatchBackend, DispatchReason, Metrics, ObservabilityLayer, RuntimeEvent,
+    DispatchBackend, DispatchReason, Metrics, ObservabilityLayer, RuntimeEvent, observability,
 };
 pub use orchestrator::{
+    GroupPolicy, ResourceGroup, RuntimeRunner, TaskPriority, TaskScheduler, WorkloadHint,
     best_runner, best_runner_gpu_wait, best_runner_gpu_wait_for, default_runner, record_fallback,
-    scheduler, try_best_runner, try_default_runner, GroupPolicy, ResourceGroup, RuntimeRunner,
-    TaskPriority, TaskScheduler, WorkloadHint,
+    scheduler, try_best_runner, try_default_runner,
 };
 pub use pipeline::{AsyncPipelineHandle, ExecutionEvent, PipelineResult};
 pub use pipeline::{BufferAlloc, TransientBufferPool};
@@ -55,7 +55,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[macro_export]
 macro_rules! submit_to {
-    ($group_name:expr, $f:block) => {
+    ($group_name:expr_2021, $f:block) => {
         match $crate::scheduler() {
             Ok(s) => s.submit($group_name, move || $f),
             Err(e) => Err(e),

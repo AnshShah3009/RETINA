@@ -1,5 +1,5 @@
-use crate::gpu::GpuContext;
 use crate::Result;
+use crate::gpu::GpuContext;
 use cv_core::{Float, HoughCircle};
 use wgpu::util::DeviceExt;
 

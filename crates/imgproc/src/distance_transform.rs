@@ -635,10 +635,10 @@ mod tests {
         // Neighbors should be 1
         assert_eq!(d[2 * 5 + 1], 1.0); // left
         assert_eq!(d[2 * 5 + 3], 1.0); // right
-        assert_eq!(d[1 * 5 + 2], 1.0); // above
+        assert_eq!(d[5 + 2], 1.0); // above
         assert_eq!(d[3 * 5 + 2], 1.0); // below
-                                       // Diagonal should be 2
-        assert_eq!(d[1 * 5 + 1], 2.0);
+        // Diagonal should be 2
+        assert_eq!(d[5 + 1], 2.0);
         assert_eq!(d[3 * 5 + 3], 2.0);
         // Corner (0,0) should be 4
         assert_eq!(d[0], 4.0);
@@ -656,9 +656,9 @@ mod tests {
         assert_eq!(d[2 * 5 + 2], 0.0);
         // Cardinal neighbors = 1.0
         assert!((d[2 * 5 + 1] - 1.0).abs() < 0.01);
-        assert!((d[1 * 5 + 2] - 1.0).abs() < 0.01);
+        assert!((d[5 + 2] - 1.0).abs() < 0.01);
         // Diagonal neighbor = sqrt(2) ~ 1.414
-        assert!((d[1 * 5 + 1] - std::f32::consts::SQRT_2).abs() < 0.01);
+        assert!((d[5 + 1] - std::f32::consts::SQRT_2).abs() < 0.01);
         // Corner (0,0) = sqrt(8) ~ 2.828
         assert!((d[0] - (8.0f32).sqrt()).abs() < 0.01);
     }
@@ -676,7 +676,7 @@ mod tests {
         // Cardinal neighbors = 1
         assert_eq!(d[2 * 5 + 1], 1.0);
         // Diagonal neighbor = 1 (chessboard)
-        assert_eq!(d[1 * 5 + 1], 1.0);
+        assert_eq!(d[5 + 1], 1.0);
         // Corner (0,0) = 2
         assert_eq!(d[0], 2.0);
     }

@@ -196,6 +196,16 @@ pub fn canny_u8(src: &[u8], w: usize, h: usize, low: f64, high: f64, l2: bool) -
     canny_hysteresis(&mut state, w, h)
 }
 
+/// Quantise an arbitrary float image to the 8-bit input `cv::Canny`
+/// requires: round half to even, saturate to 0..=255 (NaN -> 0).
+pub fn quantize_u8(v: f32) -> u8 {
+    if v.is_nan() {
+        0
+    } else {
+        v.round_ties_even().clamp(0.0, 255.0) as u8
+    }
+}
+
 #[cfg(test)]
 mod hysteresis_tests {
     use super::*;
@@ -252,7 +262,7 @@ mod hysteresis_tests {
             (17, 13),
             (64, 48),
         ] {
-            let mut a = fill(w, h, 0x9E37 ^ ((w as u64) << 16) ^ h as u64);
+            let mut a = fill(w, h, 0x9e37 ^ ((w as u64) << 16) ^ h as u64);
             let mut b = a.clone();
             // A strong pixel in the corner and a weak pixel in the opposite
             // corner, so both the border arm and a disconnected weak pixel
@@ -339,15 +349,5 @@ mod hysteresis_tests {
                 "{w}x{h}: canny {full:?}, hysteresis {best_old:?} -> {best_new:?}, strong {strong}, out {out_n}"
             );
         }
-    }
-}
-
-/// Quantise an arbitrary float image to the 8-bit input `cv::Canny`
-/// requires: round half to even, saturate to 0..=255 (NaN -> 0).
-pub fn quantize_u8(v: f32) -> u8 {
-    if v.is_nan() {
-        0
-    } else {
-        v.round_ties_even().clamp(0.0, 255.0) as u8
     }
 }

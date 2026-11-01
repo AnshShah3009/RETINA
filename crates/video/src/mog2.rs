@@ -6,7 +6,7 @@
 #![allow(deprecated)]
 
 use crate::Result;
-use cv_core::{storage::CpuStorage, storage::Storage, CpuTensor, Error, Tensor, TensorShape};
+use cv_core::{CpuTensor, Error, Tensor, TensorShape, storage::CpuStorage, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::context::{ComputeContext, Mog2Params};
 use cv_hal::tensor_ext::{TensorCast, TensorToCpu, TensorToGpu};

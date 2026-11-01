@@ -32,7 +32,7 @@ fn log_gamma_negative_non_integer_no_nan() {
     // Pre-fix: gamma(-0.5) = NaN (true -3.5449077018110321).
     let v = gamma(-0.5);
     assert!(
-        rel_close(v, -3.5449077018110321, 1e-12),
+        rel_close(v, -3.544_907_701_811_032, 1e-12),
         "gamma(-0.5) = {v}, want -3.5449077018110321"
     );
     assert!(!v.is_nan(), "gamma(-0.5) must not be NaN");
@@ -40,21 +40,21 @@ fn log_gamma_negative_non_integer_no_nan() {
     // Pre-fix: gamma(-0.25) = NaN (true -4.9016668098607106).
     let v = gamma(-0.25);
     assert!(
-        rel_close(v, -4.9016668098607106, 1e-12),
+        rel_close(v, -4.901_666_809_860_711, 1e-12),
         "gamma(-0.25) = {v}, want -4.9016668098607106"
     );
 
     // Pre-fix: gamma(-0.75) = NaN (true -4.8341465442958777).
     let v = gamma(-0.75);
     assert!(
-        rel_close(v, -4.8341465442958777, 1e-12),
+        rel_close(v, -4.834_146_544_295_877, 1e-12),
         "gamma(-0.75) = {v}, want -4.8341465442958777"
     );
 
     // Pre-fix: gamma(-2.5) = NaN (true -0.9453087204829419).
     let v = gamma(-2.5);
     assert!(
-        rel_close(v, -0.94530872048294188, 1e-12),
+        rel_close(v, -0.945_308_720_482_941_9, 1e-12),
         "gamma(-2.5) = {v}, want -0.9453087204829419"
     );
 
@@ -62,7 +62,7 @@ fn log_gamma_negative_non_integer_no_nan() {
     // (-2,-1) where pi/sin(pi x) is positive).
     let c = gamma(-1.5);
     assert!(
-        rel_close(c, 2.3632718012073547, 1e-12),
+        rel_close(c, 2.363_271_801_207_355, 1e-12),
         "CONTROL gamma(-1.5) = {c}, want 2.3632718012073547"
     );
     // CONTROL: positive arguments are untouched.
@@ -107,7 +107,7 @@ fn beta_does_not_overflow() {
     // like x^(1/2)*x*eps and reaches ~2.4e-9 at x = 200; the log-domain
     // cancellation amplifies it). Asserting at 1e-8 keeps the test meaningful
     // without pretending to more accuracy than the fit has.
-    let got = v / 9.7132172476111818e-122 - 1.0;
+    let got = v / 9.713_217_247_611_181e-122 - 1.0;
     assert!(
         got.abs() < 1e-8,
         "beta(200,200) = {v:e} (relative deviation {got:e}), \
@@ -121,7 +121,7 @@ fn beta_does_not_overflow() {
         !v.is_nan() && v > 0.0,
         "beta(150,150) = {v:e} must be positive"
     );
-    let dev = v / 1.42207504279732784e-91 - 1.0;
+    let dev = v / 1.422_075_042_797_327_8e-91 - 1.0;
     assert!(
         dev.abs() < 1e-6,
         "beta(150,150) = {v:e} (deviation {dev:e})"
@@ -186,16 +186,24 @@ fn spherical_jn_stable_for_n_greater_than_x() {
     ));
     assert!(rel_close(spherical_jn(5, 0.5), 2.9774668754574456e-6, 1e-9));
     assert!(rel_close(spherical_jn(2, 0.5), 1.6371106607993413e-2, 1e-9));
-    assert!(rel_close(spherical_jn(3, 1.0), 9.0065811171125163e-3, 1e-9));
+    assert!(rel_close(
+        spherical_jn(3, 1.0),
+        9.006_581_117_112_515e-3,
+        1e-9
+    ));
 
     // CONTROL: the n < x path (upward recurrence) still works and is
     // undisturbed by the new backward branch.
-    assert!(rel_close(spherical_jn(0, 1.0), 0.84147098480789650, 1e-12));
+    assert!(rel_close(
+        spherical_jn(0, 1.0),
+        0.841_470_984_807_896_5,
+        1e-12
+    ));
     assert!(rel_close(spherical_jn(1, 1.0), 0.30116867893975674, 1e-12));
     assert!(rel_close(spherical_jn(2, 4.0), 0.27628368577135016, 1e-12));
     assert!(rel_close(
         spherical_jn(4, 2.0),
-        1.4079392762915321e-2,
+        1.407_939_276_291_532e-2,
         1e-12
     ));
 }
@@ -204,7 +212,7 @@ fn spherical_jn_stable_for_n_greater_than_x() {
 fn spherical_jn_boundary_and_odd_parity() {
     // At the n == x switch point the n < x branch (j_{n-1} + 1) must agree
     // with the Miller backward branch.
-    let exact_3_1 = 9.0065811171125163e-3;
+    let exact_3_1 = 9.006_581_117_112_515e-3;
     let v = spherical_jn(3, 1.0);
     assert!(
         rel_close(v, exact_3_1, 1e-9),
@@ -293,6 +301,6 @@ fn bessel_jn_non_finite_argument_is_nan() {
     assert_eq!(bessel_jn(0, 0.0), 1.0);
     assert_eq!(bessel_jn(2, 0.0), 0.0);
     assert!((bessel_jn(2, 1.0) - 0.11490348493190048).abs() < 1e-12);
-    assert!((bessel_jn(10, 15.0) - (-0.090071811047659034)).abs() < 1e-9);
-    assert!((bessel_jn(5, 2.0) - 0.0070396297558716855).abs() < 1e-9);
+    assert!((bessel_jn(10, 15.0) - (-0.090_071_811_047_659_03)).abs() < 1e-9);
+    assert!((bessel_jn(5, 2.0) - 0.007_039_629_755_871_686).abs() < 1e-9);
 }

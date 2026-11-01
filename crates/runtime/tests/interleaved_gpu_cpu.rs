@@ -1,7 +1,7 @@
 use cv_hal::DeviceId;
-use cv_runtime::distributed::{ShmCoordinator, SHM_TOTAL_SIZE};
-use cv_runtime::orchestrator::{scheduler, RuntimeRunner, WorkloadHint};
 use cv_runtime::Error;
+use cv_runtime::distributed::{SHM_TOTAL_SIZE, ShmCoordinator};
+use cv_runtime::orchestrator::{RuntimeRunner, WorkloadHint, scheduler};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;

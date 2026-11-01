@@ -127,7 +127,7 @@ fn the_special_functions_agree_with_published_values() {
         erfc(1.0)
     );
     assert!(
-        (erfc(3.0) - 2.209_049_699_858_544_1e-5).abs() < 1e-12,
+        (erfc(3.0) - 2.209_049_699_858_544e-5).abs() < 1e-12,
         "erfc(3) = {}",
         erfc(3.0)
     );

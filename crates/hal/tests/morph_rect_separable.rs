@@ -3,9 +3,9 @@
 //! block now loads interior rows as slices). Both must return exactly the
 //! bytes of the per-tap definition: out-of-image taps replicate the edge pixel.
 
+use cv_core::TensorShape;
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
-use cv_core::TensorShape;
 use cv_hal::context::{ComputeContext, MorphologyType};
 use cv_hal::cpu::CpuBackend;
 use std::time::Instant;
@@ -15,7 +15,7 @@ fn u8_tensor(data: &[u8], w: usize, h: usize, c: usize) -> Tensor<u8, CpuStorage
 }
 
 fn noise(seed: u64, n: usize) -> Vec<u8> {
-    let mut s = seed.wrapping_add(0x9E3779B97F4A7C15);
+    let mut s = seed.wrapping_add(0x9e3779b97f4a7c15);
     (0..n)
         .map(|_| {
             s ^= s << 13;

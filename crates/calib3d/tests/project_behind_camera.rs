@@ -3,8 +3,8 @@
 //! projects to `u = 70` and must keep doing so.
 
 use cv_calib3d::{
-    project_points, project_points_with_distortion, project_points_with_jacobian,
-    ProjectPointsOptions,
+    ProjectPointsOptions, project_points, project_points_with_distortion,
+    project_points_with_jacobian,
 };
 use cv_core::{CameraIntrinsics, Distortion, Pose};
 use nalgebra::Point3;

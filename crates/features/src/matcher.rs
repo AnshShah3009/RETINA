@@ -118,27 +118,27 @@ impl Matcher {
                 if let Some((train_idx, distance)) = best_match {
                     let mut keep_match = true;
 
-                    if let Some(threshold) = self.ratio_threshold {
-                        if let Some(second) = second_best {
-                            // A zero second-best distance means the match is
-                            // ambiguous: two train descriptors are identical, or
-                            // as close as the encoding allows. That is the most
-                            // ambiguous case the ratio test exists to reject, and
-                            // it is exactly the one `0/0` fails on - IEEE-754
-                            // gives NaN, and `NaN > threshold` is false, so the
-                            // match would be *kept*.
-                            //
-                            // Such matches are common wherever an image has
-                            // repeated texture, and each one that survives flows
-                            // into track building and PnP looking confident.
-                            let rejected = if second == 0.0 {
-                                true
-                            } else {
-                                distance / second > threshold
-                            };
-                            if rejected {
-                                keep_match = false;
-                            }
+                    if let Some(threshold) = self.ratio_threshold
+                        && let Some(second) = second_best
+                    {
+                        // A zero second-best distance means the match is
+                        // ambiguous: two train descriptors are identical, or
+                        // as close as the encoding allows. That is the most
+                        // ambiguous case the ratio test exists to reject, and
+                        // it is exactly the one `0/0` fails on - IEEE-754
+                        // gives NaN, and `NaN > threshold` is false, so the
+                        // match would be *kept*.
+                        //
+                        // Such matches are common wherever an image has
+                        // repeated texture, and each one that survives flows
+                        // into track building and PnP looking confident.
+                        let rejected = if second == 0.0 {
+                            true
+                        } else {
+                            distance / second > threshold
+                        };
+                        if rejected {
+                            keep_match = false;
                         }
                     }
 
@@ -215,7 +215,7 @@ pub fn knn_match(query: &Descriptors, train: &Descriptors, k: usize) -> Vec<Vec<
             .map(|(idx, t_desc)| (idx, q_desc.hamming_distance(t_desc)))
             .collect();
 
-        distances.sort_by(|a, b| a.1.cmp(&b.1));
+        distances.sort_by_key(|a| a.1);
 
         let knn: Vec<FeatureMatch> = distances
             .into_iter()
@@ -295,8 +295,8 @@ mod tests {
 
     #[test]
     fn match_descriptors_identical_sets() {
-        let query = make_descriptors_from_bytes(&[&[0u8; 8], &[0xFFu8; 8]]);
-        let train = make_descriptors_from_bytes(&[&[0u8; 8], &[0xFFu8; 8]]);
+        let query = make_descriptors_from_bytes(&[&[0u8; 8], &[0xffu8; 8]]);
+        let train = make_descriptors_from_bytes(&[&[0u8; 8], &[0xffu8; 8]]);
         let result = match_descriptors(&query, &train, None);
         assert_eq!(result.matches.len(), 2);
         assert!(result.matches.iter().all(|m| (m.distance as u32) == 0));
@@ -306,8 +306,8 @@ mod tests {
     fn brute_force_variants_use_hamming() {
         // `BruteForce` and `BruteForceHamming` are documented aliases: both run
         // the Hamming matcher, so their result sets must be identical.
-        let query = make_descriptors_from_bytes(&[&[0x0Fu8; 4], &[0xF0u8; 4]]);
-        let train = make_descriptors_from_bytes(&[&[0x00u8; 4], &[0xFFu8; 4]]);
+        let query = make_descriptors_from_bytes(&[&[0x0fu8; 4], &[0xf0u8; 4]]);
+        let train = make_descriptors_from_bytes(&[&[0x00u8; 4], &[0xffu8; 4]]);
         let a = Matcher::new(MatchType::BruteForce).match_descriptors(&query, &train);
         let b = Matcher::new(MatchType::BruteForceHamming).match_descriptors(&query, &train);
         let av: Vec<_> = a
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn match_descriptors_with_ratio_filter() {
         let query = make_descriptors_from_bytes(&[&[0u8; 1]]);
-        let train = make_descriptors_from_bytes(&[&[0u8; 1], &[0xFFu8; 1]]);
+        let train = make_descriptors_from_bytes(&[&[0u8; 1], &[0xffu8; 1]]);
         let result = match_descriptors(&query, &train, Some(0.75));
         assert_eq!(result.matches.len(), 1);
     }
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn knn_match_returns_k_results() {
         let query = make_descriptors_from_bytes(&[&[0u8; 4]]);
-        let train = make_descriptors_from_bytes(&[&[0u8; 4], &[0x0Fu8; 4], &[0xFFu8; 4]]);
+        let train = make_descriptors_from_bytes(&[&[0u8; 4], &[0x0fu8; 4], &[0xffu8; 4]]);
         let results = knn_match(&query, &train, 2);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].len(), 2);
@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn knn_match_fewer_than_k() {
         let query = make_descriptors_from_bytes(&[&[0u8; 4]]);
-        let train = make_descriptors_from_bytes(&[&[0u8; 4], &[0xFFu8; 4]]);
+        let train = make_descriptors_from_bytes(&[&[0u8; 4], &[0xffu8; 4]]);
         let results = knn_match(&query, &train, 5);
         assert_eq!(results[0].len(), 2);
     }

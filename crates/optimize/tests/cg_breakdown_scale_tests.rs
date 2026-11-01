@@ -16,8 +16,8 @@
 //!
 //! Baseline for every "before" number below: commit `4029e46`.
 
-use cv_optimize::sparse::{CgSolver, LinearSolver, SparseMatrix, Triplet};
 use cv_optimize::CostFunction;
+use cv_optimize::sparse::{CgSolver, LinearSolver, SparseMatrix, Triplet};
 use nalgebra::DVector;
 
 fn cpu_device() -> cv_hal::compute::ComputeDevice<'static> {

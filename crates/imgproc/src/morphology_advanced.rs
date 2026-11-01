@@ -3,7 +3,7 @@
 //!
 //! These build on the basic dilate/erode primitives in [`crate::morph`].
 
-use crate::morph::{closing, create_morph_kernel, opening, MorphShape};
+use crate::morph::{MorphShape, closing, create_morph_kernel, opening};
 use image::GrayImage;
 use rayon::prelude::*;
 

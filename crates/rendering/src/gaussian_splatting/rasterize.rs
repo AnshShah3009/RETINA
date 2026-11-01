@@ -655,11 +655,7 @@ impl DifferentiableRasterizer {
             count += 1;
         }
 
-        if count > 0 {
-            loss / count as f32
-        } else {
-            0.0
-        }
+        if count > 0 { loss / count as f32 } else { 0.0 }
     }
 
     /// Gradient of `compute_loss(rendered, target)` with respect to each

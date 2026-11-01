@@ -48,7 +48,7 @@ pub mod three_d;
 
 pub use chart::{Figure, Plot, PlotType, Series, SubPlot};
 pub use export::{save_html, save_png, save_svg, to_html, to_svg};
-pub use style::{Color, Legend, Style, COLORS};
+pub use style::{COLORS, Color, Legend, Style};
 pub use three_d::{Plot3D, Point3D, PointCloud3D};
 
 /// Plotting error types

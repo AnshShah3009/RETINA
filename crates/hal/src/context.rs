@@ -1,5 +1,5 @@
 use crate::{BackendType, DeviceId, Result};
-use cv_core::{storage::Storage, Float, Tensor};
+use cv_core::{Float, Tensor, storage::Storage};
 
 /// Resampling filter.
 ///
