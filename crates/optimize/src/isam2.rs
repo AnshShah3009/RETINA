@@ -101,17 +101,40 @@ impl Isam2Solver {
         }
 
         let base_idx = self.factors.len();
+        let mut new_factor_keys: HashSet<Key> = HashSet::new();
         for (i, factor) in new_factors.into_iter().enumerate() {
             let fi = base_idx + i;
             for &k in factor.keys() {
                 self.key_to_factors.entry(k).or_default().push(fi);
+                new_factor_keys.insert(k);
             }
             self.factors.push(factor);
         }
 
         self.update_count += 1;
 
+        // A new factor constrains the variables it touches just as much as a new
+        // value defines one, so both seeds belong in the affected set. Seeding it
+        // from `new_values` alone dropped every factor added in an update that
+        // introduced no new variable — which is exactly a loop closure between
+        // poses that already exist — at the `affected.is_empty()` early return
+        // below: the factor stayed in `self.factors` and in `key_to_factors`,
+        // but nothing was linearised and `last_error` was never refreshed.
+        //
+        // Measured on a two-variable graph (prior x0 = 0, between x0->x1 = 1)
+        // followed by an update carrying only a second between x0->x1 = 3:
+        //
+        // ```text
+        //                          before fix     after fix
+        //   estimate of x1          1.000000      2.980198
+        //   total_error()           4.245e-52     4.245e-52
+        //   cost of the graph       4.000e+04     4.245e-52
+        // ```
+        //
+        // Both the estimate and the reported cost described a graph that no
+        // longer matched the factors the solver held.
         let mut affected: HashSet<Key> = new_keys.into_iter().collect();
+        affected.extend(new_factor_keys);
 
         if self.config.enable_partial_relinearization
             && self
