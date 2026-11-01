@@ -107,13 +107,13 @@ fn douglas_peucker(
         }
     }
 
-    if dmax > epsilon {
+    // `mask` starts all-false; a point is kept when it is selected as a split
+    // point. The previous revision only ever cleared entries, so no interior
+    // vertex could survive and every curve collapsed to its two endpoints.
+    if dmax > epsilon && idx > start {
+        mask[idx] = true;
         douglas_peucker(curve, start, idx, epsilon, mask);
         douglas_peucker(curve, idx, end, epsilon, mask);
-    } else {
-        for i in (start + 1)..end {
-            mask[i] = false;
-        }
     }
 }
 
@@ -152,5 +152,49 @@ mod tests {
         assert!(approx.len() <= curve.len());
         assert_eq!(approx[0], curve[0]);
         assert_eq!(*approx.last().unwrap(), *curve.last().unwrap());
+    }
+
+    #[test]
+    fn test_approx_poly_dp_keeps_vertices_beyond_epsilon() {
+        // Regression: `douglas_peucker` started from an all-false mask and only
+        // ever cleared entries, so a vertex selected as a split point was never
+        // marked kept. Every curve with 3+ points therefore collapsed to its
+        // two endpoints no matter how large the deviation was.
+        let spike = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 5.0), // 5 px off the closing chord, epsilon 0.5
+            Point2::new(2.0, 0.0),
+        ];
+        let open = approx_poly_dp(&spike, 0.5, false);
+        assert_eq!(
+            open.len(),
+            3,
+            "the spike vertex exceeds epsilon and must be kept: {:?}",
+            open
+        );
+        assert!(open.contains(&Point2::new(1.0, 5.0)));
+
+        // Closed squares: a dense outline must simplify to its four corners,
+        // not to two opposite corners joined by a diagonal.
+        let mut square = Vec::new();
+        for i in 0..10 {
+            square.push(Point2::new(i as f64, 0.0));
+        }
+        for i in 1..10 {
+            square.push(Point2::new(9.0, i as f64));
+        }
+        for i in (0..9).rev() {
+            square.push(Point2::new(i as f64, 9.0));
+        }
+        for i in (1..9).rev() {
+            square.push(Point2::new(0.0, i as f64));
+        }
+        let closed = approx_poly_dp(&square, 0.5, true);
+        assert_eq!(
+            closed.len(),
+            4,
+            "a closed square must keep its four corners: {:?}",
+            closed
+        );
     }
 }
