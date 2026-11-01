@@ -234,6 +234,18 @@ impl DnnNet {
             )));
         }
 
+        let (channels, height, width) =
+            (input_shape_vec[1], input_shape_vec[2], input_shape_vec[3]);
+        let got = (input.shape.channels, input.shape.height, input.shape.width);
+        if got != (channels, height, width) {
+            return Err(Error::InvalidInput(format!(
+                "input tensor shape (channels, height, width) = {got:?} does not match the \
+                 model's (channels, height, width) = {:?}; the flat buffer would be silently \
+                 reinterpreted as the model's layout",
+                (channels, height, width)
+            )));
+        }
+
         let slice = input
             .as_slice()
             .map_err(|e| Error::RuntimeError(e.to_string()))?;
@@ -437,6 +449,137 @@ mod tests {
         assert_eq!(tensor.shape.height, 4);
         assert_eq!(tensor.shape.width, 5);
         assert_eq!(tensor.as_slice().expect("slice"), data.as_slice());
+    }
+
+    // -- a minimal in-memory ONNX Identity model, so `forward` can be exercised
+    // without a binary fixture ------------------------------------------------
+
+    fn pb_varint(mut v: u64, out: &mut Vec<u8>) {
+        loop {
+            let mut b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if v == 0 {
+                break;
+            }
+        }
+    }
+
+    fn pb_key(field: u64, wire: u64, out: &mut Vec<u8>) {
+        pb_varint((field << 3) | wire, out);
+    }
+
+    fn pb_len(field: u64, bytes: &[u8], out: &mut Vec<u8>) {
+        pb_key(field, 2, out);
+        pb_varint(bytes.len() as u64, out);
+        out.extend_from_slice(bytes);
+    }
+
+    fn pb_int(field: u64, v: i64, out: &mut Vec<u8>) {
+        pb_key(field, 0, out);
+        pb_varint(v as u64, out);
+    }
+
+    fn pb_str(field: u64, s: &str, out: &mut Vec<u8>) {
+        pb_len(field, s.as_bytes(), out);
+    }
+
+    fn pb_value_info(name: &str, dims: &[i64]) -> Vec<u8> {
+        let mut shape = Vec::new();
+        for &d in dims {
+            let mut dim = Vec::new();
+            pb_int(1, d, &mut dim);
+            pb_len(1, &dim, &mut shape);
+        }
+        let mut tensor = Vec::new();
+        pb_int(1, 1, &mut tensor); // elem_type = FLOAT
+        pb_len(2, &shape, &mut tensor);
+        let mut ty = Vec::new();
+        pb_len(1, &tensor, &mut ty);
+        let mut vi = Vec::new();
+        pb_str(1, name, &mut vi);
+        pb_len(2, &ty, &mut vi);
+        vi
+    }
+
+    fn identity_onnx(dims: &[i64]) -> Vec<u8> {
+        let mut node = Vec::new();
+        pb_str(1, "x", &mut node);
+        pb_str(2, "y", &mut node);
+        pb_str(4, "Identity", &mut node);
+
+        let mut graph = Vec::new();
+        pb_len(1, &node, &mut graph);
+        pb_str(2, "g", &mut graph);
+        pb_len(11, &pb_value_info("x", dims), &mut graph);
+        pb_len(12, &pb_value_info("y", dims), &mut graph);
+
+        let mut opset = Vec::new();
+        pb_int(2, 13, &mut opset);
+
+        let mut model = Vec::new();
+        pb_int(1, 7, &mut model); // ir_version
+        pb_len(7, &graph, &mut model);
+        pb_len(8, &opset, &mut model);
+        model
+    }
+
+    fn runnable_identity(dims: &[i64]) -> RunnableModel {
+        let bytes = identity_onnx(dims);
+        let mut reader: &[u8] = &bytes;
+        tract_onnx::onnx()
+            .model_for_read(&mut reader)
+            .expect("parse")
+            .into_optimized()
+            .expect("optimize")
+            .into_runnable()
+            .expect("runnable")
+    }
+
+    #[test]
+    fn a_tensor_with_the_wrong_shape_is_rejected_not_reinterpreted() {
+        let net = DnnNet {
+            model: Arc::new(runnable_identity(&[1, 1, 2, 3])),
+            input_shape: vec![1, 1, 2, 3],
+        };
+        // The model wants CHW (1, 2, 3). This tensor is (1, 3, 2): the same six
+        // values, but a different image - a transposed one. Re-labelling the
+        // flat buffer as (1, 2, 3) silently returns a different picture.
+        let input = cv_core::Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            cv_core::TensorShape::new(1, 3, 2),
+        )
+        .expect("input tensor");
+
+        let err = net
+            .forward(&input)
+            .expect_err("a tensor of a different shape must not be accepted");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shape"),
+            "error should name the shape mismatch, got {msg}"
+        );
+    }
+
+    #[test]
+    fn a_matching_tensor_still_runs_through_identity() {
+        let net = DnnNet {
+            model: Arc::new(runnable_identity(&[1, 1, 2, 3])),
+            input_shape: vec![1, 1, 2, 3],
+        };
+        let data = vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6];
+        let input = cv_core::Tensor::from_vec(data.clone(), cv_core::TensorShape::new(1, 2, 3))
+            .expect("input tensor");
+
+        let outputs = net.forward(&input).expect("matching shape runs");
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].shape.channels, 1);
+        assert_eq!(outputs[0].shape.height, 2);
+        assert_eq!(outputs[0].shape.width, 3);
+        assert_eq!(outputs[0].as_slice().expect("slice"), data.as_slice());
     }
 
     #[test]
