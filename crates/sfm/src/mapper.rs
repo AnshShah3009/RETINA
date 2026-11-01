@@ -2065,13 +2065,27 @@ fn seed_candidates(
         .collect();
     // Best reach first, then local quality, then the tightest pair, then the
     // lowest view indices so the choice stays deterministic.
-    chosen.sort_by_key(|(local, choice)| {
+    //
+    // Reach and local quality are *higher is better*, so they sort descending;
+    // span and the lower view index are tie-breakers where smaller is better.
+    // Sorting the whole key ascending (as a single `sort_by_key` tuple did)
+    // inverted both primary keys: the anchored, least-supported candidate came
+    // back first and was the seed the mapper tried first.
+    let rank_of = |local: usize, choice: &SeedChoice| {
         ranks.get(&(choice.a, choice.b)).copied().unwrap_or((
             0,
-            *local,
+            local,
             choice.b - choice.a,
             choice.a,
         ))
+    };
+    chosen.sort_by(|left, right| {
+        let a = rank_of(left.0, &left.1);
+        let b = rank_of(right.0, &right.1);
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+            .then_with(|| a.3.cmp(&b.3))
     });
     let mut ordered: Vec<SeedChoice> = chosen
         .into_iter()
@@ -3176,6 +3190,118 @@ mod tests {
         assert_eq!(
             pairs,
             vec![(0, 1), (0, 2), (1, 2), (1, 3), (2, 3), (2, 4), (3, 4)]
+        );
+    }
+
+    /// Keypoints of one camera looking at `points`, for a world-to-camera pose.
+    fn project_view(
+        points: &[Point3<f64>],
+        pose_cw: &Pose,
+        intrinsics: &CameraIntrinsics,
+    ) -> Vec<KeyPoint> {
+        points
+            .iter()
+            .map(|point| {
+                let camera = pose_cw.rotation * point.coords + pose_cw.translation;
+                let q = intrinsics.project(&Point3::from(camera));
+                KeyPoint::new(q.x, q.y)
+            })
+            .collect()
+    }
+
+    fn synthetic_pair(a: usize, b: usize, inliers: usize) -> VerifiedPair {
+        VerifiedPair {
+            a,
+            b,
+            inliers: (0..inliers).map(|i| (i, i)).collect(),
+            epipolar_rmse_px: 0.0,
+            model: PairModelDiagnostic {
+                a,
+                b,
+                matches: inliers,
+                fundamental_inliers: inliers,
+                homography_inliers: 0,
+                essential_score: 0.0,
+                homography_score: 0.0,
+                score_margin: 0.0,
+                planar: false,
+            },
+        }
+    }
+
+    /// The seed ranking is documented to prefer a pair that connects to the
+    /// sequence over an anchored one, then local quality. The sort key is
+    /// ascending on both, so it does the exact opposite: the pair spanning the
+    /// whole index range with the weaker geometry comes back first, and that is
+    /// the seed the mapper tries first (and, past `seed_hypotheses`, may be the
+    /// only one it ever tries).
+    #[test]
+    fn a_connected_seed_outranks_an_anchored_one() {
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        let points: Vec<Point3<f64>> = (0..40)
+            .map(|i| {
+                Point3::new(
+                    -0.6 + 0.3 * (i % 4) as f64,
+                    -0.45 + 0.3 * ((i / 4) % 4) as f64,
+                    4.0 + 0.25 * (i / 16) as f64,
+                )
+            })
+            .collect();
+        let near = Pose::identity();
+        let far = Pose::new(
+            nalgebra::Matrix3::<f64>::identity(),
+            Vector3::new(-0.5, 0.0, 0.0),
+        );
+
+        let mut views: Vec<View> = (0..12)
+            .map(|_| View::new(Vec::new(), Descriptors::new(), 640, 480))
+            .collect();
+        // Anchored: views 0 and 11 span the whole index range.
+        views[0] = View::new(
+            project_view(&points, &near, &intrinsics),
+            Descriptors::new(),
+            640,
+            480,
+        );
+        views[11] = View::new(
+            project_view(&points, &far, &intrinsics),
+            Descriptors::new(),
+            640,
+            480,
+        );
+        // Connected: views 5 and 6 sit inside the range, all 40 points.
+        views[5] = View::new(
+            project_view(&points, &near, &intrinsics),
+            Descriptors::new(),
+            640,
+            480,
+        );
+        views[6] = View::new(
+            project_view(&points, &far, &intrinsics),
+            Descriptors::new(),
+            640,
+            480,
+        );
+
+        let verified = vec![synthetic_pair(0, 11, 40), synthetic_pair(5, 6, 40)];
+        let config = MapperConfig {
+            min_seed_inliers: 8,
+            min_seed_points: 1,
+            seed_candidates: 16,
+            ..MapperConfig::default()
+        };
+        let (seeds, diagnostics) = seed_candidates(&verified, &views, &intrinsics, &config);
+        assert_eq!(
+            diagnostics.len(),
+            2,
+            "both pairs must be scorable: {diagnostics:?}"
+        );
+        assert_eq!(seeds.len(), 2, "both pairs must be candidates");
+        let order: Vec<(usize, usize)> = seeds.iter().map(|s| (s.a, s.b)).collect();
+        assert_eq!(
+            order,
+            vec![(5, 6), (0, 11)],
+            "the connected, better-supported pair must rank first"
         );
     }
 
