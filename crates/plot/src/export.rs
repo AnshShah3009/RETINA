@@ -130,12 +130,19 @@ impl Bounds {
         // Bars make y = 0 a *sticky edge*: when the data limit is exactly 0
         // the margin is not applied past it, so bars stand on the axis
         // (measured, matplotlib 3.x: bar([0,1,2],[10,11,12]) -> ylim (0, 12.6)).
-        let lo_y = if has_bars && min_y == 0.0 {
+        //
+        // The stickiness only holds when the range has width. An all-zero bar
+        // series has *both* limits at 0, so honouring both edges collapsed the
+        // range to `[0, 0]` and `project` divided by zero, emitting `NaN` for
+        // every bar's y and height. Matplotlib pads that case symmetrically to
+        // `(-0.055, 0.055)`, which is what a normal (non-sticky) pad gives.
+        let bars_span = has_bars && min_y < max_y;
+        let lo_y = if bars_span && min_y == 0.0 {
             0.0
         } else {
             min_y - y_pad
         };
-        let hi_y = if has_bars && max_y == 0.0 {
+        let hi_y = if bars_span && max_y == 0.0 {
             0.0
         } else {
             max_y + y_pad
