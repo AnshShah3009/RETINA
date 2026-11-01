@@ -77,6 +77,36 @@ fn per_tap(
     out
 }
 
+/// One `morphology` call, defined from the operations it is composed of.
+///
+/// `Open` is erode `iters` times then dilate `iters` times, and `Close` the
+/// reverse - the same composition OpenCV's `morphologyEx` and `cv-hal`'s GPU
+/// kernel use. Only `Erode` and `Dilate` reach `per_tap`'s single min/max pass.
+fn compose(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    c: usize,
+    mask: &[u8],
+    kw: usize,
+    kh: usize,
+    typ: MorphologyType,
+    iters: u32,
+) -> Vec<u8> {
+    let run = |input: &[u8], op: MorphologyType| {
+        let mut cur = input.to_vec();
+        for _ in 0..iters {
+            cur = per_tap(&cur, w, h, c, mask, kw, kh, op);
+        }
+        cur
+    };
+    match typ {
+        MorphologyType::Open => run(&run(src, MorphologyType::Erode), MorphologyType::Dilate),
+        MorphologyType::Close => run(&run(src, MorphologyType::Dilate), MorphologyType::Erode),
+        _ => run(src, typ),
+    }
+}
+
 #[test]
 fn morphology_matches_per_tap_definition_for_rect_and_general_masks() {
     let cpu = CpuBackend::new().unwrap();
@@ -116,10 +146,7 @@ fn morphology_matches_per_tap_definition_for_rect_and_general_masks() {
                     let got = cpu
                         .morphology(&u8_tensor(&src, w, h, c), typ, &k, iters)
                         .unwrap();
-                    let mut want = src.clone();
-                    for _ in 0..iters {
-                        want = per_tap(&want, w, h, c, mask, *kw, *kh, typ);
-                    }
+                    let want = compose(&src, w, h, c, mask, *kw, *kh, typ, iters);
                     assert_eq!(
                         got.as_slice().unwrap(),
                         &want[..],

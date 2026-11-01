@@ -298,12 +298,24 @@ pub fn morphology_ctx(
         }
     }
 
-    // CPU fallback
+    // CPU fallback. `Open` and `Close` are compositions, not a no-op: the
+    // catch-all arm below used to swallow them and return `GrayImage::new`,
+    // i.e. an all-black image where `cv-hal`'s CPU backend returned the real
+    // result (see `tests/morphology_open_close_parity.rs`).
     let mut out = GrayImage::new(src.width(), src.height());
     match typ {
         HalMorphType::Dilate => dilate_with_border_into(src, &mut out, kernel, iterations, _border),
         HalMorphType::Erode => erode_with_border_into(src, &mut out, kernel, iterations, _border),
-        _ => {}
+        HalMorphType::Open => {
+            let mut mid = GrayImage::new(src.width(), src.height());
+            erode_with_border_into(src, &mut mid, kernel, iterations, _border);
+            dilate_with_border_into(&mid, &mut out, kernel, iterations, _border);
+        }
+        HalMorphType::Close => {
+            let mut mid = GrayImage::new(src.width(), src.height());
+            dilate_with_border_into(src, &mut mid, kernel, iterations, _border);
+            erode_with_border_into(&mid, &mut out, kernel, iterations, _border);
+        }
     }
     out
 }
