@@ -25,6 +25,13 @@ pub enum OdometryMethod {
     Hybrid,
 }
 
+/// The GPU odometry kernel ignores both colour buffers and runs point-to-plane.
+/// Only the geometric method may take it. Intensity and Hybrid read colour,
+/// which that kernel never does.
+fn geometric_gpu_kernel_applies(method: OdometryMethod) -> bool {
+    matches!(method, OdometryMethod::PointToPlane)
+}
+
 /// Compute RGBD odometry between two frames using best available runner
 #[allow(clippy::too_many_arguments)]
 pub fn compute_rgbd_odometry(
@@ -67,38 +74,45 @@ pub fn compute_rgbd_odometry_ctx(
     // Multi-scale pyramid
     let transformation = Matrix4::identity();
 
-    // GPU Path
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        let intrinsics_array = [intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy];
+    // GPU path. The kernel drops both colour buffers and solves point-to-plane,
+    // so Intensity and Hybrid — the methods that read colour — stay on the CPU
+    // implementation below. A successful GPU call used to return before `method`
+    // was consulted, and those two variants then reported a geometric pose.
+    if geometric_gpu_kernel_applies(method) {
+        if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
+            let intrinsics_array = [intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy];
 
-        // Convert color to u32 for HAL if provided
-        let src_color_u32 = source_color.map(|c| {
-            c.iter()
-                .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
-                .collect::<Vec<_>>()
-        });
-        let dst_color_u32 = target_color.map(|c| {
-            c.iter()
-                .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
-                .collect::<Vec<_>>()
-        });
-
-        if let Ok((transform, fitness, rmse)) = cv_hal::gpu_kernels::odometry_gpu::compute_odometry(
-            gpu,
-            source_depth,
-            target_depth,
-            src_color_u32.as_deref(),
-            dst_color_u32.as_deref(),
-            &intrinsics_array,
-            width as u32,
-            height as u32,
-            &transformation,
-        ) {
-            return Some(OdometryResult {
-                transformation: transform,
-                fitness,
-                inlier_rmse: rmse,
+            // Convert color to u32 for HAL if provided
+            let src_color_u32 = source_color.map(|c| {
+                c.iter()
+                    .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
+                    .collect::<Vec<_>>()
             });
+            let dst_color_u32 = target_color.map(|c| {
+                c.iter()
+                    .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
+                    .collect::<Vec<_>>()
+            });
+
+            if let Ok((transform, fitness, rmse)) =
+                cv_hal::gpu_kernels::odometry_gpu::compute_odometry(
+                    gpu,
+                    source_depth,
+                    target_depth,
+                    src_color_u32.as_deref(),
+                    dst_color_u32.as_deref(),
+                    &intrinsics_array,
+                    width as u32,
+                    height as u32,
+                    &transformation,
+                )
+            {
+                return Some(OdometryResult {
+                    transformation: transform,
+                    fitness,
+                    inlier_rmse: rmse,
+                });
+            }
         }
     }
 
@@ -1112,5 +1126,76 @@ mod tests {
         let input: Vec<f32> = (0..16).map(|i| i as f32).collect();
         let out = downsample_depth(&input, 4, 4, 0.5);
         assert_eq!(out, vec![0.0, 2.0, 8.0, 10.0]);
+    }
+
+    #[test]
+    fn photometric_methods_do_not_use_the_geometric_gpu_kernel() {
+        assert!(geometric_gpu_kernel_applies(OdometryMethod::PointToPlane));
+        assert!(!geometric_gpu_kernel_applies(OdometryMethod::Intensity));
+        assert!(!geometric_gpu_kernel_applies(OdometryMethod::Hybrid));
+    }
+
+    /// A flat plane has one normal, so point-to-plane cannot see a slide along
+    /// the plane. Intensity reads the shifted texture and can.
+    #[test]
+    fn intensity_recovers_a_lateral_slide_point_to_plane_cannot() {
+        let (w, h) = (64usize, 48usize);
+        let k = crate::tsdf::CameraIntrinsics::new(
+            100.0,
+            100.0,
+            (w as f32 - 1.0) / 2.0,
+            (h as f32 - 1.0) / 2.0,
+            w as u32,
+            h as u32,
+        );
+        let (dx, dy) = (0.03f32, 0.015f32);
+        let texture =
+            |x: f32, y: f32| (127.0 + 90.0 * (20.0 * x).sin() * (15.0 * y).cos()).clamp(0.0, 255.0);
+        let color = |v: f32| {
+            let b = v.round().clamp(0.0, 255.0) as u8;
+            Vector3::new(b, b, b)
+        };
+        let mut sd = vec![1.0f32; w * h];
+        let td = vec![1.0f32; w * h];
+        let mut sc = vec![Vector3::new(0u8, 0, 0); w * h];
+        let mut tc = vec![Vector3::new(0u8, 0, 0); w * h];
+        for v in 0..h {
+            for u in 0..w {
+                let idx = v * w + u;
+                let (x, y) = ((u as f32 - k.cx) / k.fx, (v as f32 - k.cy) / k.fy);
+                sd[idx] = 1.0;
+                sc[idx] = color(texture(x, y));
+                tc[idx] = color(texture(x - dx, y - dy));
+            }
+        }
+        let runner = RuntimeRunner::Sync(cv_hal::DeviceId(0));
+        let geometric =
+            compute_point_to_plane_ctx(&sd, &td, &k, w, h, &Matrix4::identity(), &runner)
+                .expect("identical depth is a solved geometric problem");
+        assert!(
+            geometric.transformation[(0, 3)].abs() < 5e-3,
+            "point-to-plane on a flat plane must not invent the in-plane slide, got {}",
+            geometric.transformation[(0, 3)]
+        );
+        let photometric = compute_intensity(
+            &sd,
+            &td,
+            Some(&sc),
+            Some(&tc),
+            &k,
+            w,
+            h,
+            &Matrix4::identity(),
+        )
+        .expect("intensity must converge on a textured plane");
+        let err = (photometric.transformation[(0, 3)] - dx)
+            .abs()
+            .max((photometric.transformation[(1, 3)] - dy).abs());
+        assert!(
+            err < 1e-2,
+            "intensity should recover the lateral slide ({dx}, {dy}), got ({}, {}), err {err}",
+            photometric.transformation[(0, 3)],
+            photometric.transformation[(1, 3)]
+        );
     }
 }
