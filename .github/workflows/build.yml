@@ -66,7 +66,7 @@ jobs:
       run: cargo clippy --workspace --lib -- -W clippy::all
 
     - name: Run tests
-      run: cargo nextest run --workspace
+      run: cargo nextest run --workspace --no-fail-fast
 
     - name: Run doctests
       # `cargo nextest` deliberately does not support doctests, so the 32 doc
@@ -121,7 +121,7 @@ jobs:
       run: cargo clippy --workspace --lib -- -W clippy::all
 
     - name: Run tests (CPU backend)
-      run: cargo nextest run --workspace --features cpu
+      run: cargo nextest run --workspace --no-fail-fast --features cpu
 
     - name: Run tests (MLX backend)
-      run: cargo nextest run --workspace --features mlx
+      run: cargo nextest run --workspace --no-fail-fast --features mlx
