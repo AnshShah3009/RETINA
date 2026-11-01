@@ -269,15 +269,48 @@ pub fn closest_point_on_mesh(
     query: &Point3<f32>,
     mesh: &TriangleMesh,
 ) -> (Point3<f32>, f32, usize) {
-    if mesh.vertices.is_empty() || mesh.faces.is_empty() {
+    if !has_surface(mesh) {
         // No geometry to project onto; report an infinite distance instead of
         // panicking on `mesh.vertices[0]` or fabricating a triangle index.
         return (*query, f32::INFINITY, NO_TRIANGLE);
     }
+    let bvh = Bvh::build(&mesh.vertices, &mesh.faces);
+    closest_point_on_mesh_bvh(query, mesh, &bvh)
+}
 
-    // Seed from the first real triangle rather than from `vertices[0]`: with no
-    // faces there is nothing to seed from, and with faces the seed is replaced
-    // by the loop below anyway.
+/// Closest point using a BVH built once for the mesh. A box is pruned when its
+/// lower bound is farther than the best triangle. On a distance tie the lower
+/// face index wins, so the reported face is the one the linear scan would name
+/// and therefore contains the point.
+fn closest_point_on_mesh_bvh(
+    query: &Point3<f32>,
+    mesh: &TriangleMesh,
+    bvh: &Bvh,
+) -> (Point3<f32>, f32, usize) {
+    bvh.closest_on_faces(query, |fi| {
+        let face = mesh.faces[fi];
+        closest_point_on_triangle(
+            query,
+            mesh.vertices[face[0]],
+            mesh.vertices[face[1]],
+            mesh.vertices[face[2]],
+        )
+    })
+    .unwrap_or((*query, f32::INFINITY, NO_TRIANGLE))
+}
+
+/// Every face, in order. The reference the BVH query is checked against: the
+/// returned point has to stay within 1e-5, and a tie has to name a face that
+/// contains the point. Walking in index order and replacing only on a strict
+/// improvement is that tie.
+#[cfg(test)]
+fn closest_point_on_mesh_exhaustive(
+    query: &Point3<f32>,
+    mesh: &TriangleMesh,
+) -> (Point3<f32>, f32, usize) {
+    if !has_surface(mesh) {
+        return (*query, f32::INFINITY, NO_TRIANGLE);
+    }
     let first = mesh.faces[0];
     let (mut closest_point, mut closest_dist) = closest_point_on_triangle(
         query,
@@ -286,21 +319,19 @@ pub fn closest_point_on_mesh(
         mesh.vertices[first[2]],
     );
     let mut closest_tri = 0usize;
-
     for (tri_idx, face) in mesh.faces.iter().enumerate().skip(1) {
-        let v0 = mesh.vertices[face[0]];
-        let v1 = mesh.vertices[face[1]];
-        let v2 = mesh.vertices[face[2]];
-
-        let (point, dist) = closest_point_on_triangle(query, v0, v1, v2);
-
+        let (point, dist) = closest_point_on_triangle(
+            query,
+            mesh.vertices[face[0]],
+            mesh.vertices[face[1]],
+            mesh.vertices[face[2]],
+        );
         if dist < closest_dist {
             closest_dist = dist;
             closest_point = point;
             closest_tri = tri_idx;
         }
     }
-
     (closest_point, closest_dist, closest_tri)
 }
 
@@ -388,10 +419,19 @@ pub fn closest_points_on_mesh_ctx(
 ) -> Vec<(Point3<f32>, f32, usize)> {
     use rayon::prelude::*;
 
+    if !has_surface(mesh) {
+        return queries
+            .iter()
+            .map(|query| (*query, f32::INFINITY, NO_TRIANGLE))
+            .collect();
+    }
+    // One tree for the whole batch. Building it per query made the acceleration
+    // slower than walking the faces.
+    let bvh = Bvh::build(&mesh.vertices, &mesh.faces);
     group.run(|| {
         queries
             .par_iter()
-            .map(|query| closest_point_on_mesh(query, mesh))
+            .map(|query| closest_point_on_mesh_bvh(query, mesh, &bvh))
             .collect()
     })
 }
@@ -436,11 +476,15 @@ pub fn mesh_to_mesh_distance(source: &TriangleMesh, target: &TriangleMesh) -> (f
         return (f32::INFINITY, f32::INFINITY);
     }
 
+    // One tree per mesh. `closest_point_on_mesh` would rebuild it for every vertex.
+    let target_bvh = Bvh::build(&target.vertices, &target.faces);
+    let source_bvh = Bvh::build(&source.vertices, &source.faces);
+
     // Forward distance: source -> target
     let forward_dists: Vec<f32> = source
         .vertices
         .iter()
-        .map(|v| closest_point_on_mesh(v, target).1)
+        .map(|v| closest_point_on_mesh_bvh(v, target, &target_bvh).1)
         .collect();
 
     let forward_max = forward_dists.iter().cloned().fold(0.0, f32::max);
@@ -450,7 +494,7 @@ pub fn mesh_to_mesh_distance(source: &TriangleMesh, target: &TriangleMesh) -> (f
     let backward_dists: Vec<f32> = target
         .vertices
         .iter()
-        .map(|v| closest_point_on_mesh(v, source).1)
+        .map(|v| closest_point_on_mesh_bvh(v, source, &source_bvh).1)
         .collect();
 
     let backward_max = backward_dists.iter().cloned().fold(0.0, f32::max);
@@ -477,9 +521,9 @@ pub fn point_inside_mesh(query: &Point3<f32>, mesh: &TriangleMesh) -> bool {
 /// edge/vertex hits a measure-zero event, and the majority of three absorbs
 /// the rare one that still lands on an edge.
 ///
-/// The BVH is not used: it reports only the closest hit, and parity needs all
-/// of them, so crossings are counted over every face.
-pub fn point_inside_mesh_bvh(query: &Point3<f32>, mesh: &TriangleMesh, _bvh: &Bvh) -> bool {
+/// Crossings are counted over every face the ray meets, not the closest one.
+/// The tree drops a box only when the padded slab test says the ray misses it.
+pub fn point_inside_mesh_bvh(query: &Point3<f32>, mesh: &TriangleMesh, bvh: &Bvh) -> bool {
     const DIRECTIONS: [[f32; 3]; 3] = [
         [1.0, 0.312_719_8, 0.193_147_2],
         [-0.271_103_4, 1.0, 0.451_890_7],
@@ -488,20 +532,21 @@ pub fn point_inside_mesh_bvh(query: &Point3<f32>, mesh: &TriangleMesh, _bvh: &Bv
     let inside_votes = DIRECTIONS
         .iter()
         .filter(|d| {
-            let ray = Ray::new(*query, Vector3::new(d[0], d[1], d[2]).normalize());
-            let crossings = mesh
-                .faces
-                .iter()
-                .filter(|face| {
-                    ray_triangle_intersection(
-                        &ray,
-                        mesh.vertices[face[0]],
-                        mesh.vertices[face[1]],
-                        mesh.vertices[face[2]],
-                    )
-                    .is_some_and(|t| t > 0.0)
-                })
-                .count();
+            let ray = Ray::new(*query, Vector3::new(d[0], d[1], d[2]));
+            let mut crossings = 0usize;
+            bvh.for_each_face_along_ray(&ray.origin, &ray.direction, |fi| {
+                let face = mesh.faces[fi];
+                if ray_triangle_intersection(
+                    &ray,
+                    mesh.vertices[face[0]],
+                    mesh.vertices[face[1]],
+                    mesh.vertices[face[2]],
+                )
+                .is_some_and(|t| t > 0.0)
+                {
+                    crossings += 1;
+                }
+            });
             crossings % 2 == 1
         })
         .count();
@@ -613,5 +658,128 @@ mod tests {
             (0.0, 0.0),
             "a mesh measured against itself is a perfect match, not absence"
         );
+    }
+
+    fn centred_cube(scale: f32) -> TriangleMesh {
+        let h = scale / 2.0;
+        let v = |x: f32, y: f32, z: f32| Point3::new(x * h, y * h, z * h);
+        TriangleMesh::with_vertices_and_faces(
+            vec![
+                v(-1.0, -1.0, -1.0),
+                v(1.0, -1.0, -1.0),
+                v(1.0, 1.0, -1.0),
+                v(-1.0, 1.0, -1.0),
+                v(-1.0, -1.0, 1.0),
+                v(1.0, -1.0, 1.0),
+                v(1.0, 1.0, 1.0),
+                v(-1.0, 1.0, 1.0),
+            ],
+            vec![
+                [0, 1, 2],
+                [0, 2, 3],
+                [4, 6, 5],
+                [4, 7, 6],
+                [0, 4, 5],
+                [0, 5, 1],
+                [1, 5, 6],
+                [1, 6, 2],
+                [2, 6, 7],
+                [2, 7, 3],
+                [3, 7, 4],
+                [3, 4, 0],
+            ],
+        )
+    }
+
+    #[test]
+    fn bvh_closest_point_stays_on_the_exhaustive_point() {
+        let mesh = centred_cube(2.0);
+        for query in [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(2.0, 2.0, 2.0),
+            Point3::new(0.2, -0.3, 0.4),
+            Point3::new(3.0, 0.0, 0.0),
+            Point3::new(-0.5, 1.5, 0.1),
+        ] {
+            let (fast, fast_d, fast_tri) = closest_point_on_mesh(&query, &mesh);
+            let (slow, slow_d, slow_tri) = closest_point_on_mesh_exhaustive(&query, &mesh);
+            assert!(
+                (fast - slow).norm() < 1e-5,
+                "query {query:?}: bvh {fast:?} vs exhaustive {slow:?}"
+            );
+            assert!((fast_d - slow_d).abs() < 1e-5);
+            let face = mesh.faces[fast_tri];
+            let (on_face, gap) = closest_point_on_triangle(
+                &fast,
+                mesh.vertices[face[0]],
+                mesh.vertices[face[1]],
+                mesh.vertices[face[2]],
+            );
+            assert!(
+                gap < 1e-4,
+                "face {fast_tri} does not contain {fast:?} (gap {gap}, on face {on_face:?})"
+            );
+            let _ = slow_tri;
+        }
+    }
+
+    #[test]
+    fn bvh_inside_parity_matches_every_face() {
+        const DIRECTIONS: [[f32; 3]; 3] = [
+            [1.0, 0.312_719_8, 0.193_147_2],
+            [-0.271_103_4, 1.0, 0.451_890_7],
+            [0.371_928_5, -0.162_327_9, 1.0],
+        ];
+        for &scale in &[2.0f32, 1.0, 1e-2, 1e-5] {
+            let mesh = centred_cube(scale);
+            let queries = [
+                Point3::new(scale * 0.1, scale * 0.2, scale * 0.3),
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(scale, 0.0, 0.0),
+                Point3::new(scale * 0.4, scale * -0.2, scale * 0.1),
+            ];
+            for query in queries {
+                let bvh = Bvh::build(&mesh.vertices, &mesh.faces);
+                for d in DIRECTIONS {
+                    let ray = Ray::new(query, Vector3::new(d[0], d[1], d[2]));
+                    let brute = mesh
+                        .faces
+                        .iter()
+                        .filter(|face| {
+                            ray_triangle_intersection(
+                                &ray,
+                                mesh.vertices[face[0]],
+                                mesh.vertices[face[1]],
+                                mesh.vertices[face[2]],
+                            )
+                            .is_some_and(|t| t > 0.0)
+                        })
+                        .count();
+                    let mut walked = 0usize;
+                    bvh.for_each_face_along_ray(&ray.origin, &ray.direction, |fi| {
+                        let face = mesh.faces[fi];
+                        if ray_triangle_intersection(
+                            &ray,
+                            mesh.vertices[face[0]],
+                            mesh.vertices[face[1]],
+                            mesh.vertices[face[2]],
+                        )
+                        .is_some_and(|t| t > 0.0)
+                        {
+                            walked += 1;
+                        }
+                    });
+                    assert_eq!(
+                        walked, brute,
+                        "scale {scale} query {query:?} dir {d:?}: bvh counted {walked}, every face counted {brute}"
+                    );
+                }
+                let inside = point_inside_mesh(&query, &mesh);
+                let expect = query.x.abs() < scale / 2.0
+                    && query.y.abs() < scale / 2.0
+                    && query.z.abs() < scale / 2.0;
+                assert_eq!(inside, expect, "scale {scale} query {query:?}");
+            }
+        }
     }
 }
