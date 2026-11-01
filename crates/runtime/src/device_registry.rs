@@ -194,9 +194,14 @@ impl DeviceRegistry {
         let mut devices = HashMap::new();
 
         // Always initialize CPU backend
-        let cpu_backend = cv_hal::cpu::CpuBackend::new().ok_or_else(|| {
-            crate::Error::RuntimeError("Failed to initialize CPU backend".to_string())
-        })?;
+        // A clone of HAL's process-wide CPU backend (same `DeviceId`), so a
+        // group built from `cv_hal::compute::get_device()` and a runner from
+        // this registry name the CPU the same way.
+        let cpu_backend = cv_hal::compute::global_cpu()
+            .map_err(|e| {
+                crate::Error::RuntimeError(format!("Failed to initialize CPU backend: {e}"))
+            })?
+            .clone();
         let cpu_id = ComputeContext::device_id(&cpu_backend);
         let cpu_runtime = Arc::new(DeviceRuntime::new(BackendContext::Cpu(Arc::new(
             cpu_backend,
