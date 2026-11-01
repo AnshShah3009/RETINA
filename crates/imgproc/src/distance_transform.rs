@@ -72,6 +72,19 @@ pub fn distance_transform<T: Float>(
 /// `(distance_map, label_map)` where `label_map[i]` is the flat index of the
 /// nearest zero pixel to pixel `i`. Background pixels map to themselves.
 ///
+/// When several background pixels are equally near - which is common, e.g. two
+/// background pixels straddling a foreground pixel - the label is the one with
+/// the **smallest flat index**, i.e. the first in row-major order. That is the
+/// tie-break the former brute-force scan produced (it walked the background
+/// pixels in row-major order and only replaced the incumbent on a strict `<`),
+/// and it is preserved so that labels do not change.
+///
+/// # Complexity
+/// `O(height * width)` for every metric, instead of the former
+/// `O(height * width * background_count)` scan. See [`chamfer_labels`] (L1,
+/// Chessboard) and [`euclidean_labels`] (L2) for how each pixel's label is
+/// derived.
+///
 /// # Errors
 /// Same as [`distance_transform`]: the input must be single-channel with
 /// non-zero spatial dimensions.
@@ -99,61 +112,291 @@ pub fn distance_transform_with_labels<T: Float>(
     let src = binary.as_slice()?;
     let n = height * width;
 
-    // Build list of background pixel coordinates.
-    let mut bg_coords: Vec<(usize, usize)> = Vec::new();
-    let mut bg_indices: Vec<i32> = Vec::new();
-    for y in 0..height {
-        for x in 0..width {
-            if src[y * width + x].to_f32() == 0.0 {
-                bg_coords.push((x, y));
-                bg_indices.push((y * width + x) as i32);
-            }
-        }
-    }
-
     // Compute distance map.
     let dist = distance_transform(binary, dist_type)?;
-    // For each pixel, find the nearest background pixel by brute-force scan of bg list.
-    // This is O(n * bg_count). For large images a Voronoi approach would be better,
-    // but this is correct and sufficient for moderate sizes.
     let out_shape = TensorShape::new(1, height, width);
 
-    if bg_coords.is_empty() {
+    if !src.iter().any(|v| v.to_f32() == Some(0.0)) {
         // No background pixels: labels are all -1.
         let labels = vec![-1i32; n];
         let label_tensor = CpuTensor::from_vec(labels, out_shape)?;
         return Ok((dist, label_tensor));
     }
 
-    let labels: Vec<i32> = (0..n)
-        .into_par_iter()
-        .map(|idx| {
-            let px = idx % width;
-            let py = idx / width;
-            if src[idx].to_f32() == 0.0 {
-                return idx as i32;
-            }
-            let mut best_dist = f64::MAX;
-            let mut best_label = -1i32;
-            for (i, &(bx, by)) in bg_coords.iter().enumerate() {
-                let dx = px as f64 - bx as f64;
-                let dy = py as f64 - by as f64;
-                let d = match dist_type {
-                    DistanceType::L1 => dx.abs() + dy.abs(),
-                    DistanceType::Chessboard => dx.abs().max(dy.abs()),
-                    DistanceType::L2 => dx * dx + dy * dy,
-                };
-                if d < best_dist {
-                    best_dist = d;
-                    best_label = bg_indices[i];
-                }
-            }
-            best_label
-        })
-        .collect();
+    // The label of each pixel is a single-source nearest-neighbour query, which
+    // is separable (or, for L1/Chessboard, chamfer-propagatable) in `O(n)`.
+    let labels = labels_nearest_background(src, width, height, dist_type);
 
     let label_tensor = CpuTensor::from_vec(labels, out_shape)?;
     Ok((dist, label_tensor))
+}
+
+// ---------------------------------------------------------------------------
+// Nearest-background label map
+// ---------------------------------------------------------------------------
+//
+// All three label passes below minimise, over the background pixels, the pair
+// `(distance, flat_index)` compared lexicographically. That is exactly the
+// brute-force scan this replaced - it kept the first pixel it saw on a strict
+// improvement while walking the background pixels in row-major order - so the
+// label on a tie is the *smallest flat index*, i.e. the first in row-major
+// order. Because a candidate pair is encoded as the single integer
+// `distance * n + flat_index` (with `flat_index < n`), adding `n` to a key adds
+// one unit of distance and leaves the index alone; comparing keys is then the
+// same as comparing the pairs lexicographically.
+
+/// Index of the nearest background pixel for every pixel, ties broken towards
+/// the smallest flat index. `O(width * height)` for all metrics.
+fn labels_nearest_background<T: Float>(
+    src: &[T],
+    width: usize,
+    height: usize,
+    dist_type: DistanceType,
+) -> Vec<i32> {
+    match dist_type {
+        DistanceType::L1 => chamfer_labels(src, width, height, false),
+        DistanceType::Chessboard => chamfer_labels(src, width, height, true),
+        DistanceType::L2 => euclidean_labels(src, width, height),
+    }
+}
+
+/// L1 / Chessboard labels by two raster scans of a chamfer propagation.
+///
+/// Each pixel holds the key of the best `(distance, label)` pair found so far
+/// and relaxes its neighbours by one unit, so a pixel ends up with the
+/// lexicographically smallest pair over all raster-order-compatible shortest
+/// paths. Any shortest path in these metrics can be reordered into the
+/// forward-mask steps followed by the backward-mask steps (the steps of a
+/// monotone path all point into one or two neighbouring quadrants), so the two
+/// scans reach the true minimum, and by the argument above the label is the
+/// brute-force one.
+fn chamfer_labels<T: Float>(src: &[T], width: usize, height: usize, diagonal: bool) -> Vec<i32> {
+    let n = width * height;
+    let step = n as i64; // one unit of distance
+    const NONE: i64 = i64::MAX;
+
+    let mut key = vec![NONE; n];
+    for (i, k) in key.iter_mut().enumerate() {
+        if src[i].to_f32() == 0.0 {
+            *k = i as i64;
+        }
+    }
+
+    let relax = |best: i64, from: i64| -> i64 {
+        if from == NONE {
+            best
+        } else {
+            best.min(from + step)
+        }
+    };
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            let mut best = key[idx];
+            if y > 0 {
+                best = relax(best, key[idx - width]);
+                if diagonal {
+                    if x > 0 {
+                        best = relax(best, key[idx - width - 1]);
+                    }
+                    if x + 1 < width {
+                        best = relax(best, key[idx - width + 1]);
+                    }
+                }
+            }
+            if x > 0 {
+                best = relax(best, key[idx - 1]);
+            }
+            key[idx] = best;
+        }
+    }
+
+    for y in (0..height).rev() {
+        for x in (0..width).rev() {
+            let idx = y * width + x;
+            let mut best = key[idx];
+            if y + 1 < height {
+                best = relax(best, key[idx + width]);
+                if diagonal {
+                    if x > 0 {
+                        best = relax(best, key[idx + width - 1]);
+                    }
+                    if x + 1 < width {
+                        best = relax(best, key[idx + width + 1]);
+                    }
+                }
+            }
+            if x + 1 < width {
+                best = relax(best, key[idx + 1]);
+            }
+            key[idx] = best;
+        }
+    }
+
+    key.into_iter()
+        .map(|k| if k == NONE { -1 } else { (k % step) as i32 })
+        .collect()
+}
+
+/// A real boundary between two parabolas, or one of the two infinities.
+/// `Rat` keeps an exact numerator/positive denominator so neighbouring
+/// intersections can be compared without rounding.
+#[derive(Clone, Copy)]
+enum Bound {
+    NegInf,
+    PosInf,
+    Rat(i128, i128),
+}
+
+impl Bound {
+    /// `self > other`
+    fn gt(self, other: Bound) -> bool {
+        match (self, other) {
+            (Bound::PosInf, _) => !matches!(other, Bound::PosInf),
+            (Bound::NegInf, _) => false,
+            (_, Bound::PosInf) => false,
+            (_, Bound::NegInf) => true,
+            (Bound::Rat(an, ad), Bound::Rat(bn, bd)) => an * bd > bn * ad,
+        }
+    }
+
+    /// `self < p` for an integer `p`.
+    fn lt_int(self, p: i128) -> bool {
+        match self {
+            Bound::NegInf => true,
+            Bound::PosInf => false,
+            Bound::Rat(nm, den) => nm < p * den,
+        }
+    }
+}
+
+/// L2 labels: the exact separable Euclidean transform, with the argmin carried
+/// along instead of the distance.
+///
+/// The first pass keeps, per column, the squared vertical distance to the
+/// nearest background pixel in that column and that pixel's flat index (ties
+/// in a column go to the smaller row, hence the smaller index). The column
+/// values are encoded as keys `sq * n + label` and combined along each row as
+/// the lower envelope of the parabolas `key[x] + n * (p - x)^2` - the
+/// Felzenszwalb-Huttenlocher transform run on keys rather than on distances.
+/// Minimising that key is minimising `(squared distance, label)`, and because a
+/// column contributes a single, distinct label, the parabolas never tie at an
+/// integer position at all: the returned argmin is the brute-force nearest
+/// background pixel with its smallest-index tie-break.
+fn euclidean_labels<T: Float>(src: &[T], width: usize, height: usize) -> Vec<i32> {
+    let n = width * height;
+    let big = n as i64; // scale that makes a key lexicographic in (dist, label)
+
+    // --- Pass 1: vertical squared distance and label, per column. ---
+    // Column-major so that each column is a contiguous, independently writable
+    // slice and the columns can run in parallel (as the old pixel scan did).
+    let mut vert_sq = vec![0i64; n];
+    let mut vert_lab = vec![-1i32; n];
+    vert_sq
+        .par_chunks_mut(height)
+        .zip(vert_lab.par_chunks_mut(height))
+        .enumerate()
+        .for_each(|(x, (sq_col, lab_col))| {
+            let mut above: Option<usize> = None;
+            for y in 0..height {
+                let i = y * width + x;
+                if src[i].to_f32() == 0.0 {
+                    above = Some(y);
+                    sq_col[y] = 0;
+                    lab_col[y] = i as i32;
+                } else if let Some(y0) = above {
+                    let dy = (y - y0) as i64;
+                    sq_col[y] = dy * dy;
+                    lab_col[y] = (y0 * width + x) as i32;
+                }
+            }
+            let mut below: Option<usize> = None;
+            for y in (0..height).rev() {
+                let i = y * width + x;
+                if src[i].to_f32() == 0.0 {
+                    below = Some(y);
+                    continue;
+                }
+                if let Some(y0) = below {
+                    let dy = y as i64 - y0 as i64;
+                    let d = dy * dy;
+                    // Strict: on a tie keep the pixel above, i.e. the
+                    // smaller flat index.
+                    if lab_col[y] < 0 || d < sq_col[y] {
+                        sq_col[y] = d;
+                        lab_col[y] = (y0 * width + x) as i32;
+                    }
+                }
+            }
+        });
+
+    // --- Pass 2: lower envelope of the key parabolas, per row. ---
+    // `i128` because a key is up to `n^3`, which would overflow `i64` past
+    // roughly 2000x2000. Rows are independent, so this runs in parallel too.
+    let mut labels = vec![-1i32; n];
+    labels
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row_labels)| {
+            // A column contributes one parabola per row, at key
+            // `sq*n + label`, so its vertex cost is `key + n*(p - u)^2`.
+            let mut cand: Vec<usize> = Vec::with_capacity(width);
+            let mut fkey: Vec<i128> = Vec::with_capacity(width);
+            for x in 0..width {
+                let v = x * height + y;
+                if vert_lab[v] >= 0 {
+                    cand.push(x);
+                    fkey.push(vert_sq[v] as i128 * big as i128 + vert_lab[v] as i128);
+                }
+            }
+            if cand.is_empty() {
+                // Cannot happen: the caller checked for a background pixel.
+                return;
+            }
+            let m = cand.len();
+            let mut vpos = vec![0usize; m];
+            let mut zs = vec![Bound::NegInf; m + 1];
+            zs[1] = Bound::PosInf;
+            let mut k = 0usize;
+            for q in 1..m {
+                loop {
+                    // Boundary between the parabola at vpos[k] and the one at q:
+                    //   s = (f_b - f_a + big*(u_b - u_a)*(u_a + u_b))
+                    //       / (2*big*(u_b - u_a))
+                    let (ua, ub) = (cand[vpos[k]] as i128, cand[q] as i128);
+                    let (fa, fb) = (fkey[vpos[k]], fkey[q]);
+                    let den = 2 * (big as i128) * (ub - ua); // > 0, ua < ub
+                    let num = 2 * (fb - fa) + den * (ua + ub);
+                    let s = Bound::Rat(num, 2 * den);
+                    if s.gt(zs[k]) {
+                        k += 1;
+                        vpos[k] = q;
+                        zs[k] = s;
+                        zs[k + 1] = Bound::PosInf;
+                        break;
+                    }
+                    if k == 0 {
+                        vpos[0] = q;
+                        zs[0] = Bound::NegInf;
+                        zs[1] = Bound::PosInf;
+                        break;
+                    }
+                    k -= 1;
+                }
+            }
+
+            let mut ki = 0usize;
+            for (x, slot) in row_labels.iter_mut().enumerate() {
+                while zs[ki + 1].lt_int(x as i128) {
+                    ki += 1;
+                }
+                let u = cand[vpos[ki]];
+                *slot = vert_lab[u * height + y];
+            }
+        });
+
+    labels
 }
 
 // ---------------------------------------------------------------------------
