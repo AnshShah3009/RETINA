@@ -310,13 +310,32 @@ pub fn conv2d(
     let height_out = h_num as usize / stride + 1;
     let width_out = w_num as usize / stride + 1;
 
-    let total = batch * channels_out * height_out * width_out;
     let output = TensorHandle::empty(
         client,
         vec![batch, channels_out, height_out, width_out],
         f32_storage(),
     );
+    launch_conv2d_into(client, input, weights, &output, stride, padding);
 
+    Ok(output)
+}
+
+/// Launch the one-unit-per-output conv2d into an already-allocated `output`.
+///
+/// The caller has validated the shapes: `input` `[b, c_in, h, w]`, `weights`
+/// `[c_out, c_in, k, k]`, `output` `[b, c_out, out_h, out_w]` with the extents
+/// `stride` and `padding` give. Shared with the autotuned
+/// `cubecl_optimized::conv2d`, which offers this kernel as a candidate.
+pub(crate) fn launch_conv2d_into(
+    client: &Client,
+    input: &TensorHandle,
+    weights: &TensorHandle,
+    output: &TensorHandle,
+    stride: usize,
+    padding: usize,
+) {
+    let k = weights.shape()[2];
+    let total: usize = output.shape().iter().product();
     unsafe {
         conv2d::conv2d_kernel::launch_unchecked(
             client,
@@ -330,8 +349,6 @@ pub fn conv2d(
             padding as u32,
         )
     };
-
-    Ok(output)
 }
 
 // ============================================================================

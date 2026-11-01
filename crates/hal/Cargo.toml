@@ -55,3 +55,8 @@ all-precision = ["full-precision", "half-precision"]
 [[bench]]
 name = "gpu_transfer"
 harness = false
+
+[[bench]]
+name = "cubecl_kernels"
+harness = false
+required-features = ["cubecl"]

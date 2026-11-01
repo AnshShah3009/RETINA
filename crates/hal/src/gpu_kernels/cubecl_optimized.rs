@@ -745,22 +745,13 @@ fn expect_rank4(tensor: &TensorHandle, what: &str) -> crate::Result<(usize, usiz
     ))
 }
 
-/// 2D convolution.
-///
-/// * `input` — `[batch, channels_in, height, width]`
-/// * `weights` — `[channels_out, channels_in, k, k]`
-///
-/// BUG(original): see [`conv2d_opt::conv2d_kernel`] — the original collapsed
-/// every output channel onto channel 0 and indexed the weight tensor with the
-/// batch index. Fixed here, and now numerically verified.
-pub fn conv2d(
-    ctx: &OptimizedContext,
+/// Validated conv2d geometry: `(batch, c_out, out_h, out_w)`.
+fn conv2d_output_shape(
     input: &TensorHandle,
     weights: &TensorHandle,
     stride: usize,
     padding: usize,
-) -> crate::Result<TensorHandle> {
-    let client = ctx.client();
+) -> crate::Result<(usize, usize, usize, usize)> {
     let (batch, c_in, h, w) = expect_rank4(input, "conv2d input")?;
     let (c_out, wc_in, k, kw) = expect_rank4(weights, "conv2d weights")?;
     if kw != k {
@@ -773,16 +764,153 @@ pub fn conv2d(
             "weight channels {wc_in} != input channels {c_in}"
         )));
     }
-
     let out_h = conv_output_extent(h, k, stride, padding)?;
     let out_w = conv_output_extent(w, k, stride, padding)?;
+    Ok((batch, c_out, out_h, out_w))
+}
 
+/// The conv2d candidates the autotuner chooses between.
+type Conv2dTuneInputs = (TensorHandle, TensorHandle, TensorHandle, usize, usize);
+
+/// Autotune key for [`conv2d`].
+///
+/// Channels, kernel, stride and padding are exact: they change which kernel
+/// wins. The spatial extent and batch are rounded up to a power of two so a
+/// video stream of slightly different frame sizes tunes once, not per size.
+fn conv2d_tune_key(inputs: &Conv2dTuneInputs) -> String {
+    let (input, weights, _, stride, padding) = inputs;
+    let s = input.shape();
+    let k = weights.shape();
+    format!(
+        "b{}_ci{}_co{}_h{}_w{}_k{}_s{}_p{}",
+        s[0].next_power_of_two(),
+        s[1],
+        k[0],
+        s[2].next_power_of_two(),
+        s[3].next_power_of_two(),
+        k[2],
+        stride,
+        padding
+    )
+}
+
+/// 2D convolution, autotuned (CubeCL 0.11 `LocalTuner`).
+///
+/// * `input` — `[batch, channels_in, height, width]`
+/// * `weights` — `[channels_out, channels_in, k, k]`
+///
+/// The two candidates are the one-unit-per-output kernel
+/// (`cubecl_backend::conv2d`) and the shared-memory tiled kernel
+/// ([`conv2d_tiled`]). Neither wins everywhere: measured on an RTX 5070 Ti,
+/// the tiled kernel is 2.2x slower on a 16->32-channel 240p layer and roughly
+/// even on a 1-channel 1080p 5x5 one. The first call for a [key](conv2d_tune_key)
+/// benchmarks both on the call's own inputs and every later call runs the
+/// faster one; with cubecl's default `persistence` the choice is cached on
+/// disk across runs. Both kernels sum in the same `(c_in, ky, kx)` order, so
+/// the choice does not change the result.
+pub fn conv2d(
+    ctx: &OptimizedContext,
+    input: &TensorHandle,
+    weights: &TensorHandle,
+    stride: usize,
+    padding: usize,
+) -> crate::Result<TensorHandle> {
+    use cubecl::tune::{LocalTuner, Tunable, TunableSet, local_tuner};
+
+    static TUNER: LocalTuner<String, cubecl::device::DeviceId> = local_tuner!("conv2d");
+
+    let client = ctx.client();
+    let (batch, c_out, out_h, out_w) = conv2d_output_shape(input, weights, stride, padding)?;
     let output = TensorHandle::empty(client, vec![batch, c_out, out_h, out_w], f32_storage());
-
     if batch == 0 || c_out == 0 || out_h == 0 || out_w == 0 {
         return Ok(output);
     }
 
+    let device = client.service_id().device;
+    // The set is built once per device and captures that device's client.
+    let tune_client = client.clone();
+    let set = TUNER.init(&device, move || {
+        let direct = tune_client.clone();
+        let tiled = tune_client.clone();
+        TunableSet::<String, Conv2dTuneInputs, ()>::new_cloning_inputs(conv2d_tune_key)
+            .with(Tunable::new(
+                "conv2d_direct",
+                move |(input, weights, output, stride, padding): Conv2dTuneInputs| {
+                    crate::gpu_kernels::cubecl_backend::launch_conv2d_into(
+                        &direct, &input, &weights, &output, stride, padding,
+                    );
+                    Ok::<(), String>(())
+                },
+            ))
+            .with(Tunable::new(
+                "conv2d_tiled",
+                move |(input, weights, output, stride, padding): Conv2dTuneInputs| {
+                    launch_conv2d_tiled_into(&tiled, &input, &weights, &output, stride, padding);
+                    Ok::<(), String>(())
+                },
+            ))
+    });
+    TUNER.execute(
+        &device,
+        client,
+        set,
+        (
+            input.clone(),
+            weights.clone(),
+            output.clone(),
+            stride,
+            padding,
+        ),
+    );
+
+    Ok(output)
+}
+
+/// 2D convolution through the shared-memory tiled kernel only.
+///
+/// * `input` — `[batch, channels_in, height, width]`
+/// * `weights` — `[channels_out, channels_in, k, k]`
+///
+/// [`conv2d`] picks between this and the direct kernel per shape; this entry
+/// point exists so the tiled kernel stays directly testable and benchmarkable.
+///
+/// BUG(original): see [`conv2d_opt::conv2d_kernel`] — the original collapsed
+/// every output channel onto channel 0 and indexed the weight tensor with the
+/// batch index. Fixed here, and now numerically verified.
+pub fn conv2d_tiled(
+    ctx: &OptimizedContext,
+    input: &TensorHandle,
+    weights: &TensorHandle,
+    stride: usize,
+    padding: usize,
+) -> crate::Result<TensorHandle> {
+    let client = ctx.client();
+    let (batch, c_out, out_h, out_w) = conv2d_output_shape(input, weights, stride, padding)?;
+    let output = TensorHandle::empty(client, vec![batch, c_out, out_h, out_w], f32_storage());
+    if batch == 0 || c_out == 0 || out_h == 0 || out_w == 0 {
+        return Ok(output);
+    }
+    launch_conv2d_tiled_into(client, input, weights, &output, stride, padding);
+    Ok(output)
+}
+
+/// Launch the tiled conv2d kernel into an already-allocated, validated,
+/// non-empty `output`.
+fn launch_conv2d_tiled_into(
+    client: &Client,
+    input: &TensorHandle,
+    weights: &TensorHandle,
+    output: &TensorHandle,
+    stride: usize,
+    padding: usize,
+) {
+    let k = weights.shape()[2];
+    let (batch, c_out, out_h, out_w) = (
+        output.shape()[0],
+        output.shape()[1],
+        output.shape()[2],
+        output.shape()[3],
+    );
     let tile = conv_tile_edge(stride);
     let cubes_x = (out_w as u32).div_ceil(tile as u32);
     let cubes_y = (out_h as u32).div_ceil(tile as u32);
@@ -802,8 +930,6 @@ pub fn conv2d(
             tile,
         )
     };
-
-    Ok(output)
 }
 
 /// Depthwise-separable convolution.

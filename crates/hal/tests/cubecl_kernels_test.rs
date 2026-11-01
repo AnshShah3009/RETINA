@@ -433,25 +433,78 @@ fn optimized_conv2d_matches_cpu_and_separates_channels() {
     let ti = up(&c, &input, vec![batch, ci, h, w]);
     let tw = up(&c, &weights, vec![co, ci, k, k]);
 
-    let got = down(&c, &opt::conv2d(&ctx, &ti, &tw, stride, pad).unwrap());
     let want = cpu_conv2d(&input, &weights, batch, ci, co, h, w, k, stride, pad);
-
     let oh = (h + 2 * pad - k) / stride + 1;
     let ow = (w + 2 * pad - k) / stride + 1;
-    assert_close("optimized conv2d", &got, &want, 1e-4);
-    assert_eq!(got.len(), batch * co * oh * ow);
 
-    // Explicit anti-regression: the five output channels must not be identical
-    // clones of channel 0.
-    let plane = oh * ow;
-    let ch0 = &got[..plane];
-    for o in 1..co {
-        assert_ne!(
-            &got[o * plane..(o + 1) * plane],
-            ch0,
-            "output channel {o} is a byte-for-byte copy of channel 0 \
-             (the original collapsed-channels bug)"
-        );
+    // The tiled kernel directly, and the autotuned entry point (which may pick
+    // either kernel): both must be right, whichever one the tuner chose.
+    for (label, got) in [
+        (
+            "tiled conv2d",
+            down(&c, &opt::conv2d_tiled(&ctx, &ti, &tw, stride, pad).unwrap()),
+        ),
+        (
+            "autotuned conv2d",
+            down(&c, &opt::conv2d(&ctx, &ti, &tw, stride, pad).unwrap()),
+        ),
+    ] {
+        assert_close(label, &got, &want, 1e-4);
+        assert_eq!(got.len(), batch * co * oh * ow);
+
+        // Explicit anti-regression: the five output channels must not be
+        // identical clones of channel 0.
+        let plane = oh * ow;
+        let ch0 = &got[..plane];
+        for o in 1..co {
+            assert_ne!(
+                &got[o * plane..(o + 1) * plane],
+                ch0,
+                "{label}: output channel {o} is a byte-for-byte copy of channel 0 \
+                 (the original collapsed-channels bug)"
+            );
+        }
+    }
+}
+
+/// The autotuned conv2d on shapes where the two candidates trade places, and
+/// on repeat calls once the tuner has settled.
+///
+/// The tuner benchmarks both kernels on the first call for a key and runs the
+/// winner afterwards, so the first and the later calls may run different
+/// kernels. Every call must match the CPU reference; the direct and tiled
+/// kernels also have to agree with each other, since a tuner choosing between
+/// two kernels that disagree would make the result depend on timing.
+#[test]
+fn autotuned_conv2d_matches_cpu_on_every_call_and_both_candidates_agree() {
+    let c = client();
+    let be_ctx = ctx_be(&c);
+    let ctx = ctx_opt(&c);
+    for (seed, (batch, ci, co, h, w, k, stride, pad)) in [
+        (
+            1usize, 3usize, 16usize, 48usize, 64usize, 3usize, 1usize, 1usize,
+        ),
+        (1, 16, 32, 30, 40, 3, 1, 1),
+        (2, 1, 8, 37, 53, 5, 2, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = data(batch * ci * h * w, 70 + seed as u64);
+        let weights = data(co * ci * k * k, 80 + seed as u64);
+        let ti = up(&c, &input, vec![batch, ci, h, w]);
+        let tw = up(&c, &weights, vec![co, ci, k, k]);
+        let want = cpu_conv2d(&input, &weights, batch, ci, co, h, w, k, stride, pad);
+
+        let direct = down(&c, &be::conv2d(&be_ctx, &ti, &tw, stride, pad).unwrap());
+        let tiled = down(&c, &opt::conv2d_tiled(&ctx, &ti, &tw, stride, pad).unwrap());
+        assert_close("direct vs cpu", &direct, &want, 1e-4);
+        assert_close("tiled vs direct", &tiled, &direct, 1e-5);
+
+        for call in 0..3 {
+            let got = down(&c, &opt::conv2d(&ctx, &ti, &tw, stride, pad).unwrap());
+            assert_close(&format!("autotuned call {call}"), &got, &want, 1e-4);
+        }
     }
 }
 
