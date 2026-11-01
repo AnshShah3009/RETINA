@@ -453,28 +453,39 @@ pub mod buffer_utils {
 
     /// Create a GPU buffer from data.
     /// Uniform buffers are padded to a 16-byte multiple (WebGPU / Metal requirement).
+    ///
+    /// `data` is written straight into the buffer's mapped-at-creation range,
+    /// the only host copy. It used to be copied into a `Vec` first (and, for a
+    /// uniform, padded there), which doubled the host traffic of every upload.
+    /// The uniform padding needs no write: wgpu zero-initialises a buffer's
+    /// mapped-at-creation contents, so only the payload is copied.
     pub fn create_buffer<T: bytemuck::Pod>(
         device: &Device,
         data: &[T],
         usage: BufferUsages,
     ) -> Buffer {
         use wgpu::util::DeviceExt;
-        let bytes = bytemuck::cast_slice(data);
-        let contents = if usage.contains(BufferUsages::UNIFORM) {
-            let mut padded = bytes.to_vec();
-            let rem = padded.len() % 16;
-            if rem != 0 {
-                padded.resize(padded.len() + (16 - rem), 0);
-            }
-            padded
-        } else {
-            bytes.to_vec()
-        };
-        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let bytes: &[u8] = bytemuck::cast_slice(data);
+        if !usage.contains(BufferUsages::UNIFORM) || bytes.is_empty() {
+            return device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Compute Buffer"),
+                contents: bytes,
+                usage,
+            });
+        }
+        let buffer = device.create_buffer(&BufferDescriptor {
             label: Some("Compute Buffer"),
-            contents: &contents,
+            size: bytes.len().next_multiple_of(16) as u64,
             usage,
-        })
+            mapped_at_creation: true,
+        });
+        buffer
+            .get_mapped_range_mut(..)
+            .expect("a buffer created mapped has a mapped range")
+            .slice(..bytes.len())
+            .copy_from_slice(bytes);
+        buffer.unmap();
+        buffer
     }
 
     /// Create an uninitialized GPU buffer
@@ -552,13 +563,17 @@ pub mod buffer_utils {
         let data = slice.get_mapped_range().map_err(|e| {
             crate::Error::DeviceError(format!("Readback mapped range unavailable: {e}"))
         })?;
-        let result_full: Vec<T> = bytemuck::cast_slice(&data).to_vec();
+        // One copy, of whole elements only, straight out of the mapping. This
+        // used to cast the whole (4-byte padded) mapping into a Vec and then
+        // copy the prefix into a second Vec; it also panicked when the padded
+        // length was not a multiple of `size_of::<T>()`.
+        let whole_bytes = size / std::mem::size_of::<T>() * std::mem::size_of::<T>();
+        let result: Vec<T> = bytemuck::pod_collect_to_vec(&data[..whole_bytes]);
         drop(data);
         staging_buffer.unmap();
         drop(staging_buffer); // Explicitly destroy to free resources immediately
 
-        let num_elements = size / std::mem::size_of::<T>();
-        Ok(result_full[..num_elements].to_vec())
+        Ok(result)
     }
 }
 

@@ -51,3 +51,7 @@ wgpu_backend = []
 full-precision = ["cv-core/full-precision"]
 half-precision = ["cv-core/half-precision"]
 all-precision = ["full-precision", "half-precision"]
+
+[[bench]]
+name = "gpu_transfer"
+harness = false
