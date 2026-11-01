@@ -9,7 +9,8 @@
 //! - **ONNX Model Loading**: Load pre-trained models in ONNX format
 //! - **Inference**: Execute forward passes with preprocessing/postprocessing
 //! - **Image Processing**: Built-in image resize and normalization
-//! - **Batching**: Support for batch processing of images
+//! - **Batching**: A batch of 1 is supported. An output batch greater than 1 is
+//!   rejected: cv-core tensors are CHW and have no batch axis.
 //!
 //! # Supported Formats
 //!
@@ -220,7 +221,8 @@ impl DnnNet {
     /// - 1D outputs: (1, 1, N)
     /// - 2D outputs: (1, H, W)
     /// - 3D outputs: (C, H, W)
-    /// - 4D outputs: (H, W, C) [assuming NCHW input, N=1]
+    /// - 4D outputs: (C, H, W) when the NCHW batch dimension is 1. A batch other
+    ///   than 1 is an error; the tensor type cannot store it.
     pub fn forward(&self, input: &Tensor<f32>) -> Result<Vec<Tensor<f32>>> {
         let input_shape_vec: Vec<usize> = self.input_shape.clone();
         if input_shape_vec.len() != 4 {
@@ -256,18 +258,8 @@ impl DnnNet {
                 })?
                 .to_vec();
 
-            let tensor_shape = match shape.len() {
-                1 => cv_core::TensorShape::new(1, 1, shape[0]),
-                2 => cv_core::TensorShape::new(1, shape[0], shape[1]),
-                3 => cv_core::TensorShape::new(shape[0], shape[1], shape[2]),
-                4 => cv_core::TensorShape::new(shape[1], shape[2], shape[3]), // Assuming NCHW
-                _ => cv_core::TensorShape::new(1, 1, shape.iter().product()),
-            };
-
-            outputs.push(
-                Tensor::from_vec(data, tensor_shape)
-                    .map_err(|e| Error::RuntimeError(e.to_string()))?,
-            );
+            let dims: Vec<usize> = (0..shape.len()).map(|i| shape[i]).collect();
+            outputs.push(tensor_from_model_output(&dims, data)?);
         }
 
         Ok(outputs)
@@ -322,6 +314,34 @@ impl DnnNet {
             _ => None,
         }
     }
+}
+
+/// Wrap a model output in a cv-core tensor.
+///
+/// `cv_core::TensorShape` is CHW only: it has no batch axis. A rank-4 NCHW
+/// output with batch 1 is stored as `(C, H, W)`. A larger batch cannot be
+/// represented, and is rejected here — building `(C, H, W)` anyway makes
+/// `Tensor::from_vec` fail with a length mismatch that blames the buffer
+/// instead of the unsupported batch.
+fn tensor_from_model_output(dims: &[usize], data: Vec<f32>) -> Result<Tensor<f32>> {
+    let tensor_shape = match dims.len() {
+        1 => cv_core::TensorShape::new(1, 1, dims[0]),
+        2 => cv_core::TensorShape::new(1, dims[0], dims[1]),
+        3 => cv_core::TensorShape::new(dims[0], dims[1], dims[2]),
+        4 => {
+            let batch = dims[0];
+            if batch != 1 {
+                return Err(Error::InvalidInput(format!(
+                    "batch size {batch} is unsupported: cv_core::Tensor is CHW and has no batch \
+                     dimension, so an NCHW output cannot be stored (shape {dims:?})"
+                )));
+            }
+            cv_core::TensorShape::new(dims[1], dims[2], dims[3])
+        }
+        _ => cv_core::TensorShape::new(1, 1, dims.iter().product()),
+    };
+
+    Tensor::from_vec(data, tensor_shape).map_err(|e| Error::RuntimeError(e.to_string()))
 }
 
 /// Convert an image to a normalized `(channels, height, width)` f32 tensor.
@@ -407,5 +427,34 @@ mod tests {
         for c in 0..3 {
             assert_eq!(&data[c * 16..(c + 1) * 16], plane.as_slice(), "plane {c}");
         }
+    }
+
+    #[test]
+    fn rank4_batch_of_one_loads_as_chw() {
+        let data = vec![0.25f32; 3 * 4 * 5];
+        let tensor = tensor_from_model_output(&[1, 3, 4, 5], data.clone()).expect("batch 1");
+        assert_eq!(tensor.shape.channels, 3);
+        assert_eq!(tensor.shape.height, 4);
+        assert_eq!(tensor.shape.width, 5);
+        assert_eq!(tensor.as_slice().expect("slice"), data.as_slice());
+    }
+
+    #[test]
+    fn rank4_batch_of_two_is_rejected_before_a_lying_shape() {
+        // NCHW (2, 3, 4, 5) has 120 values. Dropping the batch and labelling
+        // the buffer (3, 4, 5) asks `Tensor::from_vec` for 60 and returns
+        // `DimensionMismatch` ("Data size mismatch") instead of saying that a
+        // batch greater than 1 cannot be stored.
+        let err = tensor_from_model_output(&[2, 3, 4, 5], vec![0.0f32; 2 * 3 * 4 * 5])
+            .expect_err("batch 2 is not representable");
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("batch"),
+            "error should name the unsupported batch, got {msg}"
+        );
+        assert!(
+            !msg.contains("Data size mismatch"),
+            "shape must not be built so the length check is the one that fails: {msg}"
+        );
     }
 }
