@@ -317,30 +317,17 @@ fn ramp_frame(w: u32, base: u8) -> GrayImage {
 }
 
 /// Two frames of one continuous ramp must produce a panorama strictly wider than
-/// either input, and the overlap must be cross-faded rather than showing a step
-/// from one frame to the other.
+/// either input. These particular frames abut, so the join is a step of the ramp,
+/// not a cross-fade; an exact overlap is covered separately.
 ///
 /// Measured on HEAD: `stitch(&[a, b])` returned a byte-identical copy of `a` -
 /// the same 8x1 image, with `b` discarded entirely and `Ok(())` reported.
 #[test]
 fn stitch_two_frames_produces_a_panorama_wider_than_either_input() {
-    // **The second frame must be the CONTINUATION of the first**, not a ramp
-    // offset from it. `ramp_frame(8, base)` is `base + 3x`, so frame `a` covers
-    // 10..31 and frame `b` with `base = 34` covers 34..55 - they differ by 24 at
-    // every x, and any blend across the seam must therefore span 24 levels.
-    //
-    // My first version used bases 10 and 34 and asserted every adjacent step was
-    // <= 4, which is unsatisfiable: the frames are not continuous there, so no
-    // amount of correct blending can produce a step of 4. The stitcher's output was
-    // right and the expectation wrong:
-    //
-    //   a      = [10, 13, 16, 19, 22, 25, 28, 31]
-    //   b      = [34, 37, 40, 43, 46, 49, 52, 55]
-    //   out(15)= [10, 13, 16, 19, 22, 25, 28, 33, 37, 40, 43, 46, 49, 52, 55]
-    //
-    // `b` starts at `10 + 3*8 = 34`, so it is exactly where `a` ends - one
-    // overlapping column - and the seam is a single blend. Now the input really
-    // is one continuous ramp and a step <= 4 is the right assertion.
+    // `ramp_frame(8, base)` is `base + 3x`. Frame `a` is 10..31 and frame `b`
+    // (`base = 34`) is 34..55: the next ramp sample after 31, so the frames abut
+    // and the panorama is their concatenation (width 16). The exact bytes are
+    // asserted by `stitcher_abutting_ramps_are_concatenated_without_a_blend`.
     let a = ramp_frame(8, 10);
     let b = ramp_frame(8, 10 + 3 * 8);
     let mut s = cv_photo::Stitcher::new();
@@ -365,37 +352,17 @@ fn stitch_two_frames_produces_a_panorama_wider_than_either_input() {
         "the second frame must reach the output"
     );
 
-    // The seam must be **blended**, not cut.
-    //
-    // `a` and `b` are ramps differing by 24 at every x, and the stitcher aligns
-    // them with a one-column overlap: `out[0..8] = a`, `out[7..15] = b`, so at
-    // column 7 frame `a` says 31 and frame `b` says 34. Measured output:
-    //
-    //   out(15) = [10, 13, 16, 19, 22, 25, 28, 33, 37, 40, 43, 46, 49, 52, 55]
-    //
-    // `33` is `31 + 2/3 · (34 - 31)` — the cross-fade, working. The steps there
-    // are 5 and 4, against the 23-level jump that placing the frames without
-    // blending would produce at this column.
-    //
-    // **My first assertion was `every step <= 4`, which is unsatisfiable for this
-    // input**: the two frames genuinely differ by 3 at the seam, so even a perfect
-    // stitch with pure `b` and no blending at all would step by 3, and any blend
-    // between them is more. It read like a broken seam.
-    //
-    // So two things are asserted below instead: the seam value lies strictly
-    // *between* the two frames' own values (which only a blend can do), and the
-    // whole panorama advances monotonically (which a mis-placed seam would break).
+    // These two ramps abut (see `stitcher_abutting_ramps_are_concatenated_without_a_blend`),
+    // so the join is 31 then 34, not a cross-fade of those two samples. What this
+    // test still pins down is the panorama shape: wider than either input, both
+    // frames present, and strictly increasing along the ramp.
     let px = out.as_raw();
-    let seam = px[7] as i32;
-    let from_a = a.as_raw()[7] as i32;
-    let from_b = b.as_raw()[0] as i32;
-    assert!(
-        seam > from_a.min(from_b) && seam < from_a.max(from_b),
-        "the seam value {seam} must lie strictly between the two frames' own values \
-         ({from_a} and {from_b}); outside that range the overlap is not a blend"
+    assert_eq!(px.len(), 16, "abutting width-8 frames concatenate to 16");
+    assert_eq!(
+        px[7], 31,
+        "column 7 stays the first frame; a blended 33 means the search stopped one short"
     );
-    // And the whole panorama must advance monotonically: a seam that reverted or
-    // repeated would show a negative or zero step.
+    assert_eq!(px[8], 34, "column 8 is the second frame, not a blend");
     for i in 1..px.len() {
         assert!(
             px[i] > px[i - 1],
@@ -405,6 +372,55 @@ fn stitch_two_frames_produces_a_panorama_wider_than_either_input() {
             px[i - 1]
         );
     }
+}
+
+/// Two width-8 ramps that continue each other, `[10, 13, …, 31]` then
+/// `[34, 37, …, 55]`, meet at a shift of `canvas_width` (8): the next frame
+/// abuts and the overlap is empty. The search used to stop at
+/// `canvas_width - 1`, so this pair came back width 15 with column 7 blended
+/// to 33 (`31` and `34` cross-faded). The continuation is the concatenation,
+/// width 16, with no blended sample.
+#[test]
+fn stitcher_abutting_ramps_are_concatenated_without_a_blend() {
+    let a = ramp_frame(8, 10);
+    let b = ramp_frame(8, 34);
+    assert_eq!(a.as_raw(), &[10, 13, 16, 19, 22, 25, 28, 31]);
+    assert_eq!(b.as_raw(), &[34, 37, 40, 43, 46, 49, 52, 55]);
+
+    let mut s = cv_photo::Stitcher::new();
+    let out = s.stitch(&[a, b]).expect("abutting ramps must stitch");
+    let expected: [u8; 16] = [
+        10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46, 49, 52, 55,
+    ];
+    assert_eq!(
+        out.as_raw(),
+        &expected,
+        "an empty overlap is a legal shift of canvas_width; the panorama must be the \
+         concatenation, not a width-15 image with a blended 33"
+    );
+}
+
+/// A real overlap whose samples agree is cost 0, the same score as abutting
+/// with an empty overlap. The tie goes to the smaller shift, and the cross-fade
+/// of equal values leaves those columns unchanged. This is the overlapping case
+/// the abutting-shift fix must not move.
+#[test]
+fn stitch_exact_overlap_keeps_the_shorter_shift_and_does_not_rewrite_shared_columns() {
+    let a = ramp_frame(8, 10);
+    // Shares a's last four samples, then continues the ramp.
+    let b = ramp_frame(8, 22);
+    assert_eq!(a.as_raw(), &[10, 13, 16, 19, 22, 25, 28, 31]);
+    assert_eq!(b.as_raw(), &[22, 25, 28, 31, 34, 37, 40, 43]);
+
+    let mut s = cv_photo::Stitcher::new();
+    let out = s.stitch(&[a, b]).expect("an exact overlap must stitch");
+    let expected: [u8; 12] = [10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43];
+    assert_eq!(
+        out.as_raw(),
+        &expected,
+        "a zero-cost overlap must beat the empty-overlap shift, and blending equal \
+         samples must leave them as they were"
+    );
 }
 
 /// Three frames must be wider than two, i.e. every frame has to be placed.

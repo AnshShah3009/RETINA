@@ -36,8 +36,10 @@ impl Stitcher {
     /// Stitch `images` into a single panorama.
     ///
     /// Each image after the first is placed at the horizontal offset `s` in
-    /// `0..=MAX_SHIFT` that minimises the sum of absolute differences between it
-    /// and the panorama's columns `s..s + image.width()`. Where the image lands
+    /// `0..=min(MAX_SHIFT, canvas_width)` that minimises the sum of absolute
+    /// differences between it and the panorama's columns `s..s + image.width()`.
+    /// `s == canvas_width` is included, so a frame that abuts the panorama (empty
+    /// overlap) can win. Where the image lands
     /// on already-filled columns the two are cross-faded with a running weighted
     /// average whose bandwidth is [`SEAM_WIDTH`]; where it lands on empty columns
     /// it is copied in unchanged. The canvas is widened to
@@ -135,7 +137,7 @@ impl Stitcher {
 }
 
 /// The horizontal offset that best aligns `candidate` with the running
-/// panorama, in `0..=MAX_SHIFT`.
+/// panorama. Searched over `0..=min(MAX_SHIFT, canvas_width)`.
 ///
 /// Scored by the mean absolute difference over the columns the candidate would
 /// cover. A shift that leaves the candidate with *no* overlap scores 0: nothing
@@ -144,12 +146,14 @@ impl Stitcher {
 /// makes the true offset unreachable for exactly-abutting frames, since their
 /// overlap is empty by construction; the search then slid the candidate *into*
 /// the panorama to create overlap it did not have. Measured on two abutting
-/// ramp frames of width 8: the search chose a shift of 7 and the output was
-/// `[10,13,16,19,22,25,28,33,37,...]` - off by one, with a 5-level step at the
-/// seam.
+/// ramp frames of width 8: stopping the search at `canvas_width - 1` chose a
+/// shift of 7 and the output was `[10,13,16,19,22,25,28,33,37,...]` - off by
+/// one, with a 5-level step at the seam. Shift `canvas_width` is inside the
+/// range above, so that pair concatenates.
 ///
 /// Ties keep the smaller shift, so a shift of 0 wins when the images really do
-/// match at zero, and a no-overlap shift wins over a misaligned overlap.
+/// match at zero, and a no-overlap shift wins over a misaligned overlap. A
+/// perfect overlap (cost 0) therefore still beats the empty one.
 fn best_horizontal_shift(canvas: &GrayImage, weight: &[f32], candidate: &GrayImage) -> u32 {
     let cw = canvas.width();
     let kw = candidate.width();
@@ -159,7 +163,9 @@ fn best_horizontal_shift(canvas: &GrayImage, weight: &[f32], candidate: &GrayIma
     }
 
     let mut best = (f32::INFINITY, 0u32);
-    let max_shift = MAX_SHIFT.min(cw.saturating_sub(1));
+    // `s == cw` abuts: the overlap is empty. Capping at `cw - 1` made that
+    // shift unscored, so an abutting frame was pulled back one column.
+    let max_shift = MAX_SHIFT.min(cw);
     for s in 0..=max_shift {
         let cost = mean_abs_diff(canvas, weight, candidate, s, h);
         if cost < best.0 {
