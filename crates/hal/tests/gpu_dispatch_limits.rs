@@ -173,7 +173,8 @@ fn subtract_on_a_3_channel_4k_frame_matches_cpu() {
 
 #[test]
 fn pointcloud_transform_on_a_buffer_sized_cloud_matches_cpu() {
-    // 2^24 points x 16 bytes = 256 MiB, the device's buffer cap. At 256 points
+    // 2^24 points x 16 bytes = 256 MiB (the device's buffer cap before it
+    // requested the adapter's limits; still the downlevel max_buffer_size). At 256 points
     // per workgroup that is 65536 groups - one past the limit.
     let Some(gpu) = require_gpu() else { return };
     let cpu = CpuBackend::new().unwrap();

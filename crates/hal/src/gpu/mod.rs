@@ -41,6 +41,29 @@ pub enum DeviceSelector {
     Index(usize),
 }
 
+/// The limits [`GpuContext`] requests from an adapter with `adapter` limits.
+///
+/// * Buffer size and storage-binding size are the adapter's own. These were
+///   capped at 256 MiB, which made a 4K float stack or a 20M-point cloud a
+///   validation error on cards with gigabytes to spare. Since wgpu 29 the
+///   binding limit is `u64` and the native backends report their real limits
+///   (4 GiB buffers / 2 GiB bindings on an RTX 5070 Ti under Vulkan).
+/// * Every other limit stays at `downlevel_defaults`, which is what the shader
+///   corpus is validated against (`tests/shader_bindings_limits.rs`): a device
+///   that allowed more would accept a non-portable shader here and fail on a
+///   smaller adapter.
+/// * Nothing is ever requested beyond the adapter, on any axis:
+///   `request_device` refuses that outright. On adapters below downlevel
+///   (WebGL2-class) the adapter's own, lower, values are used.
+pub fn requested_device_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
+    wgpu::Limits {
+        max_storage_buffer_binding_size: adapter.max_storage_buffer_binding_size,
+        max_buffer_size: adapter.max_buffer_size,
+        ..wgpu::Limits::downlevel_defaults()
+    }
+    .or_worse_values_from(adapter)
+}
+
 /// Shared GPU Context containing Device and Queue.
 #[derive(Debug, Clone)]
 pub struct GpuContext {
@@ -359,17 +382,7 @@ impl GpuContext {
             features |= wgpu::Features::TIMESTAMP_QUERY;
         }
 
-        // Request device with increased limits for large point clouds, but never
-        // request more than the adapter advertises: request_device fails outright
-        // when a requested limit exceeds the adapter's, even if the fallback
-        // default would otherwise be sufficient.
-        let adapter_limits = adapter.limits();
-        let limits = wgpu::Limits {
-            max_storage_buffer_binding_size: (256u64 * 1024 * 1024)
-                .min(adapter_limits.max_storage_buffer_binding_size),
-            max_buffer_size: (256u64 * 1024 * 1024).min(adapter_limits.max_buffer_size),
-            ..wgpu::Limits::downlevel_defaults()
-        };
+        let limits = requested_device_limits(&adapter.limits());
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -563,10 +576,13 @@ impl GpuContext {
             return mb;
         }
         let max_buffer = self.device.limits().max_buffer_size;
-        // max_buffer_size is the largest single allocation, typically 256MB-2GB.
-        // Total VRAM is usually 2-4x this value. We report max_buffer_size as a
-        // conservative usable estimate to prevent overcommit.
-        (max_buffer / (1024 * 1024)) as u32
+        // max_buffer_size is the largest single allocation, typically 256MB-4GB
+        // (the device requests the adapter's own value). Total VRAM is usually
+        // 2-4x this value. We report max_buffer_size as a conservative usable
+        // estimate to prevent overcommit. A backend may report a buffer limit
+        // far beyond any real memory, so the conversion saturates rather than
+        // wraps.
+        u32::try_from(max_buffer / (1024 * 1024)).unwrap_or(u32::MAX)
     }
 
     /// Submit a command encoder (convenience method)
