@@ -150,6 +150,49 @@ fn publishing_a_new_load_replaces_the_previous_one() {
 }
 
 #[test]
+fn a_load_the_shm_slot_cannot_represent_is_rejected_not_silently_dropped() {
+    // The shm slot has one `load_count` cell per device, `MAX_DEVICES` of them.
+    // `update_load` documents that it publishes the caller's map verbatim, and
+    // every other entry point (`init_device`, `reserve_device`,
+    // `release_device`, `wait_for_device_memory`) rejects an out-of-range
+    // device with `InvalidInput`. `update_load` used to return `Ok(())` and
+    // write nothing for such a device: the load simply vanished from
+    // `get_global_load`, so the scheduler saw an idle device that was busy.
+    let shm = ShmCoordinator::new(&unique("out_of_range"), SHM_TOTAL_SIZE).unwrap();
+
+    // Control: an in-range publish round-trips.
+    shm.update_load(&load(&[(1, 4)])).unwrap();
+    assert_eq!(sorted(&shm.get_global_load().unwrap()), vec![(1, 4)]);
+
+    // Device 16 is the first index past the slot's capacity (0..=15).
+    let res = shm.update_load(&load(&[(1, 4), (16, 7)]));
+    assert!(
+        res.is_err(),
+        "an unrepresentable device id was accepted (`Ok(())`) and its load dropped"
+    );
+    assert_eq!(res.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+
+    // A rejected publish must not be half-applied: the previous map stands.
+    assert_eq!(
+        sorted(&shm.get_global_load().unwrap()),
+        vec![(1, 4)],
+        "a rejected publish changed the published load"
+    );
+
+    // The file-based coordinator has no such limit, so it keeps the device -
+    // which is why silently dropping it, rather than saying so, is the bug.
+    let fixture = FileFixture::new("out_of_range");
+    fixture
+        .coord
+        .update_load(&load(&[(1, 4), (16, 7)]))
+        .unwrap();
+    assert_eq!(
+        sorted(&fixture.coord.get_global_load().unwrap()),
+        vec![(1, 4), (16, 7)]
+    );
+}
+
+#[test]
 fn create_coordinator_returns_a_working_coordinator_for_both_kinds() {
     let dir = std::env::temp_dir().join(unique("factory_file"));
     let file = create_coordinator(CoordinatorType::File { path: dir.clone() }).unwrap();
