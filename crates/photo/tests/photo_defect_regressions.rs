@@ -471,6 +471,61 @@ fn stitch_identical_frames_is_well_formed() {
     );
 }
 
+/// The stitcher composites with a weight that is *per output column* - the
+/// comment calls it "how much evidence is behind it" and `w_old` "how many
+/// images have already contributed" - but the weight was read and incremented
+/// once per *pixel*, inside the row loop. Row `y` of the image being composited
+/// therefore read `w_old = 1 + y` instead of `1`, so
+/// `alpha = SEAM_WIDTH / (SEAM_WIDTH + 1 + y)` varied with the row and the same
+/// column of the same frame was blended differently at every height. Measured
+/// on the pair below: the 8-column overlap came back 6 grey levels darker on
+/// row 7 than on row 0 - a horizontal seam *inside* the panorama.
+///
+/// The overlap has to be scored positively for the blend to run at all, and an
+/// abutting shift (empty overlap, cost 0) always beats a positive-cost overlap;
+/// with `MAX_SHIFT == 512` that abutting shift is only out of the search range
+/// once the canvas is wider than 512. Hence the 520-column first frame, the
+/// smallest canvas that exercises the per-column weight at all. The invariant
+/// does not depend on which shift wins: both inputs are row-constant, and a
+/// horizontal-translation model must return a row-constant panorama.
+#[test]
+fn stitch_blend_weight_is_per_column_not_per_pixel() {
+    const H: u32 = 8;
+    const W: u32 = 520;
+    let line = |x: u32| ((x * 37 + 11) % 120) as u8;
+
+    let a = GrayImage::from_fn(W, H, |x, _| Luma([line(x)]));
+    // Continues the first frame at column 512, uniformly 40 grey levels
+    // brighter, so the overlap there is the best alignment and its mean
+    // absolute difference (40) is non-zero: the cross-fade actually runs.
+    let b = GrayImage::from_fn(8, H, |x, _| Luma([line(512 + x) + 40]));
+
+    let mut s = cv_photo::Stitcher::new();
+    let out = s
+        .stitch(&[a.clone(), b])
+        .expect("two row-constant frames must stitch");
+
+    assert_eq!(out.height(), H);
+    let w = out.width() as usize;
+    let first = &out.as_raw()[..w];
+    for y in 1..H as usize {
+        let row = &out.as_raw()[y * w..(y + 1) * w];
+        assert_eq!(
+            row, first,
+            "row {y} differs from row 0 although both inputs are row-constant, so the \
+             panorama must be too. The blend weight is per output column; incrementing \
+             it once per pixel made alpha = 32/(32 + 1 + y) instead of 32/(32 + 1), \
+             which blends the overlap differently on every row"
+        );
+    }
+    // Control: the second frame reached the output, so a blend really happened.
+    assert_ne!(
+        out.as_raw(),
+        a.as_raw(),
+        "the second frame must be composited, not discarded"
+    );
+}
+
 /// Control: an empty list is an error, not a silently-empty success.
 #[test]
 fn stitch_empty_is_an_error() {
