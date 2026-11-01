@@ -66,7 +66,22 @@ impl MosseTracker {
         let mut a_sum = vec![(0.0, 0.0); n];
         let mut b_sum = vec![(0.0, 0.0); n];
 
-        // Bootstrap with 8 slightly perturbed versions of the patch
+        // Bootstrap with 8 slightly perturbed versions of the patch.
+        //
+        // The extraction window is recentred, so the object moves inside the
+        // patch by the opposite amount and the ideal correlation peak moves with
+        // it. The regression target must be shifted by the *same* spatial
+        // displacement as the patch content, otherwise each sample is paired
+        // with a peak at the wrong place and the samples cancel instead of
+        // reinforcing: the resulting filter returned `None` even on the exact
+        // frame it was initialised from.
+        //
+        // `extract_patch` rounds the window origin to whole pixels, so the
+        // displacement that actually reaches the patch is the difference of the
+        // rounded origins - not the fractional centre offset.
+        let center_to_origin = |c: f64, size: usize| (c - size as f64 / 2.0).round();
+        let x0_ref = center_to_origin(bbox.cx(), pw);
+        let y0_ref = center_to_origin(bbox.cy(), ph);
         let num_perturbations = 8;
         for p in 0..num_perturbations {
             let offset_x = if p == 0 { 0.0 } else { (p as f64 - 4.0) * 0.5 };
@@ -77,18 +92,28 @@ impl MosseTracker {
             };
             let mut patch =
                 extract_patch(frame, bbox.cx() + offset_x, bbox.cy() + offset_y, pw, ph);
+            let shift_x = center_to_origin(bbox.cx() + offset_x, pw) - x0_ref;
+            let shift_y = center_to_origin(bbox.cy() + offset_y, ph) - y0_ref;
             preprocess_patch(&mut patch);
             for (v, w) in patch.iter_mut().zip(self.cos_window.iter()) {
                 *v *= w;
             }
             let fi = fft2(&patch.iter().map(|&v| (v, 0.0)).collect::<Vec<_>>(), ph, pw);
             for i in 0..n {
+                // Shift the target with the patch: a spatial displacement of
+                // `(shift_x, shift_y)` multiplies the target spectrum by
+                // exp(+i*2*pi*(col*shift_x/pw + row*shift_y/ph)).
+                let col = (i % pw) as f64;
+                let row = (i / pw) as f64;
+                let phase =
+                    std::f64::consts::TAU * (col * shift_x / pw as f64 + row * shift_y / ph as f64);
+                let gfi = complex_mul(gf[i], (phase.cos(), phase.sin()));
                 // A += G* . F_i
                 // H* accumulates G * conj(F): G is real-valued so the
                 // previous conj(G)*F computed a plain product, scrambling
                 // the phase and breaking peak localization.
                 let fc = complex_conj(fi[i]);
-                let af = complex_mul(gf[i], fc);
+                let af = complex_mul(gfi, fc);
                 a_sum[i].0 += af.0;
                 a_sum[i].1 += af.1;
                 // B += F_i* . F_i
