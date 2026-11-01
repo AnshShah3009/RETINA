@@ -296,7 +296,18 @@ pub(crate) fn prepare_kernel_buffers(
         .collect()
 }
 
-/// One 1-D workgroup per 64 bytes of the largest output.
+/// Threads per workgroup for the pipeline kernels (`@workgroup_size(64)`).
+const KERNEL_WORKGROUP_SIZE: u32 = 64;
+
+/// One workgroup per 64 bytes of the largest output, split so no axis exceeds
+/// wgpu's per-dimension limit.
+///
+/// A count that fits is `(groups, 1, 1)`. A larger count is a 2-D (or, past
+/// `65535²` groups, 3-D) grid whose product equals `groups` when an exact
+/// factor exists. The shaders index it with the same linear id as
+/// [`cv_hal::gpu_kernels::dispatch_1d`]:
+/// `gid.x + gid.y * num_wg.x * 64` (and `gid.z` on the third axis). On a 1-D
+/// grid that expression is `gid.x`, so an in-limit dispatch is unchanged.
 pub(crate) fn kernel_workgroups(
     buffers: &HashMap<BufferId, usize>,
     outputs: &[BufferId],
@@ -306,7 +317,81 @@ pub(crate) fn kernel_workgroups(
         .filter_map(|id| buffers.get(id).copied())
         .max()
         .unwrap_or(1);
-    (((max_size as f64 / 64.0).ceil() as u32).max(1), 1, 1)
+    let groups = (max_size as u64)
+        .div_ceil(KERNEL_WORKGROUP_SIZE as u64)
+        .max(1);
+    split_linear_workgroups(u32::try_from(groups).unwrap_or(u32::MAX))
+}
+
+/// Spread `groups` 1-D workgroups over x, y, and z.
+///
+/// Exact factors are preferred, so a 3840×2160 RGBA buffer (518_400 groups)
+/// is covered with no surplus tail. When `groups` has no factor inside the
+/// limit, the shape matches [`cv_hal::gpu_kernels::dispatch_groups_1d`]: x is
+/// saturated and the extra groups at the tail are unused. Shaders must skip
+/// those with the linear id above.
+fn split_linear_workgroups(groups: u32) -> (u32, u32, u32) {
+    const MAX: u32 = cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM;
+    if groups <= MAX {
+        return (groups, 1, 1);
+    }
+    let mut y = groups.div_ceil(MAX);
+    if y <= MAX {
+        while y <= MAX {
+            if groups.is_multiple_of(y) {
+                let x = groups / y;
+                if (1..=MAX).contains(&x) {
+                    return (x, y, 1);
+                }
+            }
+            y += 1;
+        }
+    }
+    let y = groups.div_ceil(MAX).min(MAX);
+    let covered = (MAX as u64) * (y as u64);
+    if (groups as u64) <= covered {
+        return (MAX, y, 1);
+    }
+    let z = ((groups as u64).div_ceil(covered)).min(MAX as u64) as u32;
+    (MAX, y, z.max(1))
+}
+
+#[cfg(test)]
+mod workgroup_tests {
+    use super::*;
+
+    #[test]
+    fn kernel_workgroups_splits_518400_groups_inside_the_wgpu_limit() {
+        // 3840×2160 RGBA is 33_177_600 bytes, one group per 64 bytes.
+        const BYTES: usize = 3840 * 2160 * 4;
+        const LINEAR: u32 = 518_400;
+        assert_eq!(BYTES, 33_177_600);
+        assert_eq!((BYTES as u64).div_ceil(64), LINEAR as u64);
+
+        let (x, y, z) = split_linear_workgroups(LINEAR);
+        assert_eq!(
+            x as u64 * y as u64 * z as u64,
+            LINEAR as u64,
+            "the grid must cover every linear group"
+        );
+        assert!(x <= cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM);
+        assert!(y <= cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM);
+        assert!(z <= cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM);
+
+        let mut buffers = HashMap::new();
+        buffers.insert(BufferId(0), BYTES);
+        assert_eq!(kernel_workgroups(&buffers, &[BufferId(0)]), (x, y, z));
+
+        // Counts that already fit stay a 1-D grid, including the limit itself.
+        assert_eq!(split_linear_workgroups(100), (100, 1, 1));
+        assert_eq!(
+            split_linear_workgroups(cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM),
+            (cv_hal::gpu_kernels::MAX_WORKGROUPS_PER_DIM, 1, 1)
+        );
+        let mut small = HashMap::new();
+        small.insert(BufferId(1), 64 * 100);
+        assert_eq!(kernel_workgroups(&small, &[BufferId(1)]), (100, 1, 1));
+    }
 }
 
 /// After a dispatch: the kernel's outputs now live on the GPU.
