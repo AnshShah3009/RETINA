@@ -74,68 +74,47 @@ pub fn fast_nl_means_denoising<T: Float + Default + 'static>(
     let src: Vec<f64> = data.iter().map(|v| Float::to_f64(*v)).collect();
 
     let n_pixels = height * width;
-    let mut out = vec![0.0f64; n_pixels];
+    let mut sum_weight = vec![0.0f64; n_pixels];
+    let mut sum_val = vec![0.0f64; n_pixels];
+    // One integral of (image - shifted image)^2 per search-window displacement.
+    // The clipped template overlap is a rectangle on that integral, so the mean
+    // squared distance is the sum over pixels that actually exist on both
+    // patches — not a zero-padded full window.
+    let mut integral = vec![0.0f64; (height + 1) * (width + 1)];
 
-    // Process each pixel.
-    for py in 0..height {
-        for px in 0..width {
-            let mut sum_weight = 0.0f64;
-            let mut sum_val = 0.0f64;
-
-            // Search window bounds.
-            let sy_start = py.saturating_sub(s_half);
-            let sy_end = (py + s_half + 1).min(height);
-            let sx_start = px.saturating_sub(s_half);
-            let sx_end = (px + s_half + 1).min(width);
-
-            for sy in sy_start..sy_end {
-                for sx in sx_start..sx_end {
-                    // Compute squared distance between patches centered at (py,px) and (sy,sx).
-                    let mut dist_sq = 0.0f64;
-                    let mut count = 0;
-
-                    let ty_start = t_half.min(py).min(sy);
-                    let ty_end_p = (height - py).min(t_half + 1);
-                    let ty_end_s = (height - sy).min(t_half + 1);
-                    let ty_end = ty_end_p.min(ty_end_s);
-
-                    let tx_start = t_half.min(px).min(sx);
-                    let tx_end_p = (width - px).min(t_half + 1);
-                    let tx_end_s = (width - sx).min(t_half + 1);
-                    let tx_end = tx_end_p.min(tx_end_s);
-
-                    for dy_offset in 0..(ty_start + ty_end) {
-                        let dy = dy_offset as isize - ty_start as isize;
-                        let p_row = (py as isize + dy) as usize;
-                        let s_row = (sy as isize + dy) as usize;
-
-                        for dx_offset in 0..(tx_start + tx_end) {
-                            let dx = dx_offset as isize - tx_start as isize;
-                            let p_col = (px as isize + dx) as usize;
-                            let s_col = (sx as isize + dx) as usize;
-
-                            let diff = src[p_row * width + p_col] - src[s_row * width + s_col];
-                            dist_sq += diff * diff;
-                            count += 1;
-                        }
+    for dy in -(s_half as isize)..=s_half as isize {
+        for dx in -(s_half as isize)..=s_half as isize {
+            fill_squared_shift_integral(&src, height, width, dy, dx, &mut integral);
+            for py in 0..height {
+                let sy_i = py as isize + dy;
+                if sy_i < 0 || sy_i >= height as isize {
+                    continue;
+                }
+                let sy = sy_i as usize;
+                for px in 0..width {
+                    let sx_i = px as isize + dx;
+                    if sx_i < 0 || sx_i >= width as isize {
+                        continue;
                     }
-
-                    if count > 0 {
-                        dist_sq /= count as f64;
-                    }
-
+                    let sx = sx_i as usize;
+                    let dist_sq =
+                        overlap_mean_ssd(&integral, width, height, py, px, sy, sx, t_half);
                     let w = (-dist_sq / h_sq).exp();
-                    sum_weight += w;
-                    sum_val += w * src[sy * width + sx];
+                    let i = py * width + px;
+                    sum_weight[i] += w;
+                    sum_val[i] += w * src[sy * width + sx];
                 }
             }
-
-            out[py * width + px] = if sum_weight > 1e-15 {
-                sum_val / sum_weight
-            } else {
-                src[py * width + px]
-            };
         }
+    }
+
+    let mut out = vec![0.0f64; n_pixels];
+    for i in 0..n_pixels {
+        out[i] = if sum_weight[i] > 1e-15 {
+            sum_val[i] / sum_weight[i]
+        } else {
+            src[i]
+        };
     }
 
     let result: Vec<T> = out.iter().map(|&v| T::from_f64(v)).collect();
@@ -476,84 +455,84 @@ pub fn bm3d<T: Float + Default + 'static>(
     let mut estimate = vec![0.0f64; height * width];
     let mut weights = vec![0.0f64; height * width];
 
-    // Step through reference blocks
+    // Step through reference blocks. Distances are full-block SSDs: the search
+    // refuses any block that hangs off the image, so each one is a rectangle on
+    // the integral of (image - shifted image)^2.
+    let src_f64: Vec<f64> = src.iter().map(|v| Float::to_f64(*v)).collect();
+    let max_dist = threshold * threshold * (bs * bs) as f64;
     let step = (bs / 2).max(1);
-    for ry in (0..height - bs + 1).step_by(step) {
-        for rx in (0..width - bs + 1).step_by(step) {
-            // Extract reference block
-            let ref_block = extract_block_f64(src, width, rx, ry, bs);
+    let stage1_matches = similar_blocks(
+        &src_f64,
+        height,
+        width,
+        bs,
+        half_sw,
+        step,
+        max_dist,
+        max_matches,
+    );
+    #[cfg(test)]
+    assert_same_block_matches(
+        &stage1_matches,
+        &similar_blocks_direct(
+            &src_f64,
+            height,
+            width,
+            bs,
+            half_sw,
+            step,
+            max_dist,
+            max_matches,
+        ),
+        "bm3d stage 1",
+    );
 
-            // Find similar blocks in search window
-            let mut matches: Vec<(usize, usize, f64)> = Vec::new();
-            let sy0 = ry.saturating_sub(half_sw);
-            let sy1 = (ry + half_sw + 1).min(height - bs + 1);
-            let sx0 = rx.saturating_sub(half_sw);
-            let sx1 = (rx + half_sw + 1).min(width - bs + 1);
+    for matches in &stage1_matches {
+        // Stack matched blocks into 3D group
+        let n_matches = matches.len();
+        let mut group: Vec<f64> = Vec::with_capacity(n_matches * bs * bs);
+        for &(mx, my, _) in matches {
+            let blk = extract_block_f64(src, width, mx, my, bs);
+            group.extend_from_slice(&blk);
+        }
 
-            for my in sy0..sy1 {
-                for mx in sx0..sx1 {
-                    let cand = extract_block_f64(src, width, mx, my, bs);
-                    let dist = block_distance(&ref_block, &cand, bs);
-                    if dist < threshold * threshold * (bs * bs) as f64 {
-                        matches.push((mx, my, dist));
-                    }
-                }
-            }
+        // Apply 2D DCT to each block, hard-threshold coefficients,
+        // inverse-transform back (real transform-domain hard thresholding;
+        // a previous revision only subtracted the block mean).
+        for b in 0..n_matches {
+            let offset = b * bs * bs;
+            dct_2d(
+                &group[offset..offset + bs * bs],
+                bs,
+                &dct_b,
+                &mut scratch_a,
+                &mut coefs,
+            );
 
-            // Sort by distance and keep top matches
-            matches.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-            matches.truncate(max_matches);
-
-            if matches.is_empty() {
-                matches.push((rx, ry, 0.0));
-            }
-
-            // Stack matched blocks into 3D group
-            let n_matches = matches.len();
-            let mut group: Vec<f64> = Vec::with_capacity(n_matches * bs * bs);
-            for &(mx, my, _) in &matches {
-                let blk = extract_block_f64(src, width, mx, my, bs);
-                group.extend_from_slice(&blk);
-            }
-
-            // Apply 2D DCT to each block, hard-threshold coefficients,
-            // inverse-transform back (real transform-domain hard thresholding;
-            // a previous revision only subtracted the block mean).
-            for b in 0..n_matches {
-                let offset = b * bs * bs;
-                dct_2d(
-                    &group[offset..offset + bs * bs],
-                    bs,
-                    &dct_b,
-                    &mut scratch_a,
-                    &mut coefs,
-                );
-
-                let mut nonzero = 0usize;
-                for c in coefs.iter_mut() {
-                    if c.abs() > threshold {
-                        nonzero += 1;
-                    } else {
-                        *c = 0.0;
-                    }
-                }
-                idct_2d(&coefs, bs, &dct_b, &mut scratch_a, &mut scratch_b);
-                group[offset..offset + bs * bs].copy_from_slice(&scratch_b);
-                // Weight based on number of surviving coefficients
-                let w = if nonzero > 0 {
-                    1.0 / nonzero as f64
+            let mut nonzero = 0usize;
+            for c in coefs.iter_mut() {
+                if c.abs() > threshold {
+                    nonzero += 1;
                 } else {
-                    1.0
-                };
+                    *c = 0.0;
+                }
+            }
+            idct_2d(&coefs, bs, &dct_b, &mut scratch_a, &mut scratch_b);
+            group[offset..offset + bs * bs].copy_from_slice(&scratch_b);
+            // Weight based on number of surviving coefficients
+            let w = if nonzero > 0 {
+                1.0 / nonzero as f64
+            } else {
+                1.0
+            };
 
-                // Aggregate back into estimate
-                let (mx, my) = (matches[b].0, matches[b].1);
-                for by in 0..bs {
-                    for bx in 0..bs {
-                        let idx = (my + by) * width + (mx + bx);
-                        estimate[idx] += group[offset + by * bs + bx] * w;
-                        weights[idx] += w;
-                    }
+            // Aggregate back into estimate
+            let (mx, my) = (matches[b].0, matches[b].1);
+            for by in 0..bs {
+                for bx in 0..bs {
+                    let idx = (my + by) * width + (mx + bx);
+                    estimate[idx] += group[offset + by * bs + bx] * w;
+                    weights[idx] += w;
                 }
             }
         }
@@ -573,56 +552,57 @@ pub fn bm3d<T: Float + Default + 'static>(
     let mut final_est = vec![0.0f64; height * width];
     let mut final_w = vec![0.0f64; height * width];
 
-    for ry in (0..height - bs + 1).step_by(step) {
-        for rx in (0..width - bs + 1).step_by(step) {
-            let ref_pilot = extract_block_f64_raw(&estimate, width, rx, ry, bs);
+    let stage2_matches = similar_blocks(
+        &estimate,
+        height,
+        width,
+        bs,
+        half_sw,
+        step,
+        max_dist,
+        max_matches,
+    );
+    #[cfg(test)]
+    assert_same_block_matches(
+        &stage2_matches,
+        &similar_blocks_direct(
+            &estimate,
+            height,
+            width,
+            bs,
+            half_sw,
+            step,
+            max_dist,
+            max_matches,
+        ),
+        "bm3d stage 2",
+    );
 
-            let mut matches: Vec<(usize, usize, f64)> = Vec::new();
-            let sy0 = ry.saturating_sub(half_sw);
-            let sy1 = (ry + half_sw + 1).min(height - bs + 1);
-            let sx0 = rx.saturating_sub(half_sw);
-            let sx1 = (rx + half_sw + 1).min(width - bs + 1);
+    for matches in &stage2_matches {
+        let n_matches = matches.len();
 
-            for my in sy0..sy1 {
-                for mx in sx0..sx1 {
-                    let cand = extract_block_f64_raw(&estimate, width, mx, my, bs);
-                    let dist = block_distance(&ref_pilot, &cand, bs);
-                    if dist < threshold * threshold * (bs * bs) as f64 {
-                        matches.push((mx, my, dist));
-                    }
-                }
+        // Empirical Wiener filtering in the DCT domain: shrink each noisy
+        // coefficient by pilot-energy/(pilot-energy + sigma^2).
+        for &(mx, my, _) in matches {
+            let noisy_blk = extract_block_f64(src, width, mx, my, bs);
+            let pilot_blk = extract_block_f64_raw(&estimate, width, mx, my, bs);
+
+            dct_2d(&noisy_blk, bs, &dct_b, &mut scratch_a, &mut noisy_coefs);
+            dct_2d(&pilot_blk, bs, &dct_b, &mut scratch_a, &mut pilot_coefs);
+
+            for k in 0..bs * bs {
+                let energy = pilot_coefs[k] * pilot_coefs[k];
+                let w_shrink = energy / (energy + sigma_f64 * sigma_f64);
+                coefs[k] = noisy_coefs[k] * w_shrink;
             }
-            matches.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-            matches.truncate(max_matches);
-            if matches.is_empty() {
-                matches.push((rx, ry, 0.0));
-            }
+            idct_2d(&coefs, bs, &dct_b, &mut scratch_a, &mut filtered);
 
-            let n_matches = matches.len();
-
-            // Empirical Wiener filtering in the DCT domain: shrink each noisy
-            // coefficient by pilot-energy/(pilot-energy + sigma^2).
-            for &(mx, my, _) in &matches {
-                let noisy_blk = extract_block_f64(src, width, mx, my, bs);
-                let pilot_blk = extract_block_f64_raw(&estimate, width, mx, my, bs);
-
-                dct_2d(&noisy_blk, bs, &dct_b, &mut scratch_a, &mut noisy_coefs);
-                dct_2d(&pilot_blk, bs, &dct_b, &mut scratch_a, &mut pilot_coefs);
-
-                for k in 0..bs * bs {
-                    let energy = pilot_coefs[k] * pilot_coefs[k];
-                    let w_shrink = energy / (energy + sigma_f64 * sigma_f64);
-                    coefs[k] = noisy_coefs[k] * w_shrink;
-                }
-                idct_2d(&coefs, bs, &dct_b, &mut scratch_a, &mut filtered);
-
-                let w = 1.0 / (1.0 + 1.0 / (n_matches as f64));
-                for by in 0..bs {
-                    for bx in 0..bs {
-                        let idx = (my + by) * width + (mx + bx);
-                        final_est[idx] += filtered[by * bs + bx] * w;
-                        final_w[idx] += w;
-                    }
+            let w = 1.0 / (1.0 + 1.0 / (n_matches as f64));
+            for by in 0..bs {
+                for bx in 0..bs {
+                    let idx = (my + by) * width + (mx + bx);
+                    final_est[idx] += filtered[by * bs + bx] * w;
+                    final_w[idx] += w;
                 }
             }
         }
@@ -729,11 +709,213 @@ fn extract_block_f64_raw(src: &[f64], width: usize, x: usize, y: usize, bs: usiz
     block
 }
 
+#[cfg(test)]
 fn block_distance(a: &[f64], b: &[f64], _bs: usize) -> f64 {
     a.iter()
         .zip(b.iter())
         .map(|(&x, &y)| (x - y) * (x - y))
         .sum()
+}
+
+/// Prefix integral of `(src[y, x] - src[y + dy, x + dx])^2`. A partner outside
+/// the image contributes nothing; rectangle queries must stay where both
+/// samples exist.
+fn fill_squared_shift_integral(
+    src: &[f64],
+    height: usize,
+    width: usize,
+    dy: isize,
+    dx: isize,
+    ii: &mut [f64],
+) {
+    let stride = width + 1;
+    debug_assert_eq!(ii.len(), (height + 1) * stride);
+    ii.fill(0.0);
+    for y in 0..height {
+        let yy = y as isize + dy;
+        let partner_y = if yy >= 0 && (yy as usize) < height {
+            Some(yy as usize)
+        } else {
+            None
+        };
+        let mut row_sum = 0.0f64;
+        for x in 0..width {
+            if let Some(py) = partner_y {
+                let xx = x as isize + dx;
+                if xx >= 0 && (xx as usize) < width {
+                    let d = src[y * width + x] - src[py * width + xx as usize];
+                    row_sum += d * d;
+                }
+            }
+            ii[(y + 1) * stride + (x + 1)] = ii[y * stride + (x + 1)] + row_sum;
+        }
+    }
+}
+
+fn rect_sum(ii: &[f64], stride: usize, y0: usize, x0: usize, y1: usize, x1: usize) -> f64 {
+    ii[y1 * stride + x1] - ii[y0 * stride + x1] - ii[y1 * stride + x0] + ii[y0 * stride + x0]
+}
+
+/// Mean squared distance of the clipped patches centered at `(py, px)` and
+/// `(sy, sx)`. The rectangle is the overlap the direct template walk used:
+/// `ty_start` / `tx_start` rows and columns that exist on both patches.
+fn overlap_mean_ssd(
+    ii: &[f64],
+    width: usize,
+    height: usize,
+    py: usize,
+    px: usize,
+    sy: usize,
+    sx: usize,
+    t_half: usize,
+) -> f64 {
+    let ty_start = t_half.min(py).min(sy);
+    let ty_end = (height - py).min(height - sy).min(t_half + 1);
+    let tx_start = t_half.min(px).min(sx);
+    let tx_end = (width - px).min(width - sx).min(t_half + 1);
+    let y0 = py - ty_start;
+    let y1 = py + ty_end;
+    let x0 = px - tx_start;
+    let x1 = px + tx_end;
+    let count = (y1 - y0) * (x1 - x0);
+    if count == 0 {
+        return 0.0;
+    }
+    rect_sum(ii, width + 1, y0, x0, y1, x1) / count as f64
+}
+
+/// Similar blocks for every reference position on the `step` grid.
+///
+/// Displacements are scored from one integral image each. Blocks are then
+/// ordered by `(distance, y, x)`, which is the same order as a stable distance
+/// sort of a row-major scan when the distances compare equal.
+fn similar_blocks(
+    image: &[f64],
+    height: usize,
+    width: usize,
+    bs: usize,
+    half_sw: usize,
+    step: usize,
+    max_dist: f64,
+    max_matches: usize,
+) -> Vec<Vec<(usize, usize, f64)>> {
+    let ref_ys: Vec<usize> = (0..height - bs + 1).step_by(step).collect();
+    let ref_xs: Vec<usize> = (0..width - bs + 1).step_by(step).collect();
+    let mut buckets = vec![Vec::new(); ref_ys.len() * ref_xs.len()];
+    let mut integral = vec![0.0f64; (height + 1) * (width + 1)];
+    let max_off = half_sw as isize;
+
+    for dy in -max_off..=max_off {
+        for dx in -max_off..=max_off {
+            let mut built = false;
+            for (iy, &ry) in ref_ys.iter().enumerate() {
+                let my_i = ry as isize + dy;
+                if my_i < 0 {
+                    continue;
+                }
+                let my = my_i as usize;
+                let sy0 = ry.saturating_sub(half_sw);
+                let sy1 = (ry + half_sw + 1).min(height - bs + 1);
+                if my < sy0 || my >= sy1 {
+                    continue;
+                }
+                for (ix, &rx) in ref_xs.iter().enumerate() {
+                    let mx_i = rx as isize + dx;
+                    if mx_i < 0 {
+                        continue;
+                    }
+                    let mx = mx_i as usize;
+                    let sx0 = rx.saturating_sub(half_sw);
+                    let sx1 = (rx + half_sw + 1).min(width - bs + 1);
+                    if mx < sx0 || mx >= sx1 {
+                        continue;
+                    }
+                    if !built {
+                        fill_squared_shift_integral(image, height, width, dy, dx, &mut integral);
+                        built = true;
+                    }
+                    let dist = rect_sum(&integral, width + 1, ry, rx, ry + bs, rx + bs);
+                    if dist < max_dist {
+                        buckets[iy * ref_xs.len() + ix].push((mx, my, dist));
+                    }
+                }
+            }
+        }
+    }
+
+    for (iy, &ry) in ref_ys.iter().enumerate() {
+        for (ix, &rx) in ref_xs.iter().enumerate() {
+            let matches = &mut buckets[iy * ref_xs.len() + ix];
+            matches.sort_by(|a, b| {
+                a.2.partial_cmp(&b.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            matches.truncate(max_matches);
+            if matches.is_empty() {
+                matches.push((rx, ry, 0.0));
+            }
+        }
+    }
+    buckets
+}
+
+/// Direct full-block SSD match list, in the original scan order. Test builds
+/// compare this with [`similar_blocks`]; a changed survivor set means the
+/// integral distances are not a safe substitute.
+#[cfg(test)]
+fn similar_blocks_direct(
+    image: &[f64],
+    height: usize,
+    width: usize,
+    bs: usize,
+    half_sw: usize,
+    step: usize,
+    max_dist: f64,
+    max_matches: usize,
+) -> Vec<Vec<(usize, usize, f64)>> {
+    let mut out = Vec::new();
+    for ry in (0..height - bs + 1).step_by(step) {
+        for rx in (0..width - bs + 1).step_by(step) {
+            let mut matches = Vec::new();
+            let sy0 = ry.saturating_sub(half_sw);
+            let sy1 = (ry + half_sw + 1).min(height - bs + 1);
+            let sx0 = rx.saturating_sub(half_sw);
+            let sx1 = (rx + half_sw + 1).min(width - bs + 1);
+            let ref_block = extract_block_f64_raw(image, width, rx, ry, bs);
+            for my in sy0..sy1 {
+                for mx in sx0..sx1 {
+                    let cand = extract_block_f64_raw(image, width, mx, my, bs);
+                    let dist = block_distance(&ref_block, &cand, bs);
+                    if dist < max_dist {
+                        matches.push((mx, my, dist));
+                    }
+                }
+            }
+            matches.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+            matches.truncate(max_matches);
+            if matches.is_empty() {
+                matches.push((rx, ry, 0.0));
+            }
+            out.push(matches);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+fn assert_same_block_matches(
+    fast: &[Vec<(usize, usize, f64)>],
+    direct: &[Vec<(usize, usize, f64)>],
+    stage: &str,
+) {
+    assert_eq!(fast.len(), direct.len(), "{stage}: reference count");
+    for (i, (f, d)) in fast.iter().zip(direct.iter()).enumerate() {
+        let fp: Vec<(usize, usize)> = f.iter().map(|&(x, y, _)| (x, y)).collect();
+        let dp: Vec<(usize, usize)> = d.iter().map(|&(x, y, _)| (x, y)).collect();
+        assert_eq!(fp, dp, "{stage}: reference {i} match list changed");
+    }
 }
 
 #[cfg(test)]
@@ -769,6 +951,93 @@ mod tests {
                 "Uniform image should be preserved, got {}",
                 v
             );
+        }
+    }
+
+    /// Integral-image patch distance against the direct overlap walk, before the
+    /// `exp(-dist / h²)` weight. Clipped borders are included: the mean is over
+    /// the real overlap, and a zero-padded full patch would disagree there.
+    #[test]
+    fn test_nlmeans_integral_ssd_matches_direct_overlap() {
+        let h = 9usize;
+        let w = 11usize;
+        let mut src = vec![0.0f64; h * w];
+        for y in 0..h {
+            for x in 0..w {
+                let step = if x < w / 2 { 0.2 } else { 0.8 };
+                let noise = ((x * 3 + y * 5) % 7) as f64 * 0.01 - 0.03;
+                src[y * w + x] = step + noise;
+            }
+        }
+        let t_half = 3usize;
+        let s_half = 5isize;
+        let mut integral = vec![0.0f64; (h + 1) * (w + 1)];
+        for dy in -s_half..=s_half {
+            for dx in -s_half..=s_half {
+                super::fill_squared_shift_integral(&src, h, w, dy, dx, &mut integral);
+                for py in 0..h {
+                    let sy_i = py as isize + dy;
+                    if sy_i < 0 || sy_i >= h as isize {
+                        continue;
+                    }
+                    let sy = sy_i as usize;
+                    for px in 0..w {
+                        let sx_i = px as isize + dx;
+                        if sx_i < 0 || sx_i >= w as isize {
+                            continue;
+                        }
+                        let sx = sx_i as usize;
+                        let fast = super::overlap_mean_ssd(&integral, w, h, py, px, sy, sx, t_half);
+                        let direct = direct_overlap_mean_ssd(&src, w, h, py, px, sy, sx, t_half);
+                        let scale = direct.abs().max(fast.abs());
+                        let rel = if scale <= 1e-15 {
+                            (direct - fast).abs()
+                        } else {
+                            (direct - fast).abs() / scale
+                        };
+                        assert!(
+                            rel < 1e-9,
+                            "mean SSD ({py},{px}) vs ({sy},{sx}): direct {direct} integral {fast} rel {rel}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn direct_overlap_mean_ssd(
+        src: &[f64],
+        width: usize,
+        height: usize,
+        py: usize,
+        px: usize,
+        sy: usize,
+        sx: usize,
+        t_half: usize,
+    ) -> f64 {
+        let mut dist_sq = 0.0f64;
+        let mut count = 0usize;
+        let ty_start = t_half.min(py).min(sy);
+        let ty_end = (height - py).min(height - sy).min(t_half + 1);
+        let tx_start = t_half.min(px).min(sx);
+        let tx_end = (width - px).min(width - sx).min(t_half + 1);
+        for dy_offset in 0..(ty_start + ty_end) {
+            let dy = dy_offset as isize - ty_start as isize;
+            let p_row = (py as isize + dy) as usize;
+            let s_row = (sy as isize + dy) as usize;
+            for dx_offset in 0..(tx_start + tx_end) {
+                let dx = dx_offset as isize - tx_start as isize;
+                let p_col = (px as isize + dx) as usize;
+                let s_col = (sx as isize + dx) as usize;
+                let diff = src[p_row * width + p_col] - src[s_row * width + s_col];
+                dist_sq += diff * diff;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            0.0
+        } else {
+            dist_sq / count as f64
         }
     }
 
