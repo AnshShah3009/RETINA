@@ -199,7 +199,10 @@ fn create_rectification_map(
     Ok((map_x, map_y))
 }
 
-/// Remap image using coordinate maps
+/// Remap image using coordinate maps.
+///
+/// Linear sampling matches `cv_imgproc` remap: each tap outside the source is
+/// the constant border (0), and the blend is rounded half-to-even.
 fn remap_image(src: &GrayImage, map_x: &[f32], map_y: &[f32]) -> GrayImage {
     let width = src.width();
     let height = src.height();
@@ -208,17 +211,7 @@ fn remap_image(src: &GrayImage, map_x: &[f32], map_y: &[f32]) -> GrayImage {
     for y in 0..height {
         for x in 0..width {
             let idx = (y * width + x) as usize;
-            let src_x = map_x[idx] as i32;
-            let src_y = map_y[idx] as i32;
-
-            // Bilinear interpolation
-            let value = if src_x >= 0 && src_x < width as i32 && src_y >= 0 && src_y < height as i32
-            {
-                bilinear_interpolate(src, map_x[idx], map_y[idx])
-            } else {
-                0
-            };
-
+            let value = bilinear_interpolate(src, map_x[idx], map_y[idx]);
             dst.put_pixel(x, y, image::Luma([value]));
         }
     }
@@ -226,27 +219,42 @@ fn remap_image(src: &GrayImage, map_x: &[f32], map_y: &[f32]) -> GrayImage {
     dst
 }
 
-/// Bilinear interpolation for pixel value
+/// Bilinear sample with a constant-0 border, then half-to-even quantisation.
+///
+/// `floor` is kept as a signed coordinate. Casting a negative floor to `u32`
+/// wraps to `u32::MAX`, and `(-0.1) as i32` is 0, so a truncating inside test
+/// used to accept that sample and then index off the image.
 fn bilinear_interpolate(img: &GrayImage, x: f32, y: f32) -> u8 {
-    let x0 = x.floor() as u32;
-    let y0 = y.floor() as u32;
-    let x1 = (x0 + 1).min(img.width() - 1);
-    let y1 = (y0 + 1).min(img.height() - 1);
-
+    let x0 = x.floor() as i64;
+    let y0 = y.floor() as i64;
+    let x1 = x0.saturating_add(1);
+    let y1 = y0.saturating_add(1);
     let dx = x - x0 as f32;
     let dy = y - y0 as f32;
 
-    let i00 = img.get_pixel(x0, y0)[0] as f32;
-    let i01 = img.get_pixel(x0, y1)[0] as f32;
-    let i10 = img.get_pixel(x1, y0)[0] as f32;
-    let i11 = img.get_pixel(x1, y1)[0] as f32;
+    let i00 = sample_constant_border(img, x0, y0);
+    let i10 = sample_constant_border(img, x1, y0);
+    let i01 = sample_constant_border(img, x0, y1);
+    let i11 = sample_constant_border(img, x1, y1);
 
-    let value = i00 * (1.0 - dx) * (1.0 - dy)
-        + i10 * dx * (1.0 - dy)
-        + i01 * (1.0 - dx) * dy
-        + i11 * dx * dy;
+    // Same association as imgproc's bilinear lerp.
+    let v0 = i00 * (1.0 - dx) + i10 * dx;
+    let v1 = i01 * (1.0 - dx) + i11 * dx;
+    let value = v0 * (1.0 - dy) + v1 * dy;
 
-    value.clamp(0.0, 255.0) as u8
+    value.round_ties_even().clamp(0.0, 255.0) as u8
+}
+
+fn sample_constant_border(img: &GrayImage, x: i64, y: i64) -> f32 {
+    if x < 0 || y < 0 || x > u32::MAX as i64 || y > u32::MAX as i64 {
+        return 0.0;
+    }
+    let (x, y) = (x as u32, y as u32);
+    if x >= img.width() || y >= img.height() {
+        0.0
+    } else {
+        img.get_pixel(x, y)[0] as f32
+    }
 }
 
 /// Check if stereo pair is properly rectified
@@ -338,6 +346,23 @@ mod tests {
         }
 
         (left, right)
+    }
+
+    #[test]
+    fn remap_linear_half_up_and_negative_sample_uses_border() {
+        // Pixels [0, 1]. x = 0.6 is the linear blend 0.6, which imgproc rounds
+        // half-to-even to 1; truncating `as u8` yields 0. x = -0.1 is outside,
+        // so the constant border fill is the sample — `(-0.1) as i32` is 0 and
+        // used to pass the inside test, then `floor` cast to `u32::MAX`.
+        let mut img = GrayImage::new(2, 1);
+        img.put_pixel(0, 0, Luma([0]));
+        img.put_pixel(1, 0, Luma([1]));
+
+        let rounded = remap_image(&img, &[0.6, 0.0], &[0.0, 0.0]);
+        assert_eq!(rounded.get_pixel(0, 0)[0], 1);
+
+        let outside = remap_image(&img, &[-0.1, 0.0], &[0.0, 0.0]);
+        assert_eq!(outside.get_pixel(0, 0)[0], 0);
     }
 
     #[test]
