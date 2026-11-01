@@ -98,11 +98,17 @@ fn next_frame_index(directory: &Path, prefix: &str) -> Result<usize> {
         let Some(rest) = rest.strip_prefix('_') else {
             continue;
         };
-        if let Some(index) = rest
-            .strip_suffix(".png")
-            .and_then(|digits| digits.parse::<usize>().ok())
-        {
-            next = next.max(index + 1);
+        // The extension is matched case-insensitively for the same reason the
+        // reader's `is_frame_path` is: `f_000010.PNG` is a frame too, and a
+        // writer that overlooked it restarted at zero and interleaved the new
+        // frames with the existing ones.
+        let Some((digits, ext)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        if ext.eq_ignore_ascii_case("png") {
+            if let Ok(index) = digits.parse::<usize>() {
+                next = next.max(index + 1);
+            }
         }
     }
 
