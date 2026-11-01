@@ -345,7 +345,12 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
 
-        std::thread::sleep(Duration::from_millis(100));
+        // Poll with a deadline: a fixed 100 ms sleep failed when the whole
+        // workspace's tests loaded the machine and the job had not run yet.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while counter.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
