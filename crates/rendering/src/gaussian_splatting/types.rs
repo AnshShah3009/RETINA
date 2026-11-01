@@ -337,9 +337,10 @@ impl Gaussian {
     pub fn project(
         &self,
         view_matrix: &Matrix3x4<f32>,
-        focal_length: f32,
-        width: u32,
-        height: u32,
+        focal_x: f32,
+        focal_y: f32,
+        cx: f32,
+        cy: f32,
     ) -> ProjectedGaussian {
         let pos = self.position.coords;
         let view_pos = Vector3::new(
@@ -362,18 +363,23 @@ impl Gaussian {
             return ProjectedGaussian::invalid();
         }
 
-        let px = view_pos[0] / depth * focal_length + width as f32 / 2.0;
-        let py = view_pos[1] / depth * focal_length + height as f32 / 2.0;
+        // Pinhole: u = fx * X/Z + cx, v = fy * Y/Z + cy. One focal length and
+        // the image centre are that formula only when fx = fy and the principal
+        // point is (width/2, height/2).
+        let px = view_pos[0] / depth * focal_x + cx;
+        let py = view_pos[1] / depth * focal_y + cy;
 
         let cov = self.covariance();
 
+        // Screen-space Jacobian of (u, v, 1/Z). The principal point is constant,
+        // so only the two focal lengths appear, and they scale different rows.
         let jw = Matrix3::new(
-            focal_length / depth,
+            focal_x / depth,
             0.0,
-            -focal_length * view_pos[0] / (depth * depth),
+            -focal_x * view_pos[0] / (depth * depth),
             0.0,
-            focal_length / depth,
-            -focal_length * view_pos[1] / (depth * depth),
+            focal_y / depth,
+            -focal_y * view_pos[1] / (depth * depth),
             0.0,
             0.0,
             1.0 / depth,
