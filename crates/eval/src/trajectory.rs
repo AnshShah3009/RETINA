@@ -34,6 +34,11 @@ pub enum Alignment {
     /// Align with a rigid SE(3) transform (Umeyama, scale forced to 1).
     Se3,
     /// Align with a similarity Sim(3) transform (Umeyama, scale estimated).
+    ///
+    /// The scale is dimensionless and therefore independent of the unit the
+    /// trajectory is expressed in; the identity scale (`1.0`) is returned only
+    /// when the camera centres of the estimate all coincide, which leaves no
+    /// extent to measure a scale against.
     Sim3,
 }
 
@@ -480,7 +485,30 @@ fn umeyama(
     }
     let rotation = u * correction * v_t;
 
-    let scale = if with_scale && variance_src > 1e-12 {
+    // The degeneracy guard is a test for *zero*, not for "small". Umeyama's
+    // scale is a ratio of two quantities that both carry the length scale of
+    // `src` - `trace(D S)` grows with `src` once and `variance_src` with `src`
+    // squared - so the ratio is dimensionless and the same scene measured in
+    // millimetres or in kilometres must yield the same number.
+    //
+    // An absolute threshold broke that. `variance_src` is a *squared* length, so
+    // `variance_src > 1e-12` means "a spread of at least one micrometre": a
+    // trajectory stored in units smaller than that took the `else` branch and
+    // reported `scale = 1.0`, the same value rigid alignment returns, while
+    // `is_valid` stayed `true`. Measured on a cloud of extent 1 and its exact
+    // 2x copy (correct scale 0.5, correct ATE 0), scaled down by `k`:
+    //
+    // ```text
+    // k = 1e-6 -> scale 0.5000, rmse 4.4e-16 of the extent   (correct)
+    // k = 1e-7 -> scale 1.0000, rmse 4.5e-01 of the extent   (45% of the scene)
+    // ```
+    //
+    // Nothing about a scene changes when the same scene is written in smaller
+    // units, so neither may the answer. Only a `src` whose points all coincide
+    // (`variance_src == 0`) leaves the scale genuinely undefined; a `src` with
+    // no finite variance cannot be normalised either. Both keep the identity
+    // scale, which is what `Alignment::Se3` reports and is documented above.
+    let scale = if with_scale && variance_src > 0.0 && variance_src.is_finite() {
         (singular[0] * correction[(0, 0)]
             + singular[1] * correction[(1, 1)]
             + singular[2] * correction[(2, 2)])

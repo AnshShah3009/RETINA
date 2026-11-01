@@ -436,6 +436,93 @@ fn help_and_no_arguments_print_usage() {
     }
 }
 
+/// An RPE gap that leaves no pair to compare is refused, not reported as NaN.
+///
+/// `Trajectory::rpe` needs one pair of poses `delta` apart, so a run whose
+/// associated trajectory is no longer than the gap has nothing to measure and
+/// every RPE statistic is `NaN`. That is the same "metric-shaped hole in a
+/// successful report" that `--rpe-delta 0` was refused for, and it is reachable
+/// with the *default* flags from a two-line input: a single pose on each side
+/// pairs fine (so the run gets past association), ATE is computed, and the
+/// report printed `RPE translation rmse (delta=1): NaN m` while exiting 0.
+/// A truncation to one associated pose, or a `--rpe-delta` larger than the
+/// sequence, reproduces it too.
+#[test]
+fn an_rpe_gap_with_no_pair_to_compare_is_refused() {
+    let dir = TempDir::new("rpe_no_pair");
+    let one = dir.write("one.txt", "1.0 0.0 0.0 0.0 0 0 0 1\n");
+    let one_copy = dir.write("one_gt.txt", "1.0 0.0 0.0 0.0 0 0 0 1\n");
+
+    // Default `--rpe-delta 1` against a single associated pose: no pair exists.
+    let output = run(&[
+        "trajectory",
+        "--estimate",
+        path_str(&one),
+        "--ground-truth",
+        path_str(&one_copy),
+        "--format",
+        "tum",
+    ]);
+    assert!(
+        !output.status.success(),
+        "a gap with no pair to compare must not exit 0:\n{}",
+        stdout_of(&output)
+    );
+    assert!(stdout_of(&output).is_empty(), "no report on failure");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("--rpe-delta"),
+        "the failure must name the flag that was out of range: {stderr}"
+    );
+
+    // A gap larger than the sequence is the same defect by a different route.
+    let three = dir.write(
+        "three.txt",
+        "0.0 0.0 0.0 0.0 0 0 0 1\n0.1 1.0 0.0 0.0 0 0 0 1\n0.2 2.0 0.0 0.0 0 0 0 1\n",
+    );
+    let three_copy = dir.write(
+        "three_gt.txt",
+        "0.0 0.0 0.0 0.0 0 0 0 1\n0.1 1.0 0.0 0.0 0 0 0 1\n0.2 2.0 0.0 0.0 0 0 0 1\n",
+    );
+    let output = run(&[
+        "trajectory",
+        "--estimate",
+        path_str(&three),
+        "--ground-truth",
+        path_str(&three_copy),
+        "--format",
+        "tum",
+        "--rpe-delta",
+        "3",
+    ]);
+    assert!(
+        !output.status.success(),
+        "a gap past the last pose must not exit 0:\n{}",
+        stdout_of(&output)
+    );
+    assert!(stderr_of(&output).contains("--rpe-delta"), "{:?}", output);
+
+    // Control: a gap that does leave a pair reports a real number, not NaN.
+    let output = run(&[
+        "trajectory",
+        "--estimate",
+        path_str(&three),
+        "--ground-truth",
+        path_str(&three_copy),
+        "--format",
+        "tum",
+        "--rpe-delta",
+        "2",
+    ]);
+    assert!(output.status.success(), "stderr: {}", stderr_of(&output));
+    let stdout = stdout_of(&output);
+    assert!(stdout.contains("delta=2"), "{stdout}");
+    assert!(
+        !stdout.contains("NaN"),
+        "RPE with a pair is real:\n{stdout}"
+    );
+}
+
 /// EuRoC poses are associated by timestamp, not by index. Ground truth is
 /// 200 Hz and estimates are usually 20 Hz; index pairing compared estimate
 /// pose k with the ground truth 5 ms * k later, so two identical x = t
