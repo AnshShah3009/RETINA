@@ -208,7 +208,7 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
             }
             let query_point = [p.x, p.y, p.z];
             let neighbors: Vec<&PointWrapper> = tree
-                .nearest_neighbor_iter(&query_point)
+                .nearest_neighbor_iter(query_point)
                 .skip(1)
                 .take(k)
                 .collect();
@@ -279,7 +279,7 @@ pub fn orient_normals(pc: &mut PointCloud, k: usize) {
 
     while let Some(i) = queue.pop() {
         let q = [pc.points[i].x, pc.points[i].y, pc.points[i].z];
-        let neighbors: Vec<_> = tree.nearest_neighbor_iter(&q).skip(1).take(k).collect();
+        let neighbors: Vec<_> = tree.nearest_neighbor_iter(q).skip(1).take(k).collect();
 
         for nb in neighbors {
             let j = nb.0;
@@ -307,7 +307,7 @@ pub fn orient_normals(pc: &mut PointCloud, k: usize) {
         let mut comp_queue = vec![i];
         while let Some(ci) = comp_queue.pop() {
             let q = [pc.points[ci].x, pc.points[ci].y, pc.points[ci].z];
-            let neighbors: Vec<_> = tree.nearest_neighbor_iter(&q).skip(1).take(k).collect();
+            let neighbors: Vec<_> = tree.nearest_neighbor_iter(q).skip(1).take(k).collect();
             for nb in neighbors {
                 let j = nb.0;
                 if visited[j] {
@@ -450,7 +450,7 @@ pub fn remove_statistical_outliers(
             // nearest_neighbor_iter returns k+1 including itself (dist 0).
             // take(k+1) gives nearest neighbors.
             let neighbors: Vec<&PointWrapper> = tree
-                .nearest_neighbor_iter(&query_point)
+                .nearest_neighbor_iter(query_point)
                 .take(k + 1)
                 .collect();
 

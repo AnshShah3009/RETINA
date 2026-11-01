@@ -7,7 +7,7 @@
 
 use crate::retrieval::hamming_distance;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::collections::{HashMap, HashSet};
 
 /// A multi-table LSH index for fixed-length binary descriptors.

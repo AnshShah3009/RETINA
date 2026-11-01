@@ -4,7 +4,7 @@
 
 use cv_core::point_cloud::PointCloud;
 use nalgebra::{Point3, Vector3};
-use rand::Rng;
+use rand::RngExt;
 use rand_distr::Distribution;
 use rand_distr::weighted::WeightedIndex;
 use rayon::prelude::*;

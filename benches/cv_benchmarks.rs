@@ -3,8 +3,9 @@
 //!
 //! Compares CPU vs GPU performance for stereo matching operations
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use image::{GrayImage, Luma};
+use std::hint::black_box;
 use std::time::Duration;
 
 /// Create synthetic stereo pair with known disparity

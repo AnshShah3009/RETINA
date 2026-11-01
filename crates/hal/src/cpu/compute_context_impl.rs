@@ -2045,7 +2045,7 @@ impl ComputeContext for CpuBackend {
 
                     // Find neighbors
                     let neighbors = tree
-                        .nearest_neighbor_iter(&[p.x, p.y, p.z])
+                        .nearest_neighbor_iter([p.x, p.y, p.z])
                         .take(k)
                         .map(|neighbor| Vector3::new(neighbor[0], neighbor[1], neighbor[2]))
                         .collect::<Vec<_>>();

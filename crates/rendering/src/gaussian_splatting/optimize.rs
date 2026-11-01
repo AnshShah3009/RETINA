@@ -1,5 +1,5 @@
 use nalgebra::{Point3, Vector3};
-use rand::Rng;
+use rand::RngExt;
 
 use super::rasterize::{DifferentiableRasterizer, GaussianGradient};
 use super::types::{Gaussian, GaussianCloud, unit_quaternion};

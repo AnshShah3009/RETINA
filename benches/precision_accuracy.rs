@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use cv_core::{CpuTensor, Tensor, TensorShape, float::Float};
 use cv_hal::context::ComputeContext;
 use cv_hal::cpu::CpuBackend;
+use std::hint::black_box;
 
 #[cfg(feature = "half-precision")]
 use half::{bf16, f16};

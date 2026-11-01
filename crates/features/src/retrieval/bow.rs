@@ -160,7 +160,7 @@ fn merge_accumulate(a: &BowVector, b: &BowVector, mut f: impl FnMut(f32, f32, f3
 mod tests {
     use super::*;
     use crate::retrieval::test_support::{random_descriptor, seeded};
-    use rand::Rng;
+    use rand::RngExt;
 
     fn sample_vocabulary() -> (Vocabulary, Vec<Vec<u8>>) {
         let mut rng = seeded(11);

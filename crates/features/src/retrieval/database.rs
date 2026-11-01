@@ -112,7 +112,7 @@ impl BowDatabase {
 mod tests {
     use super::*;
     use crate::retrieval::test_support::{flip_bits, random_descriptor, seeded};
-    use rand::Rng;
+    use rand::RngExt;
 
     const DIM: usize = 32;
     const POOL_SIZE: usize = 50;

@@ -88,7 +88,7 @@ pub fn create_plane_point_cloud(
     size: f32,
     num_points: usize,
 ) -> PointCloud {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
 
     let up = if normal.z.abs() < 0.9 {

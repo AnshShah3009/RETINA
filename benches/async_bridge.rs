@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use image::GrayImage;
+use std::hint::black_box;
 use tokio::runtime::Runtime;
 
 fn benchmark_async_bridge(c: &mut Criterion) {

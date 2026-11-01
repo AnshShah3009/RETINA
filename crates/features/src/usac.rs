@@ -5,7 +5,7 @@
 //! - **MAGSAC**: Margin-adaptive σ-consensus scoring instead of hard threshold
 
 use nalgebra::Point2;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use std::collections::HashSet;
 
 /// Sampling method for RANSAC
@@ -127,7 +127,7 @@ where
         return None;
     }
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut best_model: Option<M> = None;
     let mut best_inliers = 0;
     let mut best_score = f64::MAX;
@@ -505,8 +505,8 @@ mod tests {
 
     #[test]
     fn test_usac_line_fit() {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
+        use rand::RngExt;
+        let mut rng = rand::rng();
 
         let mut pts = Vec::new();
         // Ground truth: y = 2x + 5

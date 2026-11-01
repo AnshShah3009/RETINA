@@ -6,7 +6,7 @@
 //!   cargo bench --bench pipeline_3d -- marching_cubes
 //!   cargo bench --bench pipeline_3d -- kdtree
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use cv_3d::TSDFVolume;
 use cv_3d::mesh::reconstruction::poisson_reconstruction;
 use cv_3d::spatial::KDTree;
@@ -19,6 +19,7 @@ use cv_hal::gpu::GpuContext;
 use cv_hal::storage::WgpuGpuStorage;
 use cv_registration::registration_icp_point_to_plane;
 use nalgebra::{Matrix4, Point3, Vector3};
+use std::hint::black_box;
 use std::marker::PhantomData;
 use std::time::Duration;
 
