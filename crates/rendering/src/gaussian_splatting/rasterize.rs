@@ -50,6 +50,34 @@ impl From<cv_core::CameraIntrinsicsF32> for Camera {
         camera.projection_matrix[(0, 0)] = intrinsics.fx.max(f32::MIN_POSITIVE) / half_width;
         camera.projection_matrix[(1, 1)] = intrinsics.fy.max(f32::MIN_POSITIVE) / half_height;
 
+        // ...and the same **principal point**. `Gaussian::project` draws at
+        // `u = fx X/Z + cx`, and the two lines above only fix the `fx`/`fy`
+        // part of that. `Camera::new`'s matrix is the *symmetric* perspective,
+        // `P[0][2] = P[1][2] = 0`, which is right for the centred principal
+        // point it itself stores (`cx = width/2`): the pinhole's offset term
+        // cancels, since `(0 + 1) * width/2 = width/2 = cx`.
+        //
+        // For an off-centre principal point the two readings are different
+        // cameras. The stored matrix sends the optical axis (`X = Y = 0`) to
+        // the image centre while the renderer sends it to `(cx, cy)`.
+        //
+        // Measured, `fx, fy = 500, 200` and `cx, cy = 100, 400` on 640x480. The
+        // optical axis (`X = Y = 0`) came out at the image centre `(320, 240)`
+        // instead of the principal point `(100, 400)`, and the camera-frame
+        // point `(0.3, -0.2, 2.0)` at `(395.0, 220.0)` instead of
+        // `(175.0, 380.0)` - a disagreement of 220 px and 160 px.
+        //
+        // A 3x4 projection maps `(X, Y, Z, 1)` to clip `xyz` and the divide is
+        // by the eye depth `Z`, so NDC is `P00 X/Z + P02`. Recovering
+        // `pixel = (ndc + 1) * width/2 = fx X/Z + cx` gives
+        //
+        //     P[0][2] = cx / (width/2) - 1
+        //
+        // and likewise for the vertical entry. With `cx = width/2` this is
+        // exactly `0`, so the centred case `Camera::new` produces is unchanged.
+        camera.projection_matrix[(0, 2)] = intrinsics.cx / half_width - 1.0;
+        camera.projection_matrix[(1, 2)] = intrinsics.cy / half_height - 1.0;
+
         camera
     }
 }
