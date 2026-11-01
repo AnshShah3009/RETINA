@@ -106,27 +106,38 @@ impl Stitcher {
             }
 
             let iw = img.width();
-            for y in 0..base_h {
-                for sx in 0..iw {
-                    let dx = shift + sx;
-                    let w_old = weight[dx as usize];
+            // The weight is per output column, not per pixel: it counts how many
+            // images have contributed to that column. Reading it and adding this
+            // image's contribution once per *row* made the blend alpha depend on
+            // the row index - `w_old = 1 + y` instead of 1 - so the same column of
+            // the same frame was blended differently on every row, and a panorama
+            // of row-constant frames was not row-constant. Keep the column outer
+            // and touch its weight once.
+            for sx in 0..iw {
+                let dx = shift + sx;
+                let w_old = weight[dx as usize];
+                let alpha = if w_old <= 0.0 {
+                    1.0
+                } else {
+                    // Classic weighted blend: the first `SEAM_WIDTH`
+                    // columns of the overlap ramp towards the new image, the
+                    // rest keeps the running average's balance. `w` counts
+                    // how many images have already contributed, so a column
+                    // stitched three times is not over-weighted.
+                    (SEAM_WIDTH as f32 / (SEAM_WIDTH as f32 + w_old)).min(1.0)
+                };
+                for y in 0..base_h {
                     let src = img.get_pixel(sx, y)[0] as f32;
                     let new = if w_old <= 0.0 {
                         // Nothing behind this column: the image defines it.
                         src
                     } else {
                         let dst = canvas.get_pixel(dx, y)[0] as f32;
-                        // Classic weighted blend: the first `SEAM_WIDTH`
-                        // columns of the overlap ramp towards the new image, the
-                        // rest keeps the running average's balance. `w` counts
-                        // how many images have already contributed, so a column
-                        // stitched three times is not over-weighted.
-                        let alpha = (SEAM_WIDTH as f32 / (SEAM_WIDTH as f32 + w_old)).min(1.0);
                         dst * (1.0 - alpha) + src * alpha
                     };
                     canvas.put_pixel(dx, y, image::Luma([new as u8]));
-                    weight[dx as usize] += 1.0;
                 }
+                weight[dx as usize] += 1.0;
             }
         }
 
