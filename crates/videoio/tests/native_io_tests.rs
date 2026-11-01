@@ -308,6 +308,38 @@ fn test_png_sequence_writer_does_not_clobber_existing_frames() {
     );
 }
 
+/// Continuation must recognise the same extensions the reader does.
+///
+/// The reader treats `frame.PNG` as a frame (mixed-case directories are read),
+/// but the writer's "continue the sequence" scan only matched a lower-case
+/// `.png`. A directory of upper-case frames therefore looked empty to the
+/// writer, which restarted at zero: the new frames were numbered 0, 1, 2
+/// alongside the existing 0, 1, 2, and the reader — ordering equal frame
+/// numbers by extension case — interleaved them into 0, 0, 1, 1, 2, 2, which
+/// is not the temporal order. Every frame after the restart is out of place.
+#[test]
+fn test_png_sequence_writer_continues_uppercase_extension_frames() {
+    let dir = tempdir().expect("Failed to create temp dir");
+    for (i, v) in [10u8, 20, 30].iter().enumerate() {
+        solid(*v)
+            .save(dir.path().join(format!("seq_{:06}.PNG", i)))
+            .unwrap();
+    }
+
+    let mut writer = PngSequenceWriter::new(dir.path(), "seq").unwrap();
+    for v in [100u8, 110, 120] {
+        writer.write(&solid(v)).unwrap();
+    }
+    drop(writer);
+
+    let mut capture = PngSequenceCapture::new(dir.path()).unwrap();
+    assert_eq!(
+        drain(&mut capture),
+        vec![10, 20, 30, 100, 110, 120],
+        "a writer must continue past existing upper-case frames, not restart at zero"
+    );
+}
+
 /// Drives the real V4L2 backend when a camera is present. CI has none, and a
 /// machine where the device is busy is not a failure of this crate, so every
 /// environmental failure prints a note and returns instead of failing.
