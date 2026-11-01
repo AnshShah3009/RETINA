@@ -1,7 +1,24 @@
 use cv_core::Tensor;
 use cv_hal::compute::ComputeDevice;
-pub use faer::sparse::Triplet;
 use nalgebra::DVector;
+
+/// One nonzero of a sparse matrix in coordinate form.
+///
+/// This used to be `faer::sparse::Triplet`. faer pulls `gemm`, which depends
+/// on the unmaintained `paste` crate, and the only thing we used from faer
+/// was this three-field record.
+#[derive(Clone, Copy, Debug)]
+pub struct Triplet<I, J, T> {
+    pub row: I,
+    pub col: J,
+    pub val: T,
+}
+
+impl<I, J, T> Triplet<I, J, T> {
+    pub fn new(row: I, col: J, val: T) -> Self {
+        Self { row, col, val }
+    }
+}
 
 /// Sparse Matrix representation in CSR format for GPU optimization
 pub struct SparseMatrix {

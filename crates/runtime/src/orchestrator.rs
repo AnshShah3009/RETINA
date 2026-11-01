@@ -316,7 +316,7 @@ pub enum ExecutionMode {
 
 use parking_lot::RwLock;
 
-static EXECUTION_MODE: RwLock<ExecutionMode> = parking_lot::const_rwlock(ExecutionMode::Normal);
+static EXECUTION_MODE: RwLock<ExecutionMode> = RwLock::new(ExecutionMode::Normal);
 
 /// Set the process-wide execution mode.
 pub fn set_execution_mode(mode: ExecutionMode) {
