@@ -4,7 +4,7 @@
 //! Run with: cargo run --example registration_icp
 
 use cv_core::PointCloud;
-use cv_registration::{registration_icp_point_to_plane, ICPResult};
+use cv_registration::{ICPResult, registration_icp_point_to_plane};
 use nalgebra::{Matrix4, Point3, Vector3};
 
 fn main() {

@@ -5,7 +5,7 @@
 
 use cv_3d::{
     mesh::TriangleMesh,
-    raycasting::{cast_ray_mesh, Ray},
+    raycasting::{Ray, cast_ray_mesh},
 };
 use nalgebra::{Point3, Vector3};
 

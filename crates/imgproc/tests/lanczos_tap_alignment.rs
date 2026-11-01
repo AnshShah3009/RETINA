@@ -6,7 +6,7 @@
 //! identity warp of `[0, 10, 20, ..]` returned `[10, 20, 30, ..]`. Cubic, on
 //! the same path, returned the input, which is what isolated the offset.
 
-use cv_imgproc::{remap, warp_affine_ex, BorderMode, Interpolation};
+use cv_imgproc::{BorderMode, Interpolation, remap, warp_affine_ex};
 use image::GrayImage;
 
 fn ramp() -> GrayImage {

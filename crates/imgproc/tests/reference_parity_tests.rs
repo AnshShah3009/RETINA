@@ -10,7 +10,7 @@
 //! normalised Gaussian) agreed, which is why this survived: `[1, 1, 1]` (Σ=3),
 //! `[1, 2, 1]` (Σ=4) and the derivative `[-1, 0, 1]` (Σ=0) did not.
 
-use cv_imgproc::convolve::{gaussian_kernel_1d, BorderMode, Kernel};
+use cv_imgproc::convolve::{BorderMode, Kernel, gaussian_kernel_1d};
 use image::{GrayImage, Luma};
 
 /// Low-dynamic-range pseudo-random image so that the `u8` clamp cannot mask a

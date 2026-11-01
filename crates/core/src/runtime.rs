@@ -104,24 +104,24 @@ impl BufferPool {
         // Try preferred shard first, then linear search others in same bucket
         for i in 0..8 {
             let s = (shard_idx + i) % 8;
-            if let Ok(mut bucket) = self.buckets[bucket_idx][s].try_lock() {
-                if let Some(pos) = bucket.iter().position(|b| b.capacity() >= min_size) {
-                    let mut buf = bucket.swap_remove(pos);
-                    buf.clear();
-                    return buf;
-                }
+            if let Ok(mut bucket) = self.buckets[bucket_idx][s].try_lock()
+                && let Some(pos) = bucket.iter().position(|b| b.capacity() >= min_size)
+            {
+                let mut buf = bucket.swap_remove(pos);
+                buf.clear();
+                return buf;
             }
         }
 
         // Fallback to larger buckets if current one is empty
         for b in (bucket_idx + 1)..4 {
             for s in 0..8 {
-                if let Ok(mut bucket) = self.buckets[b][s].try_lock() {
-                    if let Some(pos) = bucket.iter().position(|b| b.capacity() >= min_size) {
-                        let mut buf = bucket.swap_remove(pos);
-                        buf.clear();
-                        return buf;
-                    }
+                if let Ok(mut bucket) = self.buckets[b][s].try_lock()
+                    && let Some(pos) = bucket.iter().position(|b| b.capacity() >= min_size)
+                {
+                    let mut buf = bucket.swap_remove(pos);
+                    buf.clear();
+                    return buf;
                 }
             }
         }
@@ -139,12 +139,12 @@ impl BufferPool {
         let bucket_idx = Self::get_bucket_index(cap);
         let shard_idx = Self::get_shard_index();
 
-        if let Ok(mut bucket) = self.buckets[bucket_idx][shard_idx].lock() {
-            if bucket.len() < 32 {
-                // Sharded limit
-                buf.clear();
-                bucket.push(buf);
-            }
+        if let Ok(mut bucket) = self.buckets[bucket_idx][shard_idx].lock()
+            && bucket.len() < 32
+        {
+            // Sharded limit
+            buf.clear();
+            bucket.push(buf);
         }
     }
 

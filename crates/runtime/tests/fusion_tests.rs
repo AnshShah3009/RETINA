@@ -12,7 +12,7 @@ fn test_kernel_fuser_creation() {
 #[test]
 fn test_fusion_rule_node_match() {
     // Create nodes that would match a sobel+threshold pattern
-    let nodes = vec![
+    let nodes = [
         PipelineNode::Kernel {
             name: "sobel".to_string(),
             inputs: vec![BufferId(0)],
@@ -72,7 +72,7 @@ fn test_fused_kernel_structure() {
 
 #[test]
 fn test_kernel_fuser_optimize() {
-    let mut fuser = KernelFuser::new();
+    let fuser = KernelFuser::new();
 
     let nodes = vec![
         PipelineNode::Kernel {

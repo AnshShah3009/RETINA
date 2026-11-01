@@ -227,11 +227,7 @@ fn ray_triangle_intersection(
     // Only the distance is read by callers; the intersection point, face
     // normal and barycentric weights (formerly in `RayHitInfo`) were computed
     // and discarded. They are gone too, in keeping with the c8 dead-field cleanup.
-    if t > epsilon {
-        Some(t)
-    } else {
-        None
-    }
+    if t > epsilon { Some(t) } else { None }
 }
 
 /// Triangle index returned by [`closest_point_on_mesh`] when the mesh has no

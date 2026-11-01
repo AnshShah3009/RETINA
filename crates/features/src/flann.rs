@@ -97,10 +97,10 @@ impl FlannIndex {
     /// neighbor of any of them. Returning them at distance 0 is how a short
     /// query used to match a longer descriptor on the shared prefix alone.
     pub fn search_knn(&self, query: &[u8], k: usize) -> Vec<(usize, u32)> {
-        if let Some(stored) = self.trees.first().and_then(|t| t.points.first()) {
-            if stored.len() != query.len() {
-                return Vec::new();
-            }
+        if let Some(stored) = self.trees.first().and_then(|t| t.points.first())
+            && stored.len() != query.len()
+        {
+            return Vec::new();
         }
         let mut candidates = BinaryHeap::new();
 
@@ -364,13 +364,13 @@ impl FlannMatcher {
             let best_match = knn[0];
 
             // Apply ratio test if enabled
-            if let Some(ratio) = self.ratio_threshold {
-                if knn.len() >= 2 {
-                    let second_match = knn[1];
-                    let ratio_calc = best_match.1 as f32 / second_match.1 as f32;
-                    if ratio_calc > ratio {
-                        continue;
-                    }
+            if let Some(ratio) = self.ratio_threshold
+                && knn.len() >= 2
+            {
+                let second_match = knn[1];
+                let ratio_calc = best_match.1 as f32 / second_match.1 as f32;
+                if ratio_calc > ratio {
+                    continue;
                 }
             }
 
@@ -496,7 +496,7 @@ mod tests {
             index.search_knn(&short, 3).is_empty(),
             "a shorter query was returned as a neighbor"
         );
-        assert_eq!(hamming_distance(&short, &vec![0u8; 32]), u32::MAX);
+        assert_eq!(hamming_distance(&short, &[0u8; 32]), u32::MAX);
         assert_eq!(hamming_distance(&[0b1111_0000], &[0b1111_1111]), 4);
     }
 

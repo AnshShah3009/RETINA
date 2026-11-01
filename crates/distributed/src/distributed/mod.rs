@@ -2,7 +2,7 @@ mod file;
 mod shared_memory;
 
 pub use file::FileCoordinator;
-pub use shared_memory::{ShmCoordinator, SHM_TOTAL_SIZE};
+pub use shared_memory::{SHM_TOTAL_SIZE, ShmCoordinator};
 
 use cv_hal::DeviceId;
 use std::collections::HashMap;

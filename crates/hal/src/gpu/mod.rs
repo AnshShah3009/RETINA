@@ -3,7 +3,7 @@ use crate::context::{
     TemplateMatchMethod, ThresholdType, WarpType,
 };
 use crate::{BackendType, DeviceId, SubmissionIndex};
-use cv_core::{storage::Storage, Tensor};
+use cv_core::{Tensor, storage::Storage};
 use futures::executor::block_on;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -147,7 +147,7 @@ impl GpuContext {
                 return Err(crate::Error::InvalidInput(format!(
                     "Unknown kernel name: {}",
                     name
-                )))
+                )));
             }
         };
         Ok(source.to_string())
@@ -556,10 +556,10 @@ impl GpuContext {
     /// the device limits as a conservative lower bound (typically 25-50% of actual
     /// VRAM). Override with `CV_GPU_MEMORY_MB` env var for precise control.
     pub fn estimated_memory_mb(&self) -> u32 {
-        if let Ok(val) = std::env::var("CV_GPU_MEMORY_MB") {
-            if let Ok(mb) = val.parse::<u32>() {
-                return mb;
-            }
+        if let Ok(val) = std::env::var("CV_GPU_MEMORY_MB")
+            && let Ok(mb) = val.parse::<u32>()
+        {
+            return mb;
         }
         let max_buffer = self.device.limits().max_buffer_size;
         // max_buffer_size is the largest single allocation, typically 256MB-2GB.

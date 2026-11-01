@@ -508,22 +508,18 @@ where
                 continue;
             }
 
-            let border_is_hole;
-            let start_dir;
-            if is_outer {
+            let (border_is_hole, start_dir) = if is_outer {
                 nbd += 1;
-                border_is_hole = false;
-                start_dir = 0usize; // start search from W (left)
+                (false, 0usize) // start search from W (left)
             } else if is_hole && fxy > 0 {
                 nbd += 1;
-                border_is_hole = true;
-                start_dir = 4usize; // start search from E (right)
+                (true, 4usize) // start search from E (right)
             } else {
                 if fxy != 0 && fxy != 1 {
                     lnbd = fxy.unsigned_abs() as i32;
                 }
                 continue;
-            }
+            };
 
             // Trace contour using Moore boundary tracing
             let mut points = Vec::new();
@@ -904,7 +900,6 @@ mod tests {
 #[cfg(test)]
 mod contour_regression_tests {
     use super::*;
-    use image::{GrayImage, Luma};
 
     #[test]
     fn test_solid_rectangle_yields_single_outer_no_phantom_holes() {

@@ -6,8 +6,8 @@
 //! cargo run -p cv-localization --features synthetic --example synthetic_localization
 //! ```
 
-use cv_localization::synthetic::{generate, SyntheticConfig};
-use cv_localization::{evaluate_localization, Localizer, LocalizerConfig, Vocabulary};
+use cv_localization::synthetic::{SyntheticConfig, generate};
+use cv_localization::{Localizer, LocalizerConfig, Vocabulary, evaluate_localization};
 
 fn main() {
     let scene = generate(&SyntheticConfig::default());

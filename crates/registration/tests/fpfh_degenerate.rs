@@ -64,9 +64,11 @@ fn a_negative_or_non_finite_radius_is_rejected() {
 #[test]
 fn an_empty_cloud_is_not_an_error() {
     let pc = cv_core::PointCloud::default();
-    assert!(compute_fpfh_features(&pc, 0.1)
-        .expect("an empty cloud is not an error")
-        .is_empty());
+    assert!(
+        compute_fpfh_features(&pc, 0.1)
+            .expect("an empty cloud is not an error")
+            .is_empty()
+    );
 }
 
 /// A cloud too sparse for PCA normals must not yield zero-information

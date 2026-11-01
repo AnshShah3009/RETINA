@@ -457,7 +457,7 @@ mod tests {
         let front_visible = points
             .iter()
             .zip(visible.iter())
-            .filter(|(p, &v)| p.z > 0.5 && v)
+            .filter(|&(p, &v)| p.z > 0.5 && v)
             .count();
         let front_total = points.iter().filter(|p| p.z > 0.5).count();
         if front_total > 0 {

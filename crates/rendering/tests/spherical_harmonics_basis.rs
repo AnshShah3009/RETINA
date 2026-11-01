@@ -14,11 +14,7 @@ fn degree_three_matches_the_3dgs_reference() {
         .collect();
     let sh = SphericalHarmonics { coeffs, degree: 3 };
     let out = sh.eval(Vector3::new(0.3, -0.5, 0.8));
-    let want = [
-        -0.8259056471306162f32,
-        -0.3170826125748017,
-        0.14489843132607078,
-    ];
+    let want = [-0.825_905_6_f32, -0.317_082_6, 0.144_898_43];
     for c in 0..3 {
         assert!(
             (out[c] - want[c]).abs() < 1e-5,

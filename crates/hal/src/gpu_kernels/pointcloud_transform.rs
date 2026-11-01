@@ -1,6 +1,6 @@
-use crate::gpu::GpuContext;
 use crate::GpuTensor;
 use crate::Result;
+use crate::gpu::GpuContext;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;

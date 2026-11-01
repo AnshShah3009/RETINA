@@ -33,7 +33,7 @@ use std::path::Path;
 
 use nalgebra::{Point3, Vector3, Vector4};
 
-use super::types::{unit_quaternion, Gaussian, GaussianCloud, SphericalHarmonics};
+use super::types::{Gaussian, GaussianCloud, SphericalHarmonics, unit_quaternion};
 
 /// Degree-0 real spherical-harmonic basis constant, `1 / (2 sqrt(pi))`.
 pub const SH_C0: f32 = 0.282_094_8;

@@ -13,7 +13,7 @@ pub use cv_video::kalman::{
 pub use types::{KeyFrame, MapPoint, WorldMap};
 
 use crate::tracking::Tracker;
-use cv_core::{storage::CpuStorage, CameraIntrinsics, Pose, Tensor};
+use cv_core::{CameraIntrinsics, Pose, Tensor, storage::CpuStorage};
 
 pub struct Slam {
     pub map: WorldMap,

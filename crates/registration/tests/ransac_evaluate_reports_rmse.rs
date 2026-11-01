@@ -28,7 +28,7 @@
 
 use cv_core::point_cloud::PointCloud;
 use cv_registration::registration::{
-    registration_fgr_based_on_feature_matching, FPFHFeature, FastGlobalRegistrationOption,
+    FPFHFeature, FastGlobalRegistrationOption, registration_fgr_based_on_feature_matching,
 };
 use nalgebra::Point3;
 

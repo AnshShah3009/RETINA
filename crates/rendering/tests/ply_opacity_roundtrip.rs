@@ -15,7 +15,7 @@
 
 use cv_rendering::gaussian_splatting::io::gaussian_cloud_to_ply_string;
 use cv_rendering::gaussian_splatting::{
-    read_ply_gaussian_cloud, write_ply_gaussian_cloud, Gaussian, GaussianCloud, SphericalHarmonics,
+    Gaussian, GaussianCloud, SphericalHarmonics, read_ply_gaussian_cloud, write_ply_gaussian_cloud,
 };
 use nalgebra::{Point3, Vector3, Vector4};
 

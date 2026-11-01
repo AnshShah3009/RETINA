@@ -119,7 +119,7 @@ fn compute_normal_map_cpu(
     for y in 0..height {
         for x in 0..width {
             let idx = (y * width + x) as usize;
-            let v = vertex_map[idx];
+            let _v = vertex_map[idx];
 
             // Simple cross product of neighbors
             let mut normal = Vector3::zeros();
@@ -184,7 +184,7 @@ fn test_vertex_normals_simple_triangle() -> Result<(), Box<dyn Error>> {
 
     // Expected: all normals should point in +Z direction (cross product)
     let expected = compute_vertex_normals_cpu(&vertices, &faces);
-    let gpu = cv_hal::gpu_kernels::mesh_gpu::compute_vertex_normals(&ctx, &vertices, &faces)?;
+    let gpu = cv_hal::gpu_kernels::mesh_gpu::compute_vertex_normals(ctx, &vertices, &faces)?;
 
     // The normal should be (0, 0, 1) or (0, 0, -1) depending on winding
     assert!(
@@ -238,7 +238,7 @@ fn test_vertex_normals_cube() -> Result<(), Box<dyn Error>> {
     // All vertex normals should be unit vectors
     let normals_cpu = compute_vertex_normals_cpu(&vertices, &faces);
     let normals_gpu =
-        cv_hal::gpu_kernels::mesh_gpu::compute_vertex_normals(&ctx, &vertices, &faces)?;
+        cv_hal::gpu_kernels::mesh_gpu::compute_vertex_normals(ctx, &vertices, &faces)?;
 
     for (i, normal) in normals_cpu.iter().enumerate() {
         let len = normal.norm();
@@ -270,7 +270,7 @@ fn test_bounds_empty_mesh() -> Result<(), Box<dyn Error>> {
     let vertices: Vec<Point3<f32>> = vec![];
 
     // Empty mesh should return error
-    let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(&ctx, &vertices);
+    let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(ctx, &vertices);
     assert!(result.is_err(), "Empty mesh should return error");
 
     Ok(())
@@ -288,7 +288,7 @@ fn test_bounds_single_point() -> Result<(), Box<dyn Error>> {
     // than the reference, so a bug in the reference below cannot hide here.
     assert_eq!(compute_bounds_cpu(&vertices), (vertices[0], vertices[0]));
 
-    let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(&ctx, &vertices)?;
+    let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(ctx, &vertices)?;
 
     assert!(
         points_close(&result.0, &vertices[0], 1e-5),
@@ -334,7 +334,7 @@ fn test_bounds_cube() -> Result<(), Box<dyn Error>> {
     // drops or mis-indexes a vertex is caught on any input.
     let expected = compute_bounds_cpu(&vertices);
 
-    let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(&ctx, &vertices)?;
+    let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(ctx, &vertices)?;
 
     assert!(
         points_close(&result.0, &expected.0, 1e-5),
@@ -371,7 +371,7 @@ fn test_bounds_negative_coordinates() -> Result<(), Box<dyn Error>> {
          is vacuous"
     );
 
-    let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(&ctx, &vertices)?;
+    let result = cv_hal::gpu_kernels::mesh_gpu::compute_bounds(ctx, &vertices)?;
 
     assert!(
         points_close(&result.0, &expected.0, 1e-5),
@@ -398,7 +398,7 @@ fn test_vertex_map_invalid_dimensions() -> Result<(), Box<dyn Error>> {
     // Empty depth should return empty result
     let depth: Vec<f32> = vec![];
     let result = cv_hal::gpu_kernels::odometry_gpu::compute_vertex_map(
-        &ctx,
+        ctx,
         &depth,
         &[525.0, 525.0, 319.5, 239.5],
         640,
@@ -428,7 +428,7 @@ fn test_vertex_map_center_projection() -> Result<(), Box<dyn Error>> {
 
     let cpu_result = compute_vertex_map_cpu(&depth, width, height, fx, fy, cx, cy);
     let gpu_result = cv_hal::gpu_kernels::odometry_gpu::compute_vertex_map(
-        &ctx,
+        ctx,
         &depth,
         &[fx, fy, cx, cy],
         width,
@@ -436,7 +436,7 @@ fn test_vertex_map_center_projection() -> Result<(), Box<dyn Error>> {
     )?;
 
     // Check center pixel (1,1): should project to (0,0,1)
-    let center_idx = (1 * width + 1) as usize;
+    let center_idx = (width + 1) as usize;
     assert!(
         vectors_close(&gpu_result[center_idx], &cpu_result[center_idx], 1e-3),
         "Center pixel projection mismatch: GPU {:?} vs CPU {:?}",
@@ -477,7 +477,7 @@ fn test_vertex_map_known_values() -> Result<(), Box<dyn Error>> {
 
     let cpu_result = compute_vertex_map_cpu(&depth, width, height, fx, fy, cx, cy);
     let gpu_result = cv_hal::gpu_kernels::odometry_gpu::compute_vertex_map(
-        &ctx,
+        ctx,
         &depth,
         &[fx, fy, cx, cy],
         width,
@@ -512,7 +512,7 @@ fn test_vertex_map_zero_depth() -> Result<(), Box<dyn Error>> {
     let depth = vec![0.0, 0.0, 0.0, 0.0];
 
     let result = cv_hal::gpu_kernels::odometry_gpu::compute_vertex_map(
-        &ctx,
+        ctx,
         &depth,
         &[525.0, 525.0, 319.5, 239.5],
         width,
@@ -549,7 +549,7 @@ fn test_normal_map_unit_vectors() -> Result<(), Box<dyn Error>> {
     }
 
     let result =
-        cv_hal::gpu_kernels::odometry_gpu::compute_normal_map(&ctx, &vertex_map, width, height)?;
+        cv_hal::gpu_kernels::odometry_gpu::compute_normal_map(ctx, &vertex_map, width, height)?;
 
     // For a flat plane, all normals should point in +Z direction
     // (accounting for the cross product direction in the algorithm)
@@ -589,7 +589,7 @@ fn test_normal_map_vs_cpu_reference() -> Result<(), Box<dyn Error>> {
 
     let cpu_result = compute_normal_map_cpu(&vertex_map, width, height);
     let gpu_result =
-        cv_hal::gpu_kernels::odometry_gpu::compute_normal_map(&ctx, &vertex_map, width, height)?;
+        cv_hal::gpu_kernels::odometry_gpu::compute_normal_map(ctx, &vertex_map, width, height)?;
 
     // Center normal should be approximately (0, 0, ±1) for flat plane (winding may flip sign)
     let center_idx = 4usize;
@@ -623,12 +623,8 @@ fn test_normal_map_consistency() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        let result = cv_hal::gpu_kernels::odometry_gpu::compute_normal_map(
-            &ctx,
-            &vertex_map,
-            width,
-            height,
-        )?;
+        let result =
+            cv_hal::gpu_kernels::odometry_gpu::compute_normal_map(ctx, &vertex_map, width, height)?;
 
         // All normals should still be unit vectors
         for (i, normal) in result.iter().enumerate() {

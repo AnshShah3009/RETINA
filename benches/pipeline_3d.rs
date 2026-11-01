@@ -6,13 +6,13 @@
 //!   cargo bench --bench pipeline_3d -- marching_cubes
 //!   cargo bench --bench pipeline_3d -- kdtree
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use cv_3d::TSDFVolume;
 use cv_3d::mesh::reconstruction::poisson_reconstruction;
+use cv_3d::spatial::KDTree;
 use cv_3d::spatial::bvh::Bvh;
 use cv_3d::spatial::hash_grid::HashGrid;
-use cv_3d::spatial::KDTree;
 use cv_3d::tsdf::CameraIntrinsics;
-use cv_3d::TSDFVolume;
 use cv_core::PointCloud;
 use cv_hal::context::ComputeContext;
 use cv_hal::gpu::GpuContext;

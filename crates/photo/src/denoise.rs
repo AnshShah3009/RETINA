@@ -12,10 +12,10 @@
 //! - **BM3D**: Block-Matching and 3D filtering — state-of-the-art denoising using
 //!   block matching, 3D DCT transform, and collaborative Wiener filtering.
 
+use cv_core::Result;
 use cv_core::float::Float;
 use cv_core::storage::Storage;
 use cv_core::tensor::{CpuTensor, TensorShape};
-use cv_core::Result;
 
 /// Non-Local Means denoising for grayscale images.
 ///
@@ -1332,7 +1332,7 @@ mod bm3d_dct_tests {
         // signal than the noisy input.
         let (h, w) = (32usize, 32usize);
         let clean: Vec<f32> = (0..h)
-            .flat_map(|y| (0..w).map(move |x| if x < w / 2 { 0.3 } else { 0.7 }))
+            .flat_map(|_y| (0..w).map(move |x| if x < w / 2 { 0.3 } else { 0.7 }))
             .collect();
 
         // Deterministic pseudo-noise.

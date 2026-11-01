@@ -1,7 +1,7 @@
 [package]
 name = "cv-registration"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "3D point cloud registration algorithms"
 license = "MIT OR Apache-2.0"
 

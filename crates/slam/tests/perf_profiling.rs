@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 use cv_core::geometry::CameraIntrinsics;
-use cv_runtime::orchestrator::{scheduler, WorkloadHint};
+use cv_runtime::orchestrator::{WorkloadHint, scheduler};
 use cv_slam::Slam;
 use image::{GrayImage, Luma};
 use std::time::Instant;
@@ -21,7 +21,7 @@ fn profile_slam_algorithms() {
         .unwrap()
         .unwrap();
 
-    let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, width as u32, height as u32);
+    let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, width, height);
 
     let mut slam = Slam::new(group, intrinsics);
 

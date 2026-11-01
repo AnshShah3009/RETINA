@@ -1,5 +1,5 @@
-use crate::gpu::GpuContext;
 use crate::Result;
+use crate::gpu::GpuContext;
 use nalgebra::{Point3, Vector3};
 use wgpu::util::DeviceExt;
 

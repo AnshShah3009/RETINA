@@ -133,7 +133,7 @@ fn nan_observations_do_not_hang_the_solver() {
 fn too_few_observations_terminate() {
     let k = CameraIntrinsics::new(820.0, 790.0, 320.0, 240.0, 640, 480);
     let board = board_points(7, 6, 40.0);
-    let ext = poses()[0].clone();
+    let ext = poses()[0];
     let obj = vec![board[..3].to_vec(); 3];
     let img = vec![
         board[..3]

@@ -1,8 +1,8 @@
 use cv_core::{CpuTensor, Float};
 
 use super::{
-    complex_conj, complex_div, complex_mul, create_cosine_window, create_gaussian_target,
-    extract_patch, fft2, ifft2, preprocess_patch, BoundingBox, Complex, ObjectTracker,
+    BoundingBox, Complex, ObjectTracker, complex_conj, complex_div, complex_mul,
+    create_cosine_window, create_gaussian_target, extract_patch, fft2, ifft2, preprocess_patch,
 };
 
 /// Minimum Output Sum of Squared Error (MOSSE) single-object tracker.

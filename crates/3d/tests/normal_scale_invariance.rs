@@ -46,7 +46,7 @@ use nalgebra::{Point3, Vector3};
 /// Equilateral triangle of side `edge`, wound anticlockwise seen from +z so
 /// `cross(v1 - v0, v2 - v0)` points along +z. `|cross| = 0.866 * edge^2`.
 fn equilateral(edge: f32) -> [Point3<f32>; 3] {
-    let h = edge * 0.577_350_269;
+    let h = edge * 0.577_350_26;
     [
         Point3::new(-edge / 2.0, -h, 0.0),
         Point3::new(edge / 2.0, -h, 0.0),
@@ -192,14 +192,19 @@ fn brute_force_agrees_with_the_bvh_path_at_every_scale() {
                     b.2
                 );
             }
-            (None, None) => panic!("edge {edge:e}: BOTH paths lost a dead-on hit — the triangle is gone"),
+            (None, None) => {
+                panic!("edge {edge:e}: BOTH paths lost a dead-on hit — the triangle is gone")
+            }
             (Some(a), None) => panic!(
                 "edge {edge:e}: the BVH path hit at t = {} with normal {:?}, but the brute-force \
                  reference found nothing. `a = e1 . (d x e2)` is twice the projected area and scales \
                  as L^2, so an absolute threshold on it is a size test, not a parallelism test.",
                 a.0, a.2
             ),
-            (None, Some(b)) => panic!("edge {edge:e}: brute force hit at t = {} but the BVH missed", b.0),
+            (None, Some(b)) => panic!(
+                "edge {edge:e}: brute force hit at t = {} but the BVH missed",
+                b.0
+            ),
         }
     }
 }

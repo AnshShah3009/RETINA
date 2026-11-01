@@ -8,8 +8,8 @@
 
 use cv_core::{CameraIntrinsics, Descriptor, Descriptors, KeyPoint, Pose};
 use cv_localization::{
-    evaluate_localization, rotation_error_degrees, translation_error, Database, DatabaseImage,
-    Landmark, LocalizationResult, Localizer, LocalizerConfig, Vocabulary,
+    Database, DatabaseImage, Landmark, LocalizationResult, Localizer, LocalizerConfig, Vocabulary,
+    evaluate_localization, rotation_error_degrees, translation_error,
 };
 use nalgebra::Point3;
 use std::time::{Duration, Instant};
@@ -127,9 +127,11 @@ fn non_finite_intrinsics_return_none_without_hanging() {
     }
 
     // Control: the identical call with finite intrinsics still succeeds.
-    assert!(localizer
-        .localize(&keypoints, &descriptors, &intrinsics())
-        .is_some());
+    assert!(
+        localizer
+            .localize(&keypoints, &descriptors, &intrinsics())
+            .is_some()
+    );
 }
 
 /// Non-finite query data and landmarks must fail closed too (these already did:
@@ -142,9 +144,11 @@ fn non_finite_correspondences_return_none() {
 
     let mut bad_keypoints = keypoints.clone();
     bad_keypoints[2].x = f64::NAN;
-    assert!(localizer
-        .localize(&bad_keypoints, &descriptors, &intrinsics())
-        .is_none());
+    assert!(
+        localizer
+            .localize(&bad_keypoints, &descriptors, &intrinsics())
+            .is_none()
+    );
 
     // A NaN landmark position in the database.
     let mut landmarks: Vec<Landmark> = db.landmarks().to_vec();
@@ -156,9 +160,11 @@ fn non_finite_correspondences_return_none() {
     db_bad.add_image(db.images()[0].clone());
     db_bad.build();
     let localizer = Localizer::new(&db_bad, LocalizerConfig::default());
-    assert!(localizer
-        .localize(&keypoints, &descriptors, &intrinsics())
-        .is_none());
+    assert!(
+        localizer
+            .localize(&keypoints, &descriptors, &intrinsics())
+            .is_none()
+    );
 }
 
 /// Success rate is `succeeded / queries`: a real 0.0 when queries were asked and
@@ -317,9 +323,11 @@ fn modification_invalidates_every_built_index() {
     assert_eq!(db.descriptors().len(), 21);
     assert!(db.lsh_index().is_some());
     let localizer = Localizer::new(&db, LocalizerConfig::default());
-    assert!(localizer
-        .localize(&keypoints, &descriptors, &intrinsics())
-        .is_some());
+    assert!(
+        localizer
+            .localize(&keypoints, &descriptors, &intrinsics())
+            .is_some()
+    );
 
     // add_landmark invalidates as well.
     db.add_landmark(Landmark {
@@ -338,12 +346,15 @@ fn rank_by_descriptor_matches_degenerate_cases_are_empty() {
     let (db, _, descriptors) = tiny_scene(20);
 
     assert!(db.rank_by_descriptor_matches(&descriptors, 0).is_empty());
-    assert!(db
-        .rank_by_descriptor_matches(&Descriptors::new(), 5)
-        .is_empty());
-    assert!(Database::new(None)
-        .rank_by_descriptor_matches(&descriptors, 5)
-        .is_empty());
+    assert!(
+        db.rank_by_descriptor_matches(&Descriptors::new(), 5)
+            .is_empty()
+    );
+    assert!(
+        Database::new(None)
+            .rank_by_descriptor_matches(&descriptors, 5)
+            .is_empty()
+    );
     assert_eq!(db.rank_by_descriptor_matches(&descriptors, 5), vec![0]);
 }
 

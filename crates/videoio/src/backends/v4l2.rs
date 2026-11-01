@@ -202,7 +202,7 @@ mod tests {
     /// filled in but must be ignored, and row padding is filled with `0xFF` so
     /// that any read of it shows up as 255 in the output.
     fn frame(width: usize, height: usize, stride: usize) -> (Vec<u8>, Vec<u8>) {
-        let mut data = vec![0xFFu8; stride * height];
+        let mut data = vec![0xffu8; stride * height];
         let mut expected = Vec::new();
         for y in 0..height {
             for x in 0..width {

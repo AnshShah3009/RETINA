@@ -1,12 +1,12 @@
 use super::{
-    finish_kernel, gather_cpu_inputs, kernel_workgroups, prepare_kernel_buffers, store_cpu_outputs,
-    BufferId, ExecutionGraph, GpuTensor, PipelineNode, TransientBufferPool,
+    BufferId, ExecutionGraph, GpuTensor, PipelineNode, TransientBufferPool, finish_kernel,
+    gather_cpu_inputs, kernel_workgroups, prepare_kernel_buffers, store_cpu_outputs,
 };
 use crate::Error;
 use crate::Result;
-use cv_hal::context::ComputeContext;
 use cv_hal::DeviceId;
 use cv_hal::SubmissionIndex;
+use cv_hal::context::ComputeContext;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};

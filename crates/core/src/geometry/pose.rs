@@ -1,8 +1,8 @@
 use nalgebra::{Isometry3, Matrix3, Matrix4, Point2, Point3, Rotation3, UnitQuaternion, Vector3};
 
+use super::Vector6;
 use super::camera::CameraIntrinsics;
 use super::distortion::Distortion;
-use super::Vector6;
 
 /// A 3D rigid body transformation (Rotation + Translation).
 /// `Pose` transforms points from the local frame to the parent frame (e.g. Camera to World).
@@ -42,7 +42,7 @@ impl Pose {
                 det
             ));
         }
-        let ortho_err = (&rotation * rotation.transpose()) - Matrix3::identity();
+        let ortho_err = (rotation * rotation.transpose()) - Matrix3::identity();
         let max_err = ortho_err.iter().fold(0.0f64, |m, v| m.max(v.abs()));
         if max_err > 1e-6 {
             return Err(format!(

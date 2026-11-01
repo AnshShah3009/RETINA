@@ -196,12 +196,10 @@ pub fn calibrate_camera_planar_with_options(
         image_points,
         80,
         options,
-    ) {
-        if is_valid_camera_calibration(&refined)
-            && refined.rms_reprojection_error <= result.rms_reprojection_error + 1e-9
-        {
-            result = refined;
-        }
+    ) && is_valid_camera_calibration(&refined)
+        && refined.rms_reprojection_error <= result.rms_reprojection_error + 1e-9
+    {
+        result = refined;
     }
     Ok(result)
 }
@@ -423,17 +421,19 @@ pub fn refine_camera_calibration_iterative_with_options(
         fixed[0] = true;
         fixed[1] = true;
     }
-    if let Some(ratio) = options.fix_aspect_ratio {
-        if ratio.is_finite() && ratio > 0.0 {
-            // fx is derived as ratio * fy, so fx is not an independent parameter.
-            fixed[0] = true;
-        }
+    if let Some(ratio) = options.fix_aspect_ratio
+        && ratio.is_finite()
+        && ratio > 0.0
+    {
+        // fx is derived as ratio * fy, so fx is not an independent parameter.
+        fixed[0] = true;
     }
-    if let Some((pcx, pcy)) = options.fix_principal_point {
-        if pcx.is_finite() && pcy.is_finite() {
-            fixed[2] = true;
-            fixed[3] = true;
-        }
+    if let Some((pcx, pcy)) = options.fix_principal_point
+        && pcx.is_finite()
+        && pcy.is_finite()
+    {
+        fixed[2] = true;
+        fixed[3] = true;
     }
     if options.fix_k1 {
         fixed[4] = true;

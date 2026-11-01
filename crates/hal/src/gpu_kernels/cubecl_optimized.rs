@@ -32,7 +32,7 @@ use cubecl::std::tensor::TensorHandle;
 
 use crate::gpu_kernels::cubecl_proto as proto;
 
-use proto::{cubes_for, f32_storage, u32_storage, CUBE_DIM};
+use proto::{CUBE_DIM, cubes_for, f32_storage, u32_storage};
 
 // ============================================================================
 // Context with Performance Settings
@@ -173,22 +173,14 @@ mod element_wise_opt {
     /// Inlined into the calling kernel by the `#[cube]` macro.
     #[cube]
     pub fn leaky_relu(x: f32, alpha: f32) -> f32 {
-        if x > 0.0 {
-            x
-        } else {
-            x * alpha
-        }
+        if x > 0.0 { x } else { x * alpha }
     }
 
     /// Exponential linear unit.
     /// Inlined into the calling kernel by the `#[cube]` macro.
     #[cube]
     pub fn elu(x: f32, alpha: f32) -> f32 {
-        if x > 0.0 {
-            x
-        } else {
-            alpha * (x.exp() - 1.0)
-        }
+        if x > 0.0 { x } else { alpha * (x.exp() - 1.0) }
     }
 }
 

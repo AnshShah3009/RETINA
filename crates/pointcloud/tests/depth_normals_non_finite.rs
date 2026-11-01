@@ -24,7 +24,7 @@ fn flat_depth_with(bad_value: f32) -> Vec<f32> {
 }
 
 /// The pixels whose four-neighbour stencil contains the bad centre pixel.
-const POISONED: [usize; 4] = [1 * W + 2, 3 * W + 2, 2 * W + 1, 2 * W + 3];
+const POISONED: [usize; 4] = [W + 2, 3 * W + 2, 2 * W + 1, 2 * W + 3];
 
 fn assert_only_the_expected_pixels_were_affected(depth: Vec<f32>) {
     let normals = compute_normals_from_depth(&depth, W, H, 5.0, 5.0, 2.0, 2.0);

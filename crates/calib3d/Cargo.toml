@@ -1,7 +1,7 @@
 [package]
 name = "cv-calib3d"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Camera calibration and 3D reconstruction for Rust Computer Vision"
 
 [dependencies]

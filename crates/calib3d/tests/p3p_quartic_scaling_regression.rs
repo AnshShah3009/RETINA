@@ -94,8 +94,8 @@ fn pmul_matches_reference_on_grunert_coefficient_shapes() {
     ];
 
     for (name, p, q) in cases {
-        let got = cv_calib3d::pnp::pmul(&p, &q);
-        let want = reference_poly_mul(&p, &q);
+        let got = cv_calib3d::pnp::pmul(p, q);
+        let want = reference_poly_mul(p, q);
         assert_eq!(got.len(), want.len(), "{name}: length mismatch");
         for (k, (g, w)) in got.iter().zip(want.iter()).enumerate() {
             assert!(

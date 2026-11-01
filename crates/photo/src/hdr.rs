@@ -19,9 +19,9 @@
 //! - **Drago tone mapping**: Adaptive logarithmic mapping for natural appearance.
 //! - **Mantiuk tone mapping**: Gradient-domain compression for local contrast preservation.
 
+use cv_core::Result;
 use cv_core::float::Float;
 use cv_core::tensor::{CpuTensor, TensorShape};
-use cv_core::Result;
 
 // ---------------------------------------------------------------------------
 // HDR Merge
@@ -33,11 +33,7 @@ use cv_core::Result;
 /// near-white pixels that are likely clipped.
 #[inline]
 fn hat_weight(z: f64) -> f64 {
-    if z <= 0.5 {
-        z + 0.01
-    } else {
-        1.01 - z
-    }
+    if z <= 0.5 { z + 0.01 } else { 1.01 - z }
 }
 
 /// Merge multiple exposures into an HDR image using Debevec's method.
@@ -831,14 +827,14 @@ mod tests {
 
         let data = result.as_slice().unwrap();
         for &v in data {
-            assert!(v >= 0.0 && v <= 1.0, "Output out of [0,1]: {}", v);
+            assert!((0.0..=1.0).contains(&v), "Output out of [0,1]: {}", v);
         }
     }
 
     #[test]
     fn test_merge_mertens_preserves_single_image() {
         let img = make_gradient_image(1, 8, 8, 1.0);
-        let result = merge_mertens(&[img.clone()]).unwrap();
+        let result = merge_mertens(std::slice::from_ref(&img)).unwrap();
         let a = img.as_slice().unwrap();
         let b = result.as_slice().unwrap();
         for (va, vb) in a.iter().zip(b.iter()) {
@@ -859,7 +855,7 @@ mod tests {
 
         let data = result.as_slice().unwrap();
         for &v in data {
-            assert!(v >= 0.0 && v <= 1.0, "Output out of [0,1]: {}", v);
+            assert!((0.0..=1.0).contains(&v), "Output out of [0,1]: {}", v);
         }
     }
 
@@ -949,7 +945,7 @@ mod tests {
 
         let result = merge_debevec(&images, &exposures, 32).unwrap();
         let data = result.as_slice().unwrap();
-        let mean: f64 = data.iter().map(|&v| v as f64).sum::<f64>() / data.len() as f64;
+        let mean: f64 = data.iter().map(|&v| v).sum::<f64>() / data.len() as f64;
 
         // Anchored scale = 1 / dt_mid = 1 / 0.1 = 10.0.
         assert!(
@@ -995,8 +991,8 @@ mod tests {
 
         let result = merge_debevec(&images, &exposures, 16).unwrap();
         let data = result.as_slice().unwrap();
-        let lo: f64 = data[..half].iter().map(|&v| v as f64).sum::<f64>() / half as f64;
-        let hi: f64 = data[half..].iter().map(|&v| v as f64).sum::<f64>() / half as f64;
+        let lo: f64 = data[..half].iter().map(|&v| v).sum::<f64>() / half as f64;
+        let hi: f64 = data[half..].iter().map(|&v| v).sum::<f64>() / half as f64;
         let ratio = hi / lo;
 
         assert!(
@@ -1035,7 +1031,7 @@ mod tests {
         let out = result.as_slice().unwrap();
         for &v in out {
             assert!(
-                v >= 0.0 && v <= 1.0,
+                (0.0..=1.0).contains(&v),
                 "Reinhard output should be in [0,1], got {}",
                 v
             );
@@ -1088,7 +1084,7 @@ mod tests {
         let out = result.as_slice().unwrap();
         for &v in out {
             assert!(
-                v >= 0.0 && v <= 1.0,
+                (0.0..=1.0).contains(&v),
                 "Drago output should be in [0,1], got {}",
                 v
             );
@@ -1240,7 +1236,7 @@ mod tests {
         let out = result.as_slice().unwrap();
         for &v in out {
             assert!(
-                v >= 0.0 && v <= 1.0,
+                (0.0..=1.0).contains(&v),
                 "Mantiuk output should be in [0,1], got {}",
                 v
             );

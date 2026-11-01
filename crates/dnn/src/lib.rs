@@ -115,13 +115,13 @@ fn fixed_rank4_input_shape(model: &RunnableModel) -> Result<Vec<usize>> {
                 return Err(Error::InvalidInput(format!(
                     "Model input dimension {axis} is {v}; every dimension must be a positive \
                      integer"
-                )))
+                )));
             }
             None => {
                 return Err(Error::InvalidInput(format!(
                     "Model input dimension {axis} is not statically known ({dim}); DnnNet cannot \
                      resolve symbolic or unknown dimensions"
-                )))
+                )));
             }
         }
     }

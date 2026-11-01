@@ -127,21 +127,31 @@ fn datasets_directory_instead_of_file_is_an_error() {
 #[test]
 fn datasets_empty_file_is_an_empty_collection() {
     let dir = TempDir::new("ds_empty");
-    assert!(euroc::read_csv(dir.write("c.csv", ""))
-        .expect("empty csv")
-        .is_empty());
-    assert!(euroc::read_groundtruth(dir.write("gt.csv", ""))
-        .expect("empty gt")
-        .is_empty());
-    assert!(tum::read_index(dir.write("rgb.txt", ""))
-        .expect("empty")
-        .is_empty());
-    assert!(kitti::read_times(dir.write("times.txt", ""))
-        .expect("empty")
-        .is_empty());
-    assert!(colmap::read_points3d_text(dir.write("p.txt", ""))
-        .expect("empty")
-        .is_empty());
+    assert!(
+        euroc::read_csv(dir.write("c.csv", ""))
+            .expect("empty csv")
+            .is_empty()
+    );
+    assert!(
+        euroc::read_groundtruth(dir.write("gt.csv", ""))
+            .expect("empty gt")
+            .is_empty()
+    );
+    assert!(
+        tum::read_index(dir.write("rgb.txt", ""))
+            .expect("empty")
+            .is_empty()
+    );
+    assert!(
+        kitti::read_times(dir.write("times.txt", ""))
+            .expect("empty")
+            .is_empty()
+    );
+    assert!(
+        colmap::read_points3d_text(dir.write("p.txt", ""))
+            .expect("empty")
+            .is_empty()
+    );
 }
 
 /// A UTF-8 BOM (EF BB BF) is not whitespace, so `trim()` does not remove it and
@@ -177,21 +187,25 @@ fn datasets_ragged_rows_error() {
     // EuRoC csv: 4 columns then 3.
     assert!(euroc::read_csv(dir.write("c.csv", "1,2,3,4\n5,6,7\n")).is_err());
     // EuRoC ground truth: 17 fields then 16.
-    assert!(euroc::read_groundtruth(dir.write(
-        "gt.csv",
-        "1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0\n2,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0\n"
-    ))
-    .is_err());
+    assert!(
+        euroc::read_groundtruth(dir.write(
+            "gt.csv",
+            "1,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0\n2,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0\n"
+        ))
+        .is_err()
+    );
     // TUM ground truth: 8 fields then 7.
     assert!(
         tum::read_groundtruth(dir.write("gt.txt", "1.0 0 0 0 0 0 0 1\n2.0 0 0 0 0 0 0\n")).is_err()
     );
     // KITTI poses: 12 numbers then 11.
-    assert!(kitti::read_poses(dir.write(
-        "poses.txt",
-        "1 0 0 0 0 1 0 0 0 0 1 0\n1 0 0 0 0 1 0 0 0 0 1\n"
-    ))
-    .is_err());
+    assert!(
+        kitti::read_poses(dir.write(
+            "poses.txt",
+            "1 0 0 0 0 1 0 0 0 0 1 0\n1 0 0 0 0 1 0 0 0 0 1\n"
+        ))
+        .is_err()
+    );
     // COLMAP points3D: 8 fields then 7.
     assert!(
         colmap::read_points3d_text(dir.write("p.txt", "1 0 0 0 1 1 1 0.5\n2 0 0 0 1 1 1\n"))

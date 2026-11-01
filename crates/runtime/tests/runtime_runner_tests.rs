@@ -1,8 +1,8 @@
 use cv_hal::DeviceId;
-use cv_runtime::orchestrator::{reset_execution_mode, set_execution_mode, RuntimeRunner};
+use cv_runtime::orchestrator::{RuntimeRunner, reset_execution_mode, set_execution_mode};
 use parking_lot::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 static TEST_ISOLATION: Mutex<()> = Mutex::new(());
 

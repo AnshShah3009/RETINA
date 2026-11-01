@@ -9,7 +9,7 @@
 #![cfg(feature = "synthetic")]
 
 use cv_core::CameraIntrinsics;
-use cv_localization::benchmark::{run, BenchmarkConfig};
+use cv_localization::benchmark::{BenchmarkConfig, run};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -108,12 +108,12 @@ impl Drop for TempSequence {
 
 /// Deterministic per-pixel noise (xorshift-style mix of the coordinates).
 fn texture(x: usize, y: usize) -> u8 {
-    let mut h = (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    let mut h = (x as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (y as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
     h ^= h >> 33;
-    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
     h ^= h >> 33;
-    (h & 0xFF) as u8
+    (h & 0xff) as u8
 }
 
 /// No features means no landmarks: the observation statistics have no

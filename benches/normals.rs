@@ -9,7 +9,7 @@
 ///  5. depth_image     – O(n) cross-product from structured depth (RGBD path)
 ///
 /// Cloud sizes: 1k / 10k / 100k points on a noisy sphere surface.
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use cv_3d::gpu::point_cloud as gpu_pc;
 use cv_scientific::point_cloud as sci_pc;
 use nalgebra::Point3;
@@ -49,11 +49,7 @@ fn sphere_depth(width: usize, height: usize) -> Vec<f32> {
             let dx = (px - cx) / fx;
             let dy = (py - cy) / fy;
             let r2 = dx * dx + dy * dy;
-            if r2 < 1.0 {
-                (1.0 - r2).sqrt()
-            } else {
-                0.0
-            }
+            if r2 < 1.0 { (1.0 - r2).sqrt() } else { 0.0 }
         })
         .collect()
 }

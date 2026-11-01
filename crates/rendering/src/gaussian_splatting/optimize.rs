@@ -2,7 +2,7 @@ use nalgebra::{Point3, Vector3};
 use rand::Rng;
 
 use super::rasterize::{DifferentiableRasterizer, GaussianGradient};
-use super::types::{unit_quaternion, Gaussian, GaussianCloud};
+use super::types::{Gaussian, GaussianCloud, unit_quaternion};
 
 /// Adaptive density control settings. See [`GaussianOptimizer::densify`].
 #[derive(Clone, Debug)]

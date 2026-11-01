@@ -1,7 +1,7 @@
-use crate::context::ColorConversion;
-use crate::gpu::GpuContext;
 use crate::GpuTensor;
 use crate::Result;
+use crate::context::ColorConversion;
+use crate::gpu::GpuContext;
 use cv_core::storage::Storage;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -76,7 +76,7 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
         Ok(cv_core::DataType::BF16) => {
             return Err(crate::Error::NotSupported(
                 "GPU colour conversion has no bf16 kernel; convert to f32 or f16 first".into(),
-            ))
+            ));
         }
         _ => {
             include_str!("../../shaders/color_cvt_f32.wgsl")

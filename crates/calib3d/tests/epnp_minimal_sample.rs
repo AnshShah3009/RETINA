@@ -54,7 +54,7 @@ fn correspondences(n: usize) -> (Vec<Vector3<f64>>, Vec<[f64; 2]>) {
 
     let mut obj: Vec<Vector3<f64>> = Vec::with_capacity(n);
     let mut img: Vec<[f64; 2]> = Vec::with_capacity(n);
-    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
     let mut next = move || {
         seed = seed
             .wrapping_mul(6364136223846793005)

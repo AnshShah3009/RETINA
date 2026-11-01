@@ -7,9 +7,9 @@
 //! 4. Solve the Poisson equation using Gauss-Seidel iteration
 //! 5. Extract the zero-level isosurface using marching cubes
 
+use super::TriangleMesh;
 use super::compute_bounds;
 use super::marching_cubes::{extract_isosurface, idx3};
-use super::TriangleMesh;
 use cv_core::point_cloud::PointCloud;
 use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;

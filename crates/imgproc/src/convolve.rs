@@ -4,7 +4,7 @@ use cv_hal::compute::ComputeDevice;
 use cv_hal::context::BorderMode as HalBorderMode;
 use cv_hal::gpu::GpuContext;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
-use cv_runtime::orchestrator::{scheduler, RuntimeRunner};
+use cv_runtime::orchestrator::{RuntimeRunner, scheduler};
 use image::GrayImage;
 use rayon::prelude::*;
 use wide::*;
@@ -249,11 +249,11 @@ pub fn convolve_into_ctx(
     border: BorderMode,
     group: &RuntimeRunner,
 ) {
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(result) = convolve_gpu(gpu, image, kernel, border) {
-            output.copy_from_slice(result.as_raw());
-            return;
-        }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+        && let Ok(result) = convolve_gpu(gpu, image, kernel, border)
+    {
+        output.copy_from_slice(result.as_raw());
+        return;
     }
 
     convolve_with_border_into_ctx(image, output, kernel, border, group);
@@ -296,10 +296,10 @@ pub fn gaussian_blur_ctx(
     border: BorderMode,
     group: &RuntimeRunner,
 ) -> GrayImage {
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(result) = gaussian_blur_gpu(gpu, image, sigma, border) {
-            return result;
-        }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+        && let Ok(result) = gaussian_blur_gpu(gpu, image, sigma, border)
+    {
+        return result;
     }
     gaussian_blur_with_border_into_ctx(image, sigma, border, group)
 }
@@ -593,11 +593,11 @@ pub fn gaussian_blur_with_border_into(
     sigma: f32,
     border: BorderMode,
 ) {
-    if let Ok(s) = scheduler() {
-        if let Ok(group) = s.get_default_group() {
-            let runner = RuntimeRunner::Group(group);
-            gaussian_blur_ctx_into(image, out, sigma, border, &runner);
-        }
+    if let Ok(s) = scheduler()
+        && let Ok(group) = s.get_default_group()
+    {
+        let runner = RuntimeRunner::Group(group);
+        gaussian_blur_ctx_into(image, out, sigma, border, &runner);
     }
 }
 

@@ -24,8 +24,8 @@
 //! plot.save_html("pointcloud.html").unwrap();
 //! ```
 
-use crate::style::Color;
 use crate::PlotError;
+use crate::style::Color;
 use std::io::Write;
 
 /// A 3D point with position, normal, color and size

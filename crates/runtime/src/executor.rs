@@ -1,8 +1,8 @@
 use crate::Result;
 use cv_hal::DeviceId;
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 const RESIZE_TIMEOUT_SECS: u64 = 30;

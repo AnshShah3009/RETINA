@@ -235,7 +235,7 @@ fn pcd_width_times_height_overflow_is_rejected() {
 #[test]
 fn pcd_binary_zero_point_stride_errors() {
     let head = "# .PCD v0.7\nVERSION 0.7\nFIELDS x y z\nSIZE 0 0 0\nTYPE F F F\nCOUNT 1 1 1\nWIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA binary\n";
-    let err = parse_err(run_pcd, &head.as_bytes().to_vec(), "zero stride");
+    let err = parse_err(run_pcd, head.as_bytes(), "zero stride");
     assert!(err.contains("stride"), "got: {err}");
 }
 
@@ -243,7 +243,7 @@ fn pcd_binary_zero_point_stride_errors() {
 #[test]
 fn pcd_binary_single_zero_size_field_errors() {
     let head = "# .PCD v0.7\nVERSION 0.7\nFIELDS x\nSIZE 0\nTYPE F\nCOUNT 1\nWIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA binary\n";
-    parse_err(run_pcd, &head.as_bytes().to_vec(), "zero-size single field");
+    parse_err(run_pcd, head.as_bytes(), "zero-size single field");
 }
 
 /// `FIELDS` with no `SIZE` line at all falls back to 4 bytes/field - verify the
@@ -251,11 +251,7 @@ fn pcd_binary_single_zero_size_field_errors() {
 #[test]
 fn pcd_binary_missing_size_line_uses_default_stride() {
     let head = "# .PCD v0.7\nVERSION 0.7\nFIELDS x y z\nTYPE F F F\nWIDTH 1\nHEIGHT 1\nPOINTS 1\nDATA binary\n";
-    let err = parse_err(
-        run_pcd,
-        &head.as_bytes().to_vec(),
-        "no SIZE line, empty body",
-    );
+    let err = parse_err(run_pcd, head.as_bytes(), "no SIZE line, empty body");
     assert!(err.contains("12 bytes"), "got: {err}");
 }
 
@@ -276,7 +272,7 @@ fn pcd_header_without_data_line_errors() {
 #[test]
 fn pcd_giant_unterminated_header_line_terminates() {
     let mut file = b"# .PCD v0.7\nVERSION 0.7\nVERSION ".to_vec();
-    file.extend(std::iter::repeat(b'A').take(1 << 20));
+    file.extend(std::iter::repeat_n(b'A', 1 << 20));
     file.push(b'\n');
     let err = parse_err(run_pcd, &file, "1 MiB header line with no DATA");
     assert!(err.contains("EOF"), "got: {err}");
@@ -386,7 +382,7 @@ fn pcd_ascii_nan_coordinates_are_rejected() {
 #[test]
 fn pcd_binary_compressed_hostile_compressed_size_allocates_4gb() {
     let before = address_space_bytes();
-    let file = pcd_binary_compressed("1", &[], 0xFFFF_FFFF);
+    let file = pcd_binary_compressed("1", &[], 0xffff_ffff);
     match parse_hostile(run_pcd, &file) {
         Outcome::Returned(_) => panic!("returned Ok for compressed_size = 0xFFFFFFFF"),
         other => assert!(other.is_ok_or_err()),

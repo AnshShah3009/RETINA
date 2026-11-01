@@ -81,7 +81,7 @@ fn stl_baseline_ascii_and_binary_parse() {
 /// 80-byte header only, no triangle count.
 #[test]
 fn stl_binary_truncated_before_count_errors() {
-    let err = stl_expect_err(&vec![0u8; 80], "no triangle count");
+    let err = stl_expect_err(&[0u8; 80], "no triangle count");
     let lower = err.to_lowercase();
     assert!(
         lower.contains("fill") || lower.contains("eof") || lower.contains("end of file"),
@@ -196,7 +196,7 @@ fn stl_binary_count_smaller_than_body_ignores_tail() {
 /// short read rather than pre-allocating or spinning for hours.
 #[test]
 fn stl_binary_hostile_triangle_count_fails_fast() {
-    let file = stl_binary("binary", 0xFFFF_FFFF, &[]);
+    let file = stl_binary("binary", 0xffff_ffff, &[]);
     let before = address_space_bytes();
     let err = stl_outcome_hostile(&file).expect_err("4.3 billion triangles, empty body");
     assert!(!err.is_empty());
@@ -215,7 +215,7 @@ fn stl_binary_hostile_triangle_count_fails_fast() {
 /// 4-byte field.
 #[test]
 fn stl_binary_with_solid_prefix_and_hostile_count_fails_fast() {
-    let file = stl_binary("solid exported by something", 0xFFFF_FFFF, &[]);
+    let file = stl_binary("solid exported by something", 0xffff_ffff, &[]);
     match stl_outcome_hostile(&file) {
         Outcome::Returned(m) => assert!(
             m.faces.len() < 1_000_000,
@@ -390,7 +390,7 @@ fn stl_binary_denormal_vertices_stay_finite() {
 #[test]
 fn stl_ascii_huge_file_without_keywords_terminates() {
     let mut file = b"solid x\n".to_vec();
-    file.extend(std::iter::repeat(b'z').take(10 << 20));
+    file.extend(std::iter::repeat_n(b'z', 10 << 20));
     file.push(b'\n');
     let outcome = stl_outcome_hostile(&file);
     match outcome {

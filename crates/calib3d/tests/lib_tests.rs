@@ -2,7 +2,7 @@
 // Extracted from lib.rs inline tests
 use cv_calib3d::*;
 use cv_core::{CameraIntrinsics, Distortion, Pose};
-use cv_imgproc::{warp_perspective_ex, BorderMode, Interpolation};
+use cv_imgproc::{BorderMode, Interpolation, warp_perspective_ex};
 use image::{GrayImage, Luma};
 use nalgebra::{Matrix3, Matrix3x4, Point2, Point3, Rotation3, Vector3};
 use std::path::PathBuf;
@@ -117,7 +117,7 @@ fn triangulate_points_recovers_geometry() {
         0.0, 1.0, 0.0, 0.0, //
         0.0, 0.0, 1.0, 0.0,
     );
-    let world = vec![
+    let world = [
         Point3::new(0.0, 0.0, 3.0),
         Point3::new(0.2, -0.1, 4.0),
         Point3::new(-0.3, 0.2, 5.0),
@@ -309,7 +309,7 @@ fn solve_pnp_refine_reduces_reprojection_error() {
 fn undistort_points_inverts_forward_distortion() {
     let k = CameraIntrinsics::new(620.0, 615.0, 320.0, 240.0, 640, 480);
     let d = Distortion::new(0.12, -0.05, 0.001, -0.0007, 0.01);
-    let ideal = vec![
+    let ideal = [
         Point2::new(120.0, 100.0),
         Point2::new(300.0, 220.0),
         Point2::new(500.0, 360.0),
@@ -376,7 +376,7 @@ fn recover_pose_from_essential_selects_valid_candidate() {
     let gt = Pose::new(rot, t);
     let e = essential_from_extrinsics(&gt);
 
-    let world = vec![
+    let world = [
         Point3::new(-0.2, -0.1, 3.0),
         Point3::new(0.2, -0.2, 3.5),
         Point3::new(0.1, 0.15, 4.1),

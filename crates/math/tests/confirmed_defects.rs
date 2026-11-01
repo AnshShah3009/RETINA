@@ -1,14 +1,14 @@
 //! Regressions for confirmed `cv-math` defects. Each test fails on the
 //! pre-fix behavior and keeps a control for the case that was already correct.
 
+use cv_math::Interp1d;
 use cv_math::integrate::{simpson, trapezoid};
 use cv_math::interpolate::interp1d_linear;
 use cv_math::linalg::{eig, lu_solve, qr_solve};
 use cv_math::polygon_iou;
-use cv_math::sparse::{eigs_inverse_power, CsrMatrix};
-use cv_math::spatial::{cdist, pdist, DistanceMetric, KDTree};
+use cv_math::sparse::{CsrMatrix, eigs_inverse_power};
+use cv_math::spatial::{DistanceMetric, KDTree, cdist, pdist};
 use cv_math::special::{bessel_y0, bessel_y1, bessel_yn};
-use cv_math::Interp1d;
 use geo::{LineString, Polygon};
 use nalgebra::{DMatrix, DVector};
 
@@ -292,12 +292,11 @@ fn interp1d_tiny_spacing_uses_the_real_blend() {
 #[test]
 fn eig_rejects_a_jordan_block_with_a_large_residual() {
     let jordan = DMatrix::from_row_slice(2, 2, &[1.0, 1.0, 0.0, 1.0]);
-    match eig(&jordan) {
-        Ok((vals, vecs)) => {
-            let residual = eigen_residual(&jordan, &vals, &vecs);
-            panic!("Jordan block returned Ok with residual {residual} (the second vector's residual is 1)");
-        }
-        Err(_) => {}
+    if let Ok((vals, vecs)) = eig(&jordan) {
+        let residual = eigen_residual(&jordan, &vals, &vecs);
+        panic!(
+            "Jordan block returned Ok with residual {residual} (the second vector's residual is 1)"
+        );
     }
 
     let diagonal = DMatrix::from_diagonal(&DVector::from_column_slice(&[3.0, 7.0]));

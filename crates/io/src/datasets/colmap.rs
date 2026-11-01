@@ -544,11 +544,7 @@ pub fn write_images_text<P: AsRef<Path>>(path: P, images: &[Image]) -> Result<()
 /// A pose component for a COLMAP text line. `-0.0` compares equal to `0.0`
 /// but formats differently; the file uses a plain zero.
 fn colmap_component(x: f64) -> f64 {
-    if x == 0.0 {
-        0.0
-    } else {
-        x
-    }
+    if x == 0.0 { 0.0 } else { x }
 }
 
 /// Write a COLMAP text-model `points3D.txt`.

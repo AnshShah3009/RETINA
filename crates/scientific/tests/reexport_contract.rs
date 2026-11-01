@@ -137,7 +137,7 @@ fn reexported_kdtree_matches_brute_force() {
 /// or a missing face.
 #[test]
 fn reexported_delaunay_covers_the_hull() {
-    use cv_scientific::geometry2d::{delaunay_triangulation, Point2D};
+    use cv_scientific::geometry2d::{Point2D, delaunay_triangulation};
 
     let points = vec![
         Point2D::new(0.0, 0.0),
@@ -226,7 +226,7 @@ fn reexported_interpolators_reproduce_their_knots() {
 /// solution; a fabricated answer (zeros, or the right-hand side) fails here.
 #[test]
 fn reexported_sparse_solver_solves_a_known_system() {
-    use cv_scientific::sparse::{cg_solve, CsrMatrix};
+    use cv_scientific::sparse::{CsrMatrix, cg_solve};
     use nalgebra::DVector;
 
     // A = [[4, 1], [1, 3]], b = [1, 2]  =>  x = [1/11, 7/11].

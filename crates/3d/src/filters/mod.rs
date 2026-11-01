@@ -16,7 +16,7 @@ pub mod transform;
 pub mod uniform_filter;
 pub mod voxel_filter;
 
-pub use bounding_box::{compute_aabb, compute_obb, OrientedBoundingBox};
+pub use bounding_box::{OrientedBoundingBox, compute_aabb, compute_obb};
 pub use crop_filter::crop_aabb;
 pub use normal_estimation::estimate_normals_knn;
 pub use radius_filter::radius_outlier_removal;

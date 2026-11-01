@@ -25,12 +25,12 @@ impl Key {
 
     /// Extract the numeric index (lower 56 bits).
     pub fn index(&self) -> u64 {
-        self.0 & 0x00FFFFFFFFFFFFFF
+        self.0 & 0x00ffffffffffffff
     }
 
     /// Extract the symbol character (upper 8 bits).
     pub fn symbol_char(&self) -> char {
-        ((self.0 >> 56) & 0xFF) as u8 as char
+        ((self.0 >> 56) & 0xff) as u8 as char
     }
 }
 

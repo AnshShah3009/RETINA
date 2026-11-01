@@ -85,7 +85,7 @@ fn unmatchable_map() -> WorldMap {
         map.add_point(MapPoint::new(
             i,
             Point3::new(i as f32, 0.0, 3.0),
-            vec![0xA5; 32],
+            vec![0xa5; 32],
         ));
     }
     map

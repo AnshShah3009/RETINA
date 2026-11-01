@@ -74,16 +74,15 @@ pub use cv_core::Result;
 pub mod registration;
 
 pub use registration::{
-    evaluate_registration, get_information_matrix_from_point_clouds,
+    ICPResult, evaluate_registration, get_information_matrix_from_point_clouds,
     registration_icp_point_to_plane, registration_icp_point_to_plane_ctx,
-    registration_multi_scale_icp, ICPResult,
+    registration_multi_scale_icp,
 };
 
 pub use cv_core::RobustLoss;
-pub use registration::colored::{registration_colored_icp, ColoredICPResult};
+pub use registration::colored::{ColoredICPResult, registration_colored_icp};
 pub use registration::global::{
-    compute_fpfh_features, registration_fgr_based_on_feature_matching,
-    registration_ransac_based_on_feature_matching, FPFHFeature, FastGlobalRegistrationOption,
-    GlobalRegistrationResult,
+    FPFHFeature, FastGlobalRegistrationOption, GlobalRegistrationResult, compute_fpfh_features,
+    registration_fgr_based_on_feature_matching, registration_ransac_based_on_feature_matching,
 };
-pub use registration::gnc::{registration_gnc, GNCOptimizer, GNCResult};
+pub use registration::gnc::{GNCOptimizer, GNCResult, registration_gnc};

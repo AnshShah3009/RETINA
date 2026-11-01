@@ -11,7 +11,7 @@
 //!
 //! All factor graph types come from [`crate::factor_graph`].
 
-use crate::factor_graph::{numerical_jacobians, Factor, Key, NoiseModel, Values, Variable};
+use crate::factor_graph::{Factor, Key, NoiseModel, Values, Variable, numerical_jacobians};
 use nalgebra::{DMatrix, DVector, Isometry3, Point3};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::AddAssign;
@@ -403,6 +403,137 @@ impl Isam2Solver {
 impl Default for Isam2Solver {
     fn default() -> Self {
         Self::new(Isam2Config::default())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backward-compatible Isam2 wrapper (used by Python bindings)
+// ---------------------------------------------------------------------------
+
+use crate::factors::BetweenFactor;
+use std::sync::RwLock;
+
+/// Legacy Isam2 interface for backward compatibility with Python bindings.
+///
+/// **Honest contract:** `optimize_on_update` and `batch_optimize` in
+/// `with_config` are accepted for API compatibility and have **no effect** today.
+/// `update()` always applies the pending factors/values and `optimize()` always
+/// runs a full batch optimisation; there is no incremental/conditional mode.
+pub struct Isam2 {
+    solver: RwLock<Isam2Solver>,
+    pending_factors: RwLock<Vec<Box<dyn Factor>>>,
+    pending_values: RwLock<Values>,
+}
+
+impl Isam2 {
+    pub fn new() -> Self {
+        Self::with_config(true, false)
+    }
+
+    pub fn with_config(_optimize_on_update: bool, _batch_optimize: bool) -> Self {
+        Self {
+            solver: RwLock::new(Isam2Solver::default()),
+            pending_factors: RwLock::new(Vec::new()),
+            pending_values: RwLock::new(Values::new()),
+        }
+    }
+
+    pub fn add_pose(&self, id: usize, initial: nalgebra::Vector3<f64>) {
+        if let Ok(mut vals) = self.pending_values.write() {
+            vals.insert(
+                Key(id as u64),
+                Variable::Vector(DVector::from_column_slice(&[
+                    initial.x, initial.y, initial.z,
+                ])),
+            );
+        }
+    }
+
+    pub fn add_point(&self, id: usize, initial: Point3<f64>) {
+        if let Ok(mut vals) = self.pending_values.write() {
+            vals.insert(Key(1_000_000 + id as u64), Variable::Point3(initial));
+        }
+    }
+
+    pub fn add_factor(&self, from: usize, to: usize, measurement: DVector<f64>, noise: f64) {
+        let dim = measurement.len();
+        let factor = BetweenFactor::new(
+            Key(from as u64),
+            Key(to as u64),
+            Variable::Vector(measurement),
+            NoiseModel::Diagonal(DVector::from_element(dim, noise)),
+        );
+        if let Ok(mut factors) = self.pending_factors.write() {
+            factors.push(Box::new(factor));
+        }
+    }
+
+    pub fn update(&self) -> Result<(), String> {
+        let factors =
+            std::mem::take(&mut *self.pending_factors.write().map_err(|e| e.to_string())?);
+        let values = std::mem::replace(
+            &mut *self.pending_values.write().map_err(|e| e.to_string())?,
+            Values::new(),
+        );
+        let mut solver = self.solver.write().map_err(|e| e.to_string())?;
+        solver.update(factors, values)
+    }
+
+    pub fn optimize(&self) -> Result<(), String> {
+        self.solver
+            .write()
+            .map_err(|e| e.to_string())?
+            .optimize_batch()?;
+        Ok(())
+    }
+
+    pub fn get_pose(&self, id: usize) -> Option<nalgebra::Vector3<f64>> {
+        let solver = self.solver.read().ok()?;
+        match solver.estimate(&Key(id as u64))? {
+            Variable::Vector(v) if v.len() >= 3 => Some(nalgebra::Vector3::new(v[0], v[1], v[2])),
+            Variable::Pose3(iso) => Some(iso.translation.vector),
+            _ => None,
+        }
+    }
+
+    pub fn get_point(&self, id: usize) -> Option<Point3<f64>> {
+        let solver = self.solver.read().ok()?;
+        solver.estimate_point3(&Key(1_000_000 + id as u64))
+    }
+
+    pub fn get_all_poses(&self) -> Vec<(usize, nalgebra::Vector3<f64>)> {
+        let solver = self.solver.read().unwrap();
+        // Plain small-u64 keys are pose ids (symbol-keyed and ≥1M keys are
+        // landmarks/other variables). Iterate the stored keys directly — a
+        // previous revision probed all 10^6 candidate ids with HashMap hits.
+        let mut result: Vec<_> = solver
+            .theta
+            .values
+            .iter()
+            .filter(|(k, _)| k.0 == k.index() && k.index() < 1_000_000)
+            .filter_map(|(k, var)| match var {
+                Variable::Vector(v) if v.len() >= 3 => {
+                    Some((k.index() as usize, nalgebra::Vector3::new(v[0], v[1], v[2])))
+                }
+                Variable::Pose3(iso) => Some((k.index() as usize, iso.translation.vector)),
+                _ => None,
+            })
+            .collect();
+        result.sort_by_key(|(id, _)| *id);
+        result
+    }
+
+    pub fn num_nodes(&self) -> usize {
+        self.solver.read().map(|s| s.num_variables()).unwrap_or(0)
+    }
+    pub fn num_factors(&self) -> usize {
+        self.solver.read().map(|s| s.num_factors()).unwrap_or(0)
+    }
+}
+
+impl Default for Isam2 {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -938,136 +1069,5 @@ mod tests {
             res.is_ok(),
             "update must not panic on a missing key: {res:?}"
         );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Backward-compatible Isam2 wrapper (used by Python bindings)
-// ---------------------------------------------------------------------------
-
-use crate::factors::BetweenFactor;
-use std::sync::RwLock;
-
-/// Legacy Isam2 interface for backward compatibility with Python bindings.
-///
-/// **Honest contract:** `optimize_on_update` and `batch_optimize` in
-/// `with_config` are accepted for API compatibility and have **no effect** today.
-/// `update()` always applies the pending factors/values and `optimize()` always
-/// runs a full batch optimisation; there is no incremental/conditional mode.
-pub struct Isam2 {
-    solver: RwLock<Isam2Solver>,
-    pending_factors: RwLock<Vec<Box<dyn Factor>>>,
-    pending_values: RwLock<Values>,
-}
-
-impl Isam2 {
-    pub fn new() -> Self {
-        Self::with_config(true, false)
-    }
-
-    pub fn with_config(_optimize_on_update: bool, _batch_optimize: bool) -> Self {
-        Self {
-            solver: RwLock::new(Isam2Solver::default()),
-            pending_factors: RwLock::new(Vec::new()),
-            pending_values: RwLock::new(Values::new()),
-        }
-    }
-
-    pub fn add_pose(&self, id: usize, initial: nalgebra::Vector3<f64>) {
-        if let Ok(mut vals) = self.pending_values.write() {
-            vals.insert(
-                Key(id as u64),
-                Variable::Vector(DVector::from_column_slice(&[
-                    initial.x, initial.y, initial.z,
-                ])),
-            );
-        }
-    }
-
-    pub fn add_point(&self, id: usize, initial: Point3<f64>) {
-        if let Ok(mut vals) = self.pending_values.write() {
-            vals.insert(Key(1_000_000 + id as u64), Variable::Point3(initial));
-        }
-    }
-
-    pub fn add_factor(&self, from: usize, to: usize, measurement: DVector<f64>, noise: f64) {
-        let dim = measurement.len();
-        let factor = BetweenFactor::new(
-            Key(from as u64),
-            Key(to as u64),
-            Variable::Vector(measurement),
-            NoiseModel::Diagonal(DVector::from_element(dim, noise)),
-        );
-        if let Ok(mut factors) = self.pending_factors.write() {
-            factors.push(Box::new(factor));
-        }
-    }
-
-    pub fn update(&self) -> Result<(), String> {
-        let factors =
-            std::mem::take(&mut *self.pending_factors.write().map_err(|e| e.to_string())?);
-        let values = std::mem::replace(
-            &mut *self.pending_values.write().map_err(|e| e.to_string())?,
-            Values::new(),
-        );
-        let mut solver = self.solver.write().map_err(|e| e.to_string())?;
-        solver.update(factors, values)
-    }
-
-    pub fn optimize(&self) -> Result<(), String> {
-        self.solver
-            .write()
-            .map_err(|e| e.to_string())?
-            .optimize_batch()?;
-        Ok(())
-    }
-
-    pub fn get_pose(&self, id: usize) -> Option<nalgebra::Vector3<f64>> {
-        let solver = self.solver.read().ok()?;
-        match solver.estimate(&Key(id as u64))? {
-            Variable::Vector(v) if v.len() >= 3 => Some(nalgebra::Vector3::new(v[0], v[1], v[2])),
-            Variable::Pose3(iso) => Some(iso.translation.vector),
-            _ => None,
-        }
-    }
-
-    pub fn get_point(&self, id: usize) -> Option<Point3<f64>> {
-        let solver = self.solver.read().ok()?;
-        solver.estimate_point3(&Key(1_000_000 + id as u64))
-    }
-
-    pub fn get_all_poses(&self) -> Vec<(usize, nalgebra::Vector3<f64>)> {
-        let solver = self.solver.read().unwrap();
-        // Plain small-u64 keys are pose ids (symbol-keyed and ≥1M keys are
-        // landmarks/other variables). Iterate the stored keys directly — a
-        // previous revision probed all 10^6 candidate ids with HashMap hits.
-        let mut result: Vec<_> = solver
-            .theta
-            .values
-            .iter()
-            .filter(|(k, _)| k.0 == k.index() && k.index() < 1_000_000)
-            .filter_map(|(k, var)| match var {
-                Variable::Vector(v) if v.len() >= 3 => {
-                    Some((k.index() as usize, nalgebra::Vector3::new(v[0], v[1], v[2])))
-                }
-                Variable::Pose3(iso) => Some((k.index() as usize, iso.translation.vector)),
-                _ => None,
-            })
-            .collect();
-        result.sort_by_key(|(id, _)| *id);
-        result
-    }
-
-    pub fn num_nodes(&self) -> usize {
-        self.solver.read().map(|s| s.num_variables()).unwrap_or(0)
-    }
-    pub fn num_factors(&self) -> usize {
-        self.solver.read().map(|s| s.num_factors()).unwrap_or(0)
-    }
-}
-
-impl Default for Isam2 {
-    fn default() -> Self {
-        Self::new()
     }
 }

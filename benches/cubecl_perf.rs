@@ -3,7 +3,7 @@
 //! Run with:
 //!   cargo bench --bench cubecl_perf
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::time::Duration;
 
 const BENCH_SIZES: &[usize] = &[1024, 4096, 16384];
@@ -64,7 +64,7 @@ fn bench_knn(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("points", n), &n, |b, &n| {
             b.iter(|| {
                 let points: Vec<f32> = (0..n * 3).map(|i| (i as f32) * 0.01).collect();
-                let queries = vec![0.0f32; 3];
+                let queries = [0.0f32; 3];
                 let k = 8;
 
                 let qx = queries[0];

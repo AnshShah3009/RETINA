@@ -24,13 +24,13 @@
 
 #![forbid(unsafe_code)]
 
+use cv_core::TensorShape;
 use cv_core::storage::{CpuStorage, Storage};
 use cv_core::tensor::Tensor;
-use cv_core::TensorShape;
 use cv_hal::context::{ComputeContext, MorphologyType};
 use cv_hal::cpu::CpuBackend;
 use cv_imgproc::{
-    create_morph_kernel, dilate_with_border_into, erode_with_border_into, BorderMode, MorphShape,
+    BorderMode, MorphShape, create_morph_kernel, dilate_with_border_into, erode_with_border_into,
 };
 use image::GrayImage;
 

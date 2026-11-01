@@ -1,5 +1,5 @@
-use crate::gpu::GpuContext;
 use crate::Result;
+use crate::gpu::GpuContext;
 use cv_core::storage::Storage;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -136,7 +136,7 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
             Ok(_) => {
                 return Err(crate::Error::NotSupported(
                     "Unsupported fast precision type".into(),
-                ))
+                ));
             }
             _ => {
                 include_str!("../../shaders/fast_nms_f32.wgsl")

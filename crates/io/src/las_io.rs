@@ -105,7 +105,7 @@ pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
                     "LAS record {} declares point format {} (which carries RGB) but \
                      supplies no colour, so colors would desynchronize from points",
                     points.len() - 1,
-                    format.to_u8().unwrap_or(0xFF)
+                    format.to_u8().unwrap_or(0xff)
                 ))
             })?;
             colors_vec.push(Point3::new(
@@ -133,7 +133,7 @@ pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
                     "LAS record {} declares point format {} (which carries GPS time) \
                      but supplies none, so gps_times would desynchronize from points",
                     points.len() - 1,
-                    format.to_u8().unwrap_or(0xFF)
+                    format.to_u8().unwrap_or(0xff)
                 ))
             })?;
             gps_times_vec.push(t);
@@ -281,9 +281,9 @@ pub fn write_las<P: AsRef<Path>>(path: P, data: &LasData) -> cv_core::Result<()>
     use las::{Builder, Point, Write, Writer};
 
     let mut builder = Builder::from((1, 4)); // LAS 1.4
-                                             // Pick a point format that actually carries the fields we write. Formats 0
-                                             // and 2 have no GPS time slot, so writing `gps_times` with them silently
-                                             // dropped it; formats 1 and 3 include GPS time.
+    // Pick a point format that actually carries the fields we write. Formats 0
+    // and 2 have no GPS time slot, so writing `gps_times` with them silently
+    // dropped it; formats 1 and 3 include GPS time.
     let has_color = data.colors.is_some();
     let has_gps = data.gps_times.is_some();
     builder.point_format = match (has_color, has_gps) {

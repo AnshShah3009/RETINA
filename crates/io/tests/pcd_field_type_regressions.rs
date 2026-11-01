@@ -196,7 +196,7 @@ fn ascii_float_colour_is_not_rescaled() {
         colors[0].x
     );
     assert!(
-        (colors[0].y - 0.5019607843).abs() < 1e-6,
+        (colors[0].y - 0.501_960_8).abs() < 1e-6,
         "got {}",
         colors[0].y
     );

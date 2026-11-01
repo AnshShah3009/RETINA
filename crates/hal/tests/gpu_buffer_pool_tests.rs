@@ -27,7 +27,7 @@
 //!   * is a returned buffer still holding the previous caller's data?
 
 use cv_hal::gpu::GpuContext;
-use cv_hal::gpu_kernels::buffer_utils::{global_pool, read_buffer, GpuBufferPool};
+use cv_hal::gpu_kernels::buffer_utils::{GpuBufferPool, global_pool, read_buffer};
 use std::sync::Arc;
 use std::time::Duration;
 use wgpu::BufferUsages;
@@ -36,7 +36,7 @@ use wgpu::BufferUsages;
 /// never read back the same thing. wgpu zero-initialises buffers, so 0 is
 /// reserved for "nobody wrote here".
 fn stamp(n: u32) -> u32 {
-    0x9E37_0000u32.wrapping_add(n).wrapping_mul(2_654_435_761) | 1
+    0x9e37_0000u32.wrapping_add(n).wrapping_mul(2_654_435_761) | 1
 }
 
 const STAMP_SIZE: u64 = 64; // 16 u32s

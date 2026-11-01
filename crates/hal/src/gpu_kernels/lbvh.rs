@@ -1,6 +1,6 @@
+use crate::Result;
 use crate::gpu::GpuContext;
 use crate::storage::GpuStorage;
-use crate::Result;
 use cv_core::{DataType, Tensor, TensorShape};
 use std::marker::PhantomData;
 use std::sync::Arc;

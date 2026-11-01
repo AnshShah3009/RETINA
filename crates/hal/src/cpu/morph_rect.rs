@@ -24,11 +24,7 @@ const VAN_HERK_MIN_WIDTH: usize = 16;
 
 #[inline(always)]
 fn ext(a: u8, b: u8, is_max: bool) -> u8 {
-    if is_max {
-        a.max(b)
-    } else {
-        a.min(b)
-    }
+    if is_max { a.max(b) } else { a.min(b) }
 }
 
 /// `acc[i] = ext(acc[i], src[i])` over equal-length slices.

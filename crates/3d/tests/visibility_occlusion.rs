@@ -302,7 +302,7 @@ fn near_silhouette_points_do_not_escape_via_a_depth_tolerance() {
     let back_visible = points
         .iter()
         .zip(visible.iter())
-        .filter(|(p, &v)| p.z < -0.2 && v)
+        .filter(|&(p, &v)| p.z < -0.2 && v)
         .count();
 
     assert_eq!(

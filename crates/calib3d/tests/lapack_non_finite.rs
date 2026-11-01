@@ -56,7 +56,7 @@ fn good_pairs(n: usize) -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
 
 #[test]
 fn a_non_finite_point_set_is_refused_rather_than_hanging_the_svd() {
-    let (mut src, mut dst) = good_pairs(12);
+    let (mut src, dst) = good_pairs(12);
     src[7] = [f64::NAN, f64::NAN];
 
     must_terminate_within("solve_dlt_homography with a NaN point", move || {

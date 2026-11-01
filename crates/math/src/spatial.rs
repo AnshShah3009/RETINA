@@ -329,11 +329,11 @@ impl KDTree {
                     }
                     if heap.len() < k {
                         heap.push(HeapItem { dist: d, index: *i });
-                    } else if let Some(top) = heap.peek() {
-                        if d < top.dist {
-                            heap.pop();
-                            heap.push(HeapItem { dist: d, index: *i });
-                        }
+                    } else if let Some(top) = heap.peek()
+                        && d < top.dist
+                    {
+                        heap.pop();
+                        heap.push(HeapItem { dist: d, index: *i });
                     }
                 }
             }

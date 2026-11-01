@@ -7,7 +7,7 @@
 
 use crate::descriptor::{Descriptor, DescriptorExtractor, Descriptors};
 use crate::fast::{self, fast_detect};
-use cv_core::{storage::Storage, Error, KeyPoint, KeyPoints, Tensor};
+use cv_core::{Error, KeyPoint, KeyPoints, Tensor, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::tensor_ext::{TensorCast, TensorToCpu};
 use cv_imgproc::convolve::gaussian_blur;
@@ -446,7 +446,7 @@ fn extract_keypoints_from_score_map<S: Storage<f32> + cv_core::StorageFactory<f3
             _ => {
                 return Err(Error::AlgorithmError(
                     "GpuStorage requires GPU context".into(),
-                ))
+                ));
             }
         };
         input_gpu
@@ -614,7 +614,7 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
                     Descriptors {
                         descriptors: Vec::new(),
                     },
-                )
+                );
             }
         };
 
@@ -1048,7 +1048,7 @@ fn convert_to_f32_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
             _ => {
                 return Err(Error::AlgorithmError(
                     "GpuStorage requires GPU context".into(),
-                ))
+                ));
             }
         };
         input_gpu
@@ -1086,7 +1086,7 @@ mod tests {
         let mut img = GrayImage::new(size, size);
         for y in 0..size {
             for x in 0..size {
-                let is_white = ((x / square_size) + (y / square_size)) % 2 == 0;
+                let is_white = ((x / square_size) + (y / square_size)).is_multiple_of(2);
                 img.put_pixel(x, y, if is_white { Luma([255]) } else { Luma([0]) });
             }
         }
@@ -1309,11 +1309,13 @@ mod tests {
         assert_eq!(Orb::new().with_n_levels_opt_in(0).n_levels(), 0);
         assert!(Orb::new().with_n_levels_opt_in(0).detect(&img).is_empty());
         assert_eq!(Orb::new().with_n_features_opt_in(0).n_features(), 0);
-        assert!(Orb::new()
-            .with_n_features_opt_in(0)
-            .detect(&img)
-            .keypoints
-            .is_empty());
+        assert!(
+            Orb::new()
+                .with_n_features_opt_in(0)
+                .detect(&img)
+                .keypoints
+                .is_empty()
+        );
     }
 
     /// Control: ordinary values are stored verbatim and detection is unchanged.
@@ -1766,7 +1768,7 @@ mod tests {
         // Regression: the ctx path fed a [0,1]-normalized tensor into
         // fast_detect with a 0..255 threshold, so it always returned zero
         // keypoints on the default Orb.
-        use cv_core::{storage::CpuStorage, TensorShape};
+        use cv_core::{TensorShape, storage::CpuStorage};
         use cv_hal::cpu::CpuBackend;
 
         let img = create_checkerboard(128, 16);
@@ -1791,7 +1793,7 @@ mod tests {
     /// so the keypoints were a different set from [`Orb::detect`].
     #[test]
     fn detect_ctx_matches_detect() {
-        use cv_core::{storage::CpuStorage, TensorShape};
+        use cv_core::{TensorShape, storage::CpuStorage};
         use cv_hal::cpu::CpuBackend;
 
         let img = create_checkerboard(96, 12);
@@ -1938,8 +1940,7 @@ mod tests {
         for theta in [30.0, 47.0, 113.0] {
             let kp = KeyPoint::new(c as f64, c as f64).with_size(31.0);
             let d0 =
-                compute_orb_descriptor(&base, &kp.clone().with_angle(theta), &pattern, 31, false)
-                    .unwrap();
+                compute_orb_descriptor(&base, &kp.with_angle(theta), &pattern, 31, false).unwrap();
             let d1 =
                 compute_orb_descriptor(&turned, &kp.with_angle(theta + 180.0), &pattern, 31, false)
                     .unwrap();

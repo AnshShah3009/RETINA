@@ -289,14 +289,14 @@ pub fn detect_aruco_markers(
 
     // Try GPU path if available
     #[cfg(feature = "gpu")]
-    if gpu::gpu_available() && gpu::is_gpu_enabled() {
-        if let Ok(gpu_detections) =
+    if gpu::gpu_available()
+        && gpu::is_gpu_enabled()
+        && let Ok(gpu_detections) =
             detect_aruco_markers_gpu(image, &candidates, &codes, payload_bits, border_bits)
-        {
-            return Ok(gpu_detections);
-        }
-        // Fall through to CPU if GPU fails
+    {
+        return Ok(gpu_detections);
     }
+    // Fall through to CPU if GPU fails
 
     // CPU path: parallel detection
     detect_aruco_markers_cpu(image, &candidates, &codes, payload_bits, border_bits)
@@ -451,14 +451,14 @@ pub fn detect_apriltags(
 
     // Try GPU path if available
     #[cfg(feature = "gpu")]
-    if gpu::gpu_available() && gpu::is_gpu_enabled() {
-        if let Ok(gpu_detections) =
+    if gpu::gpu_available()
+        && gpu::is_gpu_enabled()
+        && let Ok(gpu_detections) =
             detect_apriltags_gpu(image, &candidates, &codes, payload_bits, border_bits)
-        {
-            return Ok(gpu_detections);
-        }
-        // Fall through to CPU if GPU fails
+    {
+        return Ok(gpu_detections);
     }
+    // Fall through to CPU if GPU fails
 
     // CPU path: parallel detection
     detect_apriltags_cpu(image, &candidates, &codes, payload_bits, border_bits)
@@ -782,7 +782,7 @@ fn aruco_dictionary_codes(dict: ArucoDictionary) -> Vec<u64> {
     // LCG generated incompatible codes.)
     let side = dict.marker_size();
     let bits = side * side;
-    let nb = (bits + 7) / 8;
+    let nb = bits.div_ceil(8);
     let count = dict.dict_size();
     let (table, stride): (&[u8], usize) = match side {
         4 => (&crate::aruco_tables::DICT_4X4_BYTES, 4 * nb),
@@ -804,8 +804,8 @@ fn aruco_dictionary_codes(dict: ArucoDictionary) -> Vec<u64> {
 
 fn apriltag_family_codes(family: AprilTagFamily) -> (usize, Vec<u64>) {
     match family {
-        AprilTagFamily::Tag16h5 => (4, generate_dictionary_codes(16, 30, 0x9E37_79B9_7F4Au64)),
-        AprilTagFamily::Tag36h11 => (6, generate_dictionary_codes(36, 100, 0xC2B2_AE35_1D0Bu64)),
+        AprilTagFamily::Tag16h5 => (4, generate_dictionary_codes(16, 30, 0x9e37_79b9_7f4au64)),
+        AprilTagFamily::Tag36h11 => (6, generate_dictionary_codes(36, 100, 0xc2b2_ae35_1d0bu64)),
     }
 }
 
@@ -994,7 +994,7 @@ mod tests {
         assert_eq!(detections.len(), 5);
         let detected_ids: Vec<u16> = detections.iter().map(|d| d.id).collect();
         for id in &ids {
-            assert!(detected_ids.contains(&(*id as u16)));
+            assert!(detected_ids.contains(&{ *id }));
         }
     }
 
@@ -1019,7 +1019,7 @@ mod tests {
         assert_eq!(detections.len(), 3);
         let detected_ids: Vec<u16> = detections.iter().map(|d| d.id).collect();
         for id in &ids {
-            assert!(detected_ids.contains(&(*id as u16)));
+            assert!(detected_ids.contains(&{ *id }));
         }
     }
 
@@ -1030,7 +1030,7 @@ mod tests {
 
         // Create test image with 3 markers
         let mut canvas = GrayImage::from_pixel(400, 300, Luma([255]));
-        let ids = vec![2, 7, 12];
+        let ids = [2, 7, 12];
 
         for (i, &id) in ids.iter().enumerate() {
             let marker = draw_aruco_marker(ArucoDictionary::Dict4x4_50, id, 10).unwrap();
@@ -1066,7 +1066,7 @@ mod tests {
 
         // Create test image with 2 AprilTags
         let mut canvas = GrayImage::from_pixel(300, 250, Luma([255]));
-        let ids = vec![1, 6];
+        let ids = [1, 6];
 
         for (i, &id) in ids.iter().enumerate() {
             let marker = draw_apriltag(AprilTagFamily::Tag16h5, id, 8).unwrap();

@@ -105,10 +105,10 @@ fn next_frame_index(directory: &Path, prefix: &str) -> Result<usize> {
         let Some((digits, ext)) = rest.rsplit_once('.') else {
             continue;
         };
-        if ext.eq_ignore_ascii_case("png") {
-            if let Ok(index) = digits.parse::<usize>() {
-                next = next.max(index + 1);
-            }
+        if ext.eq_ignore_ascii_case("png")
+            && let Ok(index) = digits.parse::<usize>()
+        {
+            next = next.max(index + 1);
         }
     }
 

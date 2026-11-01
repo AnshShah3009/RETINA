@@ -1,6 +1,6 @@
+use crate::Result;
 use crate::gpu::GpuContext;
 use crate::storage::GpuStorage;
-use crate::Result;
 use cv_core::Tensor;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -1155,11 +1155,7 @@ pub(crate) fn centered_neighbor(x: u32, limit: u32, next: bool) -> u32 {
         return 0;
     }
     if next {
-        if x >= limit - 1 {
-            limit - 1
-        } else {
-            x + 1
-        }
+        if x >= limit - 1 { limit - 1 } else { x + 1 }
     } else if x > 0 {
         x - 1
     } else {
@@ -1171,11 +1167,7 @@ pub(crate) fn centered_neighbor(x: u32, limit: u32, next: bool) -> u32 {
 /// no division) when the norm is ~0.
 #[cfg(test)]
 pub(crate) fn tvl1_shrink(tau: f32, norm: f32) -> f32 {
-    if norm > 1e-6 {
-        tau / norm
-    } else {
-        tau
-    }
+    if norm > 1e-6 { tau / norm } else { tau }
 }
 
 #[cfg(test)]
@@ -1185,11 +1177,7 @@ fn poly_gauss(x: f32, sigma: f32) -> f32 {
         return 1.0;
     }
     let w = (-(x * x) / two).exp();
-    if w.is_finite() {
-        w
-    } else {
-        1.0
-    }
+    if w.is_finite() { w } else { 1.0 }
 }
 
 /// Weighted least-squares quadratic at one pixel. Same fit as

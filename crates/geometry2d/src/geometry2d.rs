@@ -668,8 +668,8 @@ fn from_geo_multi_polygon(result: &geo::MultiPolygon<f64>) -> Vec<Polygon> {
 /// needed is gone with it). Returns every ring of the result as separate
 /// polygons.
 pub fn polygon_intersection(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
-    use geo::algorithm::bool_ops::OpType;
     use geo::BooleanOps;
+    use geo::algorithm::bool_ops::OpType;
 
     let ga = to_geo_polygon(a);
     let gb = to_geo_polygon(b);
@@ -690,8 +690,8 @@ pub fn polygon_intersection(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
 /// Holes of the inputs participate in the operation. Returns every ring of
 /// the result as separate polygons (exteriors only).
 pub fn polygon_union(a: &Polygon, b: &Polygon) -> Vec<Polygon> {
-    use geo::algorithm::bool_ops::OpType;
     use geo::BooleanOps;
+    use geo::algorithm::bool_ops::OpType;
 
     let ga = to_geo_polygon(a);
     let gb = to_geo_polygon(b);

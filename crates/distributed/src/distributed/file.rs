@@ -55,19 +55,15 @@ impl LoadCoordinator for FileCoordinator {
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("load") {
-                if let Ok(metadata) = entry.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        if now.duration_since(modified).unwrap_or(Duration::ZERO) > stale_timeout {
-                            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                                if let Ok(pid) = stem.parse::<u32>() {
-                                    if !is_process_alive(pid) {
-                                        let _ = fs::remove_file(&path);
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Ok(metadata) = entry.metadata()
+                    && let Ok(modified) = metadata.modified()
+                    && now.duration_since(modified).unwrap_or(Duration::ZERO) > stale_timeout
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                    && let Ok(pid) = stem.parse::<u32>()
+                    && !is_process_alive(pid)
+                {
+                    let _ = fs::remove_file(&path);
+                    continue;
                 }
 
                 if let Ok(mut file) = File::open(&path) {

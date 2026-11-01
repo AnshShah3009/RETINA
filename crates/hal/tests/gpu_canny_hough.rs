@@ -41,7 +41,7 @@ fn scene(w: usize, h: usize) -> Vec<u8> {
             if (x - 90.0).powi(2) + (y - 70.0).powi(2) < 45.0f32.powi(2) {
                 v += 100.0;
             }
-            if ((i % w) / 25 + (i / w) / 25) % 2 == 0 {
+            if ((i % w) / 25 + (i / w) / 25).is_multiple_of(2) {
                 v += 40.0;
             }
             v += (n[i] as f32 - 128.0) * 0.2;
@@ -90,11 +90,7 @@ fn edge_map(w: usize, h: usize) -> Vec<u8> {
         .map(|i| {
             let (x, y) = (i % w, i / w);
             let on = x == y || x == 20 || y == (x + 20) / 2 || x + 2 * y == 150 || n[i] > 252;
-            if on {
-                255
-            } else {
-                0
-            }
+            if on { 255 } else { 0 }
         })
         .collect()
 }
@@ -135,7 +131,7 @@ fn gpu_hough_accumulator_is_bit_identical_including_overflow_recount() {
     let layout = cv_hal::cpu::hough_standard::HoughLayout::new(w, h, 1.0, 0.0174533);
     let (cos, sin) = layout.trig_tables();
     let mut expected = vec![0u32; layout.num_rho * layout.num_theta];
-    for (i, _) in edges.iter().enumerate().filter(|(_, &e)| e != 0) {
+    for (i, _) in edges.iter().enumerate().filter(|&(_, &e)| e != 0) {
         for t in 0..layout.num_theta {
             let k = layout.bin(i % w, i / w, cos[t], sin[t]);
             if let Some(j) = layout.index(t, k) {

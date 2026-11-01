@@ -143,7 +143,7 @@ impl CharucoDetector {
         let mut corner_data: HashMap<(usize, usize), Vec<[f64; 2]>> = HashMap::new();
 
         for marker in markers {
-            let Some(&(col, row)) = cell_of_id.get(&(marker.id as usize)) else {
+            let Some(&(col, row)) = cell_of_id.get(&{ marker.id }) else {
                 continue;
             };
             if col >= sx - 1 || row >= sy - 1 {

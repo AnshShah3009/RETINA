@@ -1,8 +1,9 @@
 use cv_core::{CpuTensor, Float};
 
 use super::{
-    complex_div, complex_mul, create_cosine_window, create_gaussian_target, extract_patch, fft2,
-    gaussian_correlation, ifft2, normalize_patch, vec_energy, BoundingBox, Complex, ObjectTracker,
+    BoundingBox, Complex, ObjectTracker, complex_div, complex_mul, create_cosine_window,
+    create_gaussian_target, extract_patch, fft2, gaussian_correlation, ifft2, normalize_patch,
+    vec_energy,
 };
 
 /// Configuration for the KCF (Kernelized Correlation Filters) tracker.

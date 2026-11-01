@@ -5,9 +5,9 @@
 
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
+use cv_hal::BackendType;
 use cv_hal::context::{BorderMode, ComputeContext};
 use cv_hal::cpu::CpuBackend;
-use cv_hal::BackendType;
 
 fn create_test_tensor_f32(
     data: &[f32],

@@ -63,8 +63,8 @@ mod gltf_tests {
 #[cfg(feature = "las")]
 mod las_tests {
     use cv_io::las_io::{
-        filter_by_classification, las_to_point_cloud, point_cloud_to_las, read_las, write_las,
-        LasData,
+        LasData, filter_by_classification, las_to_point_cloud, point_cloud_to_las, read_las,
+        write_las,
     };
     use nalgebra::Point3;
 

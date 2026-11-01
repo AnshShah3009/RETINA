@@ -199,7 +199,7 @@ struct Take {
     /// naming it — including groups whose heap entries are still queued. The
     /// generation is how a popped key tells a live group from a retired one whose
     /// slot has since been handed out again.
-    gen: u32,
+    r#gen: u32,
 }
 
 impl Ord for Take {
@@ -209,7 +209,7 @@ impl Ord for Take {
             .total_cmp(&self.diff)
             .then_with(|| other.i.cmp(&self.i))
             .then_with(|| other.j.cmp(&self.j))
-            .then_with(|| other.gen.cmp(&self.gen))
+            .then_with(|| other.r#gen.cmp(&self.r#gen))
             .then_with(|| other.slot.cmp(&self.slot))
     }
 }
@@ -240,7 +240,7 @@ struct Group {
     next: usize,
     /// Bumped every time the slot is reused, so a key can be matched to the
     /// incarnation of its group that computed it.
-    gen: u32,
+    r#gen: u32,
     /// Whether this slot currently backs a live group.
     live: bool,
 }
@@ -559,13 +559,13 @@ impl Assoc {
                 Some(slot) => {
                     // A recycled slot: bump the generation, so any key still in the
                     // heap for this slot is recognised as retired.
-                    let gen = self.groups[slot].gen.wrapping_add(1);
+                    let r#gen = self.groups[slot].r#gen.wrapping_add(1);
                     self.groups[slot] = Group {
                         lo: s,
                         hi: e,
                         q,
                         next: self.head[q],
-                        gen,
+                        r#gen,
                         live: true,
                     };
                     slot
@@ -576,7 +576,7 @@ impl Assoc {
                         hi: e,
                         q,
                         next: self.head[q],
-                        gen: 0,
+                        r#gen: 0,
                         live: true,
                     });
                     self.groups.len() - 1
@@ -589,7 +589,7 @@ impl Assoc {
                 j: self.bid[q],
                 p,
                 slot,
-                gen: self.groups[slot].gen,
+                r#gen: self.groups[slot].r#gen,
             });
         }
         self.runs.clear();
@@ -795,7 +795,7 @@ pub fn associate(a: &[IndexEntry], b: &[IndexEntry], max_dt: f64) -> Vec<(usize,
         // a fresh key of its own.
         {
             let g = &st.groups[take.slot];
-            if !g.live || g.gen != take.gen {
+            if !g.live || g.r#gen != take.r#gen {
                 continue;
             }
         }

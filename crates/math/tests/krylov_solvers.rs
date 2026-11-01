@@ -14,7 +14,7 @@
 //!
 //! References are exact solutions (`numpy.linalg.solve`).
 
-use cv_math::sparse::{cg_solve, gmres_solve, CsrMatrix};
+use cv_math::sparse::{CsrMatrix, cg_solve, gmres_solve};
 use nalgebra::DVector;
 
 fn diag(d: &[f64]) -> CsrMatrix {

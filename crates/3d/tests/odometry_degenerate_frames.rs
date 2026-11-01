@@ -58,7 +58,7 @@
 //! and it is what `compute_intensity` and `compute_hybrid` already return.
 
 use cv_3d::tsdf::CameraIntrinsics;
-use cv_3d::{compute_rgbd_odometry, OdometryMethod};
+use cv_3d::{OdometryMethod, compute_rgbd_odometry};
 
 fn intrinsics_for(w: u32, h: u32) -> CameraIntrinsics {
     CameraIntrinsics::new(100.0, 100.0, w as f32 / 2.0, h as f32 / 2.0, w, h)

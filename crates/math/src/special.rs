@@ -51,7 +51,7 @@ fn erf_series(x: f64) -> f64 {
     let mut term = x;
     let mut n = 0_usize;
     loop {
-        terms.push(if n % 2 == 0 { term } else { -term });
+        terms.push(if n.is_multiple_of(2) { term } else { -term });
         let nf = n as f64 + 1.0;
         term *= x * x * (2.0 * nf - 1.0) / (nf * (2.0 * nf + 1.0));
         n += 1;
@@ -418,11 +418,7 @@ pub fn bessel_j1(x: f64) -> f64 {
             + y * (-0.2002690873e-3
                 + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
         let r = (std::f64::consts::FRAC_2_PI / ax).sqrt() * (xx.cos() * p - z * xx.sin() * q);
-        if x < 0.0 {
-            -r
-        } else {
-            r
-        }
+        if x < 0.0 { -r } else { r }
     }
 }
 
@@ -494,11 +490,7 @@ pub fn bessel_jn(n: i32, x: f64) -> f64 {
         ans / sum
     };
 
-    if neg && n % 2 == 1 {
-        -result
-    } else {
-        result
-    }
+    if neg && n % 2 == 1 { -result } else { result }
 }
 
 pub fn bessel_y0(x: f64) -> f64 {
@@ -1048,7 +1040,7 @@ mod numeric_reference_tests {
     #[test]
     fn test_log_gamma_reference_values() {
         // scipy.special.gammaln
-        assert!(close(log_gamma(0.5), 0.57236494292470008, 1e-12));
+        assert!(close(log_gamma(0.5), 0.572_364_942_924_700_1, 1e-12));
         assert!(close(log_gamma(1.0), 0.0, 1e-14));
         assert!(close(log_gamma(3.0), std::f64::consts::LN_2, 1e-12));
         assert!(close(log_gamma(10.0), 12.801827480081469, 1e-12));
@@ -1064,7 +1056,7 @@ mod numeric_reference_tests {
     #[test]
     fn test_erfi_reference_values() {
         // scipy.special.erfi
-        assert!(close(erfi(0.5), 0.61495209469651098, 1e-9));
+        assert!(close(erfi(0.5), 0.614_952_094_696_511, 1e-9));
         assert!(close(erfi(2.0), 18.5648024146958, 1e-9));
         assert!(close(erfi(5.0), 8.29827388756904e9, 1e-9));
     }
@@ -1074,24 +1066,24 @@ mod numeric_reference_tests {
         // scipy.special.jv
         assert!(close(bessel_jn(2, 1.0), 0.11490348493190048, 1e-9));
         assert!(close(bessel_jn(2, 5.0), 0.04656511627775229, 1e-7));
-        assert!(close(bessel_jn(5, 2.0), 0.0070396297558716855, 1e-9));
-        assert!(close(bessel_jn(10, 15.0), -0.090071811047659034, 1e-9));
+        assert!(close(bessel_jn(5, 2.0), 0.007_039_629_755_871_686, 1e-9));
+        assert!(close(bessel_jn(10, 15.0), -0.090_071_811_047_659_03, 1e-9));
     }
 
     #[test]
     fn test_bessel_yn_reference_values() {
         // scipy.special.yv — regression: seeded with J instead of Y
         assert!(close(bessel_yn(2, 1.0), -1.6506826068162554, 1e-7));
-        assert!(close(bessel_yn(3, 1.0), -5.8215176059696515, 1e-7));
+        assert!(close(bessel_yn(3, 1.0), -5.821_517_605_969_651, 1e-7));
     }
 
     #[test]
     fn test_spherical_bessel_reference_values() {
         // scipy.special.spherical_jn / spherical_yn — regression: previously
         // aliased to ordinary Bessel functions.
-        assert!(close(spherical_jn(0, 1.0), 0.84147098480789650, 1e-12));
+        assert!(close(spherical_jn(0, 1.0), 0.841_470_984_807_896_5, 1e-12));
         assert!(close(spherical_jn(1, 1.0), 0.30116867893975674, 1e-12));
-        assert!(close(spherical_yn(0, 1.0), -0.54030230586813977, 1e-12));
+        assert!(close(spherical_yn(0, 1.0), -0.540_302_305_868_139_8, 1e-12));
         assert!(close(spherical_yn(1, 1.0), -1.3817732906760399, 1e-12));
     }
 
@@ -1123,7 +1115,7 @@ mod numeric_reference_tests {
         // (still far tighter than the ~3x errors being guarded against).
         assert!(close(bessel_i0(5.0), 27.239871823604442, 1e-6));
         assert!(close(bessel_k0(1.0), 0.42102443824070834, 1e-6));
-        assert!(close(bessel_k0(3.0), 0.034739504386279295, 1e-4));
+        assert!(close(bessel_k0(3.0), 0.034_739_504_386_279_3, 1e-4));
     }
 
     #[test]

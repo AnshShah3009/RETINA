@@ -9,8 +9,8 @@
 //! The Jacobian matches the CPU reference:
 //!   J = [n_x, n_y, n_z, (p x n)_x, (p x n)_y, (p x n)_z]
 
-use crate::gpu::GpuContext;
 use crate::Result;
+use crate::gpu::GpuContext;
 use nalgebra::{Matrix3, Matrix4, Matrix6, Vector3, Vector6};
 use wgpu::util::DeviceExt;
 

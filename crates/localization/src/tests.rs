@@ -1,9 +1,9 @@
 //! End-to-end tests for the localization pipeline on a real synthetic scene.
 
-use crate::database::{database_image_from_colmap, Database};
+use crate::database::{Database, database_image_from_colmap};
 use crate::evaluate::{evaluate_localization, rotation_error_degrees, translation_error};
 use crate::localizer::{LocalizationResult, Localizer, LocalizerConfig};
-use crate::synthetic::{generate, SyntheticConfig};
+use crate::synthetic::{SyntheticConfig, generate};
 use cv_core::{CameraIntrinsics, Descriptors, Pose};
 use cv_features::retrieval::Vocabulary;
 use nalgebra::{Rotation3, Vector3};
@@ -289,19 +289,25 @@ fn empty_inputs_do_not_panic() {
     let empty = Database::new(None);
     assert!(empty.is_empty());
     let localizer = Localizer::new(&empty, LocalizerConfig::default());
-    assert!(localizer
-        .localize(&[], &Descriptors::new(), &intrinsics)
-        .is_none());
+    assert!(
+        localizer
+            .localize(&[], &Descriptors::new(), &intrinsics)
+            .is_none()
+    );
 
     let scene = scene();
     let database = scene.database(None);
     let localizer = Localizer::new(&database, LocalizerConfig::default());
-    assert!(localizer
-        .localize(&[], &Descriptors::new(), &intrinsics)
-        .is_none());
-    assert!(localizer
-        .localize(&scene.query.keypoints, &Descriptors::new(), &intrinsics)
-        .is_none());
+    assert!(
+        localizer
+            .localize(&[], &Descriptors::new(), &intrinsics)
+            .is_none()
+    );
+    assert!(
+        localizer
+            .localize(&scene.query.keypoints, &Descriptors::new(), &intrinsics)
+            .is_none()
+    );
 }
 
 /// Database accessors agree with the scene, and the COLMAP bridge maps

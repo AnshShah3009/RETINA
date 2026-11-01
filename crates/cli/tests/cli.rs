@@ -65,10 +65,10 @@ fn value_after(output: &str, label: &str) -> f64 {
         let line = line.trim_start();
         if let Some(rest) = line.strip_prefix(label) {
             let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-            if let Some(token) = rest.split_whitespace().next() {
-                if let Ok(value) = token.parse::<f64>() {
-                    return value;
-                }
+            if let Some(token) = rest.split_whitespace().next()
+                && let Ok(value) = token.parse::<f64>()
+            {
+                return value;
             }
         }
     }

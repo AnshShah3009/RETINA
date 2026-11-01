@@ -1,7 +1,7 @@
+use crate::Result;
 use crate::context::StereoMatchParams;
 use crate::gpu::GpuContext;
 use crate::storage::WgpuGpuStorage;
-use crate::Result;
 use cv_core::Float;
 use std::marker::PhantomData;
 use std::sync::Arc;

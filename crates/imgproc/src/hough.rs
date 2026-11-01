@@ -1,7 +1,7 @@
 use crate::canny;
 use cv_hal::compute::ComputeDevice;
 use cv_hal::tensor_ext::TensorToGpu;
-use cv_runtime::orchestrator::{scheduler, ResourceGroup};
+use cv_runtime::orchestrator::{ResourceGroup, scheduler};
 use image::GrayImage;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -94,10 +94,10 @@ pub fn hough_circles(
     max_radius: f32,
     threshold: u32,
 ) -> Vec<cv_core::HoughCircle> {
-    if let Ok(s) = scheduler() {
-        if let Ok(group) = s.get_default_group() {
-            return hough_circles_ctx(src, min_radius, max_radius, threshold, &group);
-        }
+    if let Ok(s) = scheduler()
+        && let Ok(group) = s.get_default_group()
+    {
+        return hough_circles_ctx(src, min_radius, max_radius, threshold, &group);
     }
     // Fallback: dummy group or sequential
     let edges = canny(src, 50, 150);
@@ -148,10 +148,10 @@ pub fn hough_circles_ctx(
     threshold: u32,
     group: &ResourceGroup,
 ) -> Vec<cv_core::HoughCircle> {
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(res) = hough_circles_gpu(gpu, src, min_radius, max_radius, threshold) {
-            return res;
-        }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+        && let Ok(res) = hough_circles_gpu(gpu, src, min_radius, max_radius, threshold)
+    {
+        return res;
     }
 
     let edges = canny(src, 50, 150);
@@ -447,10 +447,10 @@ pub fn hough_lines(
     threshold: u32,
 ) -> crate::Result<Vec<Line>> {
     validate_hough_resolutions(rho_res, theta_res)?;
-    if let Ok(s) = scheduler() {
-        if let Ok(group) = s.get_default_group() {
-            return hough_lines_ctx(edges, rho_res, theta_res, threshold, &group);
-        }
+    if let Ok(s) = scheduler()
+        && let Ok(group) = s.get_default_group()
+    {
+        return hough_lines_ctx(edges, rho_res, theta_res, threshold, &group);
     }
     Ok(hough_lines_cpu(edges, rho_res, theta_res, threshold))
 }
@@ -474,10 +474,10 @@ pub fn hough_lines_ctx(
     if edges.width() == 0 || edges.height() == 0 {
         return Ok(Vec::new());
     }
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(res) = hough_lines_gpu(gpu, edges, rho_res, theta_res, threshold) {
-            return Ok(res);
-        }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+        && let Ok(res) = hough_lines_gpu(gpu, edges, rho_res, theta_res, threshold)
+    {
+        return Ok(res);
     }
     Ok(group.run(|| hough_lines_cpu(edges, rho_res, theta_res, threshold)))
 }

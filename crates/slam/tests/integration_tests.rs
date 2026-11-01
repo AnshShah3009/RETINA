@@ -64,7 +64,7 @@ fn single_frame_tracking_reports_failure() {
     // A textured frame so detection has something to find.
     let (w, h) = (64usize, 48usize);
     let data: Vec<u8> = (0..h * w)
-        .map(|i| (((i * 7 + i / w * 13) % 256) as u8))
+        .map(|i| ((i * 7 + i / w * 13) % 256) as u8)
         .collect();
     let image: CpuTensor<u8> = Tensor::from_vec(data, TensorShape::new(1, h, w)).unwrap();
     let mut map = cv_slam::types::WorldMap::new();
@@ -73,7 +73,7 @@ fn single_frame_tracking_reports_failure() {
     assert!(
         result.is_err(),
         "one monocular frame must not yield a pose; got {:?} and a map with {} points",
-        result.as_ref().map(|(p, _)| p.clone()).ok(),
+        result.as_ref().map(|(p, _)| *p).ok(),
         map.points.len()
     );
     assert!(

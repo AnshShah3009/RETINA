@@ -10,7 +10,7 @@
 //! Reference values from SciPy 1.x, default options (`m = 10`,
 //! `pgtol = 1e-5`, `factr·eps = 2.22e-9`).
 
-use cv_optimize::general::{minimize_lbfgsb, BfgsConfig, Bounds};
+use cv_optimize::general::{BfgsConfig, Bounds, minimize_lbfgsb};
 
 fn b(lo: Option<f64>, hi: Option<f64>) -> Bounds {
     Bounds {

@@ -39,19 +39,18 @@ fn main() {
                 "import sysconfig;print(sysconfig.get_config_var('LIBDIR') or '')",
             ])
             .output()
+            && out.status.success()
         {
-            if out.status.success() {
-                let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !dir.is_empty() && std::path::Path::new(&dir).is_dir() {
-                    println!("cargo:rustc-link-search=native={dir}");
-                    println!("cargo:rustc-link-lib=python3.13");
-                    // The interpreter's shared object lives in that same directory
-                    // (a conda prefix, outside the default loader path), so the
-                    // test binary exits 127 with
-                    //     error while loading shared libraries: libpython3.13.so.1.0
-                    // without an rpath even though it linked successfully.
-                    println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
-                }
+            let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !dir.is_empty() && std::path::Path::new(&dir).is_dir() {
+                println!("cargo:rustc-link-search=native={dir}");
+                println!("cargo:rustc-link-lib=python3.13");
+                // The interpreter's shared object lives in that same directory
+                // (a conda prefix, outside the default loader path), so the
+                // test binary exits 127 with
+                //     error while loading shared libraries: libpython3.13.so.1.0
+                // without an rpath even though it linked successfully.
+                println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
             }
         }
     }

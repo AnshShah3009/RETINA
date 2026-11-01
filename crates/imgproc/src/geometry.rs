@@ -1,5 +1,5 @@
 use crate::{BorderMode, Interpolation};
-use cv_core::{storage::Storage, Tensor};
+use cv_core::{Tensor, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 use cv_runtime::orchestrator::RuntimeRunner;
@@ -248,19 +248,19 @@ pub fn warp_perspective_ex_ctx(
     }
 
     // Check for GPU acceleration
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if interpolation == Interpolation::Linear && border == BorderMode::Constant(0) {
-            if let Ok(result) = warp_gpu(
-                gpu,
-                src,
-                &inv,
-                width,
-                height,
-                cv_hal::context::WarpType::Perspective,
-            ) {
-                return result;
-            }
-        }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+        && interpolation == Interpolation::Linear
+        && border == BorderMode::Constant(0)
+        && let Ok(result) = warp_gpu(
+            gpu,
+            src,
+            &inv,
+            width,
+            height,
+            cv_hal::context::WarpType::Perspective,
+        )
+    {
+        return result;
     }
 
     let mut dst = GrayImage::new(width, height);
@@ -434,19 +434,19 @@ pub fn warp_affine_ex_ctx(
     let inv = matrix.try_inverse().unwrap_or(matrix);
 
     // Check for GPU acceleration
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if interpolation == Interpolation::Linear && border == BorderMode::Constant(0) {
-            if let Ok(result) = warp_gpu(
-                gpu,
-                src,
-                &inv,
-                width,
-                height,
-                cv_hal::context::WarpType::Affine,
-            ) {
-                return result;
-            }
-        }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+        && interpolation == Interpolation::Linear
+        && border == BorderMode::Constant(0)
+        && let Ok(result) = warp_gpu(
+            gpu,
+            src,
+            &inv,
+            width,
+            height,
+            cv_hal::context::WarpType::Affine,
+        )
+    {
+        return result;
     }
 
     // `warp_perspective_ex_ctx` inverts the forward matrix itself.
@@ -509,11 +509,10 @@ pub fn remap_ex_ctx(
     }
 
     // Check for GPU acceleration
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(result) = remap_gpu(gpu, src, map_x, map_y, width, height, interpolation, border)
-        {
-            return result;
-        }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+        && let Ok(result) = remap_gpu(gpu, src, map_x, map_y, width, height, interpolation, border)
+    {
+        return result;
     }
 
     let mut dst = GrayImage::new(width, height);

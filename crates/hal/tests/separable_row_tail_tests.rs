@@ -100,7 +100,7 @@ fn convolve_row_1d_tail_written_for_random_rows() {
     // a monotone ramp can hide.
     let kernel = kernel3();
     let radius = 1;
-    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d;
     let mut next = || {
         state ^= state << 13;
         state ^= state >> 7;

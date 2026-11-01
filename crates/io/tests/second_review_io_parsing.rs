@@ -1,7 +1,7 @@
 //! Readers rejecting or misreading valid files (GAPS g-i3..g-i6).
 
 use cv_core::PointCloud;
-use cv_io::{read_pcd, write_pcd_binary_compressed, ObjMesh};
+use cv_io::{ObjMesh, read_pcd, write_pcd_binary_compressed};
 use nalgebra::Point3;
 use std::io::Cursor;
 

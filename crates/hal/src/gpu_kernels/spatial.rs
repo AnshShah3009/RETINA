@@ -1,6 +1,6 @@
+use crate::Result;
 use crate::gpu::GpuContext;
 use crate::storage::GpuStorage;
-use crate::Result;
 use cv_core::Tensor;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -180,7 +180,7 @@ fn main(
     // The counter is bumped with atomicAdd so word 0 must start at zero, and
     // freshly created buffers contain arbitrary bits - so the whole buffer is
     // written: word 0 zero, every slot the EMPTY sentinel (0xFFFFFFFF).
-    let mut claim_init = vec![0xFFu8; 4 * (1 + table_size as usize)];
+    let mut claim_init = vec![0xffu8; 4 * (1 + table_size as usize)];
     claim_init[0..4].copy_from_slice(&0u32.to_le_bytes());
     ctx.queue.write_buffer(&claim_data, 0, &claim_init);
 

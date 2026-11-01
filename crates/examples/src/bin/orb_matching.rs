@@ -4,8 +4,8 @@
 //! This example detects ORB features in two images, matches them,
 //! and draws the matches side-by-side.
 
-use cv_core::{storage::CpuStorage, Tensor, TensorShape};
-use cv_features::{detect_and_compute_ctx, MatchType, Matcher, Orb};
+use cv_core::{Tensor, TensorShape, storage::CpuStorage};
+use cv_features::{MatchType, Matcher, Orb, detect_and_compute_ctx};
 use cv_runtime::orchestrator::scheduler;
 use std::env;
 

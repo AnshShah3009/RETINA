@@ -1,11 +1,11 @@
+use crate::Result;
 use crate::context::{
     BorderMode, ColorConversion, ComputeContext, MorphologyType, ThresholdType, WarpType,
 };
 use crate::cpu::CpuBackend;
 use crate::gpu::GpuContext;
 use crate::mlx::MlxContext;
-use crate::Result;
-use cv_core::{storage::Storage, Float, Tensor};
+use cv_core::{Float, Tensor, storage::Storage};
 use std::sync::OnceLock;
 
 static CPU_CONTEXT: OnceLock<CpuBackend> = OnceLock::new();
@@ -755,17 +755,17 @@ impl<'a> ComputeDevice<'a> {
 /// Get a compute device by its ID.
 pub fn get_device_by_id(id: crate::DeviceId) -> Result<ComputeDevice<'static>> {
     // Check GPU first (high priority)
-    if let Ok(gpu) = GpuContext::global() {
-        if gpu.device_id() == id {
-            return Ok(ComputeDevice::Gpu(gpu));
-        }
+    if let Ok(gpu) = GpuContext::global()
+        && gpu.device_id() == id
+    {
+        return Ok(ComputeDevice::Gpu(gpu));
     }
 
     // Check MLX (Apple Silicon)
-    if let Some(mlx) = MLX_CONTEXT.get() {
-        if mlx.device_id() == id {
-            return Ok(ComputeDevice::Mlx(mlx));
-        }
+    if let Some(mlx) = MLX_CONTEXT.get()
+        && mlx.device_id() == id
+    {
+        return Ok(ComputeDevice::Mlx(mlx));
     }
 
     // Check CPU last

@@ -31,10 +31,10 @@ pub fn resize(src: &GrayImage, width: u32, height: u32, interpolation: Interpola
     // Attempt to get a default group, fallback to CPU only if scheduler fails (unlikely in initialized app)
     // For now, we can create a temporary CPU-only group or panic if init failed.
     // Better: use scheduler if available.
-    if let Ok(s) = cv_runtime::orchestrator::scheduler() {
-        if let Ok(group) = s.get_default_group() {
-            return resize_ctx(src, width, height, interpolation, &group);
-        }
+    if let Ok(s) = cv_runtime::orchestrator::scheduler()
+        && let Ok(group) = s.get_default_group()
+    {
+        return resize_ctx(src, width, height, interpolation, &group);
     }
     // Fallback: minimal CPU run
     resize_cpu(src, width, height, interpolation)
@@ -86,21 +86,21 @@ pub fn resize_ctx(
     // through the HAL: the CPU `ComputeContext::resize` and the GPU resize
     // shader share the same align-corners bilinear mapping. Nearest/Cubic/
     // Lanczos have no HAL equivalent and stay CPU-only below.
-    if interpolation == Interpolation::Linear {
-        if let Ok(device) = group.device() {
-            match device {
-                ComputeDevice::Gpu(gpu) => {
-                    if let Ok(result) = resize_gpu(gpu, src, width, height) {
-                        return result;
-                    }
+    if interpolation == Interpolation::Linear
+        && let Ok(device) = group.device()
+    {
+        match device {
+            ComputeDevice::Gpu(gpu) => {
+                if let Ok(result) = resize_gpu(gpu, src, width, height) {
+                    return result;
                 }
-                ComputeDevice::Cpu(cpu) => {
-                    if let Ok(result) = resize_cpu_hal(cpu, src, width, height) {
-                        return result;
-                    }
-                }
-                ComputeDevice::Mlx(_) => {}
             }
+            ComputeDevice::Cpu(cpu) => {
+                if let Ok(result) = resize_cpu_hal(cpu, src, width, height) {
+                    return result;
+                }
+            }
+            ComputeDevice::Mlx(_) => {}
         }
     }
 
@@ -146,7 +146,7 @@ fn resize_gpu(
     width: u32,
     height: u32,
 ) -> cv_hal::Result<GrayImage> {
-    use cv_core::{storage::Storage, Tensor};
+    use cv_core::{Tensor, storage::Storage};
     use cv_hal::context::ComputeContext;
     use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 
@@ -241,9 +241,9 @@ fn area_sample(
     let y1 = y0 + sh_u;
 
     let ix0 = (x0 / dw) as u32;
-    let ix1 = ((x1 + dw - 1) / dw).min(sw_u) as u32;
+    let ix1 = x1.div_ceil(dw).min(sw_u) as u32;
     let iy0 = (y0 / dh) as u32;
-    let iy1 = ((y1 + dh - 1) / dh).min(sh_u) as u32;
+    let iy1 = y1.div_ceil(dh).min(sh_u) as u32;
 
     let mut acc = [0u128; 3];
     let mut wsum = 0u128;

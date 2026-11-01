@@ -3,7 +3,7 @@
 //! convolution it replaced (`convolve_with_border_into_ctx` + `box_kernel`).
 
 use cv_imgproc::{
-    box_blur_cpu_into, box_blur_ctx, box_kernel, convolve_with_border_into_ctx, BorderMode,
+    BorderMode, box_blur_cpu_into, box_blur_ctx, box_kernel, convolve_with_border_into_ctx,
 };
 use cv_runtime::RuntimeRunner;
 use image::GrayImage;

@@ -100,7 +100,14 @@ fn subpixel_shift_converges_monotonically() {
     let pt = [64.0f32, 64.0];
     let mut errs = Vec::new();
     for iters in [1u32, 2, 3, 5, 10, 20] {
-        let f = flow_of(&cpu, &[a.clone()], &[b.clone()], pt, 21, iters);
+        let f = flow_of(
+            &cpu,
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&b),
+            pt,
+            21,
+            iters,
+        );
         let e = ((f[0] - truth[0]).powi(2) + (f[1] - truth[1]).powi(2)).sqrt();
         println!(
             "iters {iters:>2}: flow ({:.4}, {:.4}) err {e:.4}",

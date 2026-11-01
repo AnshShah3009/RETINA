@@ -2,13 +2,13 @@
 //! implementation (imgproc / video / features) already has, or the layout the
 //! tensor type documents.
 
+use cv_core::TensorShape;
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
-use cv_core::TensorShape;
 use cv_hal::context::{ColorConversion, ComputeContext, MorphologyType};
+use cv_hal::cpu::CpuBackend;
 use cv_hal::cpu::hough_standard::HoughLayout;
 use cv_hal::cpu::simd::rgb_to_gray_simd;
-use cv_hal::cpu::CpuBackend;
 
 fn cpu() -> CpuBackend {
     CpuBackend::new().unwrap()

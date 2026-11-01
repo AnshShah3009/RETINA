@@ -126,14 +126,14 @@ impl VideoCapture for NativeFfmpegCapture {
                     return Ok(());
                 }
                 Err(ffmpeg::Error::Eof) => {
-                    return Err(VideoError::CaptureFailed("End of stream".to_string()))
+                    return Err(VideoError::CaptureFailed("End of stream".to_string()));
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {}
                 Err(e) => {
                     return Err(VideoError::CaptureFailed(format!(
                         "Receive frame failed: {}",
                         e
-                    )))
+                    )));
                 }
             }
             // The decoder wants input.

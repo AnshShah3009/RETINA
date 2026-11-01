@@ -334,7 +334,7 @@ pub fn eigs_power(
 
     // Randomised (but deterministic) start vector: an all-ones start is an
     // eigenvector for structured SPD matrices, which froze the iteration.
-    let mut v = deterministic_start(n, 0x2545_F491_4F6C_DD1D);
+    let mut v = deterministic_start(n, 0x2545_f491_4f6c_dd1d);
     let anorm = matrix_inf_norm(a).max(1e-300);
     // `tol` is the caller's absolute tolerance on the eigenvalue; the residual
     // gets a floor at 1e-8 relative, which is well below the accuracy the
@@ -412,7 +412,7 @@ fn orthogonal_perturbation(v: &DVector<f64>, n: usize, seed: u64) -> DVector<f64
     // patterns overflows u64 (and therefore panics under overflow checks).
     let mut mix = seed;
     for x in v.iter() {
-        mix = mix.rotate_left(7) ^ x.to_bits().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        mix = mix.rotate_left(7) ^ x.to_bits().wrapping_mul(0x9e37_79b9_7f4a_7c15);
     }
     let mut w = deterministic_start(n, mix);
     let d = w.dot(v);
@@ -518,7 +518,7 @@ pub fn eigsh(
     // A*q0 proportional to q0 for structured SPD matrices (Laplacian,
     // Poisson), so b_0 = 0, the loop broke at j = 0 and the routine returned a
     // single Ritz value while reporting success — even for k > 1.
-    let q0 = deterministic_start(n, 0x2545_F491_4F6C_DD1D);
+    let q0 = deterministic_start(n, 0x2545_f491_4f6c_dd1d);
     q_vecs.push(q0);
 
     let mut w;
@@ -547,7 +547,7 @@ pub fn eigsh(
                 // existed. Falling through here used to silently return fewer
                 // than k eigenvalues as Ok; restart the chain from a fresh
                 // direction so the caller either gets k values or an error.
-                let trial = orthogonal_perturbation(&q_vecs[j], n, 0xD1B5_4A32_D192_ED03);
+                let trial = orthogonal_perturbation(&q_vecs[j], n, 0xd1b5_4a32_d192_ed03);
                 if q_vecs.iter().all(|qi| trial.dot(qi).abs() < 1e-8) {
                     // A zero off-diagonal block is an exact (block-diagonal)
                     // invariant subspace, so the Ritz values of the restarted

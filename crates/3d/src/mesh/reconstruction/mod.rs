@@ -232,7 +232,7 @@ mod tests {
         let cloud = create_sphere_point_cloud(Point3::new(0.0, 0.0, 0.0), 1.0, 20);
         let index = ball_pivoting::SpatialIndex::new(&cloud, 0.5);
         let neighbors = index.find_neighbors(&cloud.points[0], 0.5);
-        assert!(neighbors.len() >= 1);
+        assert!(!neighbors.is_empty());
     }
 
     #[test]

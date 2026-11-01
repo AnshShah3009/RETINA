@@ -548,7 +548,7 @@ impl Farneback {
                 "Farneback: iterations must be greater than 0".to_string(),
             ));
         }
-        if self.poly_n < 3 || self.poly_n % 2 == 0 {
+        if self.poly_n < 3 || self.poly_n.is_multiple_of(2) {
             return Err(Error::InvalidInput(format!(
                 "Farneback: poly_n must be odd and >= 3, got {}",
                 self.poly_n
@@ -1018,11 +1018,7 @@ fn gaussian_weight(x: f32, y: f32, sigma: f32) -> f32 {
         return 1.0;
     }
     let w = (-(x * x + y * y) / (2.0 * sigma_sq)).exp();
-    if w.is_finite() {
-        w
-    } else {
-        1.0
-    }
+    if w.is_finite() { w } else { 1.0 }
 }
 
 /// Scale image down

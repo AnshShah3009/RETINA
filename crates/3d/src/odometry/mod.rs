@@ -78,41 +78,39 @@ pub fn compute_rgbd_odometry_ctx(
     // so Intensity and Hybrid — the methods that read colour — stay on the CPU
     // implementation below. A successful GPU call used to return before `method`
     // was consulted, and those two variants then reported a geometric pose.
-    if geometric_gpu_kernel_applies(method) {
-        if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-            let intrinsics_array = [intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy];
+    if geometric_gpu_kernel_applies(method)
+        && let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+    {
+        let intrinsics_array = [intrinsics.fx, intrinsics.fy, intrinsics.cx, intrinsics.cy];
 
-            // Convert color to u32 for HAL if provided
-            let src_color_u32 = source_color.map(|c| {
-                c.iter()
-                    .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
-                    .collect::<Vec<_>>()
-            });
-            let dst_color_u32 = target_color.map(|c| {
-                c.iter()
-                    .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
-                    .collect::<Vec<_>>()
-            });
+        // Convert color to u32 for HAL if provided
+        let src_color_u32 = source_color.map(|c| {
+            c.iter()
+                .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
+                .collect::<Vec<_>>()
+        });
+        let dst_color_u32 = target_color.map(|c| {
+            c.iter()
+                .map(|v| (v.x as u32) | ((v.y as u32) << 8) | ((v.z as u32) << 16))
+                .collect::<Vec<_>>()
+        });
 
-            if let Ok((transform, fitness, rmse)) =
-                cv_hal::gpu_kernels::odometry_gpu::compute_odometry(
-                    gpu,
-                    source_depth,
-                    target_depth,
-                    src_color_u32.as_deref(),
-                    dst_color_u32.as_deref(),
-                    &intrinsics_array,
-                    width as u32,
-                    height as u32,
-                    &transformation,
-                )
-            {
-                return Some(OdometryResult {
-                    transformation: transform,
-                    fitness,
-                    inlier_rmse: rmse,
-                });
-            }
+        if let Ok((transform, fitness, rmse)) = cv_hal::gpu_kernels::odometry_gpu::compute_odometry(
+            gpu,
+            source_depth,
+            target_depth,
+            src_color_u32.as_deref(),
+            dst_color_u32.as_deref(),
+            &intrinsics_array,
+            width as u32,
+            height as u32,
+            &transformation,
+        ) {
+            return Some(OdometryResult {
+                transformation: transform,
+                fitness,
+                inlier_rmse: rmse,
+            });
         }
     }
 

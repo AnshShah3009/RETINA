@@ -497,7 +497,7 @@ mod tests {
             let unit = f / f.norm();
             // The correspondence set is unchanged by skipping the bad match, so
             // the recovered epipolar geometry must be the same matrix.
-            let mut base_n = result.model.clone().unwrap();
+            let mut base_n = result.model.unwrap();
             base_n /= base_n.norm();
             let agree = (unit - base_n).norm() < 1e-9 || (unit + base_n).norm() < 1e-9;
             assert!(

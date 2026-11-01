@@ -1,0 +1,8 @@
+# Google's Rust style guide: https://google.github.io/styleguide/rustguide.html
+#
+# The guide also names `format_macro_matchers` and `imports_granularity =
+# "Module"`. Both are nightly-only in rustfmt, and this repo builds on stable,
+# which is the exception the guide allows. `hex_literal_case` is stable.
+
+max_width = 100
+hex_literal_case = "Lower"

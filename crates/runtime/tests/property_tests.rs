@@ -1,5 +1,5 @@
 use cv_runtime::orchestrator::{
-    get_execution_mode, reset_execution_mode, set_execution_mode, AdaptiveLevel, ExecutionMode,
+    AdaptiveLevel, ExecutionMode, get_execution_mode, reset_execution_mode, set_execution_mode,
 };
 use parking_lot::Mutex;
 use proptest::prelude::*;

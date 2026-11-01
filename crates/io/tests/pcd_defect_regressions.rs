@@ -182,10 +182,10 @@ fn binary_rgb_field_of_wrong_size_does_not_desync_colors() {
     let mut control_bytes = std::fs::read(&control).expect("read control");
     control_bytes.extend(f32le(&[1.0, 2.0, 3.0]));
     // 0x00FF0000 as a bit pattern = red; stored in a 4-byte F slot.
-    control_bytes.extend(f32::from_bits(0x00FF_0000).to_le_bytes());
+    control_bytes.extend(f32::from_bits(0x00ff_0000).to_le_bytes());
     control_bytes.extend(f32le(&[4.0, 5.0, 6.0]));
     // 0x0000FF00 as a bit pattern = green; stored in a 4-byte F slot.
-    control_bytes.extend(f32::from_bits(0x0000_FF00).to_le_bytes());
+    control_bytes.extend(f32::from_bits(0x0000_ff00).to_le_bytes());
     std::fs::write(&control, &control_bytes).expect("append control body");
     let cloud = read_file(&control);
     assert_eq!(cloud.len(), 2, "control must parse to two points");
@@ -203,9 +203,9 @@ fn binary_rgb_field_of_wrong_size_does_not_desync_colors() {
     let mut bytes = std::fs::read(&path).expect("read");
     // 2 records of (x, y, z, 1-byte rgb) = 13 bytes each.
     bytes.extend(f32le(&[1.0, 2.0, 3.0]));
-    bytes.push(0xFF);
+    bytes.push(0xff);
     bytes.extend(f32le(&[4.0, 5.0, 6.0]));
-    bytes.push(0xFF);
+    bytes.push(0xff);
     std::fs::write(&path, &bytes).expect("append body");
 
     let f = File::open(&path).expect("open");

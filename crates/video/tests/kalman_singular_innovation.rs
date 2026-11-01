@@ -25,7 +25,7 @@
 //! invertible, and is what `DynamicKalmanFilter::correct` in the same module
 //! already used.
 
-use cv_video::kalman::{utils, ExtendedKalmanFilter, KalmanFilter, KalmanFilterState};
+use cv_video::kalman::{ExtendedKalmanFilter, KalmanFilter, KalmanFilterState, utils};
 use nalgebra::{SMatrix, SVector};
 
 /// `H` observing position `(x, y)` of a `(x, y, vx, vy)` state.

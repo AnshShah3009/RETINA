@@ -51,11 +51,7 @@ fn canonical(e: &Matrix3<f64>) -> Matrix3<f64> {
         .iter()
         .copied()
         .fold(0.0f64, |acc, v| if v.abs() > acc.abs() { v } else { acc });
-    if pivot < 0.0 {
-        -n
-    } else {
-        n
-    }
+    if pivot < 0.0 { -n } else { n }
 }
 
 #[test]

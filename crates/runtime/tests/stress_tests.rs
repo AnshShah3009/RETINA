@@ -1,5 +1,5 @@
-use cv_runtime::distributed::{ShmCoordinator, SHM_TOTAL_SIZE};
-use cv_runtime::{orchestrator::TaskPriority, scheduler, GroupPolicy};
+use cv_runtime::distributed::{SHM_TOTAL_SIZE, ShmCoordinator};
+use cv_runtime::{GroupPolicy, orchestrator::TaskPriority, scheduler};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -94,7 +94,7 @@ fn stress_test_heavy_load_mixing() {
             let tx = tx.clone();
             g_light.spawn(move || {
                 // Trivial work
-                let _ = 1 * 1;
+                let _ = 1;
                 if let Ok(guard) = tx.lock() {
                     let _ = guard.send(1);
                 }
@@ -118,11 +118,11 @@ fn stress_test_heavy_load_mixing() {
 fn stress_test_concurrent_par_iter() {
     // This test verifies that par_iter correctly utilizes the allocated
     // ResourceGroup threads and does not deadlock or panic.
-    use cv_runtime::scheduler;
     use cv_runtime::GroupPolicy;
+    use cv_runtime::scheduler;
     use rayon::prelude::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let s = scheduler().unwrap();
 

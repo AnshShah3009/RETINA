@@ -365,21 +365,20 @@ fn obj_mutation_corpus_never_produces_out_of_range_face_indices() {
             // A returned mesh whose face indices do not address real vertices
             // is a *wrong result*, so it is a finding in its own right - see
             // common::KNOWN_BUGS, entry "obj face indices are not bounds-checked".
-            if let Outcome::Returned(mesh) = &outcome {
-                if let Some((i, f)) = mesh
+            if let Outcome::Returned(mesh) = &outcome
+                && let Some((i, f)) = mesh
                     .faces
                     .iter()
                     .enumerate()
                     .find(|(_, f)| f.iter().any(|&v| v >= mesh.vertices.len()))
-                {
-                    record(
-                        &label,
-                        format!(
-                            "out-of-range: face {i} {f:?} in a {}-vertex mesh",
-                            mesh.vertices.len()
-                        ),
-                    );
-                }
+            {
+                record(
+                    &label,
+                    format!(
+                        "out-of-range: face {i} {f:?} in a {}-vertex mesh",
+                        mesh.vertices.len()
+                    ),
+                );
             }
             match &outcome {
                 Outcome::Error(_) | Outcome::Returned(_) => {}

@@ -4,8 +4,7 @@
 //! - **NAPSAC**: Nearest-neighbor guided sampling for locally connected structures
 //! - **MAGSAC**: Margin-adaptive σ-consensus scoring instead of hard threshold
 
-use cv_core::geometry::Rect;
-use nalgebra::{DMatrix, Point2};
+use nalgebra::Point2;
 use rand::Rng;
 use std::collections::HashSet;
 
@@ -311,7 +310,7 @@ fn sample_napsac(
 /// Local model refinement on best inliers
 fn refine_local<M: Clone>(
     points: &[Point2<f64>],
-    model: &M,
+    _model: &M,
     mask: &[bool],
     _params: &UsacParams,
     estimator: &impl Fn(&[Point2<f64>], &[usize]) -> Option<M>,
@@ -433,7 +432,6 @@ pub mod scorers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f64::consts::PI;
 
     fn line_model(points: &[Point2<f64>], sample: &[usize]) -> Option<(f64, f64)> {
         if sample.len() < 2 {
@@ -611,10 +609,10 @@ mod tests {
             for _ in 0..70 {
                 pts.push(Point2::new(rnd() * 30.0, rnd() * 100.0));
             }
-            if let Some(r) = estimate_usac(&pts, &params, &line_model, &line_score, 2) {
-                if r.inliers >= 30 {
-                    found += 1;
-                }
+            if let Some(r) = estimate_usac(&pts, &params, &line_model, &line_score, 2)
+                && r.inliers >= 30
+            {
+                found += 1;
             }
         }
         // At confidence 0.999 per run, 38/40 fails with probability ~1e-4.

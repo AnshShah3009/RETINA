@@ -240,7 +240,7 @@ pub fn recover_pose_from_essential(
     // 3x3 multiply.
     let mut candidates: Vec<Pose> = Vec::with_capacity(4);
     for r in [r1, r2] {
-        for t_cand in [t.clone(), -t] {
+        for t_cand in [t, -t] {
             // A candidate whose rotation is not a proper rotation must not reach
             // the cheirality test looking plausible: `Pose::new` converts it
             // through `from_matrix_unchecked`, which accepts a reflection and
@@ -249,7 +249,7 @@ pub fn recover_pose_from_essential(
             if (d - Matrix3::identity()).norm() > 1e-9 || (r.determinant() - 1.0).abs() > 1e-9 {
                 continue;
             }
-            let p = Pose::new(r, t_cand.clone());
+            let p = Pose::new(r, t_cand);
             let m = p.rotation_matrix();
             // t must be a direction; `E` determines it only up to scale.
             let tn = t_cand.normalize();
@@ -264,8 +264,8 @@ pub fn recover_pose_from_essential(
             // of `|[t]_x R - E|` reaches 2.0, which is exactly `|-E - E|/|E|`;
             // against `-E` it is ~1e-16. Checking only one sign would reject
             // every candidate.
-            let residual = (&tx * &m - essential).norm();
-            let residual_flipped = (&tx * &m + essential).norm();
+            let residual = (tx * m - essential).norm();
+            let residual_flipped = (tx * m + essential).norm();
             // The tolerance is deliberately loose. This check exists to catch a
             // *structurally wrong* candidate - a rotation that does not come from
             // `E` at all - not to re-solve the decomposition. A RANSAC estimate
@@ -538,8 +538,8 @@ impl Triangulator {
                 let dpc_domega = nalgebra::Matrix3::new(
                     0.0, p_c.z, -p_c.y, -p_c.z, 0.0, p_c.x, p_c.y, -p_c.x, 0.0,
                 ); // Note: this is actually [p_c]x, so d/domega is -[p_c]x?
-                   // p_new = R * p + t.  R approx (I + [w]x). p_new = p + [w]x * p + t = p - [p]x * w + t.
-                   // So d(p)/d(w) = -[p]x.
+                // p_new = R * p + t.  R approx (I + [w]x). p_new = p + [w]x * p + t = p - [p]x * w + t.
+                // So d(p)/d(w) = -[p]x.
 
                 let j_rot = j_proj * (-dpc_domega);
                 let j_trans = j_proj; // * I
@@ -565,16 +565,16 @@ impl Triangulator {
                 let d_rot = nalgebra::Rotation3::new(omega);
                 let next_rot = d_rot * current_pose.rotation.to_rotation_matrix();
                 let next_t = current_pose.translation - dt; // We solved J*delta = -r, so new = old + delta?
-                                                            // Wait, typically J*delta = -r -> delta is step towards solution.
-                                                            // My J was d(error)/d(param).  Actually J should be d(residual)/d(param).
-                                                            // residual = proj - obs.
-                                                            // r_new = r_old + J * delta. Want r_new = 0. J * delta = -r_old.
-                                                            // So delta = - (J^T J)^-1 J^T r.
-                                                            // But here I solved (J^T J) * delta = J^T r.  So delta is (J^T J)^-1 J^T r.
-                                                            // So this delta is -step? No, J^T r is gradient.
-                                                            // Gauss-Newton: step = -(J^T J)^-1 J^T r.
-                                                            // Here delta = (J^T J)^-1 (J^T r).
-                                                            // So step = -delta.
+                // Wait, typically J*delta = -r -> delta is step towards solution.
+                // My J was d(error)/d(param).  Actually J should be d(residual)/d(param).
+                // residual = proj - obs.
+                // r_new = r_old + J * delta. Want r_new = 0. J * delta = -r_old.
+                // So delta = - (J^T J)^-1 J^T r.
+                // But here I solved (J^T J) * delta = J^T r.  So delta is (J^T J)^-1 J^T r.
+                // So this delta is -step? No, J^T r is gradient.
+                // Gauss-Newton: step = -(J^T J)^-1 J^T r.
+                // Here delta = (J^T J)^-1 (J^T r).
+                // So step = -delta.
 
                 // Let's check my previous code:
                 // next_t = current_pose.translation - dt;

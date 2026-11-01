@@ -1,9 +1,9 @@
 //! Tests for CPU fallback behavior.
 
 use cv_hal::DeviceId;
-use cv_runtime::orchestrator::get_execution_mode;
-use cv_runtime::orchestrator::{best_runner, try_best_runner, RuntimeRunner};
 use cv_runtime::Result;
+use cv_runtime::orchestrator::get_execution_mode;
+use cv_runtime::orchestrator::{RuntimeRunner, best_runner, try_best_runner};
 
 #[test]
 fn test_runtime_runner_sync() {

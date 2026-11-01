@@ -1,9 +1,9 @@
 use crate::convolve::BorderMode;
-use cv_core::{storage::Storage, TensorShape};
+use cv_core::{TensorShape, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::context::MorphologyType as HalMorphType;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
-use cv_runtime::orchestrator::{scheduler, ResourceGroup};
+use cv_runtime::orchestrator::{ResourceGroup, scheduler};
 use image::GrayImage;
 use rayon::prelude::*;
 
@@ -249,17 +249,17 @@ pub fn dilate_with_border(
     iterations: u32,
     border: BorderMode,
 ) -> GrayImage {
-    if let Ok(s) = scheduler() {
-        if let Ok(group) = s.get_default_group() {
-            return morphology_ctx(
-                src,
-                HalMorphType::Dilate,
-                kernel,
-                iterations,
-                border,
-                &group,
-            );
-        }
+    if let Ok(s) = scheduler()
+        && let Ok(group) = s.get_default_group()
+    {
+        return morphology_ctx(
+            src,
+            HalMorphType::Dilate,
+            kernel,
+            iterations,
+            border,
+            &group,
+        );
     }
     // Fallback to basic parallel CPU if scheduler fails
     let mut out = GrayImage::new(src.width(), src.height());
@@ -273,10 +273,10 @@ pub fn erode_with_border(
     iterations: u32,
     border: BorderMode,
 ) -> GrayImage {
-    if let Ok(s) = scheduler() {
-        if let Ok(group) = s.get_default_group() {
-            return morphology_ctx(src, HalMorphType::Erode, kernel, iterations, border, &group);
-        }
+    if let Ok(s) = scheduler()
+        && let Ok(group) = s.get_default_group()
+    {
+        return morphology_ctx(src, HalMorphType::Erode, kernel, iterations, border, &group);
     }
     // Fallback
     let mut out = GrayImage::new(src.width(), src.height());
@@ -292,10 +292,10 @@ pub fn morphology_ctx(
     _border: BorderMode,
     group: &ResourceGroup,
 ) -> GrayImage {
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-        if let Ok(result) = morphology_gpu(gpu, src, typ, kernel, iterations) {
-            return result;
-        }
+    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+        && let Ok(result) = morphology_gpu(gpu, src, typ, kernel, iterations)
+    {
+        return result;
     }
 
     // CPU fallback. `Open` and `Close` are compositions, not a no-op: the
@@ -478,7 +478,7 @@ mod tests {
     fn create_ellipse_kernel() {
         let kernel = create_morph_kernel(MorphShape::Ellipse, 3, 3);
         // Ellipse with 3x3 should have multiple points
-        assert!(kernel.len() > 0);
+        assert!(!kernel.is_empty());
         assert!(kernel.len() <= 9);
     }
 
@@ -486,7 +486,7 @@ mod tests {
     fn create_cross_kernel() {
         let kernel = create_morph_kernel(MorphShape::Cross, 3, 3);
         // Cross pattern: horizontal + vertical lines
-        assert!(kernel.len() > 0);
+        assert!(!kernel.is_empty());
         // Should have some cross-shaped points
         assert!(kernel.len() <= 9);
     }

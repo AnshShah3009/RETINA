@@ -19,13 +19,13 @@ pub mod gnc;
 )]
 pub type RegistrationResult<T> = cv_core::Result<T>;
 
-pub use colored::{registration_colored_icp, ColoredICPResult};
+pub use colored::{ColoredICPResult, registration_colored_icp};
 pub use cv_core::{Error, Result, RobustLoss};
 pub use global::{
-    registration_fgr_based_on_feature_matching, registration_ransac_based_on_feature_matching,
     FPFHFeature, FastGlobalRegistrationOption, GlobalRegistrationResult,
+    registration_fgr_based_on_feature_matching, registration_ransac_based_on_feature_matching,
 };
-pub use gnc::{registration_gnc, GNCOptimizer, GNCResult, RobustLossType};
+pub use gnc::{GNCOptimizer, GNCResult, RobustLossType, registration_gnc};
 
 use cv_core::point_cloud::PointCloud;
 use nalgebra::{Matrix4, Point3};
@@ -220,7 +220,7 @@ pub fn registration_icp_point_to_plane(
         let delta = match ata.try_inverse() {
             Some(ata_inv) => -(ata_inv * atb),
             None => {
-                let Ok(pinv) = ata.clone().pseudo_inverse(1e-6) else {
+                let Ok(pinv) = ata.pseudo_inverse(1e-6) else {
                     return None;
                 };
                 -(pinv * atb)
@@ -543,7 +543,7 @@ pub fn registration_icp_point_to_plane_ctx(
                 transformation = compose_point_to_plane_update(&transformation, &delta);
             }
             None => {
-                let Ok(pinv) = ata.clone().pseudo_inverse(1e-6) else {
+                let Ok(pinv) = ata.pseudo_inverse(1e-6) else {
                     return Err(Error::AlgorithmError(
                         "registration_icp_point_to_plane_ctx: normal equations are \
                          singular and the pseudo-inverse failed, so no motion can \

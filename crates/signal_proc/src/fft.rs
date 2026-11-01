@@ -3,8 +3,8 @@
 //! Provides 1D/2D forward and inverse FFT, real-valued FFT,
 //! frequency bin generation, and power spectral density estimation.
 
-use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
+use rustfft::num_complex::Complex;
 
 /// 1D FFT of real-valued input.
 ///
@@ -193,229 +193,6 @@ pub fn psd(input: &[f64], sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
     (freqs, power)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::f64::consts::PI;
-
-    #[test]
-    fn test_fft_known_sinusoid() {
-        // Pure sinusoid at frequency 1 Hz, sampled at 8 Hz, 8 samples
-        let n = 8;
-        let freq = 1.0;
-        let input: Vec<f64> = (0..n)
-            .map(|i| (2.0 * PI * freq * i as f64 / n as f64).sin())
-            .collect();
-
-        let spectrum = fft(&input);
-        assert_eq!(spectrum.len(), n);
-
-        // The peak should be at bin 1 (frequency = 1 Hz with sample_rate = n)
-        let magnitudes: Vec<f64> = spectrum.iter().map(|c| c.norm()).collect();
-        let max_bin = magnitudes
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap()
-            .0;
-        assert!(max_bin == 1 || max_bin == n - 1);
-    }
-
-    #[test]
-    fn test_rfft_empty_input() {
-        // Regression: rfft(&[]) used to slice `spectrum[..1]` on an empty
-        // Vec returned by fft, panicking.
-        assert!(rfft(&[]).is_empty());
-        assert_eq!(rfft(&[1.0, 2.0, 3.0, 4.0]).len(), 3);
-    }
-
-    #[test]
-    fn test_ifft_recovers_input() {
-        let input: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-        let spectrum = fft(&input);
-        let recovered = ifft(&spectrum);
-
-        for (orig, rec) in input.iter().zip(recovered.iter()) {
-            assert!((orig - rec.re).abs() < 1e-10, "Real part mismatch");
-            assert!(rec.im.abs() < 1e-10, "Imaginary part should be near zero");
-        }
-    }
-
-    #[test]
-    fn test_parseval_theorem() {
-        // Parseval's theorem: sum |x[n]|^2 = (1/N) * sum |X[k]|^2
-        let input = vec![1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0];
-        let n = input.len();
-        let spectrum = fft(&input);
-
-        let time_energy: f64 = input.iter().map(|x| x * x).sum();
-        let freq_energy: f64 = spectrum.iter().map(|c| c.norm_sqr()).sum::<f64>() / n as f64;
-
-        assert!(
-            (time_energy - freq_energy).abs() < 1e-10,
-            "Parseval's theorem violated: time={} freq={}",
-            time_energy,
-            freq_energy
-        );
-    }
-
-    #[test]
-    fn test_fft2_ifft2_roundtrip() {
-        let height = 4;
-        let width = 4;
-        let input: Vec<f64> = (0..16).map(|i| i as f64).collect();
-
-        let spectrum = fft2(&input, height, width);
-        let recovered = ifft2(&spectrum, height, width);
-
-        for (i, (orig, rec)) in input.iter().zip(recovered.iter()).enumerate() {
-            assert!(
-                (orig - rec.re).abs() < 1e-10,
-                "Mismatch at index {}: {} vs {}",
-                i,
-                orig,
-                rec.re
-            );
-        }
-    }
-
-    #[test]
-    fn test_fftfreq() {
-        let freqs = fftfreq(8, 1.0);
-        assert_eq!(freqs.len(), 8);
-        assert!((freqs[0] - 0.0).abs() < 1e-10);
-        assert!((freqs[1] - 0.125).abs() < 1e-10);
-        assert!((freqs[4] - (-0.5)).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_psd_sinusoid() {
-        // A sinusoid should produce a peak at its frequency in the PSD
-        let n = 256;
-        let sample_rate = 256.0;
-        let freq = 32.0;
-        let input: Vec<f64> = (0..n)
-            .map(|i| (2.0 * PI * freq * i as f64 / sample_rate).sin())
-            .collect();
-
-        let (freqs, power) = psd(&input, sample_rate);
-        let max_idx = power
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-            .unwrap()
-            .0;
-
-        assert!(
-            (freqs[max_idx] - freq).abs() < sample_rate / n as f64 + 1e-10,
-            "PSD peak at {} Hz, expected {} Hz",
-            freqs[max_idx],
-            freq
-        );
-    }
-
-    #[test]
-    fn test_dct_roundtrip() {
-        let x: Vec<f64> = (0..8).map(|i| (i as f64 * 0.5).sin()).collect();
-        let c = dct(&x);
-        let r = idct(&c);
-        for (a, b) in x.iter().zip(r.iter()) {
-            assert!((a - b).abs() < 1e-10, "DCT roundtrip: {} vs {}", a, b);
-        }
-    }
-
-    fn signal(n: usize, seed: u64) -> Vec<f64> {
-        let mut s = seed.wrapping_add(0x9E3779B97F4A7C15);
-        (0..n)
-            .map(|i| {
-                s ^= s << 13;
-                s ^= s >> 7;
-                s ^= s << 17;
-                (s >> 11) as f64 / (1u64 << 53) as f64 - 0.5 + (i as f64 * 0.01).sin()
-            })
-            .collect()
-    }
-
-    /// `max |a - b| / ||x||_2` (the transforms are orthonormal, so outputs
-    /// have the input's norm).
-    fn rel_err(a: &[f64], b: &[f64], x: &[f64]) -> f64 {
-        let norm = x.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
-        a.iter()
-            .zip(b)
-            .map(|(p, q)| (p - q).abs())
-            .fold(0.0, f64::max)
-            / norm
-    }
-
-    /// FFT-based DCT-II / DCT-III / DST-I against the O(n^2) definitions they
-    /// replaced: odd, even, prime, power-of-two lengths around the switch-over.
-    #[test]
-    fn fft_dct_dst_match_direct_definitions() {
-        let lengths = [
-            0usize, 1, 2, 3, 7, 16, 17, 18, 31, 32, 33, 64, 100, 127, 255, 256, 257, 1000, 1024,
-            2047,
-        ];
-        for (seed, &n) in lengths.iter().enumerate() {
-            let x = signal(n, seed as u64);
-            let tol = 1e-12;
-            let e = rel_err(&dct(&x), &dct_direct(&x), &x);
-            assert!(e <= tol, "dct n={n}: {e:e}");
-            let e = rel_err(&idct(&x), &idct_direct(&x), &x);
-            assert!(e <= tol, "idct n={n}: {e:e}");
-            let e = rel_err(&dst(&x), &dst_direct(&x), &x);
-            assert!(e <= tol, "dst n={n}: {e:e}");
-            let e = rel_err(&idct(&dct(&x)), &x, &x);
-            assert!(e <= tol, "idct(dct) n={n}: {e:e}");
-            let e = rel_err(&idst(&dst(&x)), &x, &x);
-            assert!(e <= tol, "idst(dst) n={n}: {e:e}");
-        }
-    }
-
-    /// `cargo test --release -p cv-signal --lib dct_dst_timing -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn dct_dst_timing() {
-        use std::time::Instant;
-        let time = |f: &dyn Fn(&[f64]) -> Vec<f64>, x: &[f64], reps: usize| {
-            let t = Instant::now();
-            for _ in 0..reps {
-                std::hint::black_box(f(x));
-            }
-            t.elapsed().as_secs_f64() / reps as f64 * 1e3
-        };
-        for n in [64usize, 256, 1024, 4096, 16384] {
-            let x = signal(n, 1);
-            let reps = if n >= 4096 { 3 } else { 50 };
-            let worst = [
-                rel_err(&dct(&x), &dct_direct(&x), &x),
-                rel_err(&idct(&x), &idct_direct(&x), &x),
-                rel_err(&dst(&x), &dst_direct(&x), &x),
-            ]
-            .into_iter()
-            .fold(0.0, f64::max);
-            println!(
-                "n={n:5}: dct {:9.3} -> {:7.3} ms, idct {:9.3} -> {:7.3} ms, dst {:9.3} -> {:7.3} ms, max rel diff {worst:.1e}",
-                time(&dct_direct, &x, reps),
-                time(&dct, &x, reps),
-                time(&idct_direct, &x, reps),
-                time(&idct, &x, reps),
-                time(&dst_direct, &x, reps),
-                time(&dst, &x, reps),
-            );
-        }
-    }
-
-    #[test]
-    fn test_dst_roundtrip() {
-        let x: Vec<f64> = (0..8).map(|i| (i as f64 * 0.3).cos()).collect();
-        let s = dst(&x);
-        let r = idst(&s);
-        for (a, b) in x.iter().zip(r.iter()) {
-            assert!((a - b).abs() < 1e-10, "DST roundtrip: {} vs {}", a, b);
-        }
-    }
-}
-
 // ── DCT / DST (Discrete Cosine / Sine Transform) ───────────────────────────
 //
 // Each transform is evaluated through one complex FFT (O(n log n)); below
@@ -586,4 +363,227 @@ fn dst_direct(input: &[f64]) -> Vec<f64> {
 pub fn idst(input: &[f64]) -> Vec<f64> {
     // DST-I is its own inverse with orthogonal normalization
     dst(input)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::PI;
+
+    #[test]
+    fn test_fft_known_sinusoid() {
+        // Pure sinusoid at frequency 1 Hz, sampled at 8 Hz, 8 samples
+        let n = 8;
+        let freq = 1.0;
+        let input: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * freq * i as f64 / n as f64).sin())
+            .collect();
+
+        let spectrum = fft(&input);
+        assert_eq!(spectrum.len(), n);
+
+        // The peak should be at bin 1 (frequency = 1 Hz with sample_rate = n)
+        let magnitudes: Vec<f64> = spectrum.iter().map(|c| c.norm()).collect();
+        let max_bin = magnitudes
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+        assert!(max_bin == 1 || max_bin == n - 1);
+    }
+
+    #[test]
+    fn test_rfft_empty_input() {
+        // Regression: rfft(&[]) used to slice `spectrum[..1]` on an empty
+        // Vec returned by fft, panicking.
+        assert!(rfft(&[]).is_empty());
+        assert_eq!(rfft(&[1.0, 2.0, 3.0, 4.0]).len(), 3);
+    }
+
+    #[test]
+    fn test_ifft_recovers_input() {
+        let input: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let spectrum = fft(&input);
+        let recovered = ifft(&spectrum);
+
+        for (orig, rec) in input.iter().zip(recovered.iter()) {
+            assert!((orig - rec.re).abs() < 1e-10, "Real part mismatch");
+            assert!(rec.im.abs() < 1e-10, "Imaginary part should be near zero");
+        }
+    }
+
+    #[test]
+    fn test_parseval_theorem() {
+        // Parseval's theorem: sum |x[n]|^2 = (1/N) * sum |X[k]|^2
+        let input = vec![1.0, -2.0, 3.0, -4.0, 5.0, -6.0, 7.0, -8.0];
+        let n = input.len();
+        let spectrum = fft(&input);
+
+        let time_energy: f64 = input.iter().map(|x| x * x).sum();
+        let freq_energy: f64 = spectrum.iter().map(|c| c.norm_sqr()).sum::<f64>() / n as f64;
+
+        assert!(
+            (time_energy - freq_energy).abs() < 1e-10,
+            "Parseval's theorem violated: time={} freq={}",
+            time_energy,
+            freq_energy
+        );
+    }
+
+    #[test]
+    fn test_fft2_ifft2_roundtrip() {
+        let height = 4;
+        let width = 4;
+        let input: Vec<f64> = (0..16).map(|i| i as f64).collect();
+
+        let spectrum = fft2(&input, height, width);
+        let recovered = ifft2(&spectrum, height, width);
+
+        for (i, (orig, rec)) in input.iter().zip(recovered.iter()).enumerate() {
+            assert!(
+                (orig - rec.re).abs() < 1e-10,
+                "Mismatch at index {}: {} vs {}",
+                i,
+                orig,
+                rec.re
+            );
+        }
+    }
+
+    #[test]
+    fn test_fftfreq() {
+        let freqs = fftfreq(8, 1.0);
+        assert_eq!(freqs.len(), 8);
+        assert!((freqs[0] - 0.0).abs() < 1e-10);
+        assert!((freqs[1] - 0.125).abs() < 1e-10);
+        assert!((freqs[4] - (-0.5)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_psd_sinusoid() {
+        // A sinusoid should produce a peak at its frequency in the PSD
+        let n = 256;
+        let sample_rate = 256.0;
+        let freq = 32.0;
+        let input: Vec<f64> = (0..n)
+            .map(|i| (2.0 * PI * freq * i as f64 / sample_rate).sin())
+            .collect();
+
+        let (freqs, power) = psd(&input, sample_rate);
+        let max_idx = power
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
+
+        assert!(
+            (freqs[max_idx] - freq).abs() < sample_rate / n as f64 + 1e-10,
+            "PSD peak at {} Hz, expected {} Hz",
+            freqs[max_idx],
+            freq
+        );
+    }
+
+    #[test]
+    fn test_dct_roundtrip() {
+        let x: Vec<f64> = (0..8).map(|i| (i as f64 * 0.5).sin()).collect();
+        let c = dct(&x);
+        let r = idct(&c);
+        for (a, b) in x.iter().zip(r.iter()) {
+            assert!((a - b).abs() < 1e-10, "DCT roundtrip: {} vs {}", a, b);
+        }
+    }
+
+    fn signal(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed.wrapping_add(0x9e3779b97f4a7c15);
+        (0..n)
+            .map(|i| {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                (s >> 11) as f64 / (1u64 << 53) as f64 - 0.5 + (i as f64 * 0.01).sin()
+            })
+            .collect()
+    }
+
+    /// `max |a - b| / ||x||_2` (the transforms are orthonormal, so outputs
+    /// have the input's norm).
+    fn rel_err(a: &[f64], b: &[f64], x: &[f64]) -> f64 {
+        let norm = x.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-300);
+        a.iter()
+            .zip(b)
+            .map(|(p, q)| (p - q).abs())
+            .fold(0.0, f64::max)
+            / norm
+    }
+
+    /// FFT-based DCT-II / DCT-III / DST-I against the O(n^2) definitions they
+    /// replaced: odd, even, prime, power-of-two lengths around the switch-over.
+    #[test]
+    fn fft_dct_dst_match_direct_definitions() {
+        let lengths = [
+            0usize, 1, 2, 3, 7, 16, 17, 18, 31, 32, 33, 64, 100, 127, 255, 256, 257, 1000, 1024,
+            2047,
+        ];
+        for (seed, &n) in lengths.iter().enumerate() {
+            let x = signal(n, seed as u64);
+            let tol = 1e-12;
+            let e = rel_err(&dct(&x), &dct_direct(&x), &x);
+            assert!(e <= tol, "dct n={n}: {e:e}");
+            let e = rel_err(&idct(&x), &idct_direct(&x), &x);
+            assert!(e <= tol, "idct n={n}: {e:e}");
+            let e = rel_err(&dst(&x), &dst_direct(&x), &x);
+            assert!(e <= tol, "dst n={n}: {e:e}");
+            let e = rel_err(&idct(&dct(&x)), &x, &x);
+            assert!(e <= tol, "idct(dct) n={n}: {e:e}");
+            let e = rel_err(&idst(&dst(&x)), &x, &x);
+            assert!(e <= tol, "idst(dst) n={n}: {e:e}");
+        }
+    }
+
+    /// `cargo test --release -p cv-signal --lib dct_dst_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dct_dst_timing() {
+        use std::time::Instant;
+        let time = |f: &dyn Fn(&[f64]) -> Vec<f64>, x: &[f64], reps: usize| {
+            let t = Instant::now();
+            for _ in 0..reps {
+                std::hint::black_box(f(x));
+            }
+            t.elapsed().as_secs_f64() / reps as f64 * 1e3
+        };
+        for n in [64usize, 256, 1024, 4096, 16384] {
+            let x = signal(n, 1);
+            let reps = if n >= 4096 { 3 } else { 50 };
+            let worst = [
+                rel_err(&dct(&x), &dct_direct(&x), &x),
+                rel_err(&idct(&x), &idct_direct(&x), &x),
+                rel_err(&dst(&x), &dst_direct(&x), &x),
+            ]
+            .into_iter()
+            .fold(0.0, f64::max);
+            println!(
+                "n={n:5}: dct {:9.3} -> {:7.3} ms, idct {:9.3} -> {:7.3} ms, dst {:9.3} -> {:7.3} ms, max rel diff {worst:.1e}",
+                time(&dct_direct, &x, reps),
+                time(&dct, &x, reps),
+                time(&idct_direct, &x, reps),
+                time(&idct, &x, reps),
+                time(&dst_direct, &x, reps),
+                time(&dst, &x, reps),
+            );
+        }
+    }
+
+    #[test]
+    fn test_dst_roundtrip() {
+        let x: Vec<f64> = (0..8).map(|i| (i as f64 * 0.3).cos()).collect();
+        let s = dst(&x);
+        let r = idst(&s);
+        for (a, b) in x.iter().zip(r.iter()) {
+            assert!((a - b).abs() < 1e-10, "DST roundtrip: {} vs {}", a, b);
+        }
+    }
 }

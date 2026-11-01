@@ -1,7 +1,7 @@
 [package]
 name = "cv-videoio"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Video input/output and camera capture for Rust Computer Vision"
 
 [dependencies]

@@ -1,6 +1,6 @@
+use crate::Result;
 use crate::gpu::GpuContext;
 use crate::storage::GpuStorage;
-use crate::Result;
 use cv_core::Tensor;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -99,7 +99,7 @@ pub fn nms_boxes(
 
     // Greedy selection on CPU. Match the CPU backend by processing boxes in
     // descending score order (boxes are laid out [x1, y1, x2, y2, score]).
-    let box_bytes = (num_boxes * 5 * 4) as usize;
+    let box_bytes = num_boxes * 5 * 4;
     let box_data: Vec<f32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
         ctx.device.clone(),
         &ctx.queue,

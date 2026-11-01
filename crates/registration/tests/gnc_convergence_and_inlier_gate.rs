@@ -41,7 +41,7 @@
 //!    throughout as the control distinguishing "the gate was wrong" from "the
 //!    solver is wrong".
 
-use cv_registration::registration::{registration_gnc, RobustLossType};
+use cv_registration::registration::{RobustLossType, registration_gnc};
 use nalgebra::{Point3, Vector3};
 
 const ALL: [RobustLossType; 3] = [

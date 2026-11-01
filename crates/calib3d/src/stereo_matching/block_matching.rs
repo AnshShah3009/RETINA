@@ -2,7 +2,7 @@
 
 use super::{DisparityMap, StereoMatcher, StereoMatcherCtx};
 use crate::Result;
-use cv_core::{storage::Storage, Error, Tensor};
+use cv_core::{Error, Tensor, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 use cv_runtime::orchestrator::RuntimeRunner;
@@ -69,10 +69,10 @@ impl StereoMatcherCtx for BlockMatcher {
         let half_block = (self.block_size / 2) as i32;
 
         // Check for GPU acceleration
-        if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-            if let Ok(res) = self.compute_gpu(gpu, left, right) {
-                return Ok(res);
-            }
+        if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+            && let Ok(res) = self.compute_gpu(gpu, left, right)
+        {
+            return Ok(res);
         }
 
         let left_data = left.as_raw();
@@ -613,11 +613,7 @@ fn box_sum_exact_in_f32(window: usize, squared: bool) -> bool {
 
 fn pair_cost(a: u8, b: u8, squared: bool) -> u64 {
     let d = u64::from(a.abs_diff(b));
-    if squared {
-        d * d
-    } else {
-        d
-    }
+    if squared { d * d } else { d }
 }
 
 /// Inclusive-exclusive box sums from a summed-area table built with a row
@@ -677,11 +673,7 @@ mod tests {
 
         for y in 0..height {
             for x in 0..width {
-                let src_x = if x >= disparity as u32 {
-                    x - disparity as u32
-                } else {
-                    0
-                };
+                let src_x = x.saturating_sub(disparity as u32);
                 let val = ((src_x / 10) * 25) as u8;
                 right.put_pixel(x, y, Luma([val]));
             }

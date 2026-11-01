@@ -8,10 +8,10 @@
 //! needs one dispatch per step of the longest weak chain, which on real images
 //! costs more than the download.
 
+use crate::Result;
 use crate::cpu::canny_opencv::{canny_hysteresis, canny_tg22, canny_thresholds};
 use crate::gpu::GpuContext;
 use crate::storage::WgpuGpuStorage;
-use crate::Result;
 use cv_core::Float;
 use std::marker::PhantomData;
 use std::sync::Arc;

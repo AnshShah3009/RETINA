@@ -6,8 +6,8 @@
 //! skips when it is absent. Runs only with `--features ffmpeg`.
 #![cfg(feature = "ffmpeg")]
 
-use cv_videoio::backends::NativeFfmpegCapture;
 use cv_videoio::VideoCapture;
+use cv_videoio::backends::NativeFfmpegCapture;
 use std::process::Command;
 
 fn make(name: &str, args: &[&str]) -> Option<std::path::PathBuf> {

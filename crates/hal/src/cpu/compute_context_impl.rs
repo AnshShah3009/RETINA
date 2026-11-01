@@ -682,8 +682,8 @@ impl ComputeContext for CpuBackend {
         // running box sums, O(W*H*D) instead of O(W*H*D*B^2). Every partial
         // sum is an exact integer in `T` under `integer_pixels`' bound, so the
         // costs, comparisons and chosen disparities equal the dense loop's.
-        if block_size >= 1 {
-            if let Some((li, ri)) =
+        if block_size >= 1
+            && let Some((li, ri)) =
                 crate::cpu::stereo_sad::integer_pixels(left_data, right_data, block_size)
             {
                 let best = crate::cpu::stereo_sad::block_match_sad(
@@ -701,7 +701,6 @@ impl ComputeContext for CpuBackend {
                     _phantom: std::marker::PhantomData,
                 });
             }
-        }
 
         // Block matching with SAD (Sum of Absolute Differences)
         dst.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
@@ -2227,8 +2226,7 @@ impl ComputeContext for CpuBackend {
                     format!(
                         "TSDF volume must have at least 2 depth slices, got {}x{}x{}",
                         vx, vy, vz
-                    )
-                    .into(),
+                    ),
                 ));
             }
 
@@ -4021,7 +4019,7 @@ impl ComputeContext for CpuBackend {
         let nh = h.div_ceil(2);
         if w == 0 || h == 0 || nw == 0 || nh == 0 {
             return Err(crate::Error::InvalidInput(
-                format!("Pyramid down requires a non-empty image, got {w}x{h}").into(),
+                format!("Pyramid down requires a non-empty image, got {w}x{h}"),
             ));
         }
         let c = input.shape.channels;

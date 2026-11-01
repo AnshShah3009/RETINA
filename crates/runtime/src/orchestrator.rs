@@ -1,7 +1,7 @@
-use crate::device_registry::{registry, DeviceRuntime};
-use crate::executor::{Executor, ExecutorConfig};
 use crate::Result;
-use cv_distributed::distributed::{FileCoordinator, LoadCoordinator, ShmCoordinator, SHM_SIZE};
+use crate::device_registry::{DeviceRuntime, registry};
+use crate::executor::{Executor, ExecutorConfig};
+use cv_distributed::distributed::{FileCoordinator, LoadCoordinator, SHM_SIZE, ShmCoordinator};
 use cv_hal::{BackendType, DeviceId};
 use parking_lot::Mutex;
 use std::collections::HashMap;
@@ -430,10 +430,10 @@ pub fn best_runner() -> Result<(RuntimeRunner, bool)> {
 
 /// Try to get the best runner; falls back to synchronous CPU if no scheduler is available.
 pub fn try_best_runner() -> Result<(RuntimeRunner, bool)> {
-    if let Ok(s) = scheduler() {
-        if let Ok((g, is_gpu)) = s.best_gpu_with_wait(WorkloadHint::Default, 0, None) {
-            return Ok((RuntimeRunner::Group(g), is_gpu));
-        }
+    if let Ok(s) = scheduler()
+        && let Ok((g, is_gpu)) = s.best_gpu_with_wait(WorkloadHint::Default, 0, None)
+    {
+        return Ok((RuntimeRunner::Group(g), is_gpu));
     }
 
     if let Ok(reg) = registry() {
@@ -460,10 +460,10 @@ pub fn best_runner_gpu_wait_for(
     needed_mb: u32,
     timeout: Option<Duration>,
 ) -> Result<(RuntimeRunner, bool)> {
-    if let Ok(s) = scheduler() {
-        if let Ok((group, is_gpu)) = s.best_gpu_with_wait(hint, needed_mb, timeout) {
-            return Ok((RuntimeRunner::Group(group), is_gpu));
-        }
+    if let Ok(s) = scheduler()
+        && let Ok((group, is_gpu)) = s.best_gpu_with_wait(hint, needed_mb, timeout)
+    {
+        return Ok((RuntimeRunner::Group(group), is_gpu));
     }
 
     if let Ok(reg) = registry() {
@@ -482,10 +482,10 @@ pub fn default_runner() -> Result<RuntimeRunner> {
 
 /// Try to get the default runner; falls back to synchronous CPU if no scheduler is available.
 pub fn try_default_runner() -> Result<RuntimeRunner> {
-    if let Ok(s) = scheduler() {
-        if let Ok(g) = s.get_default_group() {
-            return Ok(RuntimeRunner::Group(g));
-        }
+    if let Ok(s) = scheduler()
+        && let Ok(g) = s.get_default_group()
+    {
+        return Ok(RuntimeRunner::Group(g));
     }
 
     if let Ok(reg) = registry() {
@@ -618,7 +618,7 @@ impl TaskScheduler {
             // `best_gpu_with_wait` and `UnifiedBuffer::sync_to_device`). A
             // dense counter would write index 0 while consumers read the
             // device id (GPU ids start at 1), leaving the VRAM budget dead.
-            let device_idx = (device.id().0 & 0xFF) as u8;
+            let device_idx = (device.id().0 & 0xff) as u8;
             // Use the coordinator's init_device — CAS ensures only first writer wins.
             // init_device itself rejects out-of-range indices.
             let _ = coord.init_device(device_idx, mem_mb);
@@ -708,17 +708,18 @@ impl TaskScheduler {
     /// Remove and return a resource group by name, if it exists.
     pub fn remove_group(&self, name: &str) -> Result<Option<Arc<ResourceGroup>>> {
         let mut groups = self.groups.lock();
-        if let Some(group) = groups.remove(name) {
-            // Unregister the group's executor from the device runtime, otherwise
-            // the rayon pool (and its threads) lives for the process lifetime.
-            if let Ok(reg) = registry() {
-                if let Some(runtime) = reg.get_device(group.device_id()) {
+        match groups.remove(name) {
+            Some(group) => {
+                // Unregister the group's executor from the device runtime, otherwise
+                // the rayon pool (and its threads) lives for the process lifetime.
+                if let Ok(reg) = registry()
+                    && let Some(runtime) = reg.get_device(group.device_id())
+                {
                     runtime.executors().lock().remove_executor(&group.executor);
                 }
+                Ok(Some(group))
             }
-            Ok(Some(group))
-        } else {
-            Ok(None)
+            _ => Ok(None),
         }
     }
 
@@ -843,7 +844,7 @@ impl TaskScheduler {
 
                 // Affinity preference: If this is our affinity device, treat it as having less load
                 // (threshold of 2 tasks) to encourage co-placement.
-                let effective_load = if Some((device_id.0 & 0xFF) as u8) == affinity_device {
+                let effective_load = if Some((device_id.0 & 0xff) as u8) == affinity_device {
                     total_device_load.saturating_sub(2)
                 } else {
                     total_device_load
@@ -851,14 +852,14 @@ impl TaskScheduler {
 
                 // Boost priority if it's our preferred backend
                 let final_priority = priority;
-                if let WorkloadHint::Prefer(pref) = hint {
-                    if group_backend == pref {
-                        // Conceptual priority boost for exact preferred backend match
-                        // (Internal only, doesn't change policy)
-                        if final_priority < TaskPriority::Critical {
-                            // We can't actually increment the enum, but we can influence the choice.
-                            // For simplicity, we just use the min_load check below.
-                        }
+                if let WorkloadHint::Prefer(pref) = hint
+                    && group_backend == pref
+                {
+                    // Conceptual priority boost for exact preferred backend match
+                    // (Internal only, doesn't change policy)
+                    if final_priority < TaskPriority::Critical {
+                        // We can't actually increment the enum, but we can influence the choice.
+                        // For simplicity, we just use the min_load check below.
                     }
                 }
 
@@ -924,7 +925,7 @@ impl TaskScheduler {
         timeout: Option<Duration>,
     ) -> Result<(Arc<ResourceGroup>, bool)> {
         use crate::observe::events::{DispatchBackend, DispatchReason};
-        use crate::observe::{observability, RuntimeEvent};
+        use crate::observe::{RuntimeEvent, observability};
 
         // The backend lookup is driven by the hint, so a hint that names the
         // CPU (`Require(Cpu)`, `Prefer(Cpu)`) hands back a CPU group from
@@ -960,7 +961,7 @@ impl TaskScheduler {
 
         // If there's a coordinator, check VRAM budget
         if let Some(ref coord) = self.coordinator {
-            let dev_idx = (gpu_group.device_id().0 & 0xFF) as u8;
+            let dev_idx = (gpu_group.device_id().0 & 0xff) as u8;
             let usage = coord.device_memory_usage();
             // Use device index as affinity group identifier
             let affinity_group: u32 = dev_idx as u32;
@@ -1083,14 +1084,15 @@ impl TaskScheduler {
     where
         F: FnOnce() + Send + 'static,
     {
-        if let Some(group) = self.get_group(group_name)? {
-            group.spawn(f)?;
-            Ok(())
-        } else {
-            Err(crate::Error::RuntimeError(format!(
+        match self.get_group(group_name)? {
+            Some(group) => {
+                group.spawn(f)?;
+                Ok(())
+            }
+            _ => Err(crate::Error::RuntimeError(format!(
                 "Resource group '{}' not found",
                 group_name
-            )))
+            ))),
         }
     }
 
@@ -1310,7 +1312,7 @@ mod tests {
         let s2 = TaskScheduler::new();
         let policy = GroupPolicy::default();
 
-        s1.create_group("test", 2, None, policy.clone()).unwrap();
+        s1.create_group("test", 2, None, policy).unwrap();
 
         assert!(s1.get_group("test").unwrap().is_some());
         assert!(s2.get_group("test").unwrap().is_none());

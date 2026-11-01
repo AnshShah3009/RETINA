@@ -223,14 +223,14 @@ pub fn find_homography_ransac(
         .inliers
         .iter()
         .enumerate()
-        .filter(|(_, &is_in)| is_in)
+        .filter(|&(_, &is_in)| is_in)
         .map(|(i, _)| src_points[i])
         .collect();
     let inlier_dst: Vec<(f64, f64)> = result
         .inliers
         .iter()
         .enumerate()
-        .filter(|(_, &is_in)| is_in)
+        .filter(|&(_, &is_in)| is_in)
         .map(|(i, _)| dst_points[i])
         .collect();
 
@@ -674,13 +674,13 @@ mod tests {
         let inlier_src: Vec<(f64, f64)> = best_mask
             .iter()
             .enumerate()
-            .filter(|(_, &b)| b)
+            .filter(|&(_, &b)| b)
             .map(|(i, _)| src_points[i])
             .collect();
         let inlier_dst: Vec<(f64, f64)> = best_mask
             .iter()
             .enumerate()
-            .filter(|(_, &b)| b)
+            .filter(|&(_, &b)| b)
             .map(|(i, _)| dst_points[i])
             .collect();
         let refined = find_homography(&inlier_src, &inlier_dst).unwrap_or(best_h);
@@ -779,7 +779,7 @@ mod tests {
         let w = 6;
         let mut data = vec![0.0f32; h * w];
         // Put a value at (2, 1).
-        data[1 * w + 2] = 1.0;
+        data[w + 2] = 1.0;
         let img = CpuTensor::<f32>::from_vec(data, TensorShape::new(1, h, w)).unwrap();
 
         let translate = [[1.0, 0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
@@ -788,12 +788,12 @@ mod tests {
 
         // The point at (2, 1) should now appear at (3, 1).
         assert!(
-            out[1 * w + 3] > 0.9,
+            out[w + 3] > 0.9,
             "Translated pixel should be at (3,1), got {}",
-            out[1 * w + 3]
+            out[w + 3]
         );
         // Original location should be zero (mapped from outside).
-        assert!(out[1 * w + 2] < 0.1);
+        assert!(out[w + 2] < 0.1);
     }
 
     #[test]

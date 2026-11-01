@@ -1,8 +1,8 @@
 //! Second-review CPU HAL fixes (GAPS g-h3, g-h9, g-h10).
 
+use cv_core::TensorShape;
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
-use cv_core::TensorShape;
 use cv_hal::context::{ComputeContext, DiffusivityType, StereoMatchMethod, StereoMatchParams};
 use cv_hal::cpu::CpuBackend;
 
@@ -72,7 +72,7 @@ fn stereo_pixels_with_no_testable_disparity_are_no_match() {
 #[test]
 fn matching_against_nothing_matches_nothing() {
     let q: Tensor<u8, CpuStorage<u8>> =
-        Tensor::from_vec(vec![0xAA; 32], TensorShape::new(1, 1, 32)).unwrap();
+        Tensor::from_vec(vec![0xaa; 32], TensorShape::new(1, 1, 32)).unwrap();
     let t: Tensor<u8, CpuStorage<u8>> =
         Tensor::from_vec(Vec::new(), TensorShape::new(1, 0, 32)).unwrap();
     let m = cpu().match_descriptors(&q, &t, 1.0).unwrap();

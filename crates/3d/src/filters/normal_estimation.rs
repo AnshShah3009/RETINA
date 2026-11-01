@@ -51,11 +51,7 @@ pub fn estimate_normals_knn(points: &[Point3<f64>], k: usize) -> Vec<Vector3<f64
             let normal = min_eigenvector_3x3(&cov);
 
             // Orient towards +Z (Open3D default when no viewpoint).
-            if normal.z < 0.0 {
-                -normal
-            } else {
-                normal
-            }
+            if normal.z < 0.0 { -normal } else { normal }
         })
         .collect()
 }

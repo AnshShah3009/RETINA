@@ -1,6 +1,6 @@
+use cv_core::TensorShape;
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
-use cv_core::TensorShape;
 use cv_hal::context::ComputeContext;
 use cv_hal::cpu::CpuBackend;
 

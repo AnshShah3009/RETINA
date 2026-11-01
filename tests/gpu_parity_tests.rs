@@ -427,8 +427,6 @@ fn probe_icp_iterates_on_gpu() {
 /// failure on any machine, GPU or not.
 #[test]
 fn every_shader_compiles() {
-    use cv_hal::gpu::GpuContext;
-
     let shaders: &[(&str, &str)] = &[
         (
             "stereo_match",
@@ -598,7 +596,7 @@ fn probe_lbvh_builds() {
     let nodes = build_lbvh(g, &pts_g, &si_g, &mc_g)
         .expect("LBVH build must succeed on a device with the 4-buffer limit");
     assert!(
-        nodes.shape.len() > 0,
+        !nodes.shape.is_empty(),
         "LBVH produced no nodes for {n} points"
     );
     println!("  LBVH: {} nodes for {n} points", nodes.shape.len());
@@ -685,7 +683,7 @@ mod sweep {
 
     /// Deterministic pseudo-random floats, so a failure is reproducible.
     fn values(n: usize, seed: u64, lo: f32, hi: f32) -> Vec<f32> {
-        let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut s = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
         (0..n)
             .map(|_| {
                 s ^= s << 13;
@@ -1332,10 +1330,10 @@ mod sweep {
                     }
                     // Which rows carry differences? A border bug clusters at
                     // the frame; an indexing bug spreads.
-                    let mut rows: Vec<usize> = (0..h)
+                    let _rows: Vec<usize> = (0..h)
                         .filter(|&y| (0..w).any(|x| (cs[y * w + x] - gs[y * w + x]).abs() > 0.01))
                         .collect();
-                    let mut cols: Vec<usize> = (0..w)
+                    let _cols: Vec<usize> = (0..w)
                         .filter(|&x| (0..h).any(|y| (cs[y * w + x] - gs[y * w + x]).abs() > 0.01))
                         .collect();
                 }
@@ -1560,10 +1558,9 @@ fn f32_suffixed_shaders_declare_f32_storage() {
             if let Some(e) = after
                 .split(|c: char| !c.is_ascii_alphanumeric())
                 .find(|s| !s.is_empty())
+                && !elems.contains(&e)
             {
-                if !elems.contains(&e) {
-                    elems.push(e);
-                }
+                elems.push(e);
             }
         }
         checked += 1;

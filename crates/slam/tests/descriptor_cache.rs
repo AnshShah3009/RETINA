@@ -16,7 +16,7 @@
 use cv_slam::mapping::MapExt;
 use cv_slam::{MapPoint, WorldMap};
 use nalgebra::Point3;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 fn descriptor(seed: u8) -> Vec<u8> {
     vec![seed; 32]
@@ -57,7 +57,7 @@ fn an_in_place_descriptor_edit_invalidates_the_cache() {
     // re-estimation would. The length does not change.
     {
         let mut p = map.points[1].write().unwrap();
-        p.descriptor = vec![0xAB; 32];
+        p.descriptor = vec![0xab; 32];
     }
 
     let after = map.descriptor_bytes();
@@ -69,11 +69,11 @@ fn an_in_place_descriptor_edit_invalidates_the_cache() {
     // And the bytes must actually be the new ones.
     let slice = after.clone();
     assert_eq!(
-        slice[32], 0xAB,
+        slice[32], 0xab,
         "byte 32 should be the edited descriptor's first byte, not the stale \
          {stale_byte:#04x}"
     );
-    assert_eq!(after[33], 0xAB);
+    assert_eq!(after[33], 0xab);
 }
 
 /// Short descriptors are zero-padded, so the padding must be part of the
@@ -105,7 +105,7 @@ fn appending_still_invalidates() {
     map.add_point(MapPoint::new(
         99,
         Point3::new(5.0, 5.0, 5.0),
-        descriptor(0x7F),
+        descriptor(0x7f),
     ));
     let second = map.descriptor_bytes();
     assert!(!Arc::ptr_eq(&first, &second));

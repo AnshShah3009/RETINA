@@ -2,7 +2,7 @@
 
 use super::{DisparityMap, StereoMatcher, StereoMatcherCtx};
 use crate::Result;
-use cv_core::{storage::Storage, Error, Tensor};
+use cv_core::{Error, Tensor, storage::Storage};
 use cv_hal::compute::ComputeDevice;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 use cv_runtime::orchestrator::RuntimeRunner;
@@ -78,10 +78,10 @@ impl StereoMatcherCtx for SgmMatcher {
         let num_disparities = (self.max_disparity - self.min_disparity + 1) as usize;
 
         // Check for GPU acceleration
-        if let Ok(ComputeDevice::Gpu(gpu)) = group.device() {
-            if let Ok(res) = self.compute_gpu(gpu, left, right) {
-                return Ok(res);
-            }
+        if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+            && let Ok(res) = self.compute_gpu(gpu, left, right)
+        {
+            return Ok(res);
         }
 
         // Step 1: Compute pixel-wise matching costs (Census or SAD)
@@ -401,7 +401,7 @@ mod tests {
                 left.put_pixel(x, y, Luma([pattern as u8]));
 
                 // Shift pattern by 5 pixels for right image
-                let shifted_x = if x >= 5 { x - 5 } else { 0 };
+                let shifted_x = x.saturating_sub(5);
                 let right_pattern = ((shifted_x / 8) % 2) * 200;
                 right.put_pixel(x, y, Luma([right_pattern as u8]));
             }
@@ -432,7 +432,7 @@ mod tests {
         let valid_count = disparity
             .data
             .iter()
-            .filter(|&&d| d >= 0.0 && d <= 16.0)
+            .filter(|&&d| (0.0..=16.0).contains(&d))
             .count();
 
         assert!(valid_count > 0, "Should have valid disparities");

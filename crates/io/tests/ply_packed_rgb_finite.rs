@@ -96,9 +96,9 @@ fn assert_packed(name: &str, packed: u32) {
         .unwrap_or_else(|| panic!("{name}: packed rgb 0x{packed:08x} produced no colours"))
         .clone();
     let want = [
-        ((packed >> 16) & 0xFF) as f32 / 255.0,
-        ((packed >> 8) & 0xFF) as f32 / 255.0,
-        (packed & 0xFF) as f32 / 255.0,
+        ((packed >> 16) & 0xff) as f32 / 255.0,
+        ((packed >> 8) & 0xff) as f32 / 255.0,
+        (packed & 0xff) as f32 / 255.0,
     ];
     assert!(
         (c[0].x - want[0]).abs() < 1e-6
@@ -120,7 +120,7 @@ fn assert_packed(name: &str, packed: u32) {
 /// float. If this failed, the test would be passing for the wrong reason.
 #[test]
 fn control_packed_colour_with_a_finite_bit_pattern_reads() {
-    assert_packed("control", 0x00_7F_00_00); // exponent 127: -1.7014118e38
+    assert_packed("control", 0x00_7f_00_00); // exponent 127: -1.7014118e38
 }
 
 /// Pure red. `R = 0xFF` sets bit 31, whose exponent contribution makes the
@@ -128,7 +128,7 @@ fn control_packed_colour_with_a_finite_bit_pattern_reads() {
 /// away.
 #[test]
 fn pure_red_is_read() {
-    assert_packed("red", 0xFF00_0000);
+    assert_packed("red", 0xff00_0000);
 }
 
 /// The documented boundary pair. `0xff800000` is `-inf` and is an honest
@@ -136,7 +136,7 @@ fn pure_red_is_read() {
 /// and decodes to a real colour: `R = 0xFF`, `G = 0x80`.
 #[test]
 fn the_inf_literal_is_still_a_colour() {
-    assert_packed("inf_literal", 0xFF80_0000);
+    assert_packed("inf_literal", 0xff80_0000);
 }
 
 /// CONTROL for the ASCII channel: `NaN` does NOT round-trip. Rust's `f32` has
@@ -157,11 +157,11 @@ fn the_inf_literal_is_still_a_colour() {
 /// all rather than refused.
 #[test]
 fn control_a_nan_literal_loses_its_payload_in_ascii() {
-    for &packed in &[0x7FFF_0000u32, 0xFFFF_0000] {
+    for &packed in &[0x7fff_0000u32, 0xffff_0000] {
         let cloud = read_one(&format!("nan_{packed:08x}"), &packed_rgb_ply(packed));
         let c = cloud.colors.as_ref().expect("colours were declared")[0];
         // 0x7fc00000: R = 0xC0, G = 0, B = 0.
-        let want = [0xC0u8 as f32 / 255.0, 0.0, 0.0];
+        let want = [0xc0u8 as f32 / 255.0, 0.0, 0.0];
         assert!(
             (c.x - want[0]).abs() < 1e-6 && c.y == 0.0 && c.z == 0.0,
             "packed 0x{packed:08x} decoded as {c:?}, expected the payload-losing read \
@@ -176,7 +176,7 @@ fn control_a_nan_literal_loses_its_payload_in_ascii() {
 #[test]
 fn the_g_0x80_boundary_reads_on_both_sides() {
     // Highest G below the threshold: finite, so it worked before the fix.
-    assert_packed("g_7f", 0x00_7F_00_00);
+    assert_packed("g_7f", 0x00_7f_00_00);
     // First G at the threshold: `inf`, refused before the fix.
     assert_packed("g_80", 0x00_80_00_00);
 }
@@ -188,11 +188,11 @@ fn the_g_0x80_boundary_reads_on_both_sides() {
 #[test]
 fn the_failing_corner_grid_reads() {
     // (R=127, G=128) and (R=255, G=128): `inf` / `-inf`, bit-exact.
-    assert_packed("grid_7f800000", 0x7F80_0000);
-    assert_packed("grid_ff800000", 0xFF80_0000);
+    assert_packed("grid_7f800000", 0x7f80_0000);
+    assert_packed("grid_ff800000", 0xff80_0000);
     // (R=127, G=128, B=255) and (R=127, G=255): both print as `NaN`. Accepted
     // rather than refused, which is the defect; the payload is unrecoverable.
-    for &packed in &[0x7F80_00FFu32, 0x7FFF_0000] {
+    for &packed in &[0x7f80_00ffu32, 0x7fff_0000] {
         let cloud = read_one(&format!("grid_{packed:08x}"), &packed_rgb_ply(packed));
         assert_eq!(cloud.len(), 1, "grid_{packed:08x} must reach the reader");
         assert!(
@@ -206,9 +206,9 @@ fn the_failing_corner_grid_reads() {
 /// also live in the top bytes of the value. They must be unaffected.
 #[test]
 fn green_and_blue_packs_read() {
-    assert_packed("green", 0xFF00_FF00);
-    assert_packed("blue", 0xFF00_00FF);
-    assert_packed("magenta", 0x00FF_00FF);
+    assert_packed("green", 0xff00_ff00);
+    assert_packed("blue", 0xff00_00ff);
+    assert_packed("magenta", 0x00ff_00ff);
 }
 
 /// CONTROL for the guard itself: a genuinely non-finite *coordinate* must still

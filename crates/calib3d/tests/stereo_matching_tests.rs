@@ -13,7 +13,7 @@ fn test_block_matching_sad_simd() {
     for y in 0..height {
         for x in 0..width {
             // Shifted left image
-            let lx = if x >= 4 { x - 4 } else { 0 };
+            let lx = x.saturating_sub(4);
             let lval = if (lx / 8 + y / 8) % 2 == 0 { 200 } else { 50 };
             left.put_pixel(x, y, Luma([lval]));
 
@@ -43,7 +43,7 @@ fn test_block_matching_ssd_simd() {
 
     for y in 0..height {
         for x in 0..width {
-            let lx = if x >= 2 { x - 2 } else { 0 };
+            let lx = x.saturating_sub(2);
             let lval = (lx % 255) as u8;
             left.put_pixel(x, y, Luma([lval]));
 

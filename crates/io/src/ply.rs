@@ -3,8 +3,8 @@
 //! PLY is a flexible format for storing 3D data with arbitrary properties.
 
 use crate::Result;
-use cv_core::point_cloud::PointCloud;
 use cv_core::Error;
+use cv_core::point_cloud::PointCloud;
 use nalgebra::{Point3, Vector3};
 use std::io::{BufRead, Write};
 
@@ -348,14 +348,14 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
         if let Some(packed_idx) = rgb_i {
             // PLY rgb is stored as a float whose bit pattern packs u8 channels.
             let packed: u32 = values[packed_idx].to_bits();
-            let r = ((packed >> 16) & 0xFF) as f32 / 255.0;
-            let g = ((packed >> 8) & 0xFF) as f32 / 255.0;
-            let b = (packed & 0xFF) as f32 / 255.0;
+            let r = ((packed >> 16) & 0xff) as f32 / 255.0;
+            let g = ((packed >> 8) & 0xff) as f32 / 255.0;
+            let b = (packed & 0xff) as f32 / 255.0;
             colors.as_mut().unwrap().push(Point3::new(r, g, b));
         } else if has_colors {
-            let r = values[ri.unwrap()];
-            let g = values[gi.unwrap()];
-            let b = values[bi.unwrap()];
+            let _r = values[ri.unwrap()];
+            let _g = values[gi.unwrap()];
+            let _b = values[bi.unwrap()];
             // Scale by the *declared* type, not by guessing from the value.
             //
             // The previous heuristic was `if v > 1.0 { v / 255.0 } else { v }`,
@@ -388,16 +388,16 @@ pub fn read_ply<R: BufRead>(reader: R) -> Result<PointCloud> {
 
     // Attach optional attributes only when complete — an empty or partial
     // vector would desynchronize downstream consumers that index by point.
-    if let Some(c) = colors {
-        if c.len() == pc.len() {
-            pc.colors = Some(c);
-        }
+    if let Some(c) = colors
+        && c.len() == pc.len()
+    {
+        pc.colors = Some(c);
     }
 
-    if let Some(n) = normals {
-        if n.len() == pc.len() {
-            pc.normals = Some(n);
-        }
+    if let Some(n) = normals
+        && n.len() == pc.len()
+    {
+        pc.normals = Some(n);
     }
 
     Ok(pc)

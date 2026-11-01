@@ -352,7 +352,7 @@ pub fn registration_ransac_based_on_feature_matching(
     let inlier_correspondences = top_correspondences
         .iter()
         .zip(res.inliers.iter())
-        .filter(|(_, &inlier)| inlier)
+        .filter(|&(_, &inlier)| inlier)
         .map(|(c, _)| (c.0, c.1))
         .collect();
 
@@ -710,20 +710,20 @@ fn evaluate_registration(
 
     for point in &source.points {
         let transformed = transformation.transform_point(point);
-        if let Some((_, _, dist_sq)) = target_nn.nearest(&transformed) {
-            if dist_sq.sqrt() < max_correspondence_distance {
-                inlier_count += 1;
-                // `dist_sq` is already the SQUARED Euclidean distance. Summing it
-                // and taking one sqrt at the end gives sqrt(mean(d^4)), not an
-                // RMSE - which is sqrt(mean(d^2)).
-                //
-                // Verified: 90 inliers at distance 1e-4 and 10 at 1e-2 reported
-                // inlier_rmse 1.0045e-4 where the true RMSE is 3.302e-3,
-                // understated 33x. The error scales with the *spread* of the
-                // inlier distances, so it is invisible when they are all equal -
-                // which is why the uniform-distance case looked correct.
-                total_error += dist_sq;
-            }
+        if let Some((_, _, dist_sq)) = target_nn.nearest(&transformed)
+            && dist_sq.sqrt() < max_correspondence_distance
+        {
+            inlier_count += 1;
+            // `dist_sq` is already the SQUARED Euclidean distance. Summing it
+            // and taking one sqrt at the end gives sqrt(mean(d^4)), not an
+            // RMSE - which is sqrt(mean(d^2)).
+            //
+            // Verified: 90 inliers at distance 1e-4 and 10 at 1e-2 reported
+            // inlier_rmse 1.0045e-4 where the true RMSE is 3.302e-3,
+            // understated 33x. The error scales with the *spread* of the
+            // inlier distances, so it is invisible when they are all equal -
+            // which is why the uniform-distance case looked correct.
+            total_error += dist_sq;
         }
     }
 

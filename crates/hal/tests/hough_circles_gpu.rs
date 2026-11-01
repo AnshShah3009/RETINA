@@ -31,11 +31,7 @@ fn disk(w: usize, h: usize, cx: f32, cy: f32, radius: f32) -> CpuTensor<f32> {
         .flat_map(|y| {
             (0..w).map(move |x| {
                 let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
-                if d <= radius {
-                    255.0
-                } else {
-                    0.0
-                }
+                if d <= radius { 255.0 } else { 0.0 }
             })
         })
         .collect();

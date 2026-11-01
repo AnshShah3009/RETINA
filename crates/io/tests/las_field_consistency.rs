@@ -28,7 +28,7 @@
 
 #![cfg(feature = "las")]
 
-use cv_io::las_io::{read_las, write_las, LasData};
+use cv_io::las_io::{LasData, read_las, write_las};
 use nalgebra::Point3;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

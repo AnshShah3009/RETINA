@@ -1,8 +1,8 @@
 use cv_hal::DeviceId;
-use cv_runtime::orchestrator::{
-    get_execution_mode, reset_execution_mode, set_execution_mode, AdaptiveLevel, ExecutionMode,
-};
 use cv_runtime::GroupPolicy;
+use cv_runtime::orchestrator::{
+    AdaptiveLevel, ExecutionMode, get_execution_mode, reset_execution_mode, set_execution_mode,
+};
 use parking_lot::Mutex;
 use std::sync::Arc;
 

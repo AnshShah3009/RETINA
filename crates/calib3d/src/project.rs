@@ -197,13 +197,7 @@ pub fn project_points_with_jacobian(
         image_points.push(Point2::new(u, v));
 
         // Compute Jacobians if requested
-        if let (
-            Some(ref mut jr),
-            Some(ref mut jt),
-            Some(ref mut jk),
-            Some(ref mut jd),
-            Some(ref rv),
-        ) = (
+        if let (Some(jr), Some(jt), Some(jk), Some(jd), Some(rv)) = (
             &mut jac_rot,
             &mut jac_trans,
             &mut jac_intr,
@@ -366,7 +360,7 @@ pub fn compute_projection_jacobians(
             _ => {
                 return Err(cv_core::Error::AlgorithmError(
                     "Invalid distortion index".to_string(),
-                ))
+                ));
             }
         }
 

@@ -3,7 +3,7 @@ use crate::context::{
     TemplateMatchMethod, ThresholdType, WarpType,
 };
 use crate::{BackendType, Capability, ComputeBackend, DeviceId, QueueId, QueueType, Result};
-use cv_core::{storage::Storage, Float, Tensor, TensorShape};
+use cv_core::{Float, Tensor, TensorShape, storage::Storage};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 use wide::*;
@@ -135,7 +135,8 @@ impl CpuBackend {
         if intermediate_vec.capacity() < required_bytes {
             return Err(crate::Error::MemoryError(format!(
                 "Buffer pool returned insufficient buffer for separable convolution (capacity {} < required {})",
-                intermediate_vec.capacity(), required_bytes
+                intermediate_vec.capacity(),
+                required_bytes
             )));
         }
 

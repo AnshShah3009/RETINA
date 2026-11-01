@@ -35,13 +35,15 @@ fn toy_config(iterations: usize) -> TrainingConfig {
 }
 
 fn target_image(bg: Vector3<f32>) -> Vec<Vector3<f32>> {
-    let truth = GaussianCloud::from_gaussians(vec![Gaussian::new(
-        Point3::new(0.06, -0.04, 3.0),
-        Vector3::new(0.09, 0.06, 0.07),
-        Vector4::new(0.0, 0.0, 0.2, 1.0),
-        Vector3::new(0.9, 0.2, 0.1),
-    )
-    .with_opacity(0.85)]);
+    let truth = GaussianCloud::from_gaussians(vec![
+        Gaussian::new(
+            Point3::new(0.06, -0.04, 3.0),
+            Vector3::new(0.09, 0.06, 0.07),
+            Vector4::new(0.0, 0.0, 0.2, 1.0),
+            Vector3::new(0.9, 0.2, 0.1),
+        )
+        .with_opacity(0.85),
+    ]);
     DifferentiableRasterizer::new(camera(), bg)
         .render(&truth)
         .color
@@ -52,13 +54,15 @@ fn training_reduces_loss_on_a_toy_target() {
     let bg = Vector3::new(0.1, 0.1, 0.1);
     let target = target_image(bg);
 
-    let mut cloud = GaussianCloud::from_gaussians(vec![Gaussian::new(
-        Point3::new(0.0, 0.0, 3.0),
-        Vector3::new(0.06, 0.06, 0.06),
-        Vector4::new(0.0, 0.0, 0.0, 1.0),
-        Vector3::new(0.5, 0.5, 0.5),
-    )
-    .with_opacity(0.5)]);
+    let mut cloud = GaussianCloud::from_gaussians(vec![
+        Gaussian::new(
+            Point3::new(0.0, 0.0, 3.0),
+            Vector3::new(0.06, 0.06, 0.06),
+            Vector4::new(0.0, 0.0, 0.0, 1.0),
+            Vector3::new(0.5, 0.5, 0.5),
+        )
+        .with_opacity(0.5),
+    ]);
 
     let mut trainer =
         GaussianTrainer::new(DifferentiableRasterizer::new(camera(), bg), toy_config(300));

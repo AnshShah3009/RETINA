@@ -23,11 +23,7 @@ const PARALLEL_EPS: f32 = 1e-9;
 fn triangle_normal(v0: &Point3<f32>, v1: &Point3<f32>, v2: &Point3<f32>) -> Vector3<f32> {
     let n = (v1 - v0).cross(&(v2 - v0));
     let len = n.norm();
-    if len > 0.0 {
-        n / len
-    } else {
-        Vector3::zeros()
-    }
+    if len > 0.0 { n / len } else { Vector3::zeros() }
 }
 
 /// BVH-accelerated ray-mesh intersection — O(rays * log(triangles)).
@@ -87,17 +83,17 @@ pub fn cast_rays_brute(
                 let v0 = v[face[0]];
                 let v1 = v[face[1]];
                 let v2 = v[face[2]];
-                if let Some((t, _u, _v)) = moller_trumbore(&origin.coords, dir, &v0, &v1, &v2) {
-                    if t > 1e-6 {
-                        let replace = match best {
-                            None => true,
-                            Some((bt, _, _)) => t < bt,
-                        };
-                        if replace {
-                            let hit = Point3::from(origin.coords + dir * t);
-                            let n = triangle_normal(&v0, &v1, &v2);
-                            best = Some((t, hit, n));
-                        }
+                if let Some((t, _u, _v)) = moller_trumbore(&origin.coords, dir, &v0, &v1, &v2)
+                    && t > 1e-6
+                {
+                    let replace = match best {
+                        None => true,
+                        Some((bt, _, _)) => t < bt,
+                    };
+                    if replace {
+                        let hit = Point3::from(origin.coords + dir * t);
+                        let n = triangle_normal(&v0, &v1, &v2);
+                        best = Some((t, hit, n));
                     }
                 }
             }

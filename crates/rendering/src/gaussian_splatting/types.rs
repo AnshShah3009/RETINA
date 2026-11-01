@@ -767,10 +767,12 @@ mod tests {
         let mut active = cloud.active_indices.clone();
         active.sort_unstable();
         assert_eq!(active, vec![0, 1]);
-        assert!(cloud
-            .active_indices
-            .iter()
-            .all(|&i| i < cloud.num_gaussians()));
+        assert!(
+            cloud
+                .active_indices
+                .iter()
+                .all(|&i| i < cloud.num_gaussians())
+        );
 
         // Removing the final index must not disturb the remaining entry.
         cloud.remove(1);

@@ -1,5 +1,5 @@
-use cv_3d::mesh::processing::*;
 use cv_3d::mesh::TriangleMesh;
+use cv_3d::mesh::processing::*;
 use cv_hal::context::ComputeContext;
 use cv_hal::gpu::GpuContext;
 use nalgebra::Point3;
@@ -14,10 +14,7 @@ fn get_gpu_context() -> Option<&'static GpuContext> {
     }
 
     // Initialize if not initialized yet
-    match block_on(GpuContext::init_global()) {
-        Ok(ctx) => Some(ctx),
-        Err(_) => None,
-    }
+    block_on(GpuContext::init_global()).ok()
 }
 
 #[test]

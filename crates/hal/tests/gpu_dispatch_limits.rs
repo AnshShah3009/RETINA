@@ -20,7 +20,7 @@ use cv_core::{CpuTensor, Tensor, TensorShape};
 use cv_hal::context::{ColorConversion, ComputeContext, ThresholdType};
 use cv_hal::cpu::CpuBackend;
 use cv_hal::gpu::GpuContext;
-use cv_hal::gpu_kernels::{dispatch_1d, MAX_WORKGROUPS_PER_DIM};
+use cv_hal::gpu_kernels::{MAX_WORKGROUPS_PER_DIM, dispatch_1d};
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
 use pollster::block_on;
 

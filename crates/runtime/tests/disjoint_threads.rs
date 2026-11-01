@@ -1,5 +1,5 @@
-use cv_runtime::orchestrator::{scheduler, TaskPriority};
 use cv_runtime::GroupPolicy;
+use cv_runtime::orchestrator::{TaskPriority, scheduler};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::thread;

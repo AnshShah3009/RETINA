@@ -1,5 +1,5 @@
 use cv_runtime::device_registry::registry;
-use cv_runtime::orchestrator::{scheduler, AdaptiveLevel, ExecutionMode, WorkloadHint};
+use cv_runtime::orchestrator::{AdaptiveLevel, ExecutionMode, WorkloadHint, scheduler};
 use pyo3::prelude::*;
 
 #[pyclass]

@@ -11,9 +11,9 @@
 //! [`hough_accumulate_u8`] lets other conventions (cv-imgproc's OpenCV port)
 //! supply their own tables and exact bin function.
 
+use crate::Result;
 use crate::cpu::hough_standard::HoughLayout;
 use crate::gpu::GpuContext;
-use crate::Result;
 use cv_core::{Float, HoughLine};
 use wgpu::util::DeviceExt;
 
@@ -170,7 +170,7 @@ fn accumulate(
                 w * h * 4,
             ))?;
             let mut acc = vec![0u32; acc_len];
-            for (i, _) in px.iter().enumerate().filter(|(_, &v)| v > 0.0) {
+            for (i, _) in px.iter().enumerate().filter(|&(_, &v)| v > 0.0) {
                 for n in 0..num_angle {
                     if let Some(j) = exact(i % w, i / w, n) {
                         acc[j] += 1;
@@ -182,7 +182,7 @@ fn accumulate(
         let mut acc = read(&acc_buffer, acc_len * 4)?;
         if count > 0 {
             let pairs = read(&ambiguous_buffer, (1 + 2 * count as usize) * 4)?;
-            for p in pairs[1..].chunks_exact(2) {
+            for p in pairs[1..].as_chunks::<2>().0 {
                 let (i, n) = (p[0] as usize, p[1] as usize);
                 if let Some(j) = exact(i % w, i / w, n) {
                     acc[j] += 1;

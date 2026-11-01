@@ -1,9 +1,9 @@
-use crate::gpu::GpuContext;
-use crate::storage::WgpuGpuStorage;
 use crate::GpuTensor;
 use crate::Result;
-use cv_core::storage::Storage;
+use crate::gpu::GpuContext;
+use crate::storage::WgpuGpuStorage;
 use cv_core::Tensor;
+use cv_core::storage::Storage;
 
 #[derive(Debug, Clone)]
 pub struct ImagePyramid<T: cv_core::Float + bytemuck::Pod + 'static, S: Storage<T>> {

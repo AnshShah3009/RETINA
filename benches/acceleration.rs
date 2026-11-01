@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-use criterion::{criterion_group, criterion_main, Criterion};
-use cv_runtime::orchestrator::{scheduler, GroupPolicy, TaskPriority};
+use criterion::{Criterion, criterion_group, criterion_main};
+use cv_runtime::orchestrator::{GroupPolicy, TaskPriority, scheduler};
 use image::GrayImage;
 
 fn bench_threading_isolation(c: &mut Criterion) {

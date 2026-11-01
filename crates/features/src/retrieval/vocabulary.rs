@@ -207,7 +207,7 @@ mod tests {
 
     /// Build three well-separated synthetic clusters around fixed bit patterns.
     fn make_clusters(dim: usize, per_cluster: usize, seed: u64) -> (Vec<Vec<u8>>, Vec<usize>) {
-        let centers = [vec![0x00u8; dim], vec![0xFFu8; dim], vec![0xAAu8; dim]];
+        let centers = [vec![0x00u8; dim], vec![0xffu8; dim], vec![0xaau8; dim]];
         let mut rng = seeded(seed);
         let mut descs = Vec::new();
         let mut labels = Vec::new();

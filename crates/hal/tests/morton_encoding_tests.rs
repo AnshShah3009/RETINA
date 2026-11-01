@@ -83,7 +83,7 @@ fn test_morton_encode_preserves_bits() {
                 x_bits |= 1 << i;
             }
         }
-        assert_eq!(x_bits, val as u32, "x value {} not preserved", val);
+        assert_eq!(x_bits, val, "x value {} not preserved", val);
     }
 }
 
