@@ -12,7 +12,7 @@
 //! ```
 
 use cv_core::{Error, Result};
-use nalgebra::{Matrix4, Point3, Vector3};
+use nalgebra::{Matrix3, Matrix4, Point3, Vector3};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -145,11 +145,33 @@ fn transform_position(world: &Matrix4<f32>, p: Point3<f32>) -> Point3<f32> {
 }
 
 fn transform_normal(world: &Matrix4<f32>, n: Vector3<f32>) -> Vector3<f32> {
-    Vector3::new(
-        world[(0, 0)] * n.x + world[(0, 1)] * n.y + world[(0, 2)] * n.z,
-        world[(1, 0)] * n.x + world[(1, 1)] * n.y + world[(1, 2)] * n.z,
-        world[(2, 0)] * n.x + world[(2, 1)] * n.y + world[(2, 2)] * n.z,
-    )
+    // glTF 2.0: a normal is transformed "by the inverse transpose of the node's
+    // world matrix". The linear part used to be applied directly, which is only
+    // equivalent when that part is a similarity transform: under a non-uniform
+    // scale the directly multiplied normal no longer stays perpendicular to the
+    // transformed surface. With scale `(2, 1, 1)` the normal `(1, 1, 1)` of a
+    // plane came back as `(2, 1, 1)`; its inverse transpose is `(0.5, 1, 1)`,
+    // and only that one is perpendicular to the transformed tangent `(2, -1, 0)`
+    // (dot = 0).
+    let linear = Matrix3::new(
+        world[(0, 0)],
+        world[(0, 1)],
+        world[(0, 2)],
+        world[(1, 0)],
+        world[(1, 1)],
+        world[(1, 2)],
+        world[(2, 0)],
+        world[(2, 1)],
+        world[(2, 2)],
+    );
+    // A singular linear part (a zero scale) has no inverse transpose. Keep the
+    // previous direct transform rather than failing to load the mesh; the
+    // geometry itself is degenerate in that case.
+    let normal_matrix = linear
+        .try_inverse()
+        .map(|inverse| inverse.transpose())
+        .unwrap_or(linear);
+    normal_matrix * n
 }
 
 /// World transform of every node that instantiates a mesh, keyed by mesh index.
