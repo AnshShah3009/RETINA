@@ -1223,6 +1223,30 @@ impl LoadCoordinator for ShmCoordinator {
         // Devices absent from the map are cleared, so a process that becomes
         // idle stops contributing the load it reported earlier. An empty map
         // is a valid publish ("no load anywhere") and must not be ignored.
+        //
+        // The slot has one cell per device, so a device id at or past
+        // `MAX_DEVICES` has nowhere to go. Rejecting the map (like every other
+        // entry point, which returns `InvalidInput` for such an id) is the only
+        // honest answer: storing nothing and returning `Ok(())` made the load
+        // disappear from `get_global_load` while the caller believed it had
+        // published it. Validate before writing anything, so a rejected publish
+        // leaves the previously published map intact.
+        if let Some(bad) = device_load
+            .keys()
+            .map(|d| d.0)
+            .find(|&id| id as usize >= MAX_DEVICES)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Device {} cannot be published: the shared-memory slot tracks \
+                     devices 0..{} only",
+                    bad,
+                    MAX_DEVICES - 1
+                ),
+            ));
+        }
+
         for d in 0..MAX_DEVICES {
             let count = device_load
                 .get(&DeviceId(d as u32))
