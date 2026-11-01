@@ -173,7 +173,7 @@ impl PyFactorGraph {
 #[pyo3(signature = (f, x0, max_iters=1000))]
 fn minimize_nelder_mead(
     _py: Python,
-    f: PyObject,
+    f: Py<PyAny>,
     x0: Vec<f64>,
     max_iters: usize,
 ) -> PyResult<(Vec<f64>, f64)> {
@@ -196,7 +196,7 @@ fn minimize_nelder_mead(
     let failure: std::sync::Mutex<Option<PyErr>> = std::sync::Mutex::new(None);
     let result = cv_optimize::general::minimize_nelder_mead(
         |x: &[f64]| {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 // Propagate an earlier failure by refusing to call Python again:
                 // re-entering the interpreter from inside an optimiser callback
                 // that already holds the GIL would deadlock.

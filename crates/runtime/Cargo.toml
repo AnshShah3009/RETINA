@@ -29,4 +29,4 @@ tracing = []
 
 [dev-dependencies]
 tempfile = { workspace = true }
-proptest = "1.5"
+proptest = "1.12"

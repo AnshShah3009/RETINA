@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 geo = { workspace = true }
 # Shewchuk's adaptive exact orient2d / incircle; already in the tree via `geo`.
-robust = "1.1"
+robust = "1.2"

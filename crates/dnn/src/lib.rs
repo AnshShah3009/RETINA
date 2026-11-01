@@ -35,6 +35,7 @@ use image::DynamicImage;
 use std::path::Path;
 use std::sync::Arc;
 use tract_onnx::prelude::*;
+use tract_onnx::tract_core::internal::SimplePlan;
 
 pub use cv_core::{Error, Result};
 
@@ -52,7 +53,7 @@ pub type DnnError = cv_core::Error;
 )]
 pub type DnnResult<T> = cv_core::Result<T>;
 
-type RunnableModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+type RunnableModel = SimplePlan<TypedFact, Box<dyn TypedOp>>;
 
 /// Neural network model for inference
 ///
@@ -179,10 +180,7 @@ impl DnnNet {
 
         let input_shape = fixed_rank4_input_shape(&model)?;
 
-        Ok(Self {
-            model: Arc::new(model),
-            input_shape,
-        })
+        Ok(Self { model, input_shape })
     }
 
     /// The network input shape, as read from the model at load time.
@@ -264,11 +262,11 @@ impl DnnNet {
         for t in result {
             let shape = t.shape();
             let data = t
-                .as_slice::<f32>()
+                .try_as_plain_ram()
+                .and_then(|view| view.as_slice::<f32>().map(|slice| slice.to_vec()))
                 .map_err(|e| {
                     Error::RuntimeError(format!("Failed to extract slice from tensor: {}", e))
-                })?
-                .to_vec();
+                })?;
 
             let dims: Vec<usize> = (0..shape.len()).map(|i| shape[i]).collect();
             outputs.push(tensor_from_model_output(&dims, data)?);
@@ -527,7 +525,7 @@ mod tests {
         model
     }
 
-    fn runnable_identity(dims: &[i64]) -> RunnableModel {
+    fn runnable_identity(dims: &[i64]) -> Arc<RunnableModel> {
         let bytes = identity_onnx(dims);
         let mut reader: &[u8] = &bytes;
         tract_onnx::onnx()
@@ -542,7 +540,7 @@ mod tests {
     #[test]
     fn a_tensor_with_the_wrong_shape_is_rejected_not_reinterpreted() {
         let net = DnnNet {
-            model: Arc::new(runnable_identity(&[1, 1, 2, 3])),
+            model: runnable_identity(&[1, 1, 2, 3]),
             input_shape: vec![1, 1, 2, 3],
         };
         // The model wants CHW (1, 2, 3). This tensor is (1, 3, 2): the same six
@@ -567,7 +565,7 @@ mod tests {
     #[test]
     fn a_matching_tensor_still_runs_through_identity() {
         let net = DnnNet {
-            model: Arc::new(runnable_identity(&[1, 1, 2, 3])),
+            model: runnable_identity(&[1, 1, 2, 3]),
             input_shape: vec![1, 1, 2, 3],
         };
         let data = vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6];

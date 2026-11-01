@@ -2,8 +2,8 @@ use cv_runtime::device_registry::registry;
 use cv_runtime::orchestrator::{AdaptiveLevel, ExecutionMode, WorkloadHint, scheduler};
 use pyo3::prelude::*;
 
-#[pyclass]
-#[derive(Clone, Copy)]
+#[pyclass(eq, eq_int, from_py_object)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum PyWorkloadHint {
     Latency,
     Throughput,
@@ -22,7 +22,7 @@ impl From<PyWorkloadHint> for WorkloadHint {
     }
 }
 
-#[pyclass]
+#[pyclass(eq, eq_int, from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PyExecutionMode {
     Strict,
@@ -245,7 +245,7 @@ impl PyRuntime {
         let timeout = timeout_ms.map(std::time::Duration::from_millis);
         // Blocks up to the (default 30 s) timeout on a futex — must release
         // the GIL so other Python threads keep running.
-        py.allow_threads(move || s.wait_for_gpu_with_timeout(device_idx, needed_mb, timeout))
+        py.detach(move || s.wait_for_gpu_with_timeout(device_idx, needed_mb, timeout))
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 

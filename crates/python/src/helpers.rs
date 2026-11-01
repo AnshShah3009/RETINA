@@ -51,5 +51,5 @@ pub fn normals_to_ndarray<'py>(
         arr[[i, 1]] = v.y;
         arr[[i, 2]] = v.z;
     }
-    arr.into_pyarray_bound(py)
+    arr.into_pyarray(py)
 }
