@@ -295,6 +295,13 @@ impl Database {
 /// callers fill them from the pixels. `landmark_of` maps a COLMAP
 /// `POINT3D_ID` to this database's landmark index; observations with id `-1`
 /// (un-triangulated) or ids missing from the map become `None`.
+///
+/// The pose is converted: [`cv_io::datasets::colmap::Image::pose`] is
+/// camera-to-world, whereas [`DatabaseImage::pose`] is the world-to-camera pose
+/// the rest of this crate uses, so the COLMAP pose is inverted here. Copying it
+/// through unchanged left the field holding the opposite transform for every
+/// non-identity pose (its rotation mapped camera axes into the world and its
+/// translation was the camera centre rather than `-R * C`).
 pub fn database_image_from_colmap(
     image: &cv_io::datasets::colmap::Image,
     landmark_of: &HashMap<u64, usize>,
@@ -318,7 +325,7 @@ pub fn database_image_from_colmap(
 
     DatabaseImage {
         id: image.id as usize,
-        pose: Some(image.pose),
+        pose: Some(image.pose.inverse()),
         keypoints,
         descriptors: Descriptors::new(),
         landmarks,
