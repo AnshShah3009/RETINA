@@ -1,79 +1,65 @@
-//! A normal that was not measured must not be handed to the caller in a
-//! plausible-looking shape.
+//! `compute_point_normals` estimates a missing normal from the points.
 //!
-//! # The defect
-//!
-//! `mesh::reconstruction::compute_point_normals` is documented as
-//! "compute normals using PCA (simplified)". It is a placeholder: it returns the
-//! cloud's own normals if it has them, and otherwise
-//!
-//! ```ignore
-//! // Default: return upward normals
-//! vec![Vector3::new(0.0, 1.0, 0.0); n]
-//! ```
-//!
-//! for every point.
-//!
-//! That is a fabricated success in the exact shape this crate has been removing
-//! elsewhere. The result has precisely the right **length**, so the obvious
-//! check `assert_eq!(normals.len(), points.len())` passes; every element is a
-//! unit vector, so nothing downstream — a shading term, a back-face test, a
-//! surface-area weighting — can tell it apart from a measurement. A caller that
-//! checks only `is_empty()` would be told the cloud was fully oriented along +Y.
-//!
-//! The sibling precedent is explicit: `gpu::point_cloud::voxel_to_point_normal_transfer`
-//! used to return a zero vector per point — a valid-length result carrying no
-//! information — and was changed to return `Vec::new()` for exactly this reason.
-//!
-//! # Measurement
-//!
-//! A three-point cloud with no normals:
-//!
-//! ```text
-//! before: [[0.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 1.0, 0.0]]
-//! after:  []
-//! ```
-//!
-//! Note the deliberate consequence: in the absent case the returned length is
-//! **not** `points.len()`. That is the only way a caller can detect the absence at
-//! all, and it is the same trade `voxel_to_point_normal_transfer` made.
+//! It used to answer `(0, 1, 0)` for every point of a cloud that carried no
+//! normals: the right length, a unit vector, and independent of the cloud.
+//! The estimate is PCA over the neighbours, so two different planes do not
+//! share one normal, and a cloud that already has normals still gets those
+//! back unchanged.
 
 use cv_3d::mesh::reconstruction::compute_point_normals;
 use cv_core::PointCloud;
 use nalgebra::{Point3, Vector3};
 
-/// A cloud with no normals has none to report.
+/// Three corners of the xy plane estimate +Z, not one `(0, 1, 0)` each.
 #[test]
-fn a_cloud_without_normals_reports_absence_rather_than_fabricating_them() {
+fn a_cloud_without_normals_is_estimated_from_the_plane() {
     let cloud = PointCloud::new(vec![
         Point3::new(0.0, 0.0, 0.0),
         Point3::new(1.0, 0.0, 0.0),
         Point3::new(0.0, 1.0, 0.0),
     ]);
-    assert!(
-        cloud.normals.is_none(),
-        "CONTROL of the fixture: this cloud really has no normals"
-    );
+    assert!(cloud.normals.is_none());
 
     let normals = compute_point_normals(&cloud, 10);
-    assert!(
-        normals.is_empty(),
-        "a cloud with no normals must produce no normals, not one (0, 1, 0) per \
-         point. Got {normals:?} - a valid-length, plausible-valued answer that no \
-         caller could distinguish from a measurement."
-    );
+    assert_eq!(normals.len(), cloud.points.len());
+    for n in &normals {
+        assert!(
+            (n - Vector3::new(0.0, 0.0, 1.0)).norm() < 1e-3,
+            "xy plane should estimate +Z, got {n:?}"
+        );
+    }
 }
 
-/// The sharper statement of the same defect: no element of the result may be the
-/// constant the old default produced.
+/// A tilted plane does not get the same normal as the xy plane. The old
+/// default was `(0, 1, 0)` for both.
 #[test]
-fn no_fabricated_upward_normal_is_returned() {
-    let cloud = PointCloud::new((0..10).map(|i| Point3::new(i as f32, 0.0, 0.0)).collect());
-    let normals = compute_point_normals(&cloud, 5);
-    assert!(
-        !normals.iter().any(|n| *n == Vector3::new(0.0, 1.0, 0.0)),
-        "the default upward normal is a fabrication, not a result"
-    );
+fn two_planes_do_not_share_one_fabricated_normal() {
+    let xy = PointCloud::new(vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ]);
+    let tilted = PointCloud::new(vec![
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ]);
+    let n_xy = compute_point_normals(&xy, 5);
+    let n_tilt = compute_point_normals(&tilted, 5);
+    assert_eq!(n_xy.len(), 3);
+    assert_eq!(n_tilt.len(), 3);
+    let expected = Vector3::new(0.0, -1.0, 1.0).normalize();
+    for n in &n_tilt {
+        assert!(
+            n.dot(&expected) > 0.99,
+            "tilted plane should follow (0, -1, 1), got {n:?}"
+        );
+        assert!(
+            n.dot(&n_xy[0]) < 0.8,
+            "tilted and xy normals must differ, got {n:?} vs {:?}",
+            n_xy[0]
+        );
+    }
 }
 
 /// CONTROL: a cloud that *does* carry normals still gets them back, unchanged and
