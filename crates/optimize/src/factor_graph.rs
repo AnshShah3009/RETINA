@@ -279,6 +279,18 @@ impl Values {
         self.values.contains_key(key)
     }
 
+    /// Whether every key in `keys` has a value.
+    ///
+    /// A factor may legally name a variable that has no value yet: graphs are
+    /// built incrementally, and the constraint that reaches the next pose is
+    /// usually added with the current one, before that pose's initial value
+    /// arrives. Such a factor cannot be evaluated at this point, and the answer
+    /// is to leave it out of every quantity computed from these values — not to
+    /// demand a value from a factor that the linear system already skips.
+    pub fn contains_all(&self, keys: &[Key]) -> bool {
+        keys.iter().all(|k| self.values.contains_key(k))
+    }
+
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -387,9 +399,18 @@ impl FactorGraph {
     }
 
     /// Total (squared) whitened error: sum of ||whitened_error||^2.
+    ///
+    /// Factors naming a variable that has no value are skipped, exactly as
+    /// [`FactorGraph::linearize`] skips them. The two must agree: `total_error`
+    /// is the cost that the `H`/`b` built by `linearize` minimises, and the
+    /// factors that contribute to one are the factors that contribute to the
+    /// other. Evaluating an unevaluable factor panicked on the ready-made
+    /// factors' `Values::get(..).expect(..)`, so `optimize_gn` succeeded on a
+    /// graph that `optimize_lm` and `total_error` aborted on.
     pub fn total_error(&self, values: &Values) -> f64 {
         self.factors
             .iter()
+            .filter(|f| values.contains_all(f.keys()))
             .map(|f| {
                 let we = f.whitened_error(values);
                 we.dot(&we)
