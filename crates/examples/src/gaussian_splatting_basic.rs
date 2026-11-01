@@ -3,61 +3,35 @@
 //!
 //! Run with: cargo run --example gaussian_splatting_basic
 
-use cv_rendering::gaussian_splatting::{Camera, Gaussian, GaussianCloud, GaussianRasterizer};
-use nalgebra::{Point3, Vector3, Vector4};
+#[path = "gaussian_splatting_scene.rs"]
+mod gaussian_splatting_scene;
+
+use gaussian_splatting_scene::{demo_camera, demo_cloud, non_black_pixels, render_demo};
 
 fn main() {
     println!("=== Gaussian Splatting Basic Example ===\n");
 
-    // Create a simple scene with multiple Gaussians
-    let mut cloud = GaussianCloud::new();
-
-    // Add a few test Gaussians in a pattern
-    for i in 0..5 {
-        for j in 0..5 {
-            let x = (i as f32 - 2.0) * 0.5;
-            let y = (j as f32 - 2.0) * 0.5;
-            let z = -5.0;
-
-            // Color gradient based on position
-            let r = (i as f32) / 5.0;
-            let g = (j as f32) / 5.0;
-            let b = 0.5;
-
-            let gaussian = Gaussian::new(
-                Point3::new(x, y, z),
-                Vector3::new(0.1, 0.1, 0.1),
-                Vector4::new(0.0, 0.0, 0.0, 1.0),
-                Vector3::new(r, g, b),
-            );
-            cloud.push(gaussian);
-        }
-    }
-
+    // A 5x5 grid of coloured splats, shared with the regression test in
+    // `tests/gaussian_splatting_scene.rs` so the two cannot drift apart.
+    let cloud = demo_cloud();
     println!("Created cloud with {} Gaussians", cloud.num_gaussians());
 
-    // Create camera
-    let camera = Camera::new(
-        Point3::new(0.0, 0.0, 0.0),       // Camera at origin
-        Vector4::new(0.0, 0.0, 0.0, 1.0), // Looking forward
-        500.0,                            // Focal length
-        640,
-        480, // Resolution
+    // The scene is in front of the camera along +Z, which is the direction
+    // `Gaussian::project` treats as forward.
+    let camera = demo_camera();
+    println!(
+        "Camera: {}x{}, f = {}, looking down +Z",
+        camera.width, camera.height, camera.focal_length
     );
 
     // Create rasterizer and render
-    let rasterizer = GaussianRasterizer::new(camera, 16, 16);
-    let result = rasterizer.rasterize(&cloud);
+    let result = render_demo();
 
     println!("Rendered image: {}x{}", result.width, result.height);
     println!("Total pixels: {}", result.color.len());
 
     // Check output
-    let non_black = result
-        .color
-        .iter()
-        .filter(|c| c.x > 0.01 || c.y > 0.01 || c.z > 0.01)
-        .count();
+    let non_black = non_black_pixels(&result);
     println!("Non-black pixels: {}", non_black);
 
     // Save to PNG (if image crate available)

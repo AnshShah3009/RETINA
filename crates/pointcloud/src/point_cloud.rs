@@ -343,7 +343,9 @@ pub fn orient_normals(pc: &mut PointCloud, k: usize) {
 ///
 /// # Returns
 /// Per-pixel normals in camera space, oriented toward the viewer (−Z direction).
-/// Border pixels and pixels with zero depth get a default `(0, 0, 1)` normal.
+/// Border pixels and pixels without a usable depth (non-positive, NaN or
+/// infinite) get a default `(0, 0, 1)` normal, so a bad sample never leaks into
+/// a neighbour's normal.
 pub fn compute_normals_from_depth(
     depth: &[f32],
     width: usize,
@@ -357,7 +359,12 @@ pub fn compute_normals_from_depth(
 
     let backproject = |px: usize, py: usize| -> Option<Vector3<f32>> {
         let d = depth[py * width + px];
-        if d <= 0.0 {
+        // `d <= 0.0` alone let NaN and infinities through: NaN fails every
+        // comparison, so it passed the guard and back-projected to
+        // `[NaN, NaN, NaN]`; an infinite depth gave `inf - inf` in the
+        // horizontal/vertical difference. Either way one bad sample turned the
+        // four pixels that use it as a neighbour NaN as well.
+        if !d.is_finite() || d <= 0.0 {
             return None;
         }
         Some(Vector3::new(

@@ -97,6 +97,27 @@ fn command_trajectory(argv: &[String]) -> Result<(), String> {
 
     let estimate = &pair.estimate;
     let ground_truth = &pair.ground_truth;
+
+    // Refuse a gap that leaves no pair to compare before printing anything.
+    // `Trajectory::rpe` reports `NaN` statistics for an empty error list, which
+    // is right for the library (it has no error channel) but wrong for a report:
+    // `--rpe-delta 0` was already refused for producing `RPE ... rmse: NaN`,
+    // and a positive gap that is not *smaller* than the associated sequence
+    // reaches exactly the same hole with the same exit code 0 - including the
+    // default `--rpe-delta 1` when only one pose associated.
+    if opts.rpe_delta >= pair.paired {
+        return Err(format!(
+            "option '--rpe-delta' = {} leaves no pair to compare: the {} associated \
+             pose(s) span at most {} frame(s), and a relative pose error needs two poses \
+             exactly {} apart (use a gap below {})",
+            opts.rpe_delta,
+            pair.paired,
+            pair.paired.saturating_sub(1),
+            opts.rpe_delta,
+            pair.paired
+        ));
+    }
+
     let ate = estimate.ate(ground_truth, opts.align);
     let rpe = estimate.rpe(ground_truth, opts.rpe_delta);
 
