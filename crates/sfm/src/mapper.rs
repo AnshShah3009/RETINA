@@ -2346,26 +2346,104 @@ fn close_loops(
         }
         for &(ka, kb) in &pair.inliers {
             let (mine, theirs) = if owner_view == lo { (ka, kb) } else { (kb, ka) };
-            let node = (owner_view, mine);
-            let partner = (other_view, theirs);
-            match owner.get(&node).copied() {
-                Some(track) => {
-                    if !est.track_obs[track].iter().any(|&(v, _)| v == other_view) {
-                        est.track_obs[track].push(partner);
-                    }
-                }
-                None => {
-                    let track = est.track_obs.len();
-                    est.track_obs.push(vec![node, partner]);
-                    est.track_point.push(None);
-                    owner.insert(node, track);
-                    owner.insert(partner, track);
-                }
-            }
+            // Both endpoints are already registered, so both nodes are usually
+            // on the graph already — and when they sit on different tracks the
+            // correspondence is refused rather than duplicating a keypoint; see
+            // `fuse_observation`.
+            fuse_observation(est, &mut owner, (owner_view, mine), (other_view, theirs));
         }
         linked += 1;
     }
     linked
+}
+
+/// Fuse one verified correspondence into the track graph.
+///
+/// `left` and `right` are the two `(view, keypoint)` observations that a
+/// verified match asserts are the same 3D point. Afterwards both sit on one
+/// track: the track that already holds `left`, the track that already holds
+/// `right`, or a fresh track when neither node is on the graph yet. `owner` is
+/// the node-to-track index built from [`Est::track_obs`]; it is kept up to date
+/// here so a caller can fuse a whole correspondence set with one borrow of it.
+///
+/// Returns `true` when an observation actually reached a track.
+///
+/// A correspondence whose two nodes already sit on **different** tracks is
+/// refused. Attaching the node to the second track — what the two call sites
+/// used to do — leaves one keypoint on two tracks, and [`triangulate_new_tracks`]
+/// then gives each track its own landmark, so bundle adjustment fits a single 2D
+/// measurement to two different 3D points and counts it twice in the cost. On an
+/// 18-view synthetic orbit that left 79 keypoints shared between two landmarks
+/// and 39 landmarks whose observations were not ascending by view.
+///
+/// Fusing the two tracks instead of refusing would need to retire one of their
+/// landmarks, and `Est` cannot represent that: `points`, `point_obs` and
+/// `point_tracks` are parallel and indexed by landmark, and
+/// `point_tracks[landmark]` has to name a live track. A map that has already
+/// decided two keypoints are different points is therefore left alone.
+fn fuse_observation(
+    est: &mut Est,
+    owner: &mut std::collections::HashMap<(usize, usize), usize>,
+    left: (usize, usize),
+    right: (usize, usize),
+) -> bool {
+    match (owner.get(&left).copied(), owner.get(&right).copied()) {
+        // Both already on the graph. Either they share a track, in which case
+        // there is nothing to fuse, or the map has deliberately kept them apart
+        // and the correspondence is refused (see above).
+        (Some(_), Some(_)) => false,
+        (Some(track), None) => merge_observation_into_track(est, owner, track, right),
+        (None, Some(track)) => merge_observation_into_track(est, owner, track, left),
+        (None, None) => {
+            // A new track with no 3D point yet; `triangulate_new_tracks` fills
+            // the per-landmark vectors in once it reaches two registered views,
+            // which keeps them parallel to `points`. Built before it is pushed
+            // so a correspondence whose two nodes share a view cannot leave a
+            // one-observation track behind — the two views of a verified pair
+            // always differ, but a half-built track is not worth the risk.
+            let mut observations = Vec::with_capacity(2);
+            for node in [left, right] {
+                if !observations.iter().any(|&(view, _)| view == node.0) {
+                    observations.push(node);
+                }
+            }
+            if observations.len() < 2 {
+                return false;
+            }
+            let track = est.track_obs.len();
+            est.track_obs.push(observations.clone());
+            est.track_point.push(None);
+            for node in observations {
+                owner.insert(node, track);
+            }
+            true
+        }
+    }
+}
+
+/// Put `node` on `track`, keeping the track's observations ascending by view.
+///
+/// A track is one 3D point, so it holds at most one observation per view: a view
+/// that already contributes to it cannot contribute again, and `false` is
+/// returned. Inserting in view order rather than appending matters because the
+/// two callers attach views from both ends — a loop closure attaches an earlier
+/// view, sequential registration attaches a later one — while
+/// [`Reconstruction::observations`] documents ascending order and
+/// `build_tracks` produces it.
+fn merge_observation_into_track(
+    est: &mut Est,
+    owner: &mut std::collections::HashMap<(usize, usize), usize>,
+    track: usize,
+    node: (usize, usize),
+) -> bool {
+    let observations = &mut est.track_obs[track];
+    if observations.iter().any(|&(view, _)| view == node.0) {
+        return false;
+    }
+    let position = observations.partition_point(|&(view, _)| view < node.0);
+    observations.insert(position, node);
+    owner.insert(node, track);
+    true
 }
 
 /// Add the observations a newly registered view contributes to the track graph.
@@ -2398,26 +2476,10 @@ fn extend_tracks_for_view(est: &mut Est, view: usize, verified: &[VerifiedPair],
 
         for &(ka, kb) in &pair.inliers {
             let (mine, theirs) = if pair.a == view { (ka, kb) } else { (kb, ka) };
-            let node = (view, mine);
-            let partner_node = (partner, theirs);
-            match owner.get(&node).copied() {
-                Some(track) => {
-                    if !est.track_obs[track].iter().any(|&(v, _)| v == partner) {
-                        est.track_obs[track].push(partner_node);
-                    }
-                }
-                None => {
-                    // A new track with no 3D point yet. The per-landmark vectors
-                    // stay parallel to `points`, so nothing is appended to them
-                    // here; `triangulate_new_tracks` fills them in when the track
-                    // reaches two registered views.
-                    let track = est.track_obs.len();
-                    est.track_obs.push(vec![node, partner_node]);
-                    est.track_point.push(None);
-                    owner.insert(node, track);
-                    owner.insert(partner_node, track);
-                }
-            }
+            // A track created here has no 3D point yet; `triangulate_new_tracks`
+            // fills the per-landmark vectors in when it reaches two registered
+            // views, which keeps them parallel to `points`.
+            fuse_observation(est, &mut owner, (view, mine), (partner, theirs));
         }
     }
     let _ = views;
@@ -3651,5 +3713,160 @@ mod tests {
             "registered {}/{n_views}",
             mapping.report.registered
         );
+    }
+
+    /// Every keypoint belongs to at most one landmark, and a landmark's
+    /// observations are ascending by view.
+    ///
+    /// Both are promises of the output type — `observations` documents the
+    /// ascending order that `build_tracks` produces — and both are what a
+    /// track-graph fusion can break, so they are checked on the finished map.
+    fn assert_no_keypoint_is_shared(mapping: &Mapping) {
+        let mut owner: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        for (landmark, observations) in mapping.reconstruction.observations.iter().enumerate() {
+            for (position, &(view, keypoint)) in observations.iter().enumerate() {
+                if position > 0 {
+                    assert!(
+                        observations[position - 1].0 < view,
+                        "landmark {landmark}: observations are not ascending by view: {:?}",
+                        observations
+                    );
+                }
+                if let Some(previous) = owner.insert((view, keypoint), landmark) {
+                    assert_eq!(
+                        previous, landmark,
+                        "keypoint {keypoint} of view {view} is on landmarks {previous} and \
+                         {landmark}; one observation cannot support two 3D points"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A track holds at most one observation per view and keeps them ascending.
+    fn assert_tracks_are_well_formed(est: &Est) {
+        for (track, observations) in est.track_obs.iter().enumerate() {
+            for (position, &(view, _)) in observations.iter().enumerate() {
+                if position > 0 {
+                    assert!(
+                        observations[position - 1].0 < view,
+                        "track {track} is not ascending by view: {observations:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Fusing a correspondence whose two nodes are already on **different**
+    /// tracks must not leave one keypoint on both of them.
+    ///
+    /// `extend_tracks_for_view` and `close_loops` both fused by pushing the
+    /// partner node onto whichever track held the other node. Neither asked
+    /// whether that partner was already on a track of its own, so the keypoint
+    /// ended up on two. Each track then produced its own landmark, and bundle
+    /// adjustment fitted the one 2D measurement to two different 3D points and
+    /// charged it twice. Measured on an 18-view synthetic orbit: 79 keypoints
+    /// shared between two landmarks and 39 landmarks whose observations were not
+    /// ascending by view. With the fix both numbers are 0.
+    #[test]
+    fn fusing_a_correspondence_never_puts_a_keypoint_on_two_tracks() {
+        // Two disjoint two-view tracks. Keypoint 0 of view 0 is on track 0,
+        // keypoint 0 of view 1 is on track 1.
+        let mut est = Est::new(4, vec![vec![(0, 0), (2, 0)], vec![(1, 0), (3, 0)]]);
+        let views: Vec<View> = (0..4)
+            .map(|_| View::new(Vec::new(), Descriptors::new(), 640, 480))
+            .collect();
+        // Registering view 1 against view 0 turns up the correspondence
+        // (view 0, kp 0) <-> (view 1, kp 0), which already sits on two tracks.
+        let verified = vec![synthetic_pair(0, 1, 1)];
+
+        extend_tracks_for_view(&mut est, 1, &verified, &views);
+        assert_tracks_are_well_formed(&est);
+
+        let mut owner: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        for (track, observations) in est.track_obs.iter().enumerate() {
+            for &node in observations {
+                if let Some(previous) = owner.insert(node, track) {
+                    panic!(
+                        "{node:?} is on tracks {previous} and {track}; \
+                         a keypoint is one observation of one 3D point"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same guarantee end to end, on the input that exposes it: a closed
+    /// orbit, where `close_loops` runs and fuses verified pairs between views
+    /// that are already registered — so both nodes normally have a track
+    /// already, and the "both owned" branch is the common one there.
+    ///
+    /// Before the fix this mapping produced 79 keypoints on two landmarks each
+    /// and 39 landmarks whose observations were not ascending by view.
+    #[test]
+    fn a_closed_orbit_shares_no_keypoint_between_two_landmarks() {
+        let intrinsics = CameraIntrinsics::new(500.0, 500.0, 320.0, 240.0, 640, 480);
+        let mut rng = 0x0DDB_A11u64;
+        let mut next = || {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (rng >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let points: Vec<Point3<f64>> = (0..900)
+            .map(|_| {
+                let a = next() * std::f64::consts::TAU;
+                Point3::new(3.0 * a.sin(), next() * 1.4, 3.0 * a.cos())
+            })
+            .collect();
+        // 20 views on a ring facing outward-in, so the last frames revisit what
+        // the first ones saw and the sequence closes.
+        let n_views = 20;
+        let mut views = Vec::new();
+        for v in 0..n_views {
+            let phi = v as f64 * std::f64::consts::TAU / n_views as f64;
+            let rot = nalgebra::UnitQuaternion::from_axis_angle(&Vector3::y_axis(), phi);
+            let centre = Vector3::new(0.4 * phi.sin(), 0.0, 0.4 * phi.cos());
+            let pose_cw = Pose::from_quat_translation(rot, centre).inverse();
+            let mut keypoints = Vec::new();
+            let mut descriptors = Descriptors::with_capacity(points.len());
+            for (id, point) in points.iter().enumerate() {
+                let camera = pose_cw.rotation * point.coords + pose_cw.translation;
+                if camera[2] <= 0.1 {
+                    continue;
+                }
+                let px = intrinsics.project(&Point3::from(camera));
+                // Keep clear of the border so a keypoint is never ambiguous.
+                if !(8.0..632.0).contains(&px.x) || !(8.0..472.0).contains(&px.y) {
+                    continue;
+                }
+                let mut data = vec![0u8; 32];
+                data[0] = (id & 0xFF) as u8;
+                data[1] = ((id >> 8) & 0xFF) as u8;
+                keypoints.push(KeyPoint::new(px.x, px.y));
+                descriptors.push(Descriptor::new(data, KeyPoint::new(px.x, px.y)));
+            }
+            views.push(View::new(keypoints, descriptors, 640, 480));
+        }
+        let config = MapperConfig {
+            loop_closure: true,
+            loop_closure_min_gap: 2,
+            ba_every: 0,
+            ba_final: false,
+            local_ba_window: 0,
+            ..MapperConfig::default()
+        };
+        let mapping = map_views(&views, &intrinsics, &config);
+        assert_eq!(
+            mapping.report.registered, n_views,
+            "the orbit must register every view"
+        );
+        assert!(
+            mapping.report.loop_closures > 0,
+            "the fixture only tests the loop fusion if a loop was actually closed"
+        );
+        assert_no_keypoint_is_shared(&mapping);
     }
 }
