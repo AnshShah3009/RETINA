@@ -28,6 +28,28 @@ impl From<cv_core::CameraIntrinsicsF32> for Camera {
         camera.fy = intrinsics.fy;
         camera.cx = intrinsics.cx;
         camera.cy = intrinsics.cy;
+
+        // The stored projection matrix has to encode the same two focal
+        // lengths the camera now stores. `Camera::new` builds it from a single
+        // `focal_length`, so both diagonal entries came out as `fx`:
+        //
+        //     P[0][0] = 2 fx / width      P[1][1] = 2 fy / height
+        //
+        // With `fx` 500, `fy` 200 on a 640x480 image the vertical entry
+        // recovered an effective `fy` of 500.00003, not 200: the splat
+        // renderer projects with `camera.fy` while every consumer of
+        // `projection_matrix` / `view_projection` used 2.5x the vertical focal.
+        // That is the same stored-matrix-versus-actual-projection disagreement
+        // `Camera::new`'s fov comment fixes for a non-square viewport, just in
+        // the anisotropic-pixel case the single-focal constructor cannot
+        // express. The two entries are independent for a pinhole, so they are
+        // set independently here; the `max` guards match `Camera::new`'s, which
+        // keeps a zero or negative focal length finite instead of infinite.
+        let half_width = intrinsics.width.max(1) as f32 / 2.0;
+        let half_height = intrinsics.height.max(1) as f32 / 2.0;
+        camera.projection_matrix[(0, 0)] = intrinsics.fx.max(f32::MIN_POSITIVE) / half_width;
+        camera.projection_matrix[(1, 1)] = intrinsics.fy.max(f32::MIN_POSITIVE) / half_height;
+
         camera
     }
 }
