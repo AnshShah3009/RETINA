@@ -78,6 +78,30 @@ fn spectrogram_matches_scipy_defaults() {
     close("S2", &flat, &SPEC2_S, 1e-10, 1e-18);
 }
 
+/// A one-sample segment. SciPy's `get_window('hann', 1)` (and
+/// `get_window(('tukey', 0.25), 1)`) is `[1.0]`; the periodic helpers here
+/// evaluated `0.5 - 0.5 cos(0) = 0` instead of special-casing length one.
+/// `stft` then divided by `sum(window) = 0` and `welch` scaled by
+/// `1 / (fs * sum(w^2)) = inf`, so a single-sample analysis returned NaN
+/// where SciPy gives `[5]` (STFT) and `[0]` (Welch/spectrogram).
+#[test]
+fn single_sample_segment_matches_scipy() {
+    let x = [5.0];
+
+    let (t, f, z) = stft(&x, 1, Some(0), 1.0);
+    close("stft t", &t, &[0.0], 0.0, 1e-15);
+    close("stft f", &f, &[0.0], 0.0, 1e-15);
+    assert_eq!(z, vec![vec![(5.0, 0.0)]]);
+
+    let (f, p) = welch(&x, 1, Some(0), 1.0);
+    close("welch f", &f, &[0.0], 0.0, 1e-15);
+    close("welch psd", &p, &[0.0], 0.0, 1e-15);
+
+    let (t, _, s) = spectrogram(&x, 1, Some(0), 1.0);
+    close("spectrogram t", &t, &[0.5], 0.0, 1e-15);
+    assert_eq!(s, vec![vec![0.0]]);
+}
+
 // ── SciPy reference arrays ──
 const WELCH_16_F: [f64; 9] = [0.0, 0.0625, 0.125, 0.1875, 0.25, 0.3125, 0.375, 0.4375, 0.5];
 const WELCH_16_P: [f64; 9] = [

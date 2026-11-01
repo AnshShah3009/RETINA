@@ -452,6 +452,12 @@ fn poly_from_roots(roots: &[Complex<f64>]) -> Vec<f64> {
 /// `0.5 - 0.5 cos(2π i / n)`. Spectral estimators use this form; the
 /// symmetric [`hann_window`] (denominator `n - 1`) is for filter design.
 fn hann_periodic(n: usize) -> Vec<f64> {
+    // A one-sample window is the identity, as in `get_window('hann', 1)`
+    // (and as the symmetric [`hann_window`] already does); `0.5 - 0.5 cos(0)`
+    // would be 0 instead, making `sum(w)` zero and the STFT divide by it.
+    if n == 1 {
+        return vec![1.0];
+    }
     (0..n)
         .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos())
         .collect()
@@ -460,10 +466,16 @@ fn hann_periodic(n: usize) -> Vec<f64> {
 /// Periodic Tukey window, `scipy.signal.get_window(('tukey', alpha), n)`:
 /// the symmetric Tukey window of length `n + 1` without its last sample.
 fn tukey_periodic(n: usize, alpha: f64) -> Vec<f64> {
-    let m = n + 1;
-    if m == 1 {
+    // Length one is the identity (`get_window(('tukey', alpha), 1) == [1]`):
+    // the taper formula below returns 0 at its single sample, which zeroed the
+    // spectrogram's `sum(w^2)` and made its density scaling infinite.
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
         return vec![1.0];
     }
+    let m = n + 1;
     let width = (alpha * (m - 1) as f64 / 2.0).floor() as usize;
     let mut w = vec![1.0; m];
     for (i, wi) in w.iter_mut().enumerate().take(width + 1) {
