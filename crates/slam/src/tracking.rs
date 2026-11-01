@@ -1173,14 +1173,31 @@ fn insert_two_view_map(
         query_indices: Vec::new(),
     };
     // Reference keyframe at the origin: points are in its camera frame.
-    let ref_points: Vec<(usize, Point3<f64>)> =
-        init.points.iter().map(|&(ri, _, x)| (ri, x)).collect();
+    //
+    // The descriptor matcher works query by query, so two current-frame
+    // features can both name the same reference feature. A feature is one 3D
+    // point and the reference keyframe has one slot per feature, so a second
+    // landmark there could never be linked: its observation would point at a
+    // slot naming the first. Keep the first correspondence for each reference
+    // feature and drop the rest; the query feature of a dropped pair is then
+    // simply not mapped by the initialisation.
+    let mut taken = vec![false; reference.descriptors.descriptors.len()];
+    let mut ref_points: Vec<(usize, Point3<f64>)> = Vec::with_capacity(init.points.len());
+    let mut query_indices: Vec<usize> = Vec::with_capacity(init.points.len());
+    for &(ri, qi, x) in &init.points {
+        if taken.get(ri).copied().unwrap_or(true) {
+            continue;
+        }
+        taken[ri] = true;
+        ref_points.push((ri, x));
+        query_indices.push(qi);
+    }
     let created = add_keyframe(reference, &none, ref_points, false, map);
     // Current keyframe observes the same points.
     let tracked = MapTrack {
         pose: frame.pose,
         map_indices: created.clone(),
-        query_indices: init.points.iter().map(|&(_, qi, _)| qi).collect(),
+        query_indices,
     };
     add_keyframe(frame, &tracked, Vec::new(), false, map);
     created
@@ -1437,5 +1454,97 @@ fn convert_to_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         Ok(input_cpu.clone())
     } else {
         Err("Unsupported storage type".into())
+    }
+}
+
+#[cfg(test)]
+mod two_view_map_tests {
+    use super::*;
+    use cv_core::{Descriptor, KeyPoint};
+    use nalgebra::Point3;
+
+    fn frame(descriptors: &[(f64, f64, u8)]) -> TrackingFrame<CpuStorage<u8>> {
+        let mut descs = Descriptors::new();
+        for &(x, y, byte) in descriptors {
+            descs.push(Descriptor::new(vec![byte; 32], KeyPoint::new(x, y)));
+        }
+        let keypoints = KeyPoints {
+            keypoints: descs.descriptors.iter().map(|d| d.keypoint).collect(),
+        };
+        TrackingFrame {
+            image: Tensor::from_vec(vec![0u8; 4 * 4], cv_core::TensorShape::new(1, 4, 4))
+                .expect("image tensor"),
+            keypoints,
+            descriptors: descs,
+            pose: Pose::default(),
+        }
+    }
+
+    /// Every observation a point lists must be named by that keyframe's own
+    /// slot for the feature. This is the two-sided link the map maintenance
+    /// (fusion, culling) walks from either direction.
+    fn assert_links(map: &WorldMap) {
+        for (i, point) in map.points.iter().enumerate() {
+            let point = point.read().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(point.id, i as u64, "point {i} has a stale id");
+            for &(kf_id, kp_idx) in &point.observations {
+                let kf = map.keyframes[kf_id as usize]
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner());
+                assert_eq!(
+                    kf.map_points[kp_idx],
+                    Some(i as u64),
+                    "point {i} lists observation (keyframe {kf_id}, feature {kp_idx}), but \
+                     that keyframe slot names {:?}",
+                    kf.map_points[kp_idx]
+                );
+            }
+        }
+    }
+
+    /// One reference feature can only be one landmark.
+    ///
+    /// The descriptor matcher works query by query: two current-frame
+    /// descriptors whose best match is the same reference descriptor both come
+    /// back as matches. `two_view_init` keeps every inlier pair, so
+    /// `TwoViewInit::points` can name the same reference feature twice. The
+    /// reference keyframe has one slot per feature, so inserting both puts a
+    /// second landmark in the map that the keyframe cannot link: its
+    /// observation points at a slot naming the other point.
+    #[test]
+    fn two_matches_to_one_reference_feature_make_one_landmark() {
+        let reference = frame(&[(50.0, 50.0, 7), (60.0, 50.0, 9)]);
+        let current = frame(&[(50.0, 50.0, 7), (51.0, 50.0, 7)]);
+        let init = TwoViewInit {
+            pose: Pose::identity(),
+            // Two correspondences claim reference feature 0; they differ only
+            // in which current-frame feature they were triangulated with.
+            points: vec![
+                (0, 0, Point3::new(0.0, 0.0, 5.0)),
+                (0, 1, Point3::new(0.10, 0.0, 5.0)),
+            ],
+        };
+        let mut map = WorldMap::new();
+        let created = insert_two_view_map(&reference, &current, &init, &mut map);
+
+        assert_eq!(
+            map.points.len(),
+            1,
+            "one reference feature must produce one map point, got {} (created {created:?})",
+            map.points.len()
+        );
+        assert_eq!(created.len(), map.points.len());
+        assert_eq!(
+            map.keyframes[0]
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .map_points
+                .iter()
+                .filter(|s| s.is_some())
+                .count(),
+            1,
+            "the reference keyframe must link its feature to exactly one point"
+        );
+        assert_links(&map);
     }
 }

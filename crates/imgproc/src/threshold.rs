@@ -242,17 +242,18 @@ fn local_mean_replicate(src: &GrayImage, block: usize) -> Vec<u8> {
     let data = src.as_raw();
     let clamp = |i: isize, n: usize| i.clamp(0, n as isize - 1) as usize;
 
-    // Horizontal window sums (u32: 255 * block fits easily).
-    let mut rows = vec![0u32; w * h];
+    // Horizontal window sums. u64: 255 * block exceeds u32 once
+    // block >= 16_843_011 (the vertical pass below is already u64).
+    let mut rows = vec![0u64; w * h];
     rows.par_chunks_mut(w).enumerate().for_each(|(y, out)| {
         let src_row = &data[y * w..(y + 1) * w];
-        let mut s: u32 = (0..block)
-            .map(|i| src_row[clamp(i as isize - r as isize, w)] as u32)
+        let mut s: u64 = (0..block)
+            .map(|i| src_row[clamp(i as isize - r as isize, w)] as u64)
             .sum();
         for (x, o) in out.iter_mut().enumerate() {
             *o = s;
-            let add = src_row[clamp((x + r + 1) as isize, w)] as u32;
-            let sub = src_row[clamp(x as isize - r as isize, w)] as u32;
+            let add = src_row[clamp((x + r + 1) as isize, w)] as u64;
+            let sub = src_row[clamp(x as isize - r as isize, w)] as u64;
             s = s + add - sub;
         }
     });
@@ -464,6 +465,23 @@ mod tests {
         let img = GrayImage::from_pixel(10, 10, Luma([128u8]));
         let (_, result) = threshold_otsu(&img, 255, ThresholdType::Binary);
         assert_eq!(result.width(), 10);
+    }
+
+    #[test]
+    fn adaptive_mean_large_block_does_not_wrap_horizontal_sum() {
+        // 255 * 16_843_011 = 2^32 + 509. A u32 horizontal sum wraps, the
+        // replicated 1×1 window mean collapses to 0, and Binary c=0 then
+        // emits max_value. The true mean is 255, so 255 > 255 is false.
+        let img = GrayImage::from_pixel(1, 1, Luma([255]));
+        let out = adaptive_threshold(
+            &img,
+            255,
+            AdaptiveMethod::MeanC,
+            ThresholdType::Binary,
+            16_843_011,
+            0.0,
+        );
+        assert_eq!(out.as_raw(), &[0]);
     }
 
     #[test]

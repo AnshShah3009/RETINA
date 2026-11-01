@@ -12,14 +12,45 @@ pub(crate) const ALPHA_CUTOFF: f32 = 1e-4;
 
 impl From<cv_core::CameraIntrinsicsF32> for Camera {
     /// Convert from cv-core CameraIntrinsicsF32 to a rendering Camera at identity pose.
+    ///
+    /// `fx` is stored in `focal_length`. `fy` and the principal point are stored
+    /// on their own: a single focal length and an image-centre principal point
+    /// are a different camera whenever the pixels are not square or the
+    /// principal point is not the image centre.
     fn from(intrinsics: cv_core::CameraIntrinsicsF32) -> Self {
-        Camera::new(
+        let mut camera = Camera::new(
             Point3::origin(),
             Vector4::new(0.0, 0.0, 0.0, 1.0), // identity quaternion
             intrinsics.fx,
             intrinsics.width,
             intrinsics.height,
-        )
+        );
+        camera.fy = intrinsics.fy;
+        camera.cx = intrinsics.cx;
+        camera.cy = intrinsics.cy;
+
+        // The stored projection matrix has to encode the same two focal
+        // lengths the camera now stores. `Camera::new` builds it from a single
+        // `focal_length`, so both diagonal entries came out as `fx`:
+        //
+        //     P[0][0] = 2 fx / width      P[1][1] = 2 fy / height
+        //
+        // With `fx` 500, `fy` 200 on a 640x480 image the vertical entry
+        // recovered an effective `fy` of 500.00003, not 200: the splat
+        // renderer projects with `camera.fy` while every consumer of
+        // `projection_matrix` / `view_projection` used 2.5x the vertical focal.
+        // That is the same stored-matrix-versus-actual-projection disagreement
+        // `Camera::new`'s fov comment fixes for a non-square viewport, just in
+        // the anisotropic-pixel case the single-focal constructor cannot
+        // express. The two entries are independent for a pinhole, so they are
+        // set independently here; the `max` guards match `Camera::new`'s, which
+        // keeps a zero or negative focal length finite instead of infinite.
+        let half_width = intrinsics.width.max(1) as f32 / 2.0;
+        let half_height = intrinsics.height.max(1) as f32 / 2.0;
+        camera.projection_matrix[(0, 0)] = intrinsics.fx.max(f32::MIN_POSITIVE) / half_width;
+        camera.projection_matrix[(1, 1)] = intrinsics.fy.max(f32::MIN_POSITIVE) / half_height;
+
+        camera
     }
 }
 
@@ -27,7 +58,14 @@ impl From<cv_core::CameraIntrinsicsF32> for Camera {
 pub struct Camera {
     pub view_matrix: Matrix3x4<f32>,
     pub projection_matrix: Matrix3x4<f32>,
+    /// Horizontal focal length in pixels (`fx`).
     pub focal_length: f32,
+    /// Vertical focal length in pixels (`fy`). Equal to `focal_length` for a
+    /// camera built by [`Camera::new`].
+    pub fy: f32,
+    /// Principal point, in pixels.
+    pub cx: f32,
+    pub cy: f32,
     pub width: u32,
     pub height: u32,
     pub near: f32,
@@ -102,6 +140,9 @@ impl Camera {
             view_matrix: view,
             projection_matrix: proj,
             focal_length,
+            fy: focal_length,
+            cx: width as f32 / 2.0,
+            cy: height as f32 / 2.0,
             width,
             height,
             near: 0.01,
@@ -244,8 +285,9 @@ impl GaussianRasterizer {
                 g.project(
                     view,
                     self.camera.focal_length,
-                    self.camera.width,
-                    self.camera.height,
+                    self.camera.fy,
+                    self.camera.cx,
+                    self.camera.cy,
                 )
             })
             .collect()
@@ -767,7 +809,8 @@ fn project_backward(
     q: Matrix2<f32>,
     dl_dq: Matrix2<f32>,
 ) -> (Vector3<f32>, Vector3<f32>, Vector4<f32>) {
-    let f = camera.focal_length;
+    let fx = camera.focal_length;
+    let fy = camera.fy;
     let vm = &camera.view_matrix;
     let rv = vm.fixed_view::<3, 3>(0, 0).into_owned();
     let v = rv * g.position.coords + vm.fixed_view::<3, 1>(0, 3).into_owned();
@@ -778,28 +821,30 @@ fn project_backward(
     let dl_dsigma2 = -(q * dl_dq * q);
 
     // Sigma2 = T Sigma T^T with T = J2 Rv, J2 the top two rows of the
-    // perspective Jacobian.
+    // perspective Jacobian. `cx` and `cy` are constant in the mean, so they
+    // do not appear; `fx` and `fy` do, and they are not the same number.
     let z2 = z * z;
-    let j2 = Matrix2x3::new(f / z, 0.0, -f * x / z2, 0.0, f / z, -f * y / z2);
+    let j2 = Matrix2x3::new(fx / z, 0.0, -fx * x / z2, 0.0, fy / z, -fy * y / z2);
     let t = j2 * rv;
     let sigma = g.covariance();
     let dl_dsigma = t.transpose() * dl_dsigma2 * t;
     let dl_dt = 2.0 * dl_dsigma2 * t * sigma;
     let dl_dj = dl_dt * rv.transpose();
 
-    // Centre: p = f (x, y) / z + (W, H) / 2.
+    // Centre: p = (fx * x / z + cx, fy * y / z + cy).
     let z3 = z2 * z;
     let mut dl_dv = Vector3::new(
-        dl_dcenter.x * f / z,
-        dl_dcenter.y * f / z,
-        -(dl_dcenter.x * f * x + dl_dcenter.y * f * y) / z2,
+        dl_dcenter.x * fx / z,
+        dl_dcenter.y * fy / z,
+        -(dl_dcenter.x * fx * x + dl_dcenter.y * fy * y) / z2,
     );
     // Jacobian entries' dependence on the camera-space mean.
-    dl_dv.x += dl_dj[(0, 2)] * (-f / z2);
-    dl_dv.y += dl_dj[(1, 2)] * (-f / z2);
-    dl_dv.z += (dl_dj[(0, 0)] + dl_dj[(1, 1)]) * (-f / z2)
-        + dl_dj[(0, 2)] * (2.0 * f * x / z3)
-        + dl_dj[(1, 2)] * (2.0 * f * y / z3);
+    dl_dv.x += dl_dj[(0, 2)] * (-fx / z2);
+    dl_dv.y += dl_dj[(1, 2)] * (-fy / z2);
+    dl_dv.z += dl_dj[(0, 0)] * (-fx / z2)
+        + dl_dj[(1, 1)] * (-fy / z2)
+        + dl_dj[(0, 2)] * (2.0 * fx * x / z3)
+        + dl_dj[(1, 2)] * (2.0 * fy * y / z3);
     let dpos = rv.transpose() * dl_dv;
 
     // Sigma = M M^T, M = R S.

@@ -22,11 +22,29 @@ pub fn bilateral_filter(src: &GrayImage, d: i32, sigma_color: f32, sigma_space: 
     let gauss_color_coeff = -0.5 / (sigma_color * sigma_color);
     let gauss_space_coeff = -0.5 / (sigma_space * sigma_space);
 
+    // Spatial weight depends only on the kernel offset. u8 intensities differ
+    // by 0..=255, so the range weight is a 256-entry table of the same exp.
+    let k = (2 * radius + 1) as usize;
+    let mut space_w = vec![0.0f32; k * k];
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let dist_sq = (dx * dx + dy * dy) as f32;
+            let iy = (dy + radius) as usize;
+            let ix = (dx + radius) as usize;
+            space_w[iy * k + ix] = (dist_sq * gauss_space_coeff).exp();
+        }
+    }
+    let mut color_w = [0.0f32; 256];
+    for diff in 0..256 {
+        let d = diff as f32;
+        color_w[diff] = (d * d * gauss_color_coeff).exp();
+    }
+
     for y in 0..height {
         for x in 0..width {
             let mut sum_weight = 0.0f32;
             let mut sum_val = 0.0f32;
-            let center_val = src.get_pixel(x as u32, y as u32)[0] as f32;
+            let center_u8 = src.get_pixel(x as u32, y as u32)[0];
 
             for dy in -radius..=radius {
                 let sy = y as i32 + dy;
@@ -40,14 +58,11 @@ pub fn bilateral_filter(src: &GrayImage, d: i32, sigma_color: f32, sigma_space: 
                         continue;
                     }
 
-                    let val = src.get_pixel(sx as u32, sy as u32)[0] as f32;
-
-                    let dist_sq = (dx * dx + dy * dy) as f32;
-                    let color_diff = val - center_val;
-                    let color_diff_sq = color_diff * color_diff;
-
-                    let weight =
-                        (dist_sq * gauss_space_coeff + color_diff_sq * gauss_color_coeff).exp();
+                    let val_u8 = src.get_pixel(sx as u32, sy as u32)[0];
+                    let val = val_u8 as f32;
+                    let diff = (val_u8 as i32 - center_u8 as i32).unsigned_abs() as usize;
+                    let weight = space_w[(dy + radius) as usize * k + (dx + radius) as usize]
+                        * color_w[diff];
 
                     sum_val += val * weight;
                     sum_weight += weight;
@@ -165,6 +180,87 @@ mod tests {
 
         // Single pixel should not change
         assert_eq!(filtered.get_pixel(0, 0)[0], 200);
+    }
+
+    /// Spatial exp once per offset, times a 256-entry range exp, accumulated in
+    /// the same neighbour order as `exp(space + color)`. u8 output stays identical.
+    #[test]
+    fn precomputed_exps_match_fused_exp_bytes() {
+        let images = [
+            GrayImage::from_fn(32, 8, |x, _| Luma([if x < 16 { 100 } else { 101 }])),
+            GrayImage::from_fn(17, 13, |x, y| Luma([((x * 13 + y * 7) % 256) as u8])),
+            GrayImage::from_fn(9, 9, |x, y| Luma([if (x + y) % 5 == 0 { 0 } else { 255 }])),
+        ];
+        let params = [
+            (5, 50.0, 2.0),
+            (5, 30.0, 3.0),
+            (-1, 10.0, 5.0),
+            (4, 20.0, 15.0),
+        ];
+        for img in &images {
+            for &(d, sc, ss) in &params {
+                let fast = bilateral_filter(img, d, sc, ss);
+                let fused = fused_exp_bilateral(img, d, sc, ss);
+                assert_eq!(
+                    fast.as_raw(),
+                    fused.as_raw(),
+                    "d={d} sigma_color={sc} sigma_space={ss}"
+                );
+            }
+        }
+    }
+
+    fn fused_exp_bilateral(
+        src: &GrayImage,
+        d: i32,
+        sigma_color: f32,
+        sigma_space: f32,
+    ) -> GrayImage {
+        let width = src.width() as usize;
+        let height = src.height() as usize;
+        let mut dst = GrayImage::new(src.width(), src.height());
+        let sigma_color = if sigma_color > 0.0 { sigma_color } else { 1.0 };
+        let sigma_space = if sigma_space > 0.0 { sigma_space } else { 1.0 };
+        let radius = if d <= 0 {
+            (sigma_space * 1.5).ceil() as i32
+        } else {
+            d / 2
+        };
+        let gauss_color_coeff = -0.5 / (sigma_color * sigma_color);
+        let gauss_space_coeff = -0.5 / (sigma_space * sigma_space);
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum_weight = 0.0f32;
+                let mut sum_val = 0.0f32;
+                let center_val = src.get_pixel(x as u32, y as u32)[0] as f32;
+                for dy in -radius..=radius {
+                    let sy = y as i32 + dy;
+                    if sy < 0 || sy >= height as i32 {
+                        continue;
+                    }
+                    for dx in -radius..=radius {
+                        let sx = x as i32 + dx;
+                        if sx < 0 || sx >= width as i32 {
+                            continue;
+                        }
+                        let val = src.get_pixel(sx as u32, sy as u32)[0] as f32;
+                        let dist_sq = (dx * dx + dy * dy) as f32;
+                        let color_diff = val - center_val;
+                        let weight = (dist_sq * gauss_space_coeff
+                            + color_diff * color_diff * gauss_color_coeff)
+                            .exp();
+                        sum_val += val * weight;
+                        sum_weight += weight;
+                    }
+                }
+                dst.put_pixel(
+                    x as u32,
+                    y as u32,
+                    Luma([(sum_val / sum_weight).round().clamp(0.0, 255.0) as u8]),
+                );
+            }
+        }
+        dst
     }
 
     #[test]

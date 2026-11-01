@@ -11,6 +11,9 @@ use v4l::video::Capture;
 pub struct V4L2Capture {
     device: Device,
     stream: Option<MmapStream<'static>>,
+    /// Frame produced by the last successful grab. `retrieve` returns it and
+    /// does not read another buffer from the device.
+    grabbed: Option<GrayImage>,
 }
 
 impl std::fmt::Debug for V4L2Capture {
@@ -30,6 +33,7 @@ impl V4L2Capture {
         Ok(Self {
             device,
             stream: None,
+            grabbed: None,
         })
     }
 
@@ -147,14 +151,16 @@ impl VideoCapture for V4L2Capture {
         self.stream.is_some()
     }
 
+    /// Dequeue one device buffer and keep it. `retrieve` does not touch the
+    /// device, so a second retrieve repeats the frame and a second grab skips
+    /// one. OpenCV's contract, matching the FFmpeg backend.
     fn grab(&mut self) -> Result<()> {
-        // v4l-rust grab is essentially next() on the stream
-        Ok(())
-    }
-
-    fn retrieve(&mut self) -> Result<GrayImage> {
-        let stream = self
-            .stream
+        let V4L2Capture {
+            device,
+            stream,
+            grabbed,
+        } = self;
+        let stream = stream
             .as_mut()
             .ok_or_else(|| VideoError::CaptureFailed("Stream not started".to_string()))?;
 
@@ -162,8 +168,7 @@ impl VideoCapture for V4L2Capture {
             .next()
             .map_err(|e| VideoError::CaptureFailed(format!("Failed to grab frame: {}", e)))?;
 
-        let fmt = self
-            .device
+        let fmt = device
             .format()
             .map_err(|e| VideoError::Backend(format!("Failed to get format: {}", e)))?;
 
@@ -176,7 +181,15 @@ impl VideoCapture for V4L2Capture {
         } else {
             fmt.stride as usize
         };
-        yuyv_to_gray(data, fmt.width, fmt.height, stride)
+        *grabbed = Some(yuyv_to_gray(data, fmt.width, fmt.height, stride)?);
+        Ok(())
+    }
+
+    /// Return the frame from the last successful `grab`. Does not advance.
+    fn retrieve(&mut self) -> Result<GrayImage> {
+        self.grabbed
+            .clone()
+            .ok_or_else(|| VideoError::CaptureFailed("No frame grabbed".to_string()))
     }
 }
 

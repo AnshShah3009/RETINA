@@ -20,7 +20,7 @@ struct Voxel {
 }
 
 @group(0) @binding(0) var<storage, read> voxels: array<Voxel>;
-@group(0) @binding(1) var<storage, read_write> output_data: array<vec4<f32>>; // x: depth, yzw: normal
+@group(0) @binding(1) var<storage, read_write> output_data: array<f32>; // CHW: depth, nx, ny, nz
 @group(0) @binding(2) var<uniform> params: Params;
 // Camera-to-world. The host API (`ComputeContext::tsdf_raycast`) takes the pose
 // WORLD-to-camera - the same convention `tsdf_integrate` uses to project world
@@ -120,17 +120,27 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             let z_depth = t_surf * (1.0 / length(vec3<f32>(mx, my, 1.0)));
 
             let normal = compute_normal(p_surf_world);
-            output_data[y * params.width + x] = vec4<f32>(z_depth, normal.x, normal.y, normal.z);
-            
+            let n = params.width * params.height;
+            let pix = y * params.width + x;
+            output_data[pix] = z_depth;
+            output_data[n + pix] = normal.x;
+            output_data[2u * n + pix] = normal.y;
+            output_data[3u * n + pix] = normal.z;
+
             found = true;
             break;
         }
-        
+
         prev_tsdf = tsdf_val;
         t += t_step;
     }
 
     if (!found) {
-        output_data[y * params.width + x] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+        let n = params.width * params.height;
+        let pix = y * params.width + x;
+        output_data[pix] = 0.0;
+        output_data[n + pix] = 0.0;
+        output_data[2u * n + pix] = 0.0;
+        output_data[3u * n + pix] = 0.0;
     }
 }

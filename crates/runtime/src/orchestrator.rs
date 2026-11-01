@@ -929,9 +929,17 @@ impl TaskScheduler {
         use crate::observe::events::{DispatchBackend, DispatchReason};
         use crate::observe::{observability, RuntimeEvent};
 
-        let gpu_group = self
-            .get_best_group(BackendType::WebGPU, hint)?
-            .or(self.get_best_group(BackendType::Vulkan, hint)?);
+        // The backend lookup is driven by the hint, so a hint that names the
+        // CPU (`Require(Cpu)`, `Prefer(Cpu)`) hands back a CPU group from
+        // either probe. That is a valid answer to the hint but not a GPU: drop
+        // it so the caller is never told a CPU group is a GPU dispatch (and
+        // gets dispatched a GPU kernel on it).
+        let gpu_only =
+            |group: Option<Arc<ResourceGroup>>| group.filter(|g| g.backend() != BackendType::Cpu);
+        let gpu_group = match gpu_only(self.get_best_group(BackendType::WebGPU, hint)?) {
+            Some(g) => Some(g),
+            None => gpu_only(self.get_best_group(BackendType::Vulkan, hint)?),
+        };
 
         let gpu_group = match gpu_group {
             Some(g) => g,
@@ -1379,6 +1387,35 @@ mod tests {
         let cpu_id = registry().unwrap().default_cpu().id();
 
         assert!(s.is_device_healthy(cpu_id));
+    }
+
+    /// A hint that names the CPU (`Require(Cpu)` or `Prefer(Cpu)`) makes the
+    /// backend lookup return a CPU group. `best_gpu_with_wait` used to take
+    /// that group at face value and report `is_gpu = true`, so a caller that
+    /// trusts the flag (the whole point of returning it) would dispatch a
+    /// GPU-optimized kernel on the CPU. Only a non-CPU group may come back
+    /// with `true`.
+    #[test]
+    fn gpu_dispatch_helper_never_reports_a_cpu_group_as_gpu() {
+        let s = TaskScheduler::new();
+        s.create_group("default", 1, None, GroupPolicy::default())
+            .unwrap();
+
+        for hint in [
+            WorkloadHint::Require(BackendType::Cpu),
+            WorkloadHint::Prefer(BackendType::Cpu),
+        ] {
+            let (group, is_gpu) = s.best_gpu_with_wait(hint, 0, Some(Duration::ZERO)).unwrap();
+            assert_eq!(
+                group.backend(),
+                BackendType::Cpu,
+                "premise for {hint:?}: the scheduler only has a CPU group"
+            );
+            assert!(
+                !is_gpu,
+                "best_gpu_with_wait({hint:?}) reported a CPU group as a GPU dispatch"
+            );
+        }
     }
 
     #[test]

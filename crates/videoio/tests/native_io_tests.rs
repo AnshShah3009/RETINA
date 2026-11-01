@@ -118,6 +118,97 @@ fn test_gif_capture_reads_every_frame_in_order() {
     assert!(capture.read().is_err());
 }
 
+/// OpenCV's contract: `grab` advances, `retrieve` returns the grabbed frame and
+/// does not. Two grabs then one retrieve skip a frame; a second retrieve
+/// without grab repeats the frame. `read` is grab+retrieve and still walks
+/// the sequence.
+#[test]
+fn png_sequence_grab_retrieve_follows_opencv_contract() {
+    let dir = tempdir().expect("Failed to create temp dir");
+    let mut writer = PngSequenceWriter::new(dir.path(), "f").unwrap();
+    for v in [10u8, 20, 30] {
+        writer.write(&solid(v)).unwrap();
+    }
+    drop(writer);
+
+    let mut capture = PngSequenceCapture::new(dir.path()).unwrap();
+    capture.grab().unwrap();
+    capture.grab().unwrap();
+    let skipped = capture.retrieve().unwrap().get_pixel(0, 0)[0];
+    assert_eq!(
+        skipped, 20,
+        "grab+grab+retrieve must skip the first frame and return the second"
+    );
+
+    let mut capture = PngSequenceCapture::new(dir.path()).unwrap();
+    capture.grab().unwrap();
+    let first = capture.retrieve().unwrap().get_pixel(0, 0)[0];
+    let again = capture.retrieve().unwrap().get_pixel(0, 0)[0];
+    assert_eq!(
+        first, again,
+        "retrieve without grab must repeat the grabbed frame"
+    );
+    assert_eq!(first, 10);
+
+    let mut capture = PngSequenceCapture::new(dir.path()).unwrap();
+    let walked: Vec<u8> = (0..3)
+        .map(|_| capture.read().unwrap().get_pixel(0, 0)[0])
+        .collect();
+    assert_eq!(
+        walked,
+        vec![10, 20, 30],
+        "read() must still walk every frame"
+    );
+    assert!(
+        capture.read().is_err(),
+        "read past the end is end of sequence"
+    );
+}
+
+/// Same grab/retrieve contract as the PNG sequence, on a decoded GIF.
+#[test]
+fn gif_grab_retrieve_follows_opencv_contract() {
+    use cv_videoio::backends::GifCapture;
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{Delay, Frame, RgbaImage};
+    use std::fs::File;
+
+    let dir = tempdir().expect("Failed to create temp dir");
+    let path = dir.path().join("frames.gif");
+    {
+        let file = File::create(&path).unwrap();
+        let mut encoder = GifEncoder::new(file);
+        encoder.set_repeat(Repeat::Infinite).unwrap();
+        for value in [10u8, 20, 30] {
+            encoder
+                .encode_frame(Frame::from_parts(
+                    RgbaImage::from_pixel(4, 4, image::Rgba([value, value, value, 255])),
+                    0,
+                    0,
+                    Delay::from_numer_denom_ms(40, 1),
+                ))
+                .unwrap();
+        }
+    }
+
+    let mut capture = GifCapture::new(&path).unwrap();
+    capture.grab().unwrap();
+    capture.grab().unwrap();
+    assert_eq!(capture.retrieve().unwrap().get_pixel(0, 0)[0], 20);
+
+    let mut capture = GifCapture::new(&path).unwrap();
+    capture.grab().unwrap();
+    let first = capture.retrieve().unwrap().get_pixel(0, 0)[0];
+    let again = capture.retrieve().unwrap().get_pixel(0, 0)[0];
+    assert_eq!((first, again), (10, 10));
+
+    let mut capture = GifCapture::new(&path).unwrap();
+    let walked: Vec<u8> = (0..3)
+        .map(|_| capture.read().unwrap().get_pixel(0, 0)[0])
+        .collect();
+    assert_eq!(walked, vec![10, 20, 30]);
+}
+
 /// Reads a whole sequence, returning the value of pixel (0, 0) of each frame.
 fn drain(capture: &mut PngSequenceCapture) -> Vec<u8> {
     let mut values = Vec::new();
@@ -214,6 +305,38 @@ fn test_png_sequence_writer_does_not_clobber_existing_frames() {
         drain(&mut capture),
         vec![10, 20, 30, 100, 110],
         "a new writer must append to the sequence, not overwrite its head"
+    );
+}
+
+/// Continuation must recognise the same extensions the reader does.
+///
+/// The reader treats `frame.PNG` as a frame (mixed-case directories are read),
+/// but the writer's "continue the sequence" scan only matched a lower-case
+/// `.png`. A directory of upper-case frames therefore looked empty to the
+/// writer, which restarted at zero: the new frames were numbered 0, 1, 2
+/// alongside the existing 0, 1, 2, and the reader — ordering equal frame
+/// numbers by extension case — interleaved them into 0, 0, 1, 1, 2, 2, which
+/// is not the temporal order. Every frame after the restart is out of place.
+#[test]
+fn test_png_sequence_writer_continues_uppercase_extension_frames() {
+    let dir = tempdir().expect("Failed to create temp dir");
+    for (i, v) in [10u8, 20, 30].iter().enumerate() {
+        solid(*v)
+            .save(dir.path().join(format!("seq_{:06}.PNG", i)))
+            .unwrap();
+    }
+
+    let mut writer = PngSequenceWriter::new(dir.path(), "seq").unwrap();
+    for v in [100u8, 110, 120] {
+        writer.write(&solid(v)).unwrap();
+    }
+    drop(writer);
+
+    let mut capture = PngSequenceCapture::new(dir.path()).unwrap();
+    assert_eq!(
+        drain(&mut capture),
+        vec![10, 20, 30, 100, 110, 120],
+        "a writer must continue past existing upper-case frames, not restart at zero"
     );
 }
 

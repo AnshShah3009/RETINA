@@ -176,6 +176,39 @@ fn robust_cost(
     reproj + depth
 }
 
+/// True when an optimised keyframe will back-project a once-seen depth.
+///
+/// That point is not in the normal equations. Rescaling the keyframe and
+/// then placing the point at the old depth puts the measurement on the
+/// rescaled ray, so the depth counts as a scale pin even though it is not
+/// a variable.
+fn once_seen_depth_on_optimised_camera(map: &WorldMap, kf_ids: &[u64], fixed: &[bool]) -> bool {
+    for (c, &kf_id) in kf_ids.iter().enumerate() {
+        if fixed[c] {
+            continue;
+        }
+        let Some(kf) = map.keyframes.get(kf_id as usize) else {
+            continue;
+        };
+        let kf = kf.read().unwrap_or_else(|e| e.into_inner());
+        for p in &map.points {
+            let p = p.read().unwrap_or_else(|e| e.into_inner());
+            let Some(z) = p.depth_m else {
+                continue;
+            };
+            let z = z as f64;
+            if !(z.is_finite() && z > 1e-6) || p.born_kf != kf_id || p.observations.len() != 1 {
+                continue;
+            }
+            let (obs_kf, kp_idx) = p.observations[0];
+            if obs_kf == kf_id && kf.descriptors.descriptors.get(kp_idx).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn rms(k: &CameraIntrinsics, poses: &[Pose], pts: &[Vector3<f64>], obs: &[Obs]) -> f64 {
     let (s, n) = obs.iter().fold((0.0, 0usize), |(s, n), o| {
         match residual(k, &poses[o.cam], &pts[o.point], &o.uv) {
@@ -201,11 +234,15 @@ fn rms(k: &CameraIntrinsics, poses: &[Pose], pts: &[Vector3<f64>], obs: &[Obs]) 
 /// invariant to it). That lets the initialisation pair itself be refined,
 /// rather than freezing its distortion by fixing both. A depth measurement
 /// removes that freedom instead: the similarity is not applied when any point
-/// in the window has one, because it would throw away the metric scale the
-/// residual just recovered. A depth point seen only once is not a variable.
-/// After the poses are written it is placed on the ray of its keypoint at the
-/// measured depth, so a moved keyframe does not leave it behind and it does
-/// not drag the keyframe. Afterwards observations further than [`OUTLIER_PX`]
+/// in the window has one. A multi-view depth is a residual, and rescaling
+/// would throw away the metric scale it recovered. A depth seen only once is
+/// not a variable (it would only repeat its keyframe) but on an optimised
+/// keyframe it is still a measurement, so the similarity is not applied then
+/// either. Otherwise that pose is rescaled and the point is back-projected at
+/// the measured depth on the rescaled ray. After the poses are written the
+/// point is placed on the ray of its keypoint at the measured depth, so a
+/// moved keyframe does not leave it behind and it does not drag the keyframe.
+/// Afterwards observations further than [`OUTLIER_PX`]
 /// from their projection are unlinked from both the keyframe and the point.
 pub fn local_bundle_adjust(
     k: &CameraIntrinsics,
@@ -532,8 +569,13 @@ pub fn local_bundle_adjust(
     // similarity about the fixed camera centre leaves every reprojection
     // unchanged, so rescale to keep the distance from it to the oldest
     // optimised keyframe (for the initialisation pair, the unit baseline).
-    // Depth measurements already fix the scale; rescaling would undo them.
-    if depths.is_empty() && fixed.iter().filter(|&&f| f).count() == 1 {
+    // A multi-view depth residual already fixes that scale. A once-seen
+    // depth is not a residual, but the back-projection below uses the pose
+    // written here; rescaling first would place the point at the old z on
+    // the rescaled ray.
+    let scale_pinned =
+        !depths.is_empty() || once_seen_depth_on_optimised_camera(map, &kf_ids, &fixed);
+    if !scale_pinned && fixed.iter().filter(|&&f| f).count() == 1 {
         let f = fixed.iter().position(|&f| f).expect("one fixed");
         let r = (0..kf_ids.len())
             .filter(|&c| !fixed[c])
@@ -916,5 +958,110 @@ mod tests {
             let terr = (kf_pose(&map, i).inverse().translation - gt.inverse().translation).norm();
             assert!(terr < 0.005, "keyframe {i} moved {terr} m");
         }
+    }
+
+    /// The only depth in the window belongs to a point seen once, on an
+    /// optimised keyframe. The same pose perturbation without a depth
+    /// restores the pre-solve baseline (`recovers_a_perturbed_window_and_holds_the_gauge`).
+    /// This measurement must block that similarity, and the point is then
+    /// placed on the unscaled keyframe's ray at the measured depth.
+    #[test]
+    fn once_seen_depth_blocks_the_monocular_similarity() {
+        let (mut map, truth, points) = scene();
+        for i in 1..4 {
+            let s = i as f64;
+            nudge(
+                &mut map,
+                i,
+                [0.004 * s, -0.003, 0.002],
+                Vector3::new(0.02, -0.015, 0.01 * s),
+            );
+        }
+        for (pi, p) in map.points.iter().enumerate() {
+            let off = Vector3::new(0.01, -0.02, 0.03) * (((pi % 7) as f64) - 3.0) / 3.0;
+            p.write().unwrap().world_pos = Point3::from((points[pi] + off).cast::<f32>());
+        }
+
+        let pi = (0..points.len())
+            .find(|&pi| {
+                let obs = &map.points[pi].read().unwrap().observations;
+                obs.iter().any(|o| o.0 == 1) && obs.len() >= 2
+            })
+            .expect("keyframe 1 sees a multi-view point");
+        let keep = map.points[pi]
+            .read()
+            .unwrap()
+            .observations
+            .iter()
+            .copied()
+            .find(|o| o.0 == 1)
+            .unwrap();
+        let others: Vec<(u64, usize)> = map.points[pi]
+            .read()
+            .unwrap()
+            .observations
+            .iter()
+            .copied()
+            .filter(|o| *o != keep)
+            .collect();
+        for (kf, kp) in others {
+            let mut kfw = map.keyframes[kf as usize].write().unwrap();
+            if kfw.map_points.get(kp).copied().flatten() == Some(pi as u64) {
+                kfw.map_points[kp] = None;
+            }
+        }
+        let intr = k();
+        let z_meas = {
+            let cam = &truth[1];
+            (cam.rotation * points[pi] + cam.translation).z
+        };
+        let (u_obs, v_obs) = {
+            let kf = map.keyframes[1].read().unwrap();
+            let d = &kf.descriptors.descriptors[keep.1];
+            (d.keypoint.x, d.keypoint.y)
+        };
+        {
+            let mut p = map.points[pi].write().unwrap();
+            p.observations.clear();
+            p.observations.push(keep);
+            p.depth_m = Some(z_meas as f32);
+            p.born_kf = 1;
+        }
+        assert!(
+            map.points.iter().enumerate().all(|(i, p)| {
+                let p = p.read().unwrap();
+                i == pi || p.depth_m.is_none()
+            }),
+            "the window's only depth must be the once-seen point"
+        );
+
+        let baseline_before = kf_pose(&map, 1).inverse().translation.norm();
+        let report = local_bundle_adjust(&intr, &mut map, 4, 1, 30).expect("adjusted");
+        assert!(report.rms_after < 0.05, "did not converge: {report:?}");
+        let baseline_after = kf_pose(&map, 1).inverse().translation.norm();
+        assert!(
+            (baseline_after - baseline_before).abs() > 1e-3,
+            "similarity restored the monocular baseline {baseline_before} -> {baseline_after}"
+        );
+
+        let got = map.points[pi]
+            .read()
+            .unwrap()
+            .world_pos
+            .coords
+            .cast::<f64>();
+        let cam = kf_pose(&map, 1);
+        let c = cam.rotation * got + cam.translation;
+        assert!(
+            (c.z - z_meas).abs() < 1e-3,
+            "back-projected depth {} != measured {z_meas}",
+            c.z
+        );
+        let u = intr.fx * c.x / c.z + intr.cx;
+        let v = intr.fy * c.y / c.z + intr.cy;
+        assert!(
+            (u - u_obs).abs() < 1e-3 && (v - v_obs).abs() < 1e-3,
+            "point left the keypoint ray: ({u}, {v}) vs ({u_obs}, {v_obs})"
+        );
     }
 }

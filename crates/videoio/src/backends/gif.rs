@@ -6,14 +6,19 @@ use std::path::Path;
 
 pub struct GifCapture {
     frames: Vec<image::Frame>,
-    current_idx: usize,
+    /// Index of the next frame [`VideoCapture::grab`] will decode.
+    next_idx: usize,
+    /// Frame produced by the last successful grab. `retrieve` returns it and
+    /// does not advance.
+    grabbed: Option<GrayImage>,
 }
 
 impl std::fmt::Debug for GifCapture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GifCapture")
             .field("frame_count", &self.frames.len())
-            .field("current_idx", &self.current_idx)
+            .field("next_idx", &self.next_idx)
+            .field("has_grabbed", &self.grabbed.is_some())
             .finish()
     }
 }
@@ -36,8 +41,13 @@ impl GifCapture {
 
         Ok(Self {
             frames,
-            current_idx: 0,
+            next_idx: 0,
+            grabbed: None,
         })
+    }
+
+    fn frame_gray(frame: &image::Frame) -> GrayImage {
+        image::DynamicImage::ImageRgba8(frame.buffer().clone()).into_luma8()
     }
 }
 
@@ -46,24 +56,23 @@ impl VideoCapture for GifCapture {
         !self.frames.is_empty()
     }
 
+    /// Advance to the next frame and keep it. A second grab without
+    /// `retrieve` replaces that frame, so two grabs then one retrieve skip
+    /// a frame. OpenCV's contract, matching the FFmpeg backend.
     fn grab(&mut self) -> Result<()> {
-        if self.current_idx < self.frames.len() {
-            Ok(())
-        } else {
-            Err(VideoError::CaptureFailed("End of stream".to_string()))
-        }
-    }
-
-    fn retrieve(&mut self) -> Result<GrayImage> {
-        if self.current_idx >= self.frames.len() {
+        if self.next_idx >= self.frames.len() {
             return Err(VideoError::CaptureFailed("End of stream".to_string()));
         }
+        let img = Self::frame_gray(&self.frames[self.next_idx]);
+        self.next_idx += 1;
+        self.grabbed = Some(img);
+        Ok(())
+    }
 
-        let frame = &self.frames[self.current_idx];
-        self.current_idx += 1;
-
-        // Convert to GrayImage
-        let img = image::DynamicImage::ImageRgba8(frame.buffer().clone());
-        Ok(img.into_luma8())
+    /// Return the frame from the last successful `grab`. Does not advance.
+    fn retrieve(&mut self) -> Result<GrayImage> {
+        self.grabbed
+            .clone()
+            .ok_or_else(|| VideoError::CaptureFailed("No frame grabbed".to_string()))
     }
 }

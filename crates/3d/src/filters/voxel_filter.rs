@@ -20,7 +20,10 @@ pub fn voxel_downsample(
     colors: Option<&[Vector3<f64>]>,
     voxel_size: f64,
 ) -> VoxelDownsampleResult {
-    if points.is_empty() || voxel_size <= 0.0 {
+    // NaN is not `<= 0`. A non-finite size used to fall through, and
+    // `(NaN).floor() as i64` is 0, so every non-finite point landed in voxel
+    // `(0, 0, 0)` and poisoned the centroid of whatever finite point was there.
+    if points.is_empty() || !voxel_size.is_finite() || voxel_size <= 0.0 {
         return VoxelDownsampleResult {
             points: Vec::new(),
             normals: normals.map(|_| Vec::new()),
@@ -33,6 +36,9 @@ pub fn voxel_downsample(
     // Group points by voxel key.
     let mut voxels: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
     for (i, p) in points.iter().enumerate() {
+        if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+            continue;
+        }
         let key = (
             (p.x * inv).floor() as i64,
             (p.y * inv).floor() as i64,

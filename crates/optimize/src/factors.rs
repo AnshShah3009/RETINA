@@ -299,8 +299,12 @@ impl Factor for ProjectionFactor {
         // camera_point = pose^{-1} * world_point)
         let cam_pt = pose.inverse_transform_point(point);
 
-        if cam_pt.z.abs() < 1e-10 {
-            // Point behind/at camera — return large residual
+        // `z <= 0` is behind or on the focal plane. The old guard was only
+        // `|z| < 1e-10`, so a landmark at z = -1 (identity pose) missed it.
+        // Its projection is the principal point, and a measurement there
+        // became a zero residual. Tiny positive z stays guarded: dividing by
+        // it is not a usable projection either.
+        if !cam_pt.z.is_finite() || cam_pt.z <= 0.0 || cam_pt.z.abs() < 1e-10 {
             return DVector::from_vec(vec![1e6, 1e6]);
         }
 
@@ -433,6 +437,46 @@ mod tests {
             err.norm() < 1e-10,
             "projection at center should match: {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn projection_behind_the_camera_is_a_large_residual() {
+        let kp = Key::symbol('x', 0);
+        let kl = Key::symbol('l', 0);
+        let fx = 500.0;
+        let fy = 500.0;
+        let cx = 320.0;
+        let cy = 240.0;
+        // Measurement sits on the principal point. A landmark at (0, 0, -1)
+        // projects there too, because u = fx * 0 / z + cx, so the old
+        // `|z| < 1e-10` guard (which does not see z = -1) reported a zero
+        // residual for a point behind the camera.
+        let factor = ProjectionFactor::new(
+            kp,
+            kl,
+            Vector2::new(cx, cy),
+            fx,
+            fy,
+            cx,
+            cy,
+            NoiseModel::Isotropic(1.0, 2),
+        );
+
+        let mut values = Values::new();
+        values.insert(kp, Variable::Pose3(Isometry3::identity()));
+        values.insert(kl, Variable::Point3(Point3::new(0.0, 0.0, -1.0)));
+        let behind = factor.error(&values);
+        assert!(
+            behind[0].abs() > 1e5 && behind[1].abs() > 1e5,
+            "point behind the camera must not look like a perfect observation: {behind:?}"
+        );
+
+        values.insert(kl, Variable::Point3(Point3::new(0.0, 0.0, 1.0)));
+        let front = factor.error(&values);
+        assert!(
+            front.norm() < 1e-8,
+            "z = +1 on the principal ray should match the measurement: {front:?}"
         );
     }
 

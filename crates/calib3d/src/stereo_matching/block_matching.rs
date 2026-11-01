@@ -85,6 +85,42 @@ impl StereoMatcherCtx for BlockMatcher {
             self.max_disparity,
         );
 
+        // SAD / SSD over a full window is a box filter of the per-disparity
+        // cost image. A column running sum slid along the row reproduces the
+        // dense walk. u8 sums of an 11×11 block fit in f32 exactly, so the
+        // costs — and the low-to-high, first-on-tie winner — stay identical.
+        // Larger windows keep the dense walk.
+        let window = 2 * (self.block_size / 2) + 1;
+        let squared = matches!(self.metric, MatchingMetric::SSD);
+        if matches!(self.metric, MatchingMetric::SAD | MatchingMetric::SSD)
+            && box_sum_exact_in_f32(window, squared)
+        {
+            group.run(|| {
+                self.fill_disparity_running_box(
+                    left_data,
+                    right_data,
+                    width_usize,
+                    left.height() as usize,
+                    self.block_size / 2,
+                    &mut disparity.data,
+                );
+            });
+            return Ok(disparity);
+        }
+
+        // NCC means are box sums of the two images. The cross term stays a
+        // direct walk. Empty integrals mean "use the dense mean".
+        let integral_means =
+            matches!(self.metric, MatchingMetric::NCC) && box_sum_exact_in_f32(window, false);
+        let (sat_l, sat_r) = if integral_means {
+            (
+                integral_image(left_data, width_usize, left.height() as usize),
+                integral_image(right_data, width_usize, left.height() as usize),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
         // Compute disparity map row-wise in parallel.
         group.run(|| {
             disparity
@@ -104,6 +140,8 @@ impl StereoMatcherCtx for BlockMatcher {
                             x,
                             y,
                             half_block,
+                            &sat_l,
+                            &sat_r,
                         );
                         row[x as usize] = best_disparity as f32;
                     }
@@ -181,6 +219,7 @@ impl BlockMatcher {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn find_best_disparity(
         &self,
         left_data: &[u8],
@@ -189,6 +228,8 @@ impl BlockMatcher {
         x: i32,
         y: i32,
         half_block: i32,
+        sat_l: &[u64],
+        sat_r: &[u64],
     ) -> i32 {
         // Clamp disparity search so all right-image accesses stay in-bounds.
         let min_valid = (x + half_block - (width as i32 - 1)).max(self.min_disparity);
@@ -202,8 +243,9 @@ impl BlockMatcher {
         let mut second_best_cost = f32::INFINITY;
 
         for d in min_valid..=max_valid {
-            let cost =
-                self.compute_matching_cost(left_data, right_data, width, x, y, d, half_block);
+            let cost = self.compute_matching_cost(
+                left_data, right_data, width, x, y, d, half_block, sat_l, sat_r,
+            );
 
             if cost < best_cost {
                 second_best_cost = best_cost;
@@ -233,6 +275,8 @@ impl BlockMatcher {
         y: i32,
         disparity: i32,
         half_block: i32,
+        sat_l: &[u64],
+        sat_r: &[u64],
     ) -> f32 {
         match self.metric {
             MatchingMetric::SAD => {
@@ -242,24 +286,36 @@ impl BlockMatcher {
                 self.compute_ssd_simd(left_data, right_data, width, x, y, disparity, half_block)
             }
             MatchingMetric::NCC => {
-                // First pass: compute means
-                let mut sum_l = 0.0f32;
-                let mut sum_r = 0.0f32;
-                let mut count = 0usize;
+                // Means are box sums. When the integral is exact in f32 it
+                // matches the dense accumulation; the cross term stays a walk.
+                let (mean_l, mean_r) = if !sat_l.is_empty() {
+                    let span = (half_block * 2 + 1) as usize;
+                    let y0 = (y - half_block) as usize;
+                    let x0 = (x - half_block) as usize;
+                    let rx0 = (x - half_block - disparity) as usize;
+                    let stride = width + 1;
+                    let sum_l = rect_sum(sat_l, stride, x0, y0, x0 + span, y0 + span) as f32;
+                    let sum_r = rect_sum(sat_r, stride, rx0, y0, rx0 + span, y0 + span) as f32;
+                    let count = (span * span) as f32;
+                    (sum_l / count, sum_r / count)
+                } else {
+                    let mut sum_l = 0.0f32;
+                    let mut sum_r = 0.0f32;
+                    let mut count = 0usize;
 
-                for dy in -half_block..=half_block {
-                    let ly = (y + dy) as usize;
-                    for dx in -half_block..=half_block {
-                        let lx = (x + dx) as usize;
-                        let rx = (x + dx - disparity) as usize;
-                        sum_l += left_data[ly * width + lx] as f32;
-                        sum_r += right_data[ly * width + rx] as f32;
-                        count += 1;
+                    for dy in -half_block..=half_block {
+                        let ly = (y + dy) as usize;
+                        for dx in -half_block..=half_block {
+                            let lx = (x + dx) as usize;
+                            let rx = (x + dx - disparity) as usize;
+                            sum_l += left_data[ly * width + lx] as f32;
+                            sum_r += right_data[ly * width + rx] as f32;
+                            count += 1;
+                        }
                     }
-                }
 
-                let mean_l = sum_l / count as f32;
-                let mean_r = sum_r / count as f32;
+                    (sum_l / count as f32, sum_r / count as f32)
+                };
 
                 // Second pass: compute ZNCC
                 let mut cross = 0.0f32;
@@ -412,6 +468,175 @@ impl BlockMatcher {
 
         total_ssd.reduce_add() / count as f32
     }
+
+    /// SAD or SSD via a per-disparity column running sum and a row running sum.
+    ///
+    /// Disparities run low to high and a tie keeps the first, matching the
+    /// dense loop. The caller only uses this when every block sum is an exact
+    /// f32 integer, so the averaged costs — and the uniqueness test — match.
+    fn fill_disparity_running_box(
+        &self,
+        left: &[u8],
+        right: &[u8],
+        w: usize,
+        h: usize,
+        half: usize,
+        out: &mut [f32],
+    ) {
+        let window = 2 * half + 1;
+        let count = (window * window) as f32;
+        let squared = matches!(self.metric, MatchingMetric::SSD);
+        let min_d = self.min_disparity;
+        let max_d = self.max_disparity;
+        let uniq = self.uniqueness_ratio;
+        if h < window || w < window {
+            return;
+        }
+        if min_d > max_d {
+            for y in half..h - half {
+                for x in half..w - half {
+                    out[y * w + x] = -1.0;
+                }
+            }
+            return;
+        }
+
+        let nd = (max_d as i64 - min_d as i64 + 1) as usize;
+        let (y_lo, y_hi) = (half, h - half);
+        let (x_lo, x_hi) = (half as i64, (w - half) as i64);
+
+        const BAND: usize = 16;
+        out[y_lo * w..y_hi * w]
+            .par_chunks_mut(w * BAND)
+            .enumerate()
+            .for_each(|(band, out_band)| {
+                let y0 = y_lo + band * BAND;
+                let rows = out_band.len() / w;
+                let mut colsum = vec![0u64; nd * w];
+                let mut best = vec![u64::MAX; w];
+                let mut second = vec![u64::MAX; w];
+                let mut best_d = vec![0i32; w];
+                let mut tested = vec![false; w];
+                for dy in 0..rows {
+                    let y = y0 + dy;
+                    let out_row = &mut out_band[dy * w..(dy + 1) * w];
+                    best.fill(u64::MAX);
+                    second.fill(u64::MAX);
+                    tested.fill(false);
+                    for di in 0..nd {
+                        let disp = min_d as i64 + di as i64;
+                        // Columns where both c and c - disp lie inside the image.
+                        let c_lo = disp.clamp(0, w as i64) as usize;
+                        let c_hi = (w as i64 + disp).clamp(c_lo as i64, w as i64) as usize;
+                        if c_lo == c_hi {
+                            continue;
+                        }
+                        let r_lo = (c_lo as i64 - disp) as usize;
+                        let cs = &mut colsum[di * w..(di + 1) * w];
+                        if dy == 0 {
+                            cs[c_lo..c_hi].fill(0);
+                            for r in y - half..y - half + window {
+                                let lrow = &left[r * w..(r + 1) * w];
+                                let rrow = &right[r * w..(r + 1) * w];
+                                for i in 0..(c_hi - c_lo) {
+                                    cs[c_lo + i] +=
+                                        pair_cost(lrow[c_lo + i], rrow[r_lo + i], squared);
+                                }
+                            }
+                        } else {
+                            let add = y - half + window - 1;
+                            let sub = y - half - 1;
+                            let la = &left[add * w..(add + 1) * w];
+                            let ra = &right[add * w..(add + 1) * w];
+                            let ls = &left[sub * w..(sub + 1) * w];
+                            let rs = &right[sub * w..(sub + 1) * w];
+                            for i in 0..(c_hi - c_lo) {
+                                cs[c_lo + i] = cs[c_lo + i]
+                                    + pair_cost(la[c_lo + i], ra[r_lo + i], squared)
+                                    - pair_cost(ls[c_lo + i], rs[r_lo + i], squared);
+                            }
+                        }
+                        // Pixels whose full window stays inside both images.
+                        let xa = x_lo.max(x_lo + disp);
+                        let xb = x_hi.min(x_hi + disp);
+                        if xa >= xb {
+                            continue;
+                        }
+                        let (xa, xb) = (xa as usize, xb as usize);
+                        let mut s: u64 = cs[xa - half..xa - half + window].iter().sum();
+                        for x in xa..xb {
+                            if x > xa {
+                                s += cs[x - half + window - 1];
+                                s -= cs[x - half - 1];
+                            }
+                            tested[x] = true;
+                            if s < best[x] {
+                                second[x] = best[x];
+                                best[x] = s;
+                                best_d[x] = disp as i32;
+                            } else if s < second[x] {
+                                second[x] = s;
+                            }
+                        }
+                    }
+                    for x in half..w - half {
+                        out_row[x] = if !tested[x] {
+                            -1.0
+                        } else {
+                            let best_cost = best[x] as f32 / count;
+                            let second_cost = if second[x] == u64::MAX {
+                                f32::INFINITY
+                            } else {
+                                second[x] as f32 / count
+                            };
+                            if second_cost < best_cost * (1.0 + uniq) {
+                                -1.0
+                            } else {
+                                best_d[x] as f32
+                            }
+                        };
+                    }
+                }
+            });
+    }
+}
+
+/// Every integer in `[0, 2^24]` is exact in f32. A u8 block sum at or below
+/// that limit matches the dense f32 accumulation, so the argmin does too.
+fn box_sum_exact_in_f32(window: usize, squared: bool) -> bool {
+    let per = if squared { 255u64 * 255 } else { 255 };
+    (window as u64)
+        .checked_mul(window as u64)
+        .and_then(|n| n.checked_mul(per))
+        .is_some_and(|worst| worst <= (1u64 << 24))
+}
+
+fn pair_cost(a: u8, b: u8, squared: bool) -> u64 {
+    let d = u64::from(a.abs_diff(b));
+    if squared {
+        d * d
+    } else {
+        d
+    }
+}
+
+/// Inclusive-exclusive box sums from a summed-area table built with a row
+/// running sum and a column running sum. `stride` is `width + 1`.
+fn integral_image(data: &[u8], w: usize, h: usize) -> Vec<u64> {
+    let stride = w + 1;
+    let mut sat = vec![0u64; stride * (h + 1)];
+    for y in 0..h {
+        let mut row = 0u64;
+        for x in 0..w {
+            row += u64::from(data[y * w + x]);
+            sat[(y + 1) * stride + (x + 1)] = sat[y * stride + (x + 1)] + row;
+        }
+    }
+    sat
+}
+
+fn rect_sum(sat: &[u64], stride: usize, x0: usize, y0: usize, x1: usize, y1: usize) -> u64 {
+    sat[y1 * stride + x1] + sat[y0 * stride + x0] - sat[y0 * stride + x1] - sat[y1 * stride + x0]
 }
 
 /// Compute stereo matching using block matching
@@ -463,6 +688,106 @@ mod tests {
         }
 
         (left, right)
+    }
+
+    /// Scalar SAD with the same window, disparity order, and uniqueness rule
+    /// as `BlockMatcher`. Even `block_size` still uses `block_size / 2` as the
+    /// half-window, so the scored window is `2 * (block_size / 2) + 1`.
+    fn naive_sad(
+        left: &GrayImage,
+        right: &GrayImage,
+        block_size: usize,
+        min_d: i32,
+        max_d: i32,
+        uniqueness_ratio: f32,
+    ) -> Vec<f32> {
+        let width = left.width() as i32;
+        let height = left.height() as i32;
+        let half = (block_size / 2) as i32;
+        let left_data = left.as_raw();
+        let right_data = right.as_raw();
+        let stride = left.width() as usize;
+        let mut out = vec![f32::NAN; (width * height) as usize];
+
+        for y in 0..height {
+            if y < half || y >= height - half {
+                continue;
+            }
+            for x in half..width - half {
+                let min_valid = (x + half - (width - 1)).max(min_d);
+                let max_valid = (x - half).min(max_d);
+                let idx = (y as usize) * stride + x as usize;
+                if min_valid > max_valid {
+                    out[idx] = -1.0;
+                    continue;
+                }
+                let mut best_d = min_d;
+                let mut best_cost = f32::INFINITY;
+                let mut second = f32::INFINITY;
+                for d in min_valid..=max_valid {
+                    let mut sum = 0.0f32;
+                    let mut count = 0usize;
+                    for dy in -half..=half {
+                        let ly = (y + dy) as usize;
+                        for dx in -half..=half {
+                            let lx = (x + dx) as usize;
+                            let rx = (x + dx - d) as usize;
+                            sum += (left_data[ly * stride + lx] as f32
+                                - right_data[ly * stride + rx] as f32)
+                                .abs();
+                            count += 1;
+                        }
+                    }
+                    let cost = sum / count as f32;
+                    if cost < best_cost {
+                        second = best_cost;
+                        best_cost = cost;
+                        best_d = d;
+                    } else if cost < second {
+                        second = cost;
+                    }
+                }
+                out[idx] = if second < best_cost * (1.0 + uniqueness_ratio) {
+                    -1.0
+                } else {
+                    best_d as f32
+                };
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn block_matching_matches_naive_sad_even_and_odd_blocks() {
+        let width = 16u32;
+        let height = 12u32;
+        let mut left = GrayImage::new(width, height);
+        let mut right = GrayImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let v = ((x * 17 + y * 13) % 64) as u8 * 3;
+                left.put_pixel(x, y, Luma([v]));
+                let sx = x.saturating_sub(2);
+                let rv = ((sx * 17 + y * 13) % 64) as u8 * 3;
+                right.put_pixel(x, y, Luma([rv]));
+            }
+        }
+
+        for block_size in [4usize, 5] {
+            let matcher = BlockMatcher::new()
+                .with_block_size(block_size)
+                .with_disparity_range(0, 6)
+                .with_metric(MatchingMetric::SAD);
+            let got = matcher.compute(&left, &right).unwrap();
+            let expect = naive_sad(&left, &right, block_size, 0, 6, matcher.uniqueness_ratio);
+            assert_eq!(got.data.len(), expect.len());
+            for (i, (&g, &e)) in got.data.iter().zip(expect.iter()).enumerate() {
+                assert!(
+                    (g.is_nan() && e.is_nan()) || g == e,
+                    "block {block_size} pixel {i}: matcher {g} != naive {e}"
+                );
+            }
+        }
     }
 
     #[test]

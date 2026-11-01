@@ -281,12 +281,11 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    // One invocation per (pixel, channel); the shader recovers the channel index
-    // from x, so the dispatch has to cover `width * channels` columns. With only
-    // `width` the extra planes were never blurred at all and kept their input
-    // values.
-    let wg_x = (w as u32 * c as u32).div_ceil(16);
+    // One invocation per (pixel, channel). Channel is the z axis; the shader
+    // indexes planar CHW (`c*(H*W) + y*W + x`).
+    let wg_x = (w as u32).div_ceil(16);
     let wg_y = (h as u32).div_ceil(16);
+    let wg_z = (c as u32).max(1);
 
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -295,7 +294,7 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &h_bind_group, &[]);
-        pass.dispatch_workgroups(wg_x, wg_y, 1);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -304,7 +303,7 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &v_bind_group, &[]);
-        pass.dispatch_workgroups(wg_x, wg_y, 1);
+        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
     }
     ctx.submit(encoder);
 

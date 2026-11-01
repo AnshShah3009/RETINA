@@ -9,7 +9,8 @@
 //! - **ONNX Model Loading**: Load pre-trained models in ONNX format
 //! - **Inference**: Execute forward passes with preprocessing/postprocessing
 //! - **Image Processing**: Built-in image resize and normalization
-//! - **Batching**: Support for batch processing of images
+//! - **Batching**: A batch of 1 is supported. An output batch greater than 1 is
+//!   rejected: cv-core tensors are CHW and have no batch axis.
 //!
 //! # Supported Formats
 //!
@@ -220,7 +221,8 @@ impl DnnNet {
     /// - 1D outputs: (1, 1, N)
     /// - 2D outputs: (1, H, W)
     /// - 3D outputs: (C, H, W)
-    /// - 4D outputs: (H, W, C) [assuming NCHW input, N=1]
+    /// - 4D outputs: (C, H, W) when the NCHW batch dimension is 1. A batch other
+    ///   than 1 is an error; the tensor type cannot store it.
     pub fn forward(&self, input: &Tensor<f32>) -> Result<Vec<Tensor<f32>>> {
         let input_shape_vec: Vec<usize> = self.input_shape.clone();
         if input_shape_vec.len() != 4 {
@@ -229,6 +231,18 @@ impl DnnNet {
                  [batch, channels, height, width] shape",
                 input_shape_vec.len(),
                 input_shape_vec
+            )));
+        }
+
+        let (channels, height, width) =
+            (input_shape_vec[1], input_shape_vec[2], input_shape_vec[3]);
+        let got = (input.shape.channels, input.shape.height, input.shape.width);
+        if got != (channels, height, width) {
+            return Err(Error::InvalidInput(format!(
+                "input tensor shape (channels, height, width) = {got:?} does not match the \
+                 model's (channels, height, width) = {:?}; the flat buffer would be silently \
+                 reinterpreted as the model's layout",
+                (channels, height, width)
             )));
         }
 
@@ -256,18 +270,8 @@ impl DnnNet {
                 })?
                 .to_vec();
 
-            let tensor_shape = match shape.len() {
-                1 => cv_core::TensorShape::new(1, 1, shape[0]),
-                2 => cv_core::TensorShape::new(1, shape[0], shape[1]),
-                3 => cv_core::TensorShape::new(shape[0], shape[1], shape[2]),
-                4 => cv_core::TensorShape::new(shape[1], shape[2], shape[3]), // Assuming NCHW
-                _ => cv_core::TensorShape::new(1, 1, shape.iter().product()),
-            };
-
-            outputs.push(
-                Tensor::from_vec(data, tensor_shape)
-                    .map_err(|e| Error::RuntimeError(e.to_string()))?,
-            );
+            let dims: Vec<usize> = (0..shape.len()).map(|i| shape[i]).collect();
+            outputs.push(tensor_from_model_output(&dims, data)?);
         }
 
         Ok(outputs)
@@ -322,6 +326,34 @@ impl DnnNet {
             _ => None,
         }
     }
+}
+
+/// Wrap a model output in a cv-core tensor.
+///
+/// `cv_core::TensorShape` is CHW only: it has no batch axis. A rank-4 NCHW
+/// output with batch 1 is stored as `(C, H, W)`. A larger batch cannot be
+/// represented, and is rejected here — building `(C, H, W)` anyway makes
+/// `Tensor::from_vec` fail with a length mismatch that blames the buffer
+/// instead of the unsupported batch.
+fn tensor_from_model_output(dims: &[usize], data: Vec<f32>) -> Result<Tensor<f32>> {
+    let tensor_shape = match dims.len() {
+        1 => cv_core::TensorShape::new(1, 1, dims[0]),
+        2 => cv_core::TensorShape::new(1, dims[0], dims[1]),
+        3 => cv_core::TensorShape::new(dims[0], dims[1], dims[2]),
+        4 => {
+            let batch = dims[0];
+            if batch != 1 {
+                return Err(Error::InvalidInput(format!(
+                    "batch size {batch} is unsupported: cv_core::Tensor is CHW and has no batch \
+                     dimension, so an NCHW output cannot be stored (shape {dims:?})"
+                )));
+            }
+            cv_core::TensorShape::new(dims[1], dims[2], dims[3])
+        }
+        _ => cv_core::TensorShape::new(1, 1, dims.iter().product()),
+    };
+
+    Tensor::from_vec(data, tensor_shape).map_err(|e| Error::RuntimeError(e.to_string()))
 }
 
 /// Convert an image to a normalized `(channels, height, width)` f32 tensor.
@@ -407,5 +439,165 @@ mod tests {
         for c in 0..3 {
             assert_eq!(&data[c * 16..(c + 1) * 16], plane.as_slice(), "plane {c}");
         }
+    }
+
+    #[test]
+    fn rank4_batch_of_one_loads_as_chw() {
+        let data = vec![0.25f32; 3 * 4 * 5];
+        let tensor = tensor_from_model_output(&[1, 3, 4, 5], data.clone()).expect("batch 1");
+        assert_eq!(tensor.shape.channels, 3);
+        assert_eq!(tensor.shape.height, 4);
+        assert_eq!(tensor.shape.width, 5);
+        assert_eq!(tensor.as_slice().expect("slice"), data.as_slice());
+    }
+
+    // -- a minimal in-memory ONNX Identity model, so `forward` can be exercised
+    // without a binary fixture ------------------------------------------------
+
+    fn pb_varint(mut v: u64, out: &mut Vec<u8>) {
+        loop {
+            let mut b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v != 0 {
+                b |= 0x80;
+            }
+            out.push(b);
+            if v == 0 {
+                break;
+            }
+        }
+    }
+
+    fn pb_key(field: u64, wire: u64, out: &mut Vec<u8>) {
+        pb_varint((field << 3) | wire, out);
+    }
+
+    fn pb_len(field: u64, bytes: &[u8], out: &mut Vec<u8>) {
+        pb_key(field, 2, out);
+        pb_varint(bytes.len() as u64, out);
+        out.extend_from_slice(bytes);
+    }
+
+    fn pb_int(field: u64, v: i64, out: &mut Vec<u8>) {
+        pb_key(field, 0, out);
+        pb_varint(v as u64, out);
+    }
+
+    fn pb_str(field: u64, s: &str, out: &mut Vec<u8>) {
+        pb_len(field, s.as_bytes(), out);
+    }
+
+    fn pb_value_info(name: &str, dims: &[i64]) -> Vec<u8> {
+        let mut shape = Vec::new();
+        for &d in dims {
+            let mut dim = Vec::new();
+            pb_int(1, d, &mut dim);
+            pb_len(1, &dim, &mut shape);
+        }
+        let mut tensor = Vec::new();
+        pb_int(1, 1, &mut tensor); // elem_type = FLOAT
+        pb_len(2, &shape, &mut tensor);
+        let mut ty = Vec::new();
+        pb_len(1, &tensor, &mut ty);
+        let mut vi = Vec::new();
+        pb_str(1, name, &mut vi);
+        pb_len(2, &ty, &mut vi);
+        vi
+    }
+
+    fn identity_onnx(dims: &[i64]) -> Vec<u8> {
+        let mut node = Vec::new();
+        pb_str(1, "x", &mut node);
+        pb_str(2, "y", &mut node);
+        pb_str(4, "Identity", &mut node);
+
+        let mut graph = Vec::new();
+        pb_len(1, &node, &mut graph);
+        pb_str(2, "g", &mut graph);
+        pb_len(11, &pb_value_info("x", dims), &mut graph);
+        pb_len(12, &pb_value_info("y", dims), &mut graph);
+
+        let mut opset = Vec::new();
+        pb_int(2, 13, &mut opset);
+
+        let mut model = Vec::new();
+        pb_int(1, 7, &mut model); // ir_version
+        pb_len(7, &graph, &mut model);
+        pb_len(8, &opset, &mut model);
+        model
+    }
+
+    fn runnable_identity(dims: &[i64]) -> RunnableModel {
+        let bytes = identity_onnx(dims);
+        let mut reader: &[u8] = &bytes;
+        tract_onnx::onnx()
+            .model_for_read(&mut reader)
+            .expect("parse")
+            .into_optimized()
+            .expect("optimize")
+            .into_runnable()
+            .expect("runnable")
+    }
+
+    #[test]
+    fn a_tensor_with_the_wrong_shape_is_rejected_not_reinterpreted() {
+        let net = DnnNet {
+            model: Arc::new(runnable_identity(&[1, 1, 2, 3])),
+            input_shape: vec![1, 1, 2, 3],
+        };
+        // The model wants CHW (1, 2, 3). This tensor is (1, 3, 2): the same six
+        // values, but a different image - a transposed one. Re-labelling the
+        // flat buffer as (1, 2, 3) silently returns a different picture.
+        let input = cv_core::Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            cv_core::TensorShape::new(1, 3, 2),
+        )
+        .expect("input tensor");
+
+        let err = net
+            .forward(&input)
+            .expect_err("a tensor of a different shape must not be accepted");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("shape"),
+            "error should name the shape mismatch, got {msg}"
+        );
+    }
+
+    #[test]
+    fn a_matching_tensor_still_runs_through_identity() {
+        let net = DnnNet {
+            model: Arc::new(runnable_identity(&[1, 1, 2, 3])),
+            input_shape: vec![1, 1, 2, 3],
+        };
+        let data = vec![0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6];
+        let input = cv_core::Tensor::from_vec(data.clone(), cv_core::TensorShape::new(1, 2, 3))
+            .expect("input tensor");
+
+        let outputs = net.forward(&input).expect("matching shape runs");
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].shape.channels, 1);
+        assert_eq!(outputs[0].shape.height, 2);
+        assert_eq!(outputs[0].shape.width, 3);
+        assert_eq!(outputs[0].as_slice().expect("slice"), data.as_slice());
+    }
+
+    #[test]
+    fn rank4_batch_of_two_is_rejected_before_a_lying_shape() {
+        // NCHW (2, 3, 4, 5) has 120 values. Dropping the batch and labelling
+        // the buffer (3, 4, 5) asks `Tensor::from_vec` for 60 and returns
+        // `DimensionMismatch` ("Data size mismatch") instead of saying that a
+        // batch greater than 1 cannot be stored.
+        let err = tensor_from_model_output(&[2, 3, 4, 5], vec![0.0f32; 2 * 3 * 4 * 5])
+            .expect_err("batch 2 is not representable");
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("batch"),
+            "error should name the unsupported batch, got {msg}"
+        );
+        assert!(
+            !msg.contains("Data size mismatch"),
+            "shape must not be built so the length check is the one that fails: {msg}"
+        );
     }
 }

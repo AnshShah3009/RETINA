@@ -48,21 +48,34 @@ pub fn build_pyramid<T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 's
     Ok(ImagePyramid { levels, scales })
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct PyrDownParams {
+    src_w: u32,
+    src_h: u32,
+    dst_w: u32,
+    dst_h: u32,
+    channels: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
 pub fn pyramid_down<T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     ctx: &GpuContext,
     input: &GpuTensor<T>,
 ) -> Result<GpuTensor<T>> {
     let (h, w) = input.shape.hw();
-    let new_w = w / 2;
-    let new_h = h / 2;
+    // OpenCV `pyrDown`: `((w + 1) / 2, (h + 1) / 2)`.
+    let new_w = w.div_ceil(2);
+    let new_h = h.div_ceil(2);
 
-    if new_w == 0 || new_h == 0 {
+    if w == 0 || h == 0 || new_w == 0 || new_h == 0 {
         return Err(crate::Error::InvalidInput(
             "Image too small to downsample".into(),
         ));
     }
 
-    // Gaussian blur then resize (gaussian_blur is f32-only, so we use resize directly for non-f32)
     use cv_core::storage::Storage;
     if let Some(input_f32) = input
         .storage
@@ -70,14 +83,78 @@ pub fn pyramid_down<T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'st
         .downcast_ref::<crate::storage::WgpuGpuStorage<f32>>()
     {
         use std::marker::PhantomData;
-        let input_f32_tensor: crate::GpuTensor<f32> = cv_core::Tensor {
-            storage: input_f32.clone(),
-            shape: input.shape,
+        use std::sync::Arc;
+        use wgpu::util::DeviceExt;
+        let c = input.shape.channels.max(1);
+        let out_len = c * new_h * new_w;
+        let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PyrDown"),
+            size: (out_len * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let params = PyrDownParams {
+            src_w: w as u32,
+            src_h: h as u32,
+            dst_w: new_w as u32,
+            dst_h: new_h as u32,
+            channels: c as u32,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        let params_buf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("PyrDown Params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let shader = include_str!("../../shaders/pyramid_down.wgsl");
+        let pipeline = ctx.create_compute_pipeline(shader, "main");
+        let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("PyrDown"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: input_f32.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: output_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: params_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("PyrDown"),
+            });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(
+                (new_w as u32).div_ceil(16),
+                (new_h as u32).div_ceil(16),
+                c as u32,
+            );
+        }
+        ctx.submit(enc);
+        let scaled = cv_core::Tensor {
+            storage: crate::storage::WgpuGpuStorage::<f32>::from_buffer(
+                Arc::new(output_buffer),
+                out_len,
+            ),
+            shape: cv_core::TensorShape::new(c, new_h, new_w),
             dtype: input.dtype,
             _phantom: PhantomData,
         };
-        let blurred = crate::gpu_kernels::convolve::gaussian_blur(ctx, &input_f32_tensor, 1.0, 5)?;
-        let scaled = crate::gpu_kernels::resize::resize(ctx, &blurred, new_w as u32, new_h as u32)?;
         let scaled_t = cv_core::Tensor {
             storage: scaled.storage.retype::<T>(),
             shape: scaled.shape,
@@ -86,7 +163,6 @@ pub fn pyramid_down<T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'st
         };
         Ok(scaled_t)
     } else {
-        // For non-f32: skip gaussian blur, just resize
         crate::gpu_kernels::resize::resize(ctx, input, new_w as u32, new_h as u32)
     }
 }

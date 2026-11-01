@@ -26,6 +26,14 @@ fn l2_picks_the_numerically_nearest_descriptor() {
     assert_eq!(ham.matches[0].train_idx, 0);
 }
 
+fn descs_raw(rows: &[&[u8]]) -> Descriptors {
+    let mut d = Descriptors::new();
+    for r in rows {
+        d.push(Descriptor::new(r.to_vec(), KeyPoint::new(0.0, 0.0)));
+    }
+    d
+}
+
 #[test]
 fn cross_check_against_an_empty_train_set_does_not_panic() {
     let query = descs(&[[1, 2, 3, 4]]);
@@ -34,4 +42,33 @@ fn cross_check_against_an_empty_train_set_does_not_panic() {
         .with_cross_check()
         .match_descriptors(&query, &train);
     assert!(m.matches.is_empty());
+}
+
+/// An 8-byte zero descriptor against a 128-byte zero descriptor used to
+/// report L2 distance 0, because `zip` stopped at the shorter slice.
+#[test]
+fn l2_short_zeros_against_long_zeros_is_not_distance_zero() {
+    let query = descs_raw(&[&[0u8; 8]]);
+    let train = descs_raw(&[&[0u8; 128]]);
+    let m = Matcher::new(MatchType::BruteForceL2).match_descriptors(&query, &train);
+    assert_eq!(m.matches.len(), 1);
+    assert_eq!(
+        m.matches[0].distance,
+        u32::MAX as f32,
+        "unequal lengths must take the Hamming sentinel, not a prefix distance"
+    );
+}
+
+/// A longer descriptor that only shares a zero prefix must not beat a real
+/// equal-length neighbor. The prefix used to look identical under `zip`.
+#[test]
+fn l2_prefix_lookalike_does_not_beat_equal_length_neighbor() {
+    let query = descs_raw(&[&[0u8; 8]]);
+    let mut lookalike = vec![0u8; 128];
+    lookalike[8..].fill(255);
+    let train = descs_raw(&[&lookalike, &[0u8; 8]]);
+    let m = Matcher::new(MatchType::BruteForceL2).match_descriptors(&query, &train);
+    assert_eq!(m.matches.len(), 1);
+    assert_eq!(m.matches[0].train_idx, 1);
+    assert!(m.matches[0].distance.abs() < 1e-6);
 }

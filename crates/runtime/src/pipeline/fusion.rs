@@ -346,8 +346,14 @@ fn apply_thresh(val: u32) -> u32 {
 }
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // Same linear id as cv-hal dispatch_1d. y and z are 0 on a 1-D grid, so an
+    // in-limit dispatch still indexes global_id.x. A split grid covers every
+    // group past wgpu's 65535 limit without repeating the first row.
+    let idx = global_id.x + global_id.y * num_wg.x * 64u + global_id.z * num_wg.x * num_wg.y * 64u;
     let count = (params.width + 3u) / 4u * params.height;
 
     if (idx < 1u) { apply_gaussian(); }
@@ -388,8 +394,14 @@ fn apply_thresh(val: u32) -> u32 {
 }
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // Same linear id as cv-hal dispatch_1d. y and z are 0 on a 1-D grid, so an
+    // in-limit dispatch still indexes global_id.x. A split grid covers every
+    // group past wgpu's 65535 limit without repeating the first row.
+    let idx = global_id.x + global_id.y * num_wg.x * 64u + global_id.z * num_wg.x * num_wg.y * 64u;
     let count = (params.width + 3u) / 4u * params.height;
     let w = (params.width + 3u) / 4u;
 
@@ -547,7 +559,7 @@ fn apply_canny() {
 
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    if (global_id.x == 0u && global_id.y == 0u) {
+    if (global_id.x == 0u && global_id.y == 0u && global_id.z == 0u) {
         compute_sobel();
         compute_magnitude();
         apply_canny();
@@ -607,8 +619,14 @@ fn apply_thresh(val: u32) -> u32 {
 }
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // Same linear id as cv-hal dispatch_1d. y and z are 0 on a 1-D grid, so an
+    // in-limit dispatch still indexes global_id.x. A split grid covers every
+    // group past wgpu's 65535 limit without repeating the first row.
+    let idx = global_id.x + global_id.y * num_wg.x * 64u + global_id.z * num_wg.x * num_wg.y * 64u;
     let w4 = (params.width + 3u) / 4u;
     let y = idx / w4;
     let x_base = idx % w4;
@@ -672,8 +690,14 @@ fn apply_conv_at(x: i32, y: i32, kernel_offset: u32) -> f32 {
 }
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // Same linear id as cv-hal dispatch_1d. y and z are 0 on a 1-D grid, so an
+    // in-limit dispatch still indexes global_id.x. A split grid covers every
+    // group past wgpu's 65535 limit without repeating the first row.
+    let idx = global_id.x + global_id.y * num_wg.x * 64u + global_id.z * num_wg.x * num_wg.y * 64u;
     let w4 = (params.width + 3u) / 4u;
     let y = idx / w4;
     let x_base = idx % w4;
@@ -716,8 +740,14 @@ struct Params { width: u32, height: u32 }
 @group(0) @binding(2) var<uniform> params: Params;
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let idx = global_id.x;
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(num_workgroups) num_wg: vec3<u32>,
+) {
+    // Same linear id as cv-hal dispatch_1d. y and z are 0 on a 1-D grid, so an
+    // in-limit dispatch still indexes global_id.x. A split grid covers every
+    // group past wgpu's 65535 limit without repeating the first row.
+    let idx = global_id.x + global_id.y * num_wg.x * 64u + global_id.z * num_wg.x * num_wg.y * 64u;
     let count = (params.width + 3u) / 4u * params.height;
     if (idx < count) {
         output_data[idx] = input_data[idx];

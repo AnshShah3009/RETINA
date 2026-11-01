@@ -155,8 +155,13 @@ impl HaarCascade {
             let win_h = (self.size.1 as f32 * scale) as u32;
             let step = (scale * 2.0).max(1.0) as u32;
 
-            for y in (0..img_h - win_h).step_by(step as usize) {
-                for x in (0..img_w - win_w).step_by(step as usize) {
+            // The last valid position is `img - win`, where the window's
+            // right/bottom edge is flush with the image edge. An exclusive
+            // `0..img - win` never evaluates it, so an object ending exactly
+            // at the frame border is invisible. The loop condition above
+            // guarantees `win < img`, so the inclusive bound is non-negative.
+            for y in (0..=img_h - win_h).step_by(step as usize) {
+                for x in (0..=img_w - win_w).step_by(step as usize) {
                     if self.evaluate_window(&integral, &sq_integral, x, y, win_w, win_h, scale)? {
                         detections.push(Rect::new(x as f32, y as f32, win_w as f32, win_h as f32));
                     }

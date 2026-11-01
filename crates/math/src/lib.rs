@@ -118,11 +118,10 @@ impl Interp1d {
             .min(self.x.len() - 2);
 
         let denominator = self.x[idx + 1] - self.x[idx];
-        let t = if denominator.abs() < 1e-10 {
-            0.5
-        } else {
-            (x_val - self.x[idx]) / denominator
-        };
+        // Real linear blend. Forcing t = 0.5 whenever the knots were closer
+        // than 1e-10 made (0, 0) and (1e-12, 100) queried at 1e-15 return 50
+        // instead of 0.1, which is what `interp1d_linear` returns.
+        let t = (x_val - self.x[idx]) / denominator;
         lerp(self.y[idx], self.y[idx + 1], t)
     }
 }

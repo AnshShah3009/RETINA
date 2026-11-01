@@ -9,6 +9,7 @@ use cv_calib3d::{solve_pnp_refine, triangulate_points};
 use cv_core::{CameraIntrinsics, Pose, TypedPose};
 use cv_features::Descriptors;
 use nalgebra::{Matrix3, Matrix3x4, Point2, Point3, UnitQuaternion, Vector3};
+use std::collections::HashMap;
 
 /// Largest Hamming distance (of 256 bits) accepted for a projection match.
 pub(crate) const MAX_PROJECTION_HAMMING: u32 = 64;
@@ -37,6 +38,15 @@ const FUSE_HAMMING: u32 = 50;
 const CULL_MIN_AGE: u64 = 2;
 
 pub(crate) fn hamming(a: &[u8], b: &[u8]) -> u32 {
+    // Same sentinel as `cv_core::Descriptor::hamming_distance`. `zip` stops at
+    // the shorter slice, so an 8-byte descriptor against a 32-byte one can
+    // report 0 and pass the fusion and triangulation caps. ORB descriptors
+    // are 32 bytes; this only fires when lengths are mixed. Building a
+    // `Descriptor` to call that method would copy both slices on the match
+    // path, so the check is inlined.
+    if a.len() != b.len() {
+        return u32::MAX;
+    }
     a.iter().zip(b).map(|(x, y)| (x ^ y).count_ones()).sum()
 }
 
@@ -89,6 +99,21 @@ pub(crate) fn match_by_projection(
         .iter()
         .map(|d| Point2::new(d.keypoint.x, d.keypoint.y))
         .collect();
+    // Cell size is the search radius. A disk of that radius overlaps the
+    // projection's cell and its neighbours; one further cell covers a bin
+    // that rounded across a boundary. The radius test still drops anything
+    // outside the disk, so those extra cells are not Hamming'd. An equal
+    // Hamming keeps the lower keypoint index, which is what a forward scan
+    // kept.
+    let grid = (radius.is_finite() && radius > 0.0).then(|| {
+        let mut bins: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+        for (qi, kp) in kps.iter().enumerate() {
+            bins.entry(projection_bin(kp.x, kp.y, radius))
+                .or_default()
+                .push(qi);
+        }
+        bins
+    });
     let mut best_for_query: Vec<Option<(u32, usize)>> = vec![None; kps.len()];
     for (mi, p) in map.points.iter().enumerate() {
         let p = p.read().unwrap_or_else(|e| e.into_inner());
@@ -101,13 +126,38 @@ pub(crate) fn match_by_projection(
         // the RGB-D scene: 102 -> 146 matches for 401 points). The window and
         // the pose refinement's reprojection test do that job instead.
         let mut best = (u32::MAX, usize::MAX);
-        for (qi, kp) in kps.iter().enumerate() {
-            if (kp - uv).norm_squared() > r2 {
-                continue;
+        if let Some(grid) = &grid {
+            let (cx, cy) = projection_bin(uv.x, uv.y, radius);
+            for dy in -2..=2 {
+                for dx in -2..=2 {
+                    let key = (cx.saturating_add(dx), cy.saturating_add(dy));
+                    let Some(cell) = grid.get(&key) else {
+                        continue;
+                    };
+                    for &qi in cell {
+                        consider_projection_candidate(
+                            qi,
+                            uv,
+                            r2,
+                            &kps,
+                            &p.descriptor,
+                            &descriptors.descriptors[qi].data,
+                            &mut best,
+                        );
+                    }
+                }
             }
-            let d = hamming(&p.descriptor, &descriptors.descriptors[qi].data);
-            if d < best.0 {
-                best = (d, qi);
+        } else {
+            for qi in 0..kps.len() {
+                consider_projection_candidate(
+                    qi,
+                    uv,
+                    r2,
+                    &kps,
+                    &p.descriptor,
+                    &descriptors.descriptors[qi].data,
+                    &mut best,
+                );
             }
         }
         if best.0 > MAX_PROJECTION_HAMMING {
@@ -123,6 +173,29 @@ pub(crate) fn match_by_projection(
         .enumerate()
         .filter_map(|(qi, s)| s.map(|(_, mi)| (mi, qi)))
         .collect()
+}
+
+fn projection_bin(x: f64, y: f64, cell: f64) -> (i32, i32) {
+    ((x / cell).floor() as i32, (y / cell).floor() as i32)
+}
+
+/// Radius gate, then Hamming. Equal distances keep the lower keypoint index.
+fn consider_projection_candidate(
+    qi: usize,
+    uv: Point2<f64>,
+    r2: f64,
+    kps: &[Point2<f64>],
+    map_desc: &[u8],
+    query_desc: &[u8],
+    best: &mut (u32, usize),
+) {
+    if (kps[qi] - uv).norm_squared() > r2 {
+        return;
+    }
+    let d = hamming(map_desc, query_desc);
+    if d < best.0 || (d == best.0 && qi < best.1) {
+        *best = (d, qi);
+    }
 }
 
 /// Levenberg-Marquardt pose refinement with inlier re-selection: refine on
@@ -245,6 +318,9 @@ pub(crate) fn distance_to_last_keyframe(map: &WorldMap, pose: &Pose) -> Option<K
 }
 
 /// Sampson distance of `x2ᵀ E x1 = 0` for normalised homogeneous points.
+/// The matcher uses [`sampson_precomputed`]; this form is the reference the
+/// gate is checked against.
+#[cfg(test)]
 fn sampson(e: &Matrix3<f64>, a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
     let ea = e * a;
     let etb = e.transpose() * b;
@@ -255,6 +331,38 @@ fn sampson(e: &Matrix3<f64>, a: &Vector3<f64>, b: &Vector3<f64>) -> f64 {
     } else {
         f64::INFINITY
     }
+}
+
+/// `|E a|²` on the first two coordinates. One per old feature, reused for
+/// every query against that keyframe.
+fn essential_xy2(e: &Matrix3<f64>, a: &Vector3<f64>) -> f64 {
+    let ea = e * a;
+    ea.x * ea.x + ea.y * ea.y
+}
+
+/// Same distance as [`sampson`], with `l = Eᵀ x_query` and `|E a|_xy²` already known.
+fn sampson_precomputed(a: &Vector3<f64>, l: &Vector3<f64>, ea_xy2: f64) -> f64 {
+    let num = a.dot(l).powi(2);
+    let den = ea_xy2 + l.x * l.x + l.y * l.y;
+    if den > 0.0 {
+        num / den
+    } else {
+        f64::INFINITY
+    }
+}
+
+/// The Sampson distance is `num / (|E a|_xy² + |l|_xy²)`. `|E a|_xy²` is at
+/// most `ea_xy2_max` for the features in this keyframe, so
+/// `num / (ea_xy2_max + |l|_xy²)` is a lower bound. When that bound is above
+/// the threshold, every feature in the set is above it too, and the exact
+/// test would reject them. The slack is so a value sitting on the threshold
+/// is left for the exact test.
+fn sampson_rejected_for_every_candidate(num: f64, ea_xy2_max: f64, lxy2: f64, thr: f64) -> bool {
+    let den_max = ea_xy2_max + lxy2;
+    if !(den_max.is_finite() && den_max > 0.0) {
+        return num > 0.0;
+    }
+    num > thr * den_max * (1.0 + 1e-8)
 }
 
 fn skew(t: &Vector3<f64>) -> Matrix3<f64> {
@@ -315,14 +423,19 @@ pub(crate) fn triangulate_new_points(
             let e = skew(&t) * r;
 
             let free = |m: &Vec<Option<u64>>, i: usize| m.get(i).map_or(false, |x| x.is_none());
-            let old_free: Vec<(usize, Vector3<f64>)> = old
+            let old_free: Vec<(usize, Vector3<f64>, f64)> = old
                 .descriptors
                 .descriptors
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| free(&old.map_points, *i))
-                .map(|(i, d)| (i, norm(d.keypoint.x, d.keypoint.y)))
+                .map(|(i, d)| {
+                    let xt = norm(d.keypoint.x, d.keypoint.y);
+                    let ea_xy2 = essential_xy2(&e, &xt);
+                    (i, xt, ea_xy2)
+                })
                 .collect();
+            let ea_xy2_max = old_free.iter().map(|(_, _, ea)| *ea).fold(0.0, f64::max);
             // Best old feature for each new one; then each old feature is
             // kept by its closest new feature.
             let mut best_for_old: Vec<Option<(u32, usize)>> =
@@ -332,10 +445,16 @@ pub(crate) fn triangulate_new_points(
                     continue;
                 }
                 let xq = norm(dq.keypoint.x, dq.keypoint.y);
+                let l = e.transpose() * xq;
+                let lxy2 = l.x * l.x + l.y * l.y;
                 let mut best = (u32::MAX, usize::MAX);
                 let mut second = u32::MAX;
-                for (ti, xt) in &old_free {
-                    if sampson(&e, xt, &xq) > epi_thr {
+                for (ti, xt, ea_xy2) in &old_free {
+                    let num = xt.dot(&l).powi(2);
+                    if sampson_rejected_for_every_candidate(num, ea_xy2_max, lxy2, epi_thr) {
+                        continue;
+                    }
+                    if sampson_precomputed(xt, &l, *ea_xy2) > epi_thr {
                         continue;
                     }
                     let d = hamming(&dq.data, &old.descriptors.descriptors[*ti].data);
@@ -787,6 +906,42 @@ mod tests {
     }
 
     #[test]
+    fn unequal_lengths_are_not_a_zero_distance_match() {
+        let short = [0u8; 8];
+        let mut long = [0u8; 32];
+        long[8..].fill(0xff);
+        let d = hamming(&short, &long);
+        assert!(
+            d > FUSE_HAMMING && d > MAX_TRIANGULATION_HAMMING && d > MAX_PROJECTION_HAMMING,
+            "mixed-length Hamming was {d}, under the fusion and triangulation caps"
+        );
+    }
+
+    /// Two in-window keypoints with the same descriptor sit in different
+    /// cells, and the higher index is in the cell visited first. The match
+    /// is still the lower index, and a keypoint outside the radius is not.
+    #[test]
+    fn projection_grid_keeps_the_lower_index_on_a_tie() {
+        let mut map = WorldMap::new();
+        // (0, 0, 5) projects to the principal point (50, 50).
+        add_born(&mut map, Point3::new(0.0, 0.0, 5.0), 7, &[]);
+        let radius = 4.0;
+        let mut descs = Descriptors::new();
+        // x = 53.5 is the next cell; x = 46.5 is the previous one. Both are
+        // 3.5 px from the projection. Index 1 is visited first.
+        descs.push(Descriptor::new(vec![7; 32], KeyPoint::new(53.5, 50.0)));
+        descs.push(Descriptor::new(vec![7; 32], KeyPoint::new(46.5, 50.0)));
+        descs.push(Descriptor::new(vec![7; 32], KeyPoint::new(90.0, 50.0)));
+        let pose = keyframe_world_to_camera(&identity_pose());
+        let pairs = match_by_projection(&intrinsics(), &descs, &map, &pose, radius);
+        assert_eq!(
+            pairs,
+            vec![(0, 0)],
+            "lower index must win an equal Hamming: {pairs:?}"
+        );
+    }
+
+    #[test]
     fn a_point_never_reobserved_is_removed_and_survivors_are_renumbered() {
         let mut map = WorldMap::new();
         // Born at keyframe 0, then seen twice more.
@@ -903,5 +1058,47 @@ mod tests {
         let linked = map.keyframes[0].read().unwrap().map_points.clone();
         assert_eq!(linked.iter().filter(|s| s.is_some()).count(), 1);
         assert_links(&map);
+    }
+
+    #[test]
+    fn epipolar_gate_keeps_every_sampson_inlier() {
+        let e = Matrix3::new(0.0, -0.2, 0.05, 0.2, 0.0, -0.4, -0.05, 0.4, 0.0);
+        let thr = (EPIPOLAR_PX / 100.0).powi(2);
+        let mut pts = Vec::new();
+        for i in 0..30 {
+            for j in 0..30 {
+                pts.push(Vector3::new(
+                    (i as f64 - 15.0) / 40.0,
+                    (j as f64 - 15.0) / 40.0,
+                    1.0,
+                ));
+            }
+        }
+        let ea: Vec<f64> = pts.iter().map(|a| essential_xy2(&e, a)).collect();
+        let ea_max = ea.iter().copied().fold(0.0, f64::max);
+        let queries = [
+            Vector3::new(0.1, -0.2, 1.0),
+            Vector3::new(-0.4, 0.3, 1.0),
+            Vector3::new(0.0, 0.0, 1.0),
+        ];
+        for b in queries {
+            let l = e.transpose() * b;
+            let lxy2 = l.x * l.x + l.y * l.y;
+            for (a, ea_xy2) in pts.iter().zip(ea.iter()) {
+                let exact = sampson(&e, a, &b);
+                let pre = sampson_precomputed(a, &l, *ea_xy2);
+                assert!(
+                    (exact - pre).abs() < 1e-9 || (exact.is_infinite() && pre.is_infinite()),
+                    "precomputed Sampson {pre} != {exact}"
+                );
+                let num = a.dot(&l).powi(2);
+                if sampson_rejected_for_every_candidate(num, ea_max, lxy2, thr) {
+                    assert!(
+                        exact > thr,
+                        "the gate dropped a point whose Sampson distance is {exact} (threshold {thr})"
+                    );
+                }
+            }
+        }
     }
 }

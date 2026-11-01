@@ -19,10 +19,11 @@ pub enum Interpolation {
     Linear,
     Cubic,
     Lanczos,
-    /// Pixel-area average. On an integer shrink this is a box filter, so a
-    /// checkerboard does not survive as stripes. On a zoom each output pixel
-    /// falls inside one source pixel, which is what OpenCV's `INTER_AREA` does
-    /// (nearest, not bilinear).
+    /// Pixel-area average of the source rectangle each output pixel covers,
+    /// matching OpenCV `INTER_AREA`. An integer shrink is a box filter, so a
+    /// checkerboard does not survive as stripes. A zoom uses the same area
+    /// weights: an integer zoom lands inside one source pixel, and a
+    /// fractional zoom blends every source pixel the rectangle overlaps.
     Area,
 }
 
@@ -182,16 +183,12 @@ fn resize_area(src: &GrayImage, width: u32, height: u32) -> GrayImage {
     let sw = src.width();
     let sh = src.height();
     let src_raw = src.as_raw();
-    let scale_x = sw as f64 / width as f64;
-    let scale_y = sh as f64 / height as f64;
     let mut dst = vec![0u8; (width * height) as usize];
     dst.par_chunks_mut(width as usize)
         .enumerate()
         .for_each(|(y, row)| {
-            let y0 = y as f64 * scale_y;
-            let y1 = (y as f64 + 1.0) * scale_y;
             for x in 0..width {
-                row[x as usize] = area_sample(src_raw, sw, sh, 1, scale_x, y0, y1, x as f64)[0];
+                row[x as usize] = area_sample(src_raw, sw, sh, 1, width, height, x, y as u32)[0];
             }
         });
     GrayImage::from_raw(width, height, dst).unwrap_or_else(|| GrayImage::new(width, height))
@@ -201,16 +198,12 @@ fn resize_rgb_area(src: &RgbImage, width: u32, height: u32) -> RgbImage {
     let sw = src.width();
     let sh = src.height();
     let src_raw = src.as_raw();
-    let scale_x = sw as f64 / width as f64;
-    let scale_y = sh as f64 / height as f64;
     let mut dst = vec![0u8; (width * height * 3) as usize];
     dst.par_chunks_mut(width as usize * 3)
         .enumerate()
         .for_each(|(y, row)| {
-            let y0 = y as f64 * scale_y;
-            let y1 = (y as f64 + 1.0) * scale_y;
             for x in 0..width {
-                let px = area_sample(src_raw, sw, sh, 3, scale_x, y0, y1, x as f64);
+                let px = area_sample(src_raw, sw, sh, 3, width, height, x, y as u32);
                 let o = x as usize * 3;
                 row[o] = px[0];
                 row[o + 1] = px[1];
@@ -221,46 +214,68 @@ fn resize_rgb_area(src: &RgbImage, width: u32, height: u32) -> RgbImage {
 }
 
 /// One output sample. `channels` is 1 or 3, packed in `src`.
+///
+/// Overlaps are exact integers in units of `1/dst_w` and `1/dst_h`. An f64
+/// overlap that should be a half (`2→3` of `[0, 255]` is 127.5) can land an
+/// ulp low (`127.49999999999999`), and `f64::round` then returns 127 instead
+/// of the OpenCV half-up result 128. `(2*acc + wsum) / (2*wsum)` is that
+/// half-up division on the exact rational.
 fn area_sample(
     src: &[u8],
     sw: u32,
     sh: u32,
     channels: usize,
-    scale_x: f64,
-    y0: f64,
-    y1: f64,
-    x: f64,
+    dw: u32,
+    dh: u32,
+    x: u32,
+    y: u32,
 ) -> [u8; 3] {
-    let x0 = x * scale_x;
-    let x1 = (x + 1.0) * scale_x;
-    let ix0 = x0.floor() as u32;
-    let ix1 = (x1.ceil() as u32).min(sw);
-    let iy0 = y0.floor() as u32;
-    let iy1 = (y1.ceil() as u32).min(sh);
-    let mut acc = [0.0f64; 3];
-    let mut wsum = 0.0f64;
+    let dw = dw as u64;
+    let dh = dh as u64;
+    let sw_u = sw as u64;
+    let sh_u = sh as u64;
+    // Destination pixel (x, y) covers [x*sw, (x+1)*sw) × [y*sh, (y+1)*sh).
+    let x0 = x as u64 * sw_u;
+    let x1 = x0 + sw_u;
+    let y0 = y as u64 * sh_u;
+    let y1 = y0 + sh_u;
+
+    let ix0 = (x0 / dw) as u32;
+    let ix1 = ((x1 + dw - 1) / dw).min(sw_u) as u32;
+    let iy0 = (y0 / dh) as u32;
+    let iy1 = ((y1 + dh - 1) / dh).min(sh_u) as u32;
+
+    let mut acc = [0u128; 3];
+    let mut wsum = 0u128;
     for sy in iy0..iy1 {
-        let wy = (((sy + 1) as f64).min(y1) - (sy as f64).max(y0)).max(0.0);
-        if wy == 0.0 {
+        let sy0 = sy as u64 * dh;
+        let top = sy0.max(y0);
+        let bot = (sy0 + dh).min(y1);
+        if bot <= top {
             continue;
         }
+        let wy = (bot - top) as u128;
+        let row = sy as usize * sw as usize;
         for sx in ix0..ix1 {
-            let wx = (((sx + 1) as f64).min(x1) - (sx as f64).max(x0)).max(0.0);
-            if wx == 0.0 {
+            let sx0 = sx as u64 * dw;
+            let left = sx0.max(x0);
+            let right = (sx0 + dw).min(x1);
+            if right <= left {
                 continue;
             }
-            let w = wx * wy;
-            let base = ((sy * sw + sx) as usize) * channels;
+            let w = (right - left) as u128 * wy;
+            let base = (row + sx as usize) * channels;
             for c in 0..channels {
-                acc[c] += src[base + c] as f64 * w;
+                acc[c] += src[base + c] as u128 * w;
             }
             wsum += w;
         }
     }
     let mut out = [0u8; 3];
-    if wsum > 0.0 {
+    if wsum > 0 {
+        let denom = wsum * 2;
         for c in 0..channels {
-            out[c] = (acc[c] / wsum).round().clamp(0.0, 255.0) as u8;
+            out[c] = ((acc[c] * 2 + wsum) / denom).min(255) as u8;
         }
     }
     out
@@ -740,6 +755,32 @@ mod tests {
         assert_eq!(
             resize_rgb(&rgb, 1, 1, Interpolation::Area).as_raw(),
             &[30, 38, 45]
+        );
+    }
+
+    /// OpenCV 4.13 `INTER_AREA` area-weights a fractional zoom. The centre
+    /// sample is an exact half (127.5) and must round to 128; an f64 weight
+    /// that lands an ulp low (`127.49999999999999`) rounds to 127.
+    #[test]
+    fn area_resize_fractional_upscale_rounds_half_up() {
+        let img = GrayImage::from_raw(2, 1, vec![0, 255]).unwrap();
+        assert_eq!(
+            resize(&img, 3, 1, Interpolation::Area).as_raw(),
+            &[0, 128, 255]
+        );
+
+        let mut board = GrayImage::new(2, 2);
+        board.put_pixel(0, 0, Luma([0]));
+        board.put_pixel(1, 0, Luma([255]));
+        board.put_pixel(0, 1, Luma([255]));
+        board.put_pixel(1, 1, Luma([0]));
+        assert_eq!(
+            resize(&board, 3, 3, Interpolation::Area).as_raw(),
+            &[
+                0, 128, 255, //
+                128, 128, 128, //
+                255, 128, 0,
+            ]
         );
     }
 

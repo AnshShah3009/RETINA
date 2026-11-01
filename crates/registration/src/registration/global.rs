@@ -138,15 +138,16 @@ pub fn compute_iss_features(cloud: &PointCloud, detector: ISSDetector) -> Vec<IS
 
         scatter /= neighbors.len() as f32;
 
-        // Compute eigenvalues
-        let eigenvals = scatter.eigenvalues();
-        if let Some(eigs) = eigenvals {
-            // Use determinant as saliency
-            let det = eigs[0] * eigs[1] * eigs[2];
-            saliencies.push((i, det));
-        } else {
-            saliencies.push((i, 0.0));
-        }
+        // Use determinant as saliency.
+        //
+        // `scatter` is symmetric by construction (`sums of diff * diff^T`), so
+        // the symmetric eigensolver is the right one - and the only one that
+        // terminates on the exactly-zero matrix, which is a point whose
+        // neighbours all sit on the centroid (coincident points). The general
+        // `eigenvalues()` is a real Schur iteration that does not converge
+        // there and spun forever.
+        let eigs = scatter.symmetric_eigen().eigenvalues;
+        saliencies.push((i, eigs[0] * eigs[1] * eigs[2]));
     }
 
     // Non-maximum suppression
@@ -244,11 +245,12 @@ pub fn compute_iss_features(cloud: &PointCloud, detector: ISSDetector) -> Vec<IS
             }
         }
 
-        let eigenvals = cov.eigenvalues();
-        let mut eigenvalues = [0.0f32; 3];
-        if let Some(eigs) = eigenvals {
-            eigenvalues = [eigs[0], eigs[1], eigs[2]];
-        }
+        // Symmetric by construction, as above. For a keypoint with no
+        // neighbours (or one whose neighbours are all coincident with it) this
+        // covariance is exactly zero, whose eigenvalues are all zero; the
+        // general eigensolver never returned on it.
+        let eigs = cov.symmetric_eigen().eigenvalues;
+        let eigenvalues = [eigs[0], eigs[1], eigs[2]];
 
         // Create simple descriptor from eigenvalues
         let mut descriptor = [0.0f32; 16];

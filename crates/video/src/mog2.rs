@@ -34,8 +34,9 @@ use cv_hal::tensor_ext::{TensorCast, TensorToCpu, TensorToGpu};
 /// # Parameters
 ///
 /// * `history` - Learning rate and history length (50-500 typical)
-/// * `var_threshold` - Variance threshold for detecting shadows (typically 10-20)
-/// * `detect_shadows` - Enable shadow detection (reserved for future use)
+/// * `var_threshold` - Background-match threshold (typically 10-20). A pixel
+///   matches a Gaussian component when `(pixel - mean)^2 < var_threshold * variance`.
+/// * `detect_shadows` - Unused. Shadow detection is not implemented.
 ///
 /// # Example
 ///
@@ -51,9 +52,10 @@ use cv_hal::tensor_ext::{TensorCast, TensorToCpu, TensorToGpu};
 pub struct Mog2 {
     /// Learning rate parameter and history window size
     history: usize,
-    /// Threshold for variance used in shadow detection
+    /// Background-match threshold. A component matches when
+    /// `(pixel - mean)^2 < var_threshold * variance`.
     var_threshold: f32,
-    /// Reserved for shadow detection (not currently used)
+    /// Accepted and stored. Shadow detection is not implemented.
     _detect_shadows: bool,
     /// Number of Gaussian components per pixel (fixed at 5)
     n_mixtures: usize,
@@ -89,12 +91,13 @@ impl Mog2 {
     ///   - Smaller values → faster adaptation, more noise sensitivity
     ///   - Learning rate = 1.0 / history
     ///
-    /// * `var_threshold` - Shadow detection threshold (typically 10-20)
-    ///   - Controls sensitivity of variance-based shadow detection
-    ///   - Not currently used but reserved for future implementation
+    /// * `var_threshold` - Background-match threshold (typically 10-20)
+    ///   - A pixel matches a mixture component when
+    ///     `(pixel - mean)^2 < var_threshold * variance`
+    ///   - Lower values mark more pixels as foreground
     ///
-    /// * `detect_shadows` - Enable shadow detection (false for now)
-    ///   - Reserved parameter for future shadow detection features
+    /// * `detect_shadows` - Accepted and stored, but unused
+    ///   - Shadow detection is not implemented
     ///   - Currently has no effect
     ///
     /// # Returns

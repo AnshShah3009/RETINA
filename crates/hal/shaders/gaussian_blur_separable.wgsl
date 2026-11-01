@@ -61,30 +61,19 @@ fn get_input_index(x: i32, y: i32, ch: i32) -> i32 {
         } else { iy = 0; }
     }
 
-    return (iy * w + ix) * i32(params.channels) + ch;
+    // Planar CHW: channel c of pixel (ix, iy) is c*(H*W) + iy*W + ix.
+    return ch * h * w + iy * w + ix;
 }
 
-// x covers `width * channels` so every plane is processed, and the channel index
-// is recovered from it. The previous revision had no channel concept at all and
-// indexed `y * width + x`, so a 3-channel image was blurred as one long row and
-// each output pixel averaged values from all three planes - measured at 26% mean
-// relative error against the CPU, and worse than 100% on some pixels.
+// One invocation per (x, y, channel). Tensors are planar CHW, so the channel
+// is the z index rather than a stride inside the pixel.
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    // Tensors are laid out (c, h, w) with the channels *innermost*, so a row
-    // of `width` pixels already contains all `channels` planes and the linear
-    // index within a row is `x * channels + ch`. Recovering x and ch from the
-    // invocation index therefore divides by channels to get x and takes the
-    // remainder for ch - the reverse of what the first attempt did, which left
-    // `ch` at 0 for every invocation and so blurred only the first plane while
-    // writing zeros to the rest.
-    let c = i32(params.channels);
-    let total = i32(params.width) * c;
-    let x = i32(global_id.x) / c;
-    let ch = i32(global_id.x) % c;
+    let x = i32(global_id.x);
     let y = i32(global_id.y);
+    let ch = i32(global_id.z);
 
-    if (global_id.x >= u32(total) || u32(y) >= params.height) {
+    if (u32(x) >= params.width || u32(y) >= params.height || u32(ch) >= params.channels) {
         return;
     }
 
@@ -112,6 +101,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         sum += val * kernel_data[i];
     }
 
-    let out_idx = (y * i32(params.width) + x) * c + ch;
+    let out_idx = ch * i32(params.height) * i32(params.width) + y * i32(params.width) + x;
     output_data[out_idx] = sum;
 }

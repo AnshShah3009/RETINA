@@ -22,8 +22,7 @@ fn get_pixel(x: i32, y: i32) -> f32 {
     let ix = clamp(x, 0, w - 1);
     let iy = clamp(y, 0, h - 1);
     let idx = u32(iy * w + ix);
-    let combined = input_data[idx / 4u];
-    return f32((combined >> ((idx % 4u) * 8u)) & 0xFFu);
+    return input_data[idx];
 }
 
 @compute @workgroup_size(16, 16)

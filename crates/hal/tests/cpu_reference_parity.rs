@@ -558,23 +558,33 @@ fn convolve_control_constant_image_with_normalised_kernel() {
 // pyramid_down
 // ---------------------------------------------------------------------------
 
-/// Reference: blur with a binomial [1 4 6 4 1]/16 kernel and decimate by 2
-/// taking the even-indexed samples, written here directly.
+fn reflect101(p: isize, len: usize) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    let n = len as isize;
+    let period = 2 * n - 2;
+    let mut c = p.rem_euclid(period);
+    if c >= n {
+        c = period - c;
+    }
+    c as usize
+}
+
+/// OpenCV `pyrDown`: size `((w+1)/2, (h+1)/2)`, 5-tap `[1 4 6 4 1]/256`,
+/// `BORDER_REFLECT_101`.
 fn pyramid_reference(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     let k = [1.0f32, 4.0, 6.0, 4.0, 1.0];
-    let (nw, nh) = (w / 2, h / 2);
-    // Horizontal pass over **all** source rows (the vertical pass reaches rows
-    // on either side of the kept ones), then vertical, then keep every other
-    // sample. Sized `nw * h` because the intermediate is full height.
+    let (nw, nh) = (w.div_ceil(2), h.div_ceil(2));
     let mut tmp = vec![0.0f32; nw * h];
     for y in 0..h {
         for x in 0..nw {
             let mut acc = 0.0;
             for i in 0..5 {
-                let sx = ((x * 2 + i) as isize - 2).clamp(0, w as isize - 1) as usize;
+                let sx = reflect101(2 * x as isize + i as isize - 2, w);
                 acc += k[i] * src[y * w + sx];
             }
-            tmp[y * nw + x] = acc / 16.0;
+            tmp[y * nw + x] = acc;
         }
     }
     let mut out = vec![0.0f32; nw * nh];
@@ -582,51 +592,53 @@ fn pyramid_reference(src: &[f32], w: usize, h: usize) -> Vec<f32> {
         for x in 0..nw {
             let mut acc = 0.0;
             for i in 0..5 {
-                let sy = ((y * 2 + i) as isize - 2).clamp(0, h as isize - 1) as usize;
+                let sy = reflect101(2 * y as isize + i as isize - 2, h);
                 acc += k[i] * tmp[sy * nw + x];
             }
-            out[y * nw + x] = acc / 16.0;
+            out[y * nw + x] = acc / 256.0;
         }
     }
     out
 }
 
-/// `pyramid_down` calls `gaussian_blur` and then subsamples. The reference
-/// here builds the same shape from scratch, so a change to either half is
-/// caught. Odd dimensions are included: the floor halving (`3x3 -> 1x1`) is a
-/// deliberate choice to match the GPU path, and the reference must floor the
-/// same way or the test is measuring a convention rather than a defect.
+/// `pyramid_down` is OpenCV `pyrDown`. Odd dimensions use `((n + 1) / 2)`,
+/// so a 3×3 image is 2×2 and a 99×99 image is 50×50.
 #[test]
 fn pyramid_down_matches_reference_including_odd_dimensions() {
     let cpu = CpuBackend::new().unwrap();
-    for &(w, h) in &[(100usize, 100usize), (99, 99), (100, 80), (17, 13), (8, 8)] {
+    for &(w, h) in &[
+        (100usize, 100usize),
+        (99, 99),
+        (100, 80),
+        (17, 13),
+        (8, 8),
+        (3, 3),
+    ] {
         let src = noise(0xA11CE ^ (w * 7 + h) as u64, w * h);
         let got = cpu.pyramid_down(&f32_tensor(&src, w, h, 1)).unwrap();
         let want = pyramid_reference(&src, w, h);
 
-        assert_eq!(got.shape.width, w / 2, "{w}x{h}: width should floor-halve");
+        assert_eq!(
+            got.shape.width,
+            w.div_ceil(2),
+            "{w}x{h}: width should be (w+1)/2"
+        );
         assert_eq!(
             got.shape.height,
-            h / 2,
-            "{w}x{h}: height should floor-halve"
+            h.div_ceil(2),
+            "{w}x{h}: height should be (h+1)/2"
         );
 
         let got = got.as_slice().unwrap();
         assert_eq!(got.len(), want.len(), "{w}x{h}: length changed");
 
-        // The implementation's 5-tap kernel is generated from a Gaussian rather
-        // than being the binomial above, so the two differ by roughly half a
-        // pixel of phase. That is a documented convention difference, not the
-        // defect this test is looking for, so the bound is set to catch
-        // structural errors (a dropped row, a transposed axis, a wrong tap
-        // count) rather than sub-pixel resampling differences.
         let max_err = got
             .iter()
             .zip(want.iter())
             .map(|(g, wv)| (g - wv).abs())
             .fold(0.0f32, f32::max);
         assert!(
-            max_err < 1.5,
+            max_err < 1e-3,
             "{w}x{h}: pyramid_down disagrees with a from-scratch blur+decimate \
              by up to {max_err}; the two filters are not the same, but a \
              structural error (axis order, row drop, tap count) would exceed this"

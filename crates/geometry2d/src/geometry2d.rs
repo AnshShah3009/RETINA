@@ -190,28 +190,53 @@ fn ring_perimeter(ring: &[Point2D]) -> f64 {
     total
 }
 
+/// Vertices of `ring`, dropping a repeated closing vertex when one is present.
+///
+/// Shoelace already gives that edge a zero contribution. The vertex-average
+/// fallback does not: averaging `(0,0), (1,0), (2,0), (0,0)` produced
+/// `(0.75, 0)` instead of the mean of the three distinct vertices.
+fn ring_without_repeated_close(ring: &[Point2D]) -> &[Point2D] {
+    if ring.len() >= 2 {
+        let first = &ring[0];
+        let last = ring.last().unwrap();
+        if first.x == last.x && first.y == last.y {
+            return &ring[..ring.len() - 1];
+        }
+    }
+    ring
+}
+
 fn ring_centroid(ring: &[Point2D]) -> Point2D {
-    let n = ring.len();
-    if n == 0 {
+    if ring.is_empty() {
         return Point2D::new(0.0, 0.0);
     }
     let a = ring_signed_area(ring);
-    if a.abs() < EPS {
-        // Degenerate: return average
-        let sx: f64 = ring.iter().map(|p| p.x).sum();
-        let sy: f64 = ring.iter().map(|p| p.y).sum();
-        return Point2D::new(sx / n as f64, sy / n as f64);
+    // Any nonzero area uses the shoelace centroid. An absolute cutoff
+    // (`|area| < 1e-10`) sent a closed right triangle of leg 1e-5 (area
+    // 5e-11) through the vertex average, and that average counted the
+    // repeated closing vertex, returning (2.5e-6, 2.5e-6) instead of
+    // (leg/3, leg/3). The same triangle of leg 1 never hit the cutoff.
+    if a != 0.0 {
+        let n = ring.len();
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let cross = ring[i].x * ring[j].y - ring[j].x * ring[i].y;
+            cx += (ring[i].x + ring[j].x) * cross;
+            cy += (ring[i].y + ring[j].y) * cross;
+        }
+        let factor = 1.0 / (6.0 * a);
+        return Point2D::new(cx * factor, cy * factor);
     }
-    let mut cx = 0.0;
-    let mut cy = 0.0;
-    for i in 0..n {
-        let j = (i + 1) % n;
-        let cross = ring[i].x * ring[j].y - ring[j].x * ring[i].y;
-        cx += (ring[i].x + ring[j].x) * cross;
-        cy += (ring[i].y + ring[j].y) * cross;
+    let verts = ring_without_repeated_close(ring);
+    if verts.is_empty() {
+        return Point2D::new(0.0, 0.0);
     }
-    let factor = 1.0 / (6.0 * a);
-    Point2D::new(cx * factor, cy * factor)
+    let n = verts.len() as f64;
+    let sx: f64 = verts.iter().map(|p| p.x).sum();
+    let sy: f64 = verts.iter().map(|p| p.y).sum();
+    Point2D::new(sx / n, sy / n)
 }
 
 fn ring_bbox(ring: &[Point2D]) -> (f64, f64, f64, f64) {
@@ -353,8 +378,16 @@ pub fn segment_intersection_point(
     let dby = b2.y - b1.y;
 
     let denom = dax * dby - day * dbx;
-    if denom.abs() < EPS {
-        return None; // Parallel or collinear
+    // `|denom|` is `|a| |b| |sin θ|`, a length². An absolute cutoff of `EPS`
+    // called segments of length ~1e-6 parallel (denom = 2e-12) even though
+    // they cross, while the same shape at unit scale (denom = 2) did not.
+    // Scale the cutoff with the segment lengths so a unit-length pair keeps
+    // the old threshold exactly (`EPS * 1 * 1 = EPS`).
+    let len_a = dax.hypot(day);
+    let len_b = dbx.hypot(dby);
+    let scale = len_a * len_b;
+    if !(scale > 0.0) || denom.abs() < EPS * scale {
+        return None; // Parallel, collinear, or degenerate
     }
 
     let t = ((b1.x - a1.x) * dby - (b1.y - a1.y) * dbx) / denom;
@@ -1093,32 +1126,48 @@ pub fn voronoi_diagram(points: &[Point2D], bounds: (f64, f64, f64, f64)) -> Vec<
 }
 
 /// Clip a convex polygon by the half-plane: nx*(x-pt.x) + ny*(y-pt.y) <= 0.
+///
+/// The value tested is a length². A vertex is treated as on the boundary when
+/// it is within `EPS * |n| * |v - pt|`, i.e. within a relative angle `EPS` of
+/// the line, so the result does not depend on the units. An absolute `EPS`
+/// meant no vertex was ever outside once the coordinates and their spacing
+/// were small: two sites one micron apart produced cells that were each the
+/// whole bounding box.
 fn clip_by_halfplane(poly: &[Point2D], pt: &Point2D, nx: f64, ny: f64) -> Vec<Point2D> {
     let n = poly.len();
     if n == 0 {
         return vec![];
     }
+    let n_len = nx.hypot(ny);
+    let tol = |q: &Point2D| -> f64 {
+        let dx = q.x - pt.x;
+        let dy = q.y - pt.y;
+        EPS * n_len * dx.hypot(dy)
+    };
     let mut output = Vec::new();
     let mut s = &poly[n - 1];
     let mut s_val = nx * (s.x - pt.x) + ny * (s.y - pt.y);
+    let mut s_tol = tol(s);
 
     for e in poly {
         let e_val = nx * (e.x - pt.x) + ny * (e.y - pt.y);
-        if e_val <= EPS {
+        let e_tol = tol(e);
+        if e_val <= e_tol {
             // e is inside
-            if s_val > EPS {
+            if s_val > s_tol {
                 // s is outside -> crossing
                 let t = s_val / (s_val - e_val);
                 output.push(Point2D::new(s.x + t * (e.x - s.x), s.y + t * (e.y - s.y)));
             }
             output.push(e.clone());
-        } else if s_val <= EPS {
+        } else if s_val <= s_tol {
             // s is inside, e is outside -> crossing
             let t = s_val / (s_val - e_val);
             output.push(Point2D::new(s.x + t * (e.x - s.x), s.y + t * (e.y - s.y)));
         }
         s = e;
         s_val = e_val;
+        s_tol = e_tol;
     }
     output
 }

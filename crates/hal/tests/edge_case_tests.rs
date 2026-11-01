@@ -84,18 +84,19 @@ mod pyramid_tests {
         let result = cpu.pyramid_down(&input);
         assert!(result.is_ok());
         let output = result.unwrap();
-        // Floor halving (3/2 == 1) to match the GPU pyramid convention.
-        assert_eq!(output.shape.width, 1);
-        assert_eq!(output.shape.height, 1);
+        // OpenCV pyrDown: ((3 + 1) / 2, (3 + 1) / 2) = 2×2.
+        assert_eq!(output.shape.width, 2);
+        assert_eq!(output.shape.height, 2);
     }
 
     #[test]
-    fn test_pyramid_down_1x1_fails() {
+    fn test_pyramid_down_1x1_stays_1x1() {
         let cpu = CpuBackend::new().unwrap();
         let input = create_test_tensor_f32(&[1.0], 1, 1, 1);
 
-        let result = cpu.pyramid_down(&input);
-        assert!(result.is_err());
+        let result = cpu.pyramid_down(&input).unwrap();
+        assert_eq!(result.shape.width, 1);
+        assert_eq!(result.shape.height, 1);
     }
 
     #[test]

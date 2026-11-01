@@ -264,13 +264,25 @@ impl<D, M: RobustModel<D>> LMedS<D, M> {
         let mut best_residual = f64::INFINITY;
 
         if let Some(ref model) = best_model {
-            let sigma = 1.4826 * (1.0 + 5.0 / (n - k) as f64) * best_median_error.sqrt();
+            // `n - k` is zero exactly when the minimal sample is the whole data
+            // set, and the standard `1 + 5/(n-k)` factor then divides by zero.
+            // Because the median residual is also zero for an exact fit, the
+            // `0 * inf` that followed made the threshold NaN and no point could
+            // ever be classified as an inlier. Floor the degrees of freedom at
+            // one so the scale stays finite.
+            let dof = (n - k).max(1) as f64;
+            let sigma = 1.4826 * (1.0 + 5.0 / dof) * best_median_error.sqrt();
             let threshold = 2.5 * sigma;
             let mut total_error = 0.0;
 
             for (j, d) in data.iter().enumerate() {
+                // Inclusive: an exact fit has a median residual of zero, so the
+                // derived threshold is zero too, and the points with zero
+                // residual are precisely the consensus. Testing `err < threshold`
+                // rejected every one of them and reported a perfectly fit model
+                // as having no inliers.
                 let err = estimator.compute_error(model, d);
-                if err < threshold {
+                if err <= threshold {
                     inliers[j] = true;
                     num_inliers += 1;
                     total_error += err;
@@ -765,6 +777,89 @@ mod tests {
             assert!(result.model.is_none());
             assert_eq!(result.num_inliers, 0);
         }
+    }
+
+    /// A model that fits its own sample exactly must report that sample as inliers.
+    ///
+    /// LMedS derives its inlier threshold from the median residual:
+    /// `2.5 * 1.4826 * (1 + 5/(n-k)) * sqrt(median)`. Two things went wrong in that
+    /// derivation. For an exact fit the median is `0`, so the threshold is `0`, and
+    /// the strict `err < threshold` test then rejects every point - a model the
+    /// estimator had just fit with zero error was reported as having no consensus
+    /// at all (`num_inliers = 0`, `residual = inf`). And when `n == k` the `5/(n-k)`
+    /// term is a division by zero, so `0 * inf` made the threshold `NaN`, which
+    /// likewise rejects everything. Downstream code that filters on the inlier
+    /// mask or the residual therefore sees an empty result for perfectly clean
+    /// data.
+    #[test]
+    fn exact_fit_reports_the_points_it_fit_as_inliers() {
+        use nalgebra::Point2;
+
+        struct Line;
+        impl Line {
+            fn fit(p1: &Point2<f64>, p2: &Point2<f64>) -> (f64, f64, f64) {
+                let (dx, dy) = (p2.x - p1.x, p2.y - p1.y);
+                let norm = (dx * dx + dy * dy).sqrt();
+                if norm < 1e-10 {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    (dy / norm, -dx / norm, -(dy * p1.x - dx * p1.y) / norm)
+                }
+            }
+            fn dist(m: &(f64, f64, f64), p: &Point2<f64>) -> f64 {
+                (m.0 * p.x + m.1 * p.y + m.2).abs()
+            }
+        }
+        impl RobustModel<Point2<f64>> for Line {
+            type Model = (f64, f64, f64);
+            fn min_sample_size(&self) -> usize {
+                2
+            }
+            fn estimate(&self, data: &[&Point2<f64>]) -> Option<Self::Model> {
+                if data.len() < 2 {
+                    return None;
+                }
+                Some(Self::fit(data[0], data[1]))
+            }
+            fn compute_error(&self, m: &Self::Model, p: &Point2<f64>) -> f64 {
+                Self::dist(m, p)
+            }
+        }
+
+        let lmeds = LMedS::new(RobustConfig {
+            threshold: 0.1,
+            max_iterations: 20,
+            confidence: 0.99,
+        });
+
+        // More points than the minimal sample: all lie exactly on y = 2x.
+        let scored: Vec<Point2<f64>> = (0..10)
+            .map(|i| Point2::new(i as f64, 2.0 * i as f64))
+            .collect();
+        let result = lmeds.run(&Line, &scored);
+        assert!(result.model.is_some(), "no model for an exact fit");
+        assert_eq!(
+            result.num_inliers,
+            scored.len(),
+            "an exact fit reported {} of {} points as inliers (inliers={:?}, residual={})",
+            result.num_inliers,
+            scored.len(),
+            result.inliers,
+            result.residual
+        );
+        assert!(result.inliers.iter().all(|&inl| inl));
+        assert_eq!(result.residual, 0.0);
+
+        // Exactly the minimal sample: the `n - k` in the threshold is zero.
+        let minimal = vec![Point2::new(0.0f64, 0.0), Point2::new(1.0, 2.0)];
+        let result = lmeds.run(&Line, &minimal);
+        assert!(result.model.is_some(), "no model at n == k");
+        assert_eq!(
+            result.num_inliers, 2,
+            "n == k reported {} inliers (inliers={:?}, residual={})",
+            result.num_inliers, result.inliers, result.residual
+        );
+        assert!(result.inliers.iter().all(|&inl| inl));
     }
 
     /// With every point an inlier, the first exact model ends the search.
