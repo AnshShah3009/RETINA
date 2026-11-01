@@ -502,9 +502,58 @@ fn extract_keypoints_from_score_map<S: Storage<f32> + cv_core::StorageFactory<f3
     })
 }
 
+/// Detect ORB keypoints and compute descriptors on the CPU, returning them
+/// **index-parallel**.
+///
+/// `Orb::extract` drops a keypoint whose patch would reach outside the frame, so
+/// the detection list is longer than the descriptor list. Returning both as they
+/// are would leave `keypoints[i]` naming a different feature than
+/// `descriptors[i]` for every index past the first drop. The keypoint list is
+/// therefore rebuilt from the descriptors, which is the same contract
+/// [`orb_detect_and_compute`] documents and the [GPU branch] satisfies by
+/// construction (`paired` is zipped, sorted and truncated together).
+///
+/// [GPU branch]: detect_and_compute_ctx
+fn detect_and_compute_cpu<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
+    orb: &Orb,
+    ctx: &cv_hal::compute::ComputeDevice,
+    image: &Tensor<u8, S>,
+) -> (KeyPoints, Descriptors) {
+    let mut keypoints = orb.detect_ctx(ctx, image);
+    let cpu_img_tensor = convert_to_cpu_image(ctx, image);
+    let (h, w) = cpu_img_tensor.shape.hw();
+    let gray = image::GrayImage::from_raw(
+        w as u32,
+        h as u32,
+        cpu_img_tensor.storage.as_slice().unwrap_or(&[]).to_vec(),
+    )
+    .unwrap_or_else(|| image::GrayImage::new(w as u32, h as u32));
+
+    orb.compute_orientations(&gray, &mut keypoints);
+    let descriptors = orb.extract(&gray, &keypoints);
+    // Keep one keypoint per descriptor, in descriptor order: the caller pairs
+    // the two arrays by index, and `extract` drops the border keypoints that
+    // could not be described.
+    let keypoints = KeyPoints {
+        keypoints: descriptors.descriptors.iter().map(|d| d.keypoint).collect(),
+    };
+    (keypoints, descriptors)
+}
+
 /// Detect ORB keypoints and compute descriptors using an optional GPU compute context.
 ///
 /// Falls back to CPU detection when no GPU context is available.
+///
+/// # Contract
+///
+/// The returned `KeyPoints` and `Descriptors` are **index-parallel and equal in
+/// length** on every path, so `keypoints[i]` is the keypoint `descriptors[i]`
+/// was computed from. This matters because the two arrays are paired by index
+/// all the way down the pipeline: `cv-slam` stores them verbatim in a
+/// `TrackingFrame` and builds PnP correspondences, keyframe slots and map-point
+/// observations from descriptor indices. A keypoint whose patch leaves the image
+/// has no descriptor, so it is not returned at all - on the CPU path as well as
+/// the GPU one.
 pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
     orb: &Orb,
     ctx: &cv_hal::compute::ComputeDevice,
@@ -550,20 +599,7 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
                             error = %e,
                             "failed to upload ORB input to the GPU, falling back to CPU"
                         );
-                        return {
-                            let mut keypoints = orb.detect_ctx(ctx, image);
-                            let cpu_img_tensor = convert_to_cpu_image(ctx, image);
-                            let (h, w) = cpu_img_tensor.shape.hw();
-                            let gray = image::GrayImage::from_raw(
-                                w as u32,
-                                h as u32,
-                                cpu_img_tensor.storage.as_slice().unwrap_or(&[]).to_vec(),
-                            )
-                            .unwrap_or_else(|| image::GrayImage::new(w as u32, h as u32));
-                            orb.compute_orientations(&gray, &mut keypoints);
-                            let descriptors = orb.extract(&gray, &keypoints);
-                            (keypoints, descriptors)
-                        };
+                        return detect_and_compute_cpu(orb, ctx, image);
                     }
                 }
             };
@@ -676,20 +712,8 @@ pub fn detect_and_compute_ctx<S: Storage<u8> + cv_core::StorageFactory<u8> + 'st
             },
         )
     } else {
-        // Fallback to CPU
-        let mut keypoints = orb.detect_ctx(ctx, image);
-        let cpu_img_tensor = convert_to_cpu_image(ctx, image);
-        let (h, w) = cpu_img_tensor.shape.hw();
-        let gray = image::GrayImage::from_raw(
-            w as u32,
-            h as u32,
-            cpu_img_tensor.storage.as_slice().unwrap_or(&[]).to_vec(),
-        )
-        .unwrap_or_else(|| image::GrayImage::new(w as u32, h as u32));
-
-        orb.compute_orientations(&gray, &mut keypoints);
-        let descriptors = orb.extract(&gray, &keypoints);
-        (keypoints, descriptors)
+        // No GPU context: the CPU path, with the same index-parallel contract.
+        detect_and_compute_cpu(orb, ctx, image)
     }
 }
 
@@ -1439,6 +1463,97 @@ mod tests {
                 "keypoint {i} does not match its descriptor"
             );
         }
+    }
+
+    /// The *context* entry point must return the same index-parallel pair on its
+    /// CPU path.
+    ///
+    /// `orb_detect_and_compute` above derives the keypoint list from the
+    /// descriptors for this reason, and `detect_and_compute_ctx`'s GPU branch
+    /// keeps them together (`paired` is zipped, sorted and truncated as one).
+    /// Its CPU branch returned the detector's raw keypoint list beside the
+    /// shorter descriptor list, so `keypoints[i]` named a different feature from
+    /// every index past the first border drop. Measured on the texture below:
+    /// 500 keypoints against 407 descriptors, all 407 positions disagreeing, the
+    /// first by 133 px.
+    ///
+    /// This is the path every CPU-image caller takes, `cv-slam` included: it
+    /// stores the pair verbatim in a `TrackingFrame` and pairs the arrays by
+    /// index for PnP, keyframe slots and map-point observations.
+    #[test]
+    fn detect_and_compute_ctx_cpu_path_is_index_parallel() {
+        use cv_core::storage::CpuStorage;
+
+        const W: usize = 320;
+        const H: usize = 240;
+        let data: Vec<u8> = (0..W * H)
+            .map(|i| {
+                let (x, y) = (i % W, i / W);
+                (x.wrapping_mul(7919) ^ y.wrapping_mul(104729) ^ (x * x + y * y)) as u8
+            })
+            .collect();
+        let tensor: Tensor<u8, CpuStorage<u8>> =
+            Tensor::from_vec(data, cv_core::TensorShape::new(1, H, W)).expect("image tensor");
+
+        // The device a CPU image resolves to: `detect_and_compute_ctx` takes its
+        // CPU branch exactly when the context is not `Gpu`.
+        let cpu = cv_hal::cpu::CpuBackend::new().expect("a CPU backend");
+        let ctx = ComputeDevice::Cpu(&cpu);
+        let orb = Orb::new().with_n_features(500);
+        let (keypoints, descriptors) = detect_and_compute_ctx(&orb, &ctx, group_stub(), &tensor);
+
+        assert!(
+            descriptors.len() >= 100,
+            "need a texture the detector can describe, got {}",
+            descriptors.len()
+        );
+        assert_eq!(
+            keypoints.keypoints.len(),
+            descriptors.descriptors.len(),
+            "{} keypoints but {} descriptors: `extract` drops border keypoints, \
+             so returning the detection list unpaired leaves every index past the \
+             first drop naming a different feature",
+            keypoints.keypoints.len(),
+            descriptors.descriptors.len()
+        );
+
+        let mut worst = 0.0f64;
+        let mut worst_at = 0usize;
+        for (i, d) in descriptors.descriptors.iter().enumerate() {
+            let kp = &keypoints.keypoints[i];
+            let err = ((d.keypoint.x - kp.x).powi(2) + (d.keypoint.y - kp.y).powi(2)).sqrt();
+            if err > worst {
+                worst = err;
+                worst_at = i;
+            }
+        }
+        assert!(
+            worst < 1e-9,
+            "keypoints[{worst_at}] = ({:.1}, {:.1}) is not the keypoint of \
+             descriptors[{worst_at}] = ({:.1}, {:.1}): {worst:.1} px apart",
+            keypoints.keypoints[worst_at].x,
+            keypoints.keypoints[worst_at].y,
+            descriptors.descriptors[worst_at].keypoint.x,
+            descriptors.descriptors[worst_at].keypoint.y,
+        );
+    }
+
+    /// `detect_and_compute_ctx` ignores its resource group, so a throwaway one
+    /// is enough for the tests that exercise the CPU path.
+    fn group_stub() -> &'static cv_runtime::orchestrator::ResourceGroup {
+        use std::sync::OnceLock;
+        static GROUP: OnceLock<cv_runtime::orchestrator::ResourceGroup> = OnceLock::new();
+        GROUP.get_or_init(|| {
+            let dev = cv_hal::compute::get_device().expect("a compute device");
+            cv_runtime::orchestrator::ResourceGroup::new(
+                "orb-ctx-cpu-tests",
+                dev.device_id(),
+                1,
+                None,
+                cv_runtime::orchestrator::GroupPolicy::default(),
+            )
+            .expect("resource group")
+        })
     }
 
     /// The scale-aware flag must actually change what is measured.
