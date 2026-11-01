@@ -52,12 +52,25 @@ impl LucasKanade {
     /// Builds Gaussian image pyramids for both frames and performs coarse-to-fine
     /// tracking with iterative refinement at each pyramid level. To track many
     /// points use [`Self::track_points`], which builds the pyramids once.
+    ///
+    /// Returns `None` when the frames are not the same size. Level `L` of the
+    /// pyramid is `frame / 2^L`, so frames of different sizes give two pyramids
+    /// that are *different scalings* of the scene: the coordinate `p / 2^L`
+    /// names one point in the previous frame and a different point in the next,
+    /// and the answer is meaningless rather than merely imprecise. Frames of
+    /// unequal size reach this from a capture whose resolution changes
+    /// mid-stream (`cv-videoio`'s PNG-sequence backend reads every image in a
+    /// directory, whatever its size), so the mismatch is declined the same way
+    /// any other untrackable feature is.
     pub fn track_point(
         &self,
         prev_frame: &GrayImage,
         next_frame: &GrayImage,
         point: (f32, f32),
     ) -> Option<(f32, f32)> {
+        if !frames_match(prev_frame, next_frame) {
+            return None;
+        }
         let prev_pyr = build_lk_pyramid(prev_frame, self.pyramid_levels, true);
         let next_pyr = build_lk_pyramid(next_frame, self.pyramid_levels, false);
         self.track_in_pyramids(&prev_pyr, &next_pyr, point)
@@ -206,12 +219,20 @@ impl LucasKanade {
     ///
     /// This is the original simple implementation kept as a fallback.
     /// It computes a single gradient solve with no pyramid and no iteration.
+    ///
+    /// Returns `None` when the frames are not the same size: the solve indexes
+    /// the next frame at the previous frame's coordinates, so a smaller next
+    /// frame was read out of bounds (a panic), and a larger one was compared
+    /// against unrelated pixels.
     pub fn track_point_single_pass(
         &self,
         prev_frame: &GrayImage,
         next_frame: &GrayImage,
         point: (f32, f32),
     ) -> Option<(f32, f32)> {
+        if !frames_match(prev_frame, next_frame) {
+            return None;
+        }
         let (x, y) = point;
         let half_window = (self.window_size / 2) as i32;
 
@@ -269,6 +290,12 @@ impl LucasKanade {
     ) -> Vec<Option<(f32, f32)>> {
         if points.is_empty() {
             return Vec::new();
+        }
+        // Declined for the same reason as `track_point`: the two pyramids are
+        // different scalings of the scene, so no point has a meaning across
+        // them.
+        if !frames_match(prev_frame, next_frame) {
+            return vec![None; points.len()];
         }
         let prev_pyr = build_lk_pyramid(prev_frame, self.pyramid_levels, true);
         let next_pyr = build_lk_pyramid(next_frame, self.pyramid_levels, false);
@@ -421,6 +448,23 @@ fn pyr_down(src: &[f32], w: usize, h: usize) -> (Vec<f32>, usize, usize) {
         }
     }
     (out, nw, nh)
+}
+
+/// Whether two frames describe a scene at the same scale.
+///
+/// Sparse LK correlates a window of the previous frame with the next frame at
+/// the *same* coordinates, and every pyramid level is a division of the frame
+/// by `2^L`. Frames of different sizes therefore give pyramids that are
+/// different scalings of the scene: the coordinate `p / 2^L` names one point in
+/// the previous frame and another in the next. `Farneback::compute` rejects such
+/// a pair with `DimensionMismatch`; sparse LK reports the feature as
+/// untrackable, which is the same outcome as any other unusable feature.
+///
+/// This is reachable from a real capture: `cv-videoio`'s PNG-sequence backend
+/// reads every image in a directory, so a directory holding two recordings at
+/// different resolutions yields a stream whose frame size changes mid-stream.
+fn frames_match(prev_frame: &GrayImage, next_frame: &GrayImage) -> bool {
+    prev_frame.dimensions() == next_frame.dimensions()
 }
 
 /// Build an f32 Gaussian pyramid, level 0 = finest.
