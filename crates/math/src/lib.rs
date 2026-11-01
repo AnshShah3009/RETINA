@@ -92,22 +92,69 @@ impl Interp1d {
         if self.x.is_empty() || self.y.is_empty() || x_val.is_nan() {
             return f64::NAN;
         }
-        if x_val <= self.x[0] {
+
+        // A single knot describes a constant series: there is no interval to
+        // interpolate over, so the only value on offer is y[0]. Bailing out
+        // here is also what keeps the `len - 2` clamp below from underflowing.
+        // A NaN knot reaches this point because every clamp comparison against
+        // NaN is false, so a one-knot NaN series used to fall through to
+        // `1usize - 2` and panic with "attempt to subtract with overflow" (and,
+        // in release, wrap to usize::MAX and index `self.x[idx + 1]` out of
+        // bounds). The knot's position cannot be known, but a lone sample is
+        // still a well-defined constant.
+        let n = self.x.len();
+        if n == 1 {
             return self.y[0];
         }
-        if x_val >= *self.x.last().unwrap() {
-            return *self.y.last().unwrap();
+
+        // `interpolate::interp1d_linear` rejects a non-increasing knot sequence
+        // outright; `call` returns a bare f64 and cannot report an error, so it
+        // reads the orientation from the data instead of assuming ascending.
+        // Previously a descending series was searched as if it were ascending:
+        // the bracketing interval was wrong and the blend used the wrong pair
+        // of knots, so [1.0, 0.0] -> [0.0, 10.0] at 0.5 returned 10 instead of
+        // 5. A NaN endpoint leaves the axis with no orientation at all and no
+        // meaningful blend, so it answers NaN.
+        let ascending = match self.x[0].partial_cmp(&self.x[n - 1]) {
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal) => true,
+            Some(std::cmp::Ordering::Greater) => false,
+            None => return f64::NAN,
+        };
+
+        // Clamping respects the caller's orientation: x[0] is the low end when
+        // ascending and the high end when descending, and y[0] belongs to it.
+        if ascending {
+            if x_val <= self.x[0] {
+                return self.y[0];
+            }
+            if x_val >= self.x[n - 1] {
+                return self.y[n - 1];
+            }
+        } else {
+            if x_val >= self.x[0] {
+                return self.y[0];
+            }
+            if x_val <= self.x[n - 1] {
+                return self.y[n - 1];
+            }
         }
 
         // NaN queries previously panicked here: binary_search_by returned
         // Err(0) and `pos - 1` underflowed usize to usize::MAX, so the
         // `self.x[idx + 1]` below went out of bounds. Guarded above, and the
         // result is clamped so the index can never run off either end.
+        //
+        // Mirroring both the knots and the query for a descending series keeps
+        // one ascending search for both orientations: negation reverses the
+        // order, so the same comparison and the same index clamping apply.
+        let sign = if ascending { 1.0 } else { -1.0 };
+        let query = sign * x_val;
         let idx = self
             .x
             .binary_search_by(|v| {
-                v.partial_cmp(&x_val).unwrap_or_else(|| {
-                    if v.is_nan() {
+                let knot = sign * v;
+                knot.partial_cmp(&query).unwrap_or_else(|| {
+                    if knot.is_nan() {
                         std::cmp::Ordering::Less
                     } else {
                         std::cmp::Ordering::Greater
@@ -115,7 +162,7 @@ impl Interp1d {
                 })
             })
             .unwrap_or_else(|pos| pos.saturating_sub(1))
-            .min(self.x.len() - 2);
+            .min(n - 2);
 
         let denominator = self.x[idx + 1] - self.x[idx];
         // Real linear blend. Forcing t = 0.5 whenever the knots were closer
