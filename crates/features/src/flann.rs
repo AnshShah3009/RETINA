@@ -160,50 +160,71 @@ impl KdTree {
             return KdTreeNode::Leaf(indices.to_vec());
         }
 
-        // Choose dimension based on depth and randomize slightly per tree
+        // `value < median` is an empty side whenever the median equals the
+        // minimum (more than half the points share that value). The old
+        // code then stored the whole set as one leaf, and search stopped
+        // after `num_checks` points, missing an exact copy later in the
+        // leaf. Walk dimensions until one splits both sides, and if the
+        // median is the minimum pick the first strictly greater value so
+        // the `<` side is non-empty.
         let num_dims = points[indices[0]].len();
-        let dimension = (depth + tree_id) % num_dims;
+        for attempt in 0..num_dims {
+            let dimension = (depth + tree_id + attempt) % num_dims;
+            let mut order: Vec<usize> = indices.to_vec();
+            order.sort_by_key(|&i| points[i][dimension]);
 
-        // Find median value
-        let mut values: Vec<u8> = indices.iter().map(|&i| points[i][dimension]).collect();
-        values.sort();
-        let threshold = values[values.len() / 2];
+            let min_val = points[order[0]][dimension];
+            let max_val = points[order[order.len() - 1]][dimension];
+            if min_val == max_val {
+                continue;
+            }
 
-        // Partition indices
-        let left_indices: Vec<usize> = indices
-            .iter()
-            .filter(|&&i| points[i][dimension] < threshold)
-            .copied()
-            .collect();
-        let right_indices: Vec<usize> = indices
-            .iter()
-            .filter(|&&i| points[i][dimension] >= threshold)
-            .copied()
-            .collect();
+            let mid = order.len() / 2;
+            let split_idx = if points[order[mid]][dimension] == min_val {
+                order
+                    .iter()
+                    .position(|&i| points[i][dimension] > min_val)
+                    .unwrap_or(mid)
+            } else {
+                mid
+            };
+            let threshold = points[order[split_idx]][dimension];
+            // Keep the caller's index order. Sorting was only to find the cut.
+            let left_indices: Vec<usize> = indices
+                .iter()
+                .copied()
+                .filter(|&i| points[i][dimension] < threshold)
+                .collect();
+            let right_indices: Vec<usize> = indices
+                .iter()
+                .copied()
+                .filter(|&i| points[i][dimension] >= threshold)
+                .collect();
+            if left_indices.is_empty() || right_indices.is_empty() {
+                continue;
+            }
 
-        // Handle edge case where all values are equal
-        if left_indices.is_empty() || right_indices.is_empty() {
-            return KdTreeNode::Leaf(indices.to_vec());
+            return KdTreeNode::Internal {
+                dimension,
+                threshold,
+                left: Box::new(Self::build_recursive(
+                    points,
+                    &left_indices,
+                    depth + 1,
+                    branching_factor,
+                    tree_id,
+                )),
+                right: Box::new(Self::build_recursive(
+                    points,
+                    &right_indices,
+                    depth + 1,
+                    branching_factor,
+                    tree_id,
+                )),
+            };
         }
 
-        KdTreeNode::Internal {
-            dimension,
-            threshold,
-            left: Box::new(Self::build_recursive(
-                points,
-                &left_indices,
-                depth + 1,
-                branching_factor,
-                tree_id,
-            )),
-            right: Box::new(Self::build_recursive(
-                points,
-                &right_indices,
-                depth + 1,
-                branching_factor,
-                tree_id,
-            )),
-        }
+        KdTreeNode::Leaf(indices.to_vec())
     }
 
     fn search_knn(
@@ -477,5 +498,22 @@ mod tests {
         );
         assert_eq!(hamming_distance(&short, &vec![0u8; 32]), u32::MAX);
         assert_eq!(hamming_distance(&[0b1111_0000], &[0b1111_1111]), 4);
+    }
+
+    /// 32 copies of `[0, 255]` then one `[0, 0]`. Dim 0 is constant, so a
+    /// `value < median` split is empty and the old tree stored every point
+    /// in one leaf. With 4 checks the scan stopped on index 0 (distance 8)
+    /// and never reached the exact copy at index 32.
+    #[test]
+    fn exact_copy_after_unbalanced_median_is_found() {
+        let mut descs = Descriptors::new();
+        for i in 0..32 {
+            descs.push(Descriptor::new(vec![0, 255], KeyPoint::new(i as f64, 0.0)));
+        }
+        descs.push(Descriptor::new(vec![0, 0], KeyPoint::new(32.0, 0.0)));
+
+        let mut index = FlannIndex::new(4, 1).with_checks(4);
+        index.build(&descs);
+        assert_eq!(index.search_knn(&[0, 0], 1), vec![(32, 0)]);
     }
 }
