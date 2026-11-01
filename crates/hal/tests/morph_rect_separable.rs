@@ -1,8 +1,7 @@
 //! `CpuBackend::morphology`: rectangular masks above 5x5 take the separable
 //! `cpu::morph_rect` path and other masks the per-tap loop (whose 32-wide
 //! block now loads interior rows as slices). Both must return exactly the
-//! bytes of the per-tap definition, transcribed below from the old scalar
-//! tail: out-of-image taps read the identity element (255 erode, 0 otherwise).
+//! bytes of the per-tap definition: out-of-image taps replicate the edge pixel.
 
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
@@ -57,10 +56,12 @@ fn per_tap(
                         }
                         let sy = y as isize + ky as isize - cy as isize;
                         let sx = x as isize + kx as isize - cx as isize;
-                        let t = if sy < 0 || sx < 0 || sy >= h as isize || sx >= w as isize {
+                        let t = if w == 0 || h == 0 {
                             identity
                         } else {
-                            plane[sy as usize * w + sx as usize]
+                            let sy = sy.clamp(0, h as isize - 1) as usize;
+                            let sx = sx.clamp(0, w as isize - 1) as usize;
+                            plane[sy * w + sx]
                         };
                         v = if typ == MorphologyType::Erode {
                             v.min(t)

@@ -125,7 +125,7 @@ fn test_gpu_tsdf_pipeline() {
 
     let rd_cpu: Tensor<f32, cv_core::storage::CpuStorage<f32>> =
         ray_result.to_cpu_ctx(ctx).unwrap();
-    let depth_val = rd_cpu.as_slice().unwrap()[(60 * 160 + 80) * 4];
+    let depth_val = rd_cpu.as_slice().unwrap()[60 * 160 + 80];
     assert!(depth_val > 1.8 && depth_val < 2.2);
 
     let mesh = ctx.tsdf_extract_mesh(&voxels, 0.05, 0.0, 10000).unwrap();
@@ -206,11 +206,18 @@ fn test_gpu_dense_icp() {
 
     let rr_cpu: Tensor<f32, cv_core::storage::CpuStorage<f32>> =
         ray_result.to_cpu_ctx(ctx).unwrap();
-    let center_val = rr_cpu.as_slice().unwrap()[(60 * 160 + 80) * 4];
+    let center_pix = 60 * 160 + 80;
+    let plane = w * h;
+    let center_slice = rr_cpu.as_slice().unwrap();
+    let center_val = center_slice[center_pix];
     println!("DEBUG: Raycast depth at center: {}", center_val);
     println!(
         "DEBUG: Raycast normal at center: {:?}",
-        &rr_cpu.as_slice().unwrap()[(60 * 160 + 80) * 4 + 1..(60 * 160 + 80) * 4 + 4]
+        [
+            center_slice[plane + center_pix],
+            center_slice[2 * plane + center_pix],
+            center_slice[3 * plane + center_pix],
+        ]
     );
 
     // 2. Live frame (Moved in Z)

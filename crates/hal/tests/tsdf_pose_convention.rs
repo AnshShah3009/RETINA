@@ -374,7 +374,7 @@ fn compare(label: &str, pose: &[[f32; 4]; 4], b: &Both) -> Report {
     };
     for p in 0..n_pix {
         let (u, v) = (p % IMG_W as usize, p / IMG_W as usize);
-        let (da, db) = (b.cpu[p * 4], b.gpu[p * 4]);
+        let (da, db) = (b.cpu[p], b.gpu[p]);
         if da <= 0.0 && db <= 0.0 {
             rep.missed += 1;
             continue;
@@ -413,7 +413,7 @@ fn compare(label: &str, pose: &[[f32; 4]; 4], b: &Both) -> Report {
         // pixels disagree by up to 0.6 purely for this reason.
         if hit_inside(&hit_pos(pose, p, 0.5 * (la + lb)), 2.0 * VOXEL_SIZE) {
             for c in 1..4 {
-                let nd = (b.cpu[p * 4 + c] - b.gpu[p * 4 + c]).abs();
+                let nd = (b.cpu[c * n_pix + p] - b.gpu[c * n_pix + p]).abs();
                 rep.worst_normal = rep.worst_normal.max(nd);
             }
         }
@@ -475,25 +475,26 @@ fn identity_pose_is_the_control_both_backends_agree() {
     // The pose bug is off by metres, so this still separates the two cases
     // by a factor of ~40.
     let c = (IMG_H as usize / 2) * IMG_W as usize + IMG_W as usize / 2;
-    let d = (b.cpu[c * 4] - b.gpu[c * 4]).abs();
+    let n_pix = (IMG_W * IMG_H) as usize;
+    let d = (b.cpu[c] - b.gpu[c]).abs();
     assert!(
         d <= 0.10,
         "on-axis pixel {c} must match within 10 cm: cpu={} gpu={} (diff {d})",
-        b.cpu[c * 4],
-        b.gpu[c * 4]
+        b.cpu[c],
+        b.gpu[c]
     );
     // Same-side normal comparison, also on axis. The surface normal is +z and
     // both backends take the gradient of the TSDF, so the two must agree on
     // which way it faces - the other half of Defect 1's silent output. Skipped
     // if this hit is within a voxel of the volume's x/y boundary, where the
     // gradient stencil falls outside and the two out-of-volume rules differ.
-    if hit_inside(&hit_pos(&IDENTITY, c, b.cpu[c * 4]), 2.0 * VOXEL_SIZE) {
+    if hit_inside(&hit_pos(&IDENTITY, c, b.cpu[c]), 2.0 * VOXEL_SIZE) {
         for k in 1..4 {
             assert!(
-                (b.cpu[c * 4 + k] - b.gpu[c * 4 + k]).abs() <= 0.35,
+                (b.cpu[k * n_pix + c] - b.gpu[k * n_pix + c]).abs() <= 0.35,
                 "on-axis normal component {k} disagrees: cpu={} gpu={}",
-                b.cpu[c * 4 + k],
-                b.gpu[c * 4 + k]
+                b.cpu[k * n_pix + c],
+                b.gpu[k * n_pix + c]
             );
         }
     }

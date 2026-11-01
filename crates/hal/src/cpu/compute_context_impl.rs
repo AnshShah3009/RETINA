@@ -1410,9 +1410,12 @@ impl ComputeContext for CpuBackend {
 
     /// Morphological operation (erode/dilate/open/close).
     ///
-    /// Border handling: out-of-bounds pixels use the morphological identity element
-    /// (255 for erode, 0 for dilate). This matches the GPU shader behavior and is
-    /// mathematically correct because the identity element does not affect min/max.
+    /// Border handling is replicate: an out-of-image tap reads the nearest edge
+    /// pixel. The morphological identity (255 for erode, 0 for dilate) is only
+    /// the seed of the reduction, used when a kernel has no live taps. A
+    /// left-neighbour-only dilate of `[1, 2, 3]` is then `[1, 1, 2]`. A full
+    /// odd rectangle already contains the edge pixel that replicate would
+    /// repeat, so its min/max is unchanged.
     #[allow(clippy::needless_range_loop)]
     fn morphology<S: Storage<u8> + cv_core::StorageFactory<u8> + 'static>(
         &self,
@@ -1462,7 +1465,8 @@ impl ComputeContext for CpuBackend {
                 (0..n + k - 1)
                     .map(|j| {
                         let p = j as isize - c as isize;
-                        (p >= 0 && p < n as isize).then_some(p as usize)
+                        // Replicate. `n == 0` has no edge to copy.
+                        (n > 0).then(|| p.clamp(0, n as isize - 1) as usize)
                     })
                     .collect()
             };
@@ -1506,12 +1510,13 @@ impl ComputeContext for CpuBackend {
                                     continue;
                                 }
 
-                                // If the source row is out of bounds, use identity element
-                                if sy_raw < 0 || sy_raw >= h as isize {
-                                    // identity element: no effect on min/max
+                                // Replicate the edge row. Skipping the tap is the
+                                // dilate/erode identity, which turns a left-neighbour
+                                // sample of `[1, 2, 3]` into 0.
+                                if h == 0 {
                                     continue;
                                 }
-                                let sy = sy_raw as usize;
+                                let sy = sy_raw.clamp(0, h as isize - 1) as usize;
                                 let row_src = &src[sy * w..(sy + 1) * w];
                                 let sx_base = x as isize + kx as isize - cx as isize;
 
@@ -1522,10 +1527,11 @@ impl ComputeContext for CpuBackend {
                                     u8x32::from(bytes)
                                 } else {
                                     let mut bytes = [identity; 32];
-                                    for i in 0..32 {
-                                        let sx = sx_base + i as isize;
-                                        if sx >= 0 && sx < w as isize {
-                                            bytes[i] = row_src[sx as usize];
+                                    if w > 0 {
+                                        for i in 0..32 {
+                                            let sx = (sx_base + i as isize).clamp(0, w as isize - 1)
+                                                as usize;
+                                            bytes[i] = row_src[sx];
                                         }
                                     }
                                     u8x32::from(bytes)
@@ -1553,15 +1559,14 @@ impl ComputeContext for CpuBackend {
                                     continue;
                                 }
                                 let sx_raw = cx_idx as isize + kx as isize - cx as isize;
-                                // Use identity element for out-of-bounds pixels
-                                let v = if sy_raw < 0
-                                    || sy_raw >= h as isize
-                                    || sx_raw < 0
-                                    || sx_raw >= w as isize
-                                {
+                                // Replicate. An empty axis has nothing to copy, so
+                                // the reduction seed stands.
+                                let v = if w == 0 || h == 0 {
                                     identity
                                 } else {
-                                    src[sy_raw as usize * w + sx_raw as usize]
+                                    let sy = sy_raw.clamp(0, h as isize - 1) as usize;
+                                    let sx = sx_raw.clamp(0, w as isize - 1) as usize;
+                                    src[sy * w + sx]
                                 };
                                 if typ == MorphologyType::Erode {
                                     val = val.min(v);
@@ -2492,15 +2497,13 @@ impl ComputeContext for CpuBackend {
                     } else {
                         (0.0, 0.0, 1.0)
                     };
-                    // Interleaved layout — matches the WGSL raycast kernel and
-                    // every other multichannel op in hal: channel c of pixel
-                    // p lives at p*4 + c. A previous revision wrote CHW planes
-                    // under the same interleaved-labeled shape, scrambling
-                    // depth/normals for any consumer.
-                    out_data[pix * 4] = T::from_f32(hit_depth);
-                    out_data[pix * 4 + 1] = T::from_f32(nx);
-                    out_data[pix * 4 + 2] = T::from_f32(ny);
-                    out_data[pix * 4 + 3] = T::from_f32(nz);
+                    // Planar CHW, the same layout as every other multichannel
+                    // tensor: channel c of pixel p lives at c*(H*W) + p.
+                    let plane = img_h * img_w;
+                    out_data[pix] = T::from_f32(hit_depth);
+                    out_data[plane + pix] = T::from_f32(nx);
+                    out_data[2 * plane + pix] = T::from_f32(ny);
+                    out_data[3 * plane + pix] = T::from_f32(nz);
                 }
                 // else: all zeros (no hit)
             }
@@ -3167,7 +3170,7 @@ impl ComputeContext for CpuBackend {
             // Residual flow `v` at one level for the feature at `(px, py)` with the
             // carried guess `g`. Zero when the template does not fit or is
             // untextured, so the guess passes through unchanged.
-            let track_level = |lv: &Level<'_>, px: f32, py: f32, g: [f32; 2]| -> [f32; 2] {
+            let track_level = |lv: &Level<'_>, px: f32, py: f32, g: [f32; 2]| -> Option<[f32; 2]> {
                 let (w, h) = (lv.w, lv.h);
                 let hw = half_win as f32;
                 if !(px - hw >= 0.0
@@ -3175,7 +3178,7 @@ impl ComputeContext for CpuBackend {
                     && py - hw >= 0.0
                     && py + hw <= (h - 1) as f32)
                 {
-                    return [0.0, 0.0];
+                    return None;
                 }
 
                 let n = (2 * half_win + 1) as usize;
@@ -3197,10 +3200,12 @@ impl ComputeContext for CpuBackend {
                 let det = a11 * a22 - a12 * a12;
                 let tr = a11 + a22;
                 let min_eig = 0.5 * (tr - ((a11 - a22).powi(2) + 4.0 * a12 * a12).sqrt());
-                // Relative conditioning floor (shared with the GPU kernel): an
-                // untextured or aperture-limited window is not tracked.
-                if !det.is_finite() || det <= 0.0 || min_eig <= 1e-6 * tr {
-                    return [0.0, 0.0];
+                // Video's pyramidal LK drops the track when the window does not
+                // fit or `min_eig < 1e-4`. A relative `1e-6 * trace` floor keeps
+                // an aperture-limited window, and returning a zero residual
+                // reports the original point as a successful stationary track.
+                if !det.is_finite() || !min_eig.is_finite() || det <= 0.0 || min_eig < 1e-4 {
+                    return None;
                 }
                 let inv_det = 1.0 / det;
 
@@ -3262,7 +3267,7 @@ impl ComputeContext for CpuBackend {
                     }
                     prev_delta = delta;
                 }
-                [v[0] as f32, v[1] as f32]
+                Some([v[0] as f32, v[1] as f32])
             };
 
             let results: Vec<[T; 2]> = points
@@ -3270,15 +3275,27 @@ impl ComputeContext for CpuBackend {
                 .map(|&pt| {
                     let p0: [f32; 2] = bytemuck::cast_slice(&[pt])[0];
                     let mut g = [0.0f32; 2];
+                    let mut rejected = false;
                     for level in (0..levels).rev() {
                         let s = 1.0 / (1u32 << level) as f32;
-                        let v = track_level(&pyr[level], p0[0] * s, p0[1] * s, g);
-                        g = [g[0] + v[0], g[1] + v[1]];
+                        match track_level(&pyr[level], p0[0] * s, p0[1] * s, g) {
+                            Some(v) => {
+                                g = [g[0] + v[0], g[1] + v[1]];
+                            }
+                            None if level == 0 => rejected = true,
+                            None => {}
+                        }
                         if level > 0 {
                             g = [2.0 * g[0], 2.0 * g[1]];
                         }
                     }
-                    let out = [p0[0] + g[0], p0[1] + g[1]];
+                    // NaN is the "no track" status this `Vec<[T; 2]>` API can
+                    // carry. A finite copy of the input point is a success.
+                    let out = if rejected {
+                        [f32::NAN, f32::NAN]
+                    } else {
+                        [p0[0] + g[0], p0[1] + g[1]]
+                    };
                     bytemuck::cast_slice(&[out])[0]
                 })
                 .collect();
@@ -3507,15 +3524,16 @@ impl ComputeContext for CpuBackend {
                 let wg = T::from_f32(0.587);
                 let wb = T::from_f32(0.114);
 
+                let plane = h * w;
                 dst.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
                     for x in 0..w {
-                        let base = (y * w + x) * 3;
+                        let i = y * w + x;
+                        // Planar CHW: plane 0, 1, 2 are R, G, B (or B, G, R).
                         let (r, g, b) = if code == ColorConversion::RgbToGray {
-                            (src[base], src[base + 1], src[base + 2])
+                            (src[i], src[plane + i], src[2 * plane + i])
                         } else {
-                            (src[base + 2], src[base + 1], src[base])
+                            (src[2 * plane + i], src[plane + i], src[i])
                         };
-                        // Standard luminance formula
                         row_out[x] = wr * r + wg * g + wb * b;
                     }
                 });
@@ -3539,15 +3557,12 @@ impl ComputeContext for CpuBackend {
                     .as_mut_slice()
                     .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
-                dst.par_chunks_mut(w * 3)
+                // Three identical CHW planes.
+                dst.par_chunks_mut(w)
                     .enumerate()
-                    .for_each(|(y, row_out)| {
-                        for x in 0..w {
-                            let val = src[y * w + x];
-                            row_out[x * 3] = val;
-                            row_out[x * 3 + 1] = val;
-                            row_out[x * 3 + 2] = val;
-                        }
+                    .for_each(|(row_idx, row_out)| {
+                        let y = row_idx % h;
+                        row_out.copy_from_slice(&src[y * w..(y + 1) * w]);
                     });
 
                 Ok(Tensor {
@@ -3714,6 +3729,22 @@ impl ComputeContext for CpuBackend {
         };
         let color_coeff = T::from_f32(-0.5) / (sigma_color_eff * sigma_color_eff);
         let space_coeff = T::from_f32(-0.5) / (sigma_space_eff * sigma_space_eff);
+        // Spatial factor of each offset, computed once. Integer intensity
+        // gaps reuse the same `d² * color_coeff` product. The exp stays
+        // `exp(space_term + range_term)`: `exp(a) * exp(b)` is a different
+        // f32 and would change output bytes.
+        let span = (2 * radius + 1).max(0) as usize;
+        let mut space_term = vec![T::ZERO; span * span];
+        for (jy, j) in (-radius..=radius).enumerate() {
+            for (ix, i) in (-radius..=radius).enumerate() {
+                let dist_sq = T::from_f32((i * i + j * j) as f32);
+                space_term[jy * span + ix] = dist_sq * space_coeff;
+            }
+        }
+        let mut range_term = [T::ZERO; 256];
+        for gap in 0..256 {
+            range_term[gap] = T::from_f32((gap * gap) as f32) * color_coeff;
+        }
 
         dst.par_chunks_mut(w).enumerate().for_each(|(y, row_out)| {
             for x in 0..w {
@@ -3721,16 +3752,26 @@ impl ComputeContext for CpuBackend {
                 let mut sum = T::ZERO;
                 let mut norm = T::ZERO;
 
-                for j in -radius..=radius {
-                    for i in -radius..=radius {
+                for (jy, j) in (-radius..=radius).enumerate() {
+                    for (ix, i) in (-radius..=radius).enumerate() {
                         let sy = (y as i32 + j).clamp(0, h as i32 - 1) as usize;
                         let sx = (x as i32 + i).clamp(0, w as i32 - 1) as usize;
 
                         let val = src[sy * w + sx];
-                        let dist_sq = T::from_f32((i * i + j * j) as f32);
-                        let range_sq = (val - center_val) * (val - center_val);
+                        let diff = (val - center_val).to_f32();
+                        let range = if diff.is_finite() {
+                            let gap = diff.abs();
+                            let rounded = gap.round();
+                            if gap == rounded && rounded <= 255.0 {
+                                range_term[rounded as usize]
+                            } else {
+                                (val - center_val) * (val - center_val) * color_coeff
+                            }
+                        } else {
+                            (val - center_val) * (val - center_val) * color_coeff
+                        };
 
-                        let weight = (dist_sq * space_coeff + range_sq * color_coeff).exp();
+                        let weight = (space_term[jy * span + ix] + range).exp();
                         sum += val * weight;
                         norm += weight;
                     }
@@ -3901,41 +3942,41 @@ impl ComputeContext for CpuBackend {
 
         let mut intermediate = vec![T::ZERO; w * h * c];
 
-        // Horizontal pass
+        // Horizontal pass, one CHW plane at a time: index = c*(H*W) + y*W + x.
         intermediate
-            .par_chunks_mut(w * c)
+            .par_chunks_mut(w)
             .enumerate()
-            .for_each(|(y, row_inter)| {
-                let row_src = &src[y * w * c..(y + 1) * w * c];
+            .for_each(|(row_idx, row_inter)| {
+                let ch = row_idx / h;
+                let y = row_idx % h;
+                let plane = &src[ch * h * w..(ch + 1) * h * w];
+                let row_src = &plane[y * w..(y + 1) * w];
                 for x in 0..w {
-                    for ch in 0..c {
-                        let mut sum = T::ZERO;
-                        for i in 0..kx.len() {
-                            let sx = (x as isize + i as isize - rx as isize)
-                                .clamp(0, w as isize - 1)
-                                as usize;
-                            sum += row_src[sx * c + ch] * kx[i];
-                        }
-                        row_inter[x * c + ch] = sum;
+                    let mut sum = T::ZERO;
+                    for i in 0..kx.len() {
+                        let sx = (x as isize + i as isize - rx as isize).clamp(0, w as isize - 1)
+                            as usize;
+                        sum += row_src[sx] * kx[i];
                     }
+                    row_inter[x] = sum;
                 }
             });
 
         // Vertical pass
-        dst.par_chunks_mut(w * c)
+        dst.par_chunks_mut(w)
             .enumerate()
-            .for_each(|(y, row_dst)| {
+            .for_each(|(row_idx, row_dst)| {
+                let ch = row_idx / h;
+                let y = row_idx % h;
+                let plane = &intermediate[ch * h * w..(ch + 1) * h * w];
                 for x in 0..w {
-                    for ch in 0..c {
-                        let mut sum = T::ZERO;
-                        for j in 0..ky.len() {
-                            let sy = (y as isize + j as isize - ry as isize)
-                                .clamp(0, h as isize - 1)
-                                as usize;
-                            sum += intermediate[(sy * w + x) * c + ch] * ky[j];
-                        }
-                        row_dst[x * c + ch] = sum;
+                    let mut sum = T::ZERO;
+                    for j in 0..ky.len() {
+                        let sy = (y as isize + j as isize - ry as isize).clamp(0, h as isize - 1)
+                            as usize;
+                        sum += plane[sy * w + x] * ky[j];
                     }
+                    row_dst[x] = sum;
                 }
             });
 
@@ -3954,37 +3995,62 @@ impl ComputeContext for CpuBackend {
         &self,
         input: &Tensor<T, S>,
     ) -> Result<Tensor<T, S>> {
+        let src = input
+            .storage
+            .as_slice()
+            .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
-        if w < 2 || h < 2 {
+        // OpenCV `pyrDown`: `((w + 1) / 2, (h + 1) / 2)`, 5-tap
+        // `[1, 4, 6, 4, 1] / 256`, `BORDER_REFLECT_101`. A 3×3 image is 2×2.
+        let nw = w.div_ceil(2);
+        let nh = h.div_ceil(2);
+        if w == 0 || h == 0 || nw == 0 || nh == 0 {
             return Err(crate::Error::InvalidInput(
-                format!(
-                    "Pyramid down requires input dimensions >= 2x2, got {}x{}",
-                    w, h
-                )
-                .into(),
+                format!("Pyramid down requires a non-empty image, got {w}x{h}").into(),
             ));
         }
-        // Floor halving to match the GPU path (gpu_kernels/pyramid.rs).
-        let nw = w / 2;
-        let nh = h / 2;
         let c = input.shape.channels;
+        const K: [f32; 5] = [1.0, 4.0, 6.0, 4.0, 1.0];
+        let mode = BorderMode::<T>::Reflect101;
 
-        // Gaussian blur first
-        let blurred = self.gaussian_blur(input, T::from_f32(1.0), 5)?;
-
-        // Then downsample
         let mut output_storage = S::new(nh * nw * c, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
-        let src_blurred = blurred.storage.as_slice().unwrap();
 
-        dst.par_chunks_mut(nw * c)
+        dst.par_chunks_mut(nw * nh)
             .enumerate()
-            .for_each(|(y, row_out)| {
-                for x in 0..nw {
-                    for ch in 0..c {
-                        row_out[x * c + ch] = src_blurred[((y * 2) * w + (x * 2)) * c + ch];
+            .for_each(|(ch, plane_out)| {
+                let src_plane = &src[ch * h * w..(ch + 1) * h * w];
+                let mut rows = vec![0.0f32; h * nw];
+                for y in 0..h {
+                    for x in 0..nw {
+                        let mut acc = 0.0f32;
+                        for i in 0..5 {
+                            let sx = border::map_border_coord_1d(
+                                2 * x as isize + i as isize - 2,
+                                w,
+                                &mode,
+                            )
+                            .unwrap_or(0);
+                            acc += K[i] * src_plane[y * w + sx].to_f32();
+                        }
+                        rows[y * nw + x] = acc;
+                    }
+                }
+                for y in 0..nh {
+                    for x in 0..nw {
+                        let mut acc = 0.0f32;
+                        for i in 0..5 {
+                            let sy = border::map_border_coord_1d(
+                                2 * y as isize + i as isize - 2,
+                                h,
+                                &mode,
+                            )
+                            .unwrap_or(0);
+                            acc += K[i] * rows[sy * nw + x];
+                        }
+                        plane_out[y * nw + x] = T::from_f32(acc / 256.0);
                     }
                 }
             });
@@ -4106,7 +4172,15 @@ impl ComputeContext for CpuBackend {
                 // An empty train set leaves `best_dist` at its sentinel; with
                 // `ratio >= 1` the test below passed (`MAX <= MAX`) and a match
                 // to train index 0 - which does not exist - was fabricated.
-                if best_dist != u32::MAX && best_dist as f32 <= ratio_threshold * second_best as f32
+                // A zero second-best distance is the ambiguous case (two train
+                // descriptors at distance 0). `0 <= ratio * 0` would keep it.
+                // One train descriptor leaves `second_best` at `u32::MAX` and
+                // is not ambiguous.
+                let ambiguous = second_best == 0;
+                if best_dist != u32::MAX
+                    && !ambiguous
+                    && (second_best == u32::MAX
+                        || best_dist as f32 <= ratio_threshold * second_best as f32)
                 {
                     Some(cv_core::FeatureMatch::new(
                         qi as i32,

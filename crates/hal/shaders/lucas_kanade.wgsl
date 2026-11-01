@@ -11,8 +11,8 @@ struct Params {
     num_points: u32,
     window_radius: i32,
     max_iters: u32,
-    // Relative conditioning floor: lambda_min(G) <= min_eigenvalue * trace(G)
-    // means the window is untextured or aperture-limited and is not tracked.
+    // Absolute floor: lambda_min(G) < min_eigenvalue rejects the track.
+    // Video's pyramidal LK uses 1e-4, not a fraction of the trace.
     min_eigenvalue: f32,
 }
 
@@ -117,6 +117,7 @@ fn main(
     let rf = f32(r);
 
     var v = vec2<f32>(0.0, 0.0);
+    var tracked = false;
 
     let fits = p.x - rf >= 0.0 && p.x + rf <= w - 1.0 && p.y - rf >= 0.0 && p.y + rf <= h - 1.0;
     if (fits) {
@@ -134,7 +135,8 @@ fn main(
         let det = G00 * G11 - G01 * G01;
         let tr = G00 + G11;
         let min_eig = 0.5 * (tr - sqrt((G00 - G11) * (G00 - G11) + 4.0 * G01 * G01));
-        if (det > 0.0 && min_eig > params.min_eigenvalue * tr) {
+        if (det > 0.0 && min_eig >= params.min_eigenvalue) {
+            tracked = true;
             let inv_det = 1.0 / det;
             var prev_delta = vec2<f32>(0.0, 0.0);
             for (var iter = 0u; iter < params.max_iters; iter++) {
@@ -169,6 +171,14 @@ fn main(
                 prev_delta = delta;
             }
         }
+    }
+
+    // The finest level failing (window off the image, or min eigenvalue below
+    // 1e-4) is "no track". A zero residual would report the original point.
+    if (!tracked && level == 0u) {
+        let nan = bitcast<f32>(0x7fc00000u);
+        guess[idx] = Point(nan, nan);
+        return;
     }
 
     var out = g + v;

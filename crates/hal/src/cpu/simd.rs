@@ -1,5 +1,17 @@
 use wide::f32x8;
 
+/// Round half away from zero, then saturate into `u8`.
+///
+/// `as u8` truncates toward zero, so `0.587` (the green weight) became 0.
+/// `f32::round` is the half-away-from-zero rule.
+#[inline]
+fn round_u8(v: f32) -> u8 {
+    if !v.is_finite() {
+        return 0;
+    }
+    v.round().clamp(0.0, 255.0) as u8
+}
+
 /// Convert RGB to Grayscale using SIMD
 /// Weights: R: 0.299, G: 0.587, B: 0.114
 pub fn rgb_to_gray_simd(rgb: &[u8], gray: &mut [u8]) {
@@ -35,7 +47,7 @@ pub fn rgb_to_gray_simd(rgb: &[u8], gray: &mut [u8]) {
         let gray_arr: [f32; 8] = gray_vec.into();
 
         for k in 0..8 {
-            gray[i + k] = gray_arr[k] as u8;
+            gray[i + k] = round_u8(gray_arr[k]);
         }
     }
 
@@ -44,7 +56,7 @@ pub fn rgb_to_gray_simd(rgb: &[u8], gray: &mut [u8]) {
         let r = rgb[i * 3] as f32;
         let g = rgb[i * 3 + 1] as f32;
         let b = rgb[i * 3 + 2] as f32;
-        gray[i] = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
+        gray[i] = round_u8(0.299 * r + 0.587 * g + 0.114 * b);
     }
 }
 
@@ -129,7 +141,9 @@ mod tests {
             let r = rgb[i * 3] as f32;
             let g = rgb[i * 3 + 1] as f32;
             let b = rgb[i * 3 + 2] as f32;
-            gray_scalar[i] = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
+            gray_scalar[i] = (0.299 * r + 0.587 * g + 0.114 * b)
+                .round()
+                .clamp(0.0, 255.0) as u8;
         }
 
         assert_eq!(gray_simd, gray_scalar);

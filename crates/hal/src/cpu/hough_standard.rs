@@ -1,10 +1,11 @@
 //! Standard Hough lines as the HAL backends compute it, shared by the CPU
 //! backend and the GPU host code so both produce the same lines.
 //!
-//! Layout is OpenCV's `HoughLinesStandard`: `round(((w + h) * 2 + 1) / rho)`
-//! rho bins, bin `k` centred on `(k - (num_rho - 1) / 2) * rho` (integer
-//! division), `floor(pi / theta) + 1` angles minus a duplicate of theta = 0.
-//! Votes are stored theta-major (`t * num_rho + r`).
+//! Layout is OpenCV's `HoughLinesStandard`: `cvRound(((w + h) * 2 + 1) / rho)`
+//! rho bins (half to even), bin `k` centred on `(k - (num_rho - 1) / 2) * rho`
+//! (integer division), `floor(pi / theta) + 1` angles minus a duplicate of
+//! theta = 0. Votes are stored theta-major (`t * num_rho + r`). A bin is a
+//! line only when its vote count is **strictly greater** than `threshold`.
 
 /// Accumulator shape for one image / resolution pair.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -22,7 +23,9 @@ impl HoughLayout {
     pub fn new(w: usize, h: usize, rho: f32, theta: f32) -> Self {
         let rho = rho.max(1e-6);
         let theta = theta.max(1e-6);
-        let num_rho = (((w + h) * 2 + 1) as f32 / rho).round() as usize;
+        // OpenCV `cvRound`: half to even, then at least one bin. `f32::round`
+        // is half away from zero, which sizes a 2.5-bin accumulator as 3.
+        let num_rho = (((w + h) * 2 + 1) as f32 / rho).round_ties_even().max(1.0) as usize;
         let mut num_theta = (std::f32::consts::PI / theta).floor() as usize + 1;
         if num_theta > 1
             && (std::f32::consts::PI - (num_theta - 1) as f32 * theta).abs() < theta / 2.0
@@ -50,11 +53,11 @@ impl HoughLayout {
     }
 
     /// Rho bin of pixel (x, y) at angle t, relative to `rho_center`:
-    /// `round((x cos + y sin) / rho)`, ties away from zero, all in f32.
+    /// `cvRound((x cos + y sin) / rho)`, half to even, all in f32.
     #[inline]
     pub fn bin(&self, x: usize, y: usize, cos: f32, sin: f32) -> f32 {
         let r = x as f32 * cos + y as f32 * sin;
-        (r / self.rho).round()
+        (r / self.rho).round_ties_even()
     }
 
     /// Accumulator index for a bin from [`Self::bin`], if in range.
@@ -70,7 +73,7 @@ impl HoughLayout {
 
     /// Lines from a filled accumulator: OpenCV's `findLocalMaximums` (a bin
     /// beats its rho and theta neighbours, `>` on the lower side and `>=` on
-    /// the upper, out-of-range neighbours 0) for bins with at least
+    /// the upper, out-of-range neighbours 0) for bins with **more than**
     /// `threshold` votes, strongest first (stable on theta-major order).
     pub fn peaks(&self, accumulator: &[u32], threshold: u32) -> Vec<cv_core::HoughLine> {
         let (num_rho, num_theta) = (self.num_rho, self.num_theta);
@@ -79,7 +82,7 @@ impl HoughLayout {
         for t in 0..num_theta {
             for r in 0..num_rho {
                 let votes = at(t, r);
-                if votes < threshold {
+                if votes <= threshold {
                     continue;
                 }
                 let r_lo = if r > 0 { at(t, r - 1) } else { 0 };

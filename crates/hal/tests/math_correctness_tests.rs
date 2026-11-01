@@ -336,8 +336,8 @@ mod optical_flow_numerical_tests {
         let points: Vec<[f32; 2]> = vec![[50.0, 50.0]];
 
         let flow = cpu.optical_flow_lk(
-            &[pyramid1.clone(), tensor1.clone()],
-            &[pyramid2.clone(), tensor2.clone()],
+            &[tensor1.clone(), pyramid1.clone()],
+            &[tensor2.clone(), pyramid2.clone()],
             &points,
             21,
             30,
@@ -352,11 +352,13 @@ mod optical_flow_numerical_tests {
             "Should return flow for each point"
         );
 
+        // The centre of this ramp is aperture-limited (min eigenvalue ~1e-8).
+        // That is not a successful track: a finite copy of (50, 50) would be
+        // the old "zero residual looks stationary" bug.
         for p in &flow_data {
-            let mag = (p[0].powi(2) + p[1].powi(2)).sqrt();
             assert!(
-                mag.is_finite(),
-                "Flow magnitude should be finite, got ({}, {})",
+                !p[0].is_finite() && !p[1].is_finite(),
+                "aperture-limited window must not be reported as a track, got ({}, {})",
                 p[0],
                 p[1]
             );
@@ -378,8 +380,8 @@ mod optical_flow_numerical_tests {
         let points: Vec<[f32; 2]> = vec![[50.0, 50.0]];
 
         let flow = cpu.optical_flow_lk(
-            &[pyramid1.clone(), tensor1.clone()],
-            &[pyramid2.clone(), tensor2.clone()],
+            &[tensor1.clone(), pyramid1.clone()],
+            &[tensor2.clone(), pyramid2.clone()],
             &points,
             21,
             30,
@@ -390,8 +392,8 @@ mod optical_flow_numerical_tests {
 
         for p in &flow_data {
             assert!(
-                p[0].is_finite() && p[1].is_finite(),
-                "Flow values should be finite, got ({}, {})",
+                !p[0].is_finite() && !p[1].is_finite(),
+                "aperture-limited window must not be reported as a track, got ({}, {})",
                 p[0],
                 p[1]
             );

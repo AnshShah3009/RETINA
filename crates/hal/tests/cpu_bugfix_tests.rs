@@ -45,15 +45,15 @@ fn test_canny_strong_edges_are_255() {
 }
 
 // ---------------------------------------------------------------------------
-// Finding 6: CPU pyramid_down uses floor halving to match the GPU convention.
+// Finding 6: pyramid_down follows OpenCV pyrDown, ((w+1)/2, (h+1)/2).
 // ---------------------------------------------------------------------------
 #[test]
-fn test_pyramid_down_odd_dimensions_floor() {
+fn test_pyramid_down_odd_dimensions_ceil_half() {
     let cpu = get_cpu_backend();
     let input = f32_tensor(vec![1.0; 15], 1, 3, 5);
     let out = cpu.pyramid_down(&input).unwrap();
-    assert_eq!(out.shape.width, 2);
-    assert_eq!(out.shape.height, 1);
+    assert_eq!(out.shape.width, 3);
+    assert_eq!(out.shape.height, 2);
 }
 
 // ---------------------------------------------------------------------------

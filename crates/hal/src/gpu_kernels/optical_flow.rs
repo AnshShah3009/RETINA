@@ -87,7 +87,9 @@ pub fn lucas_kanade(
         num_points: num_points as u32,
         window_radius: (window_size / 2) as i32,
         max_iters,
-        min_eigenvalue: 1e-6,
+        // Absolute floor, matching video's pyramidal LK (`min_eig < 1e-4`
+        // rejects). The shader compares against this value directly.
+        min_eigenvalue: 1e-4,
     };
 
     let params_buffer = ctx
@@ -180,7 +182,9 @@ struct FarnebackParams {
     height: u32,
     stride: u32,
     flow_stride: u32,
-    num_levels: u32,
+    /// Averaging window of the flow update. The poly-expand shader skips it
+    /// so `poly_n` stays at byte 20 and `poly_sigma` at byte 24.
+    window_size: u32,
     poly_n: u32,
     poly_sigma: f32,
     num_iters: u32,
@@ -198,31 +202,31 @@ pub fn farneback(
     next: &Tensor<f32, GpuStorage<f32>>,
     num_levels: u32,
     pyr_scale: f32,
-    _window_size: u32,
+    window_size: u32,
     num_iters: u32,
     poly_n: u32,
     poly_sigma: f32,
     _blur_mode: FlowBlurMode,
 ) -> Result<Tensor<f32, GpuStorage<f32>>> {
-    let (height, width) = prev.shape.hw();
-    let _stride = width as u32;
-
     let mut prev_pyr = Vec::new();
     let mut next_pyr = Vec::new();
     let mut current_prev = prev.clone();
     let mut current_next = next.clone();
 
+    // CPU Farneback scales each coarser level by `pyramid_scale` (truncating),
+    // rather than always calling a fixed half-resolution pyramid.
     for level in 0..num_levels {
-        let scale = pyr_scale.powi(level as i32);
-        let _scaled_w = ((width as f32 * scale) as u32).max(1);
-        let _scaled_h = ((height as f32 * scale) as u32).max(1);
-
         prev_pyr.push(current_prev.clone());
         next_pyr.push(current_next.clone());
 
         if level < num_levels - 1 {
-            current_prev = crate::gpu_kernels::pyramid::pyramid_down(ctx, &current_prev)?;
-            current_next = crate::gpu_kernels::pyramid::pyramid_down(ctx, &current_next)?;
+            let (h, w) = current_prev.shape.hw();
+            let nw = ((w as f32) * pyr_scale) as u32;
+            let nh = ((h as f32) * pyr_scale) as u32;
+            let nw = nw.max(1);
+            let nh = nh.max(1);
+            current_prev = crate::gpu_kernels::resize::resize(ctx, &current_prev, nw, nh)?;
+            current_next = crate::gpu_kernels::resize::resize(ctx, &current_next, nw, nh)?;
         }
     }
 
@@ -234,12 +238,19 @@ pub fn farneback(
         let level_stride = level_w;
 
         let flow_len = (level_w * level_h * 2) as usize;
+        // Zero before the first iteration. A singular update (`det == 0`)
+        // writes the buffer back unchanged, so an uninitialised allocation
+        // was returned as the flow.
         let flow_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Farneback Flow"),
             size: (flow_len * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
+            mapped_at_creation: true,
         });
+        {
+            flow_buffer.slice(..).get_mapped_range_mut().fill(0);
+        }
+        flow_buffer.unmap();
 
         if let Some(prev_flow) = flow {
             let flow_w = prev_flow.shape.width as u32;
@@ -323,7 +334,7 @@ pub fn farneback(
             height: level_h,
             stride: level_stride,
             flow_stride: level_w * 2,
-            num_levels: 0,
+            window_size,
             poly_n,
             poly_sigma,
             num_iters,
@@ -412,7 +423,7 @@ pub fn farneback(
             height: level_h,
             stride: level_stride,
             flow_stride: level_w * 2,
-            num_levels,
+            window_size,
             poly_n,
             poly_sigma,
             num_iters,
@@ -533,10 +544,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     
     let idx = y * params.width + x;
     
-    let x_prev = select(x - 1u, 0u, x > 0u);
-    let y_prev = select(y - 1u, 0u, y > 0u);
-    let x_next = select(params.width - 1u, x + 1u, x >= params.width - 1u);
-    let y_next = select(params.height - 1u, y + 1u, y >= params.height - 1u);
+    // WGSL select(f, t, cond) returns t when cond is true. The replicate
+    // neighbour is x-1 when x > 0, else 0; and x+1 unless x is the last column.
+    // Swapping the arms indexed u32::MAX at x = 0 and width at the last column,
+    // and the interior of [0, 1, 2, 3] came back as 1.5 instead of 1.
+    let x_prev = select(0u, x - 1u, x > 0u);
+    let y_prev = select(0u, y - 1u, y > 0u);
+    let x_next = select(x + 1u, params.width - 1u, x >= params.width - 1u);
+    let y_next = select(y + 1u, params.height - 1u, y >= params.height - 1u);
     
     let idx_prev_x = y * params.width + x_prev;
     let idx_next_x = y * params.width + x_next;
@@ -725,7 +740,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let new_p2 = v2 + d2;
     
     let norm = sqrt(new_p1 * new_p1 + new_p2 * new_p2);
-    let shrink = select(params.tau / norm, params.tau, norm > 1e-6);
+    // Divide by the norm when it is large (project onto the tau ball). When
+    // the norm is ~0, keep the step at tau so the update stays bounded.
+    let shrink = select(params.tau, params.tau / norm, norm > 1e-6);
     
     let final_p1 = new_p1 * shrink;
     let final_p2 = new_p2 * shrink;
@@ -1126,4 +1143,215 @@ pub fn tvl1_optical_flow(
         dtype: prev.dtype,
         _phantom: std::marker::PhantomData,
     })
+}
+
+/// Replicate-border index for a centered difference.
+///
+/// `select(miss, hit, cond)` is WGSL's `select`: the second value is taken
+/// when `cond` is true. The previous kernel had the arms reversed.
+#[cfg(test)]
+pub(crate) fn centered_neighbor(x: u32, limit: u32, next: bool) -> u32 {
+    if limit == 0 {
+        return 0;
+    }
+    if next {
+        if x >= limit - 1 {
+            limit - 1
+        } else {
+            x + 1
+        }
+    } else if x > 0 {
+        x - 1
+    } else {
+        0
+    }
+}
+
+/// TV-L1 dual step scale. Divide when the norm is large; keep `tau` (bounded,
+/// no division) when the norm is ~0.
+#[cfg(test)]
+pub(crate) fn tvl1_shrink(tau: f32, norm: f32) -> f32 {
+    if norm > 1e-6 {
+        tau / norm
+    } else {
+        tau
+    }
+}
+
+#[cfg(test)]
+fn poly_gauss(x: f32, sigma: f32) -> f32 {
+    let two = 2.0 * sigma * sigma;
+    if !(two.is_finite() && two > 0.0) {
+        return 1.0;
+    }
+    let w = (-(x * x) / two).exp();
+    if w.is_finite() {
+        w
+    } else {
+        1.0
+    }
+}
+
+/// Weighted least-squares quadratic at one pixel. Same fit as
+/// `farneback_poly_expand.wgsl`: basis `[1, x, y, x², xy, y²]`.
+#[cfg(test)]
+pub(crate) fn farneback_poly_pixel(
+    img: &[f32],
+    w: usize,
+    h: usize,
+    x: usize,
+    y: usize,
+    poly_n: usize,
+    sigma: f32,
+) -> [f32; 6] {
+    let half = (poly_n / 2) as i32;
+    let mut a = [0.0f32; 36];
+    let mut b = [0.0f32; 6];
+    for dy in -half..=half {
+        for dx in -half..=half {
+            let px = x as i32 + dx;
+            let py = y as i32 + dy;
+            if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 {
+                continue;
+            }
+            let val = img[py as usize * w + px as usize];
+            let xf = dx as f32;
+            let yf = dy as f32;
+            let weight = poly_gauss(xf, sigma) * poly_gauss(yf, sigma);
+            let basis = [1.0, xf, yf, xf * xf, xf * yf, yf * yf];
+            for i in 0..6 {
+                for j in 0..6 {
+                    a[i * 6 + j] += basis[i] * basis[j] * weight;
+                }
+                b[i] += basis[i] * val * weight;
+            }
+        }
+    }
+    solve6(&mut a, &mut b)
+}
+
+#[cfg(test)]
+fn solve6(a: &mut [f32; 36], b: &mut [f32; 6]) -> [f32; 6] {
+    for col in 0..6 {
+        let mut max_row = col;
+        let mut max_val = a[col * 6 + col].abs();
+        for row in (col + 1)..6 {
+            let v = a[row * 6 + col].abs();
+            if v > max_val {
+                max_val = v;
+                max_row = row;
+            }
+        }
+        if max_val < 1e-12 {
+            for row in 0..6 {
+                a[row * 6 + col] = 0.0;
+            }
+            continue;
+        }
+        if max_row != col {
+            for j in 0..6 {
+                a.swap(col * 6 + j, max_row * 6 + j);
+            }
+            b.swap(col, max_row);
+        }
+        let pivot = a[col * 6 + col];
+        for row in (col + 1)..6 {
+            let factor = a[row * 6 + col] / pivot;
+            if factor.abs() < 1e-15 {
+                continue;
+            }
+            for j in col..6 {
+                let sub = factor * a[col * 6 + j];
+                a[row * 6 + j] -= sub;
+            }
+            b[row] -= factor * b[col];
+        }
+    }
+    let mut x = [0.0f32; 6];
+    for i in (0..6).rev() {
+        if a[i * 6 + i].abs() < 1e-12 {
+            continue;
+        }
+        let mut sum = b[i];
+        for j in (i + 1)..6 {
+            sum -= a[i * 6 + j] * x[j];
+        }
+        let xi = sum / a[i * 6 + i];
+        x[i] = if xi.is_finite() { xi } else { 0.0 };
+    }
+    x
+}
+
+#[cfg(test)]
+mod flow_fix_tests {
+    use super::*;
+
+    #[test]
+    fn farneback_uniform_puts_poly_n_and_sigma_where_the_shader_reads_them() {
+        assert_eq!(std::mem::offset_of!(FarnebackParams, poly_n), 20);
+        assert_eq!(std::mem::offset_of!(FarnebackParams, poly_sigma), 24);
+        let params = FarnebackParams {
+            width: 8,
+            height: 8,
+            stride: 8,
+            flow_stride: 16,
+            window_size: 15,
+            poly_n: 5,
+            poly_sigma: 1.2,
+            num_iters: 1,
+        };
+        let bytes = bytemuck::bytes_of(&params);
+        let poly_n = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
+        let sigma = f32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        assert_eq!(poly_n, 5);
+        assert!((sigma - 1.2).abs() < 1e-6);
+        // The old shader read byte 12 as poly_n: an 8-pixel level's flow
+        // stride, which is 16.
+        let old_poly_n = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+        assert_eq!(old_poly_n, 16);
+    }
+
+    #[test]
+    fn constant_image_poly_has_no_nan_and_zero_quadratic() {
+        let value = 7.5f32;
+        let (w, h) = (8usize, 8usize);
+        let img = vec![value; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let c = farneback_poly_pixel(&img, w, h, x, y, 5, 1.2);
+                assert!(c.iter().all(|v| v.is_finite()), "NaN at {x},{y}: {c:?}");
+                assert!(
+                    (c[0] - value).abs() < 1e-3,
+                    "constant term at {x},{y} is {}, want {value}",
+                    c[0]
+                );
+                for (k, name) in [(3, "x^2"), (4, "xy"), (5, "y^2")] {
+                    assert!(c[k].abs() < 1e-3, "{name} at {x},{y} is {}", c[k]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replicate_centered_difference_of_a_ramp() {
+        let img = [0.0f32, 1.0, 2.0, 3.0];
+        let w = 4u32;
+        let mut dx = [0.0f32; 4];
+        for x in 0..w {
+            let prev = centered_neighbor(x, w, false);
+            let next = centered_neighbor(x, w, true);
+            assert!(prev < w && next < w, "border indexed outside the row");
+            dx[x as usize] = (img[next as usize] - img[prev as usize]) * 0.5;
+        }
+        assert!((dx[1] - 1.0).abs() < 1e-6, "x=1 is {}, want 1", dx[1]);
+        assert!((dx[2] - 1.0).abs() < 1e-6, "x=2 is {}, want 1", dx[2]);
+        assert!(dx.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn tvl1_shrink_divides_only_when_the_norm_is_large() {
+        assert!((tvl1_shrink(0.25, 2.0) - 0.125).abs() < 1e-6);
+        let tiny = tvl1_shrink(0.25, 1e-8);
+        assert!(tiny.is_finite() && (tiny - 0.25).abs() < 1e-6);
+    }
 }
