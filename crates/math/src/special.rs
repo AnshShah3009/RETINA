@@ -145,6 +145,13 @@ fn erfc_cf(x: f64) -> f64 {
 ///
 /// NaN in gives NaN out; `erf(+-inf) = +-1`.
 pub fn erf(x: f64) -> f64 {
+    // Every branch test below is a comparison, and every comparison against
+    // NaN is false, so a NaN `x` used to fall through to the saturated tail
+    // and return `sign` (1.0). Guard it first, exactly as `erfc` does; +-inf
+    // still reaches the saturated tail and returns +-1.
+    if x.is_nan() {
+        return f64::NAN;
+    }
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let ax = x.abs();
     if ax <= 2.0 {
