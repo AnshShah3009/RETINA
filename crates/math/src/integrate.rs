@@ -596,7 +596,17 @@ fn qags(
 }
 
 pub fn simpson(f: impl Fn(f64) -> f64, a: f64, b: f64, n: usize) -> f64 {
-    let n = if n.is_multiple_of(2) { n } else { n + 1 };
+    // n == 0 is even, so the odd-to-even bump left the panel count at 0 and
+    // divided by zero (`trapezoid`/`simpson` of x on [0, 1] returned inf; the
+    // integral is 1/2). Simpson needs a positive even count; 2 is the minimum.
+    // A positive odd count is still promoted by one, so n == 1 is unchanged.
+    let n = if n == 0 {
+        2
+    } else if n.is_multiple_of(2) {
+        n
+    } else {
+        n + 1
+    };
     let h = (b - a) / n as f64;
     let mut sum = f(a) + f(b);
 
@@ -610,6 +620,9 @@ pub fn simpson(f: impl Fn(f64) -> f64, a: f64, b: f64, n: usize) -> f64 {
 }
 
 pub fn trapezoid(f: impl Fn(f64) -> f64, a: f64, b: f64, n: usize) -> f64 {
+    // n == 0 used to divide by zero. One panel is the single trapezoid and
+    // still integrates [a, b]. n >= 1 is unchanged.
+    let n = n.max(1);
     let h = (b - a) / n as f64;
     let mut sum = (f(a) + f(b)) / 2.0;
 

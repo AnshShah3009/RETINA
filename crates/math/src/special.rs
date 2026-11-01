@@ -145,6 +145,13 @@ fn erfc_cf(x: f64) -> f64 {
 ///
 /// NaN in gives NaN out; `erf(+-inf) = +-1`.
 pub fn erf(x: f64) -> f64 {
+    // Every branch test below is a comparison, and every comparison against
+    // NaN is false, so a NaN `x` used to fall through to the saturated tail
+    // and return `sign` (1.0). Guard it first, exactly as `erfc` does; +-inf
+    // still reaches the saturated tail and returns +-1.
+    if x.is_nan() {
+        return f64::NAN;
+    }
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let ax = x.abs();
     if ax <= 2.0 {
@@ -495,7 +502,12 @@ pub fn bessel_jn(n: i32, x: f64) -> f64 {
 }
 
 pub fn bessel_y0(x: f64) -> f64 {
-    if x <= 0.0 {
+    // Y_0 is not real for x < 0 (SciPy `y0(-1)` is NaN). x == 0 stays the
+    // singularity. The old `x <= 0` branch returned -inf for both.
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x == 0.0 {
         return f64::NEG_INFINITY;
     }
     if x < 8.0 {
@@ -538,7 +550,11 @@ pub fn bessel_y0(x: f64) -> f64 {
 }
 
 pub fn bessel_y1(x: f64) -> f64 {
-    if x <= 0.0 {
+    // Same domain as [`bessel_y0`]: NaN for x < 0, -inf at the x == 0 pole.
+    if x < 0.0 {
+        return f64::NAN;
+    }
+    if x == 0.0 {
         return f64::NEG_INFINITY;
     }
     if x < 8.0 {

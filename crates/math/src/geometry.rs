@@ -163,14 +163,17 @@ pub fn polygon_iou(p1: &Polygon<f64>, p2: &Polygon<f64>) -> f64 {
     let intersection = polygon_intersection(p1, p2);
     let intersection_area = intersection.unsigned_area();
 
-    if intersection_area <= 1e-9 {
+    // Any positive area is a real overlap. An absolute cutoff of 1e-9 reported
+    // IoU 0 for two identical squares of side 1e-5 (intersection 1e-10) while
+    // side 1 returned 1. Zero is reserved for a genuinely empty intersection.
+    if !(intersection_area > 0.0) {
         return 0.0;
     }
 
     let union = polygon_union(p1, p2);
     let union_area = union.unsigned_area();
 
-    if union_area <= 1e-9 {
+    if !(union_area > 0.0) {
         return 0.0;
     }
 

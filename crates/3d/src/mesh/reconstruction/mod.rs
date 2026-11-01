@@ -21,31 +21,29 @@ use super::TriangleMesh;
 use cv_core::point_cloud::PointCloud;
 use nalgebra::{Point3, Vector3};
 
-/// Compute normals for point cloud (simplified).
+/// Normals for a point cloud.
 ///
-/// Returns the cloud's own normals when it carries them, and an **empty** vector
-/// when it does not.
-///
-/// # Why absence, and not `(0, 1, 0)`
-///
-/// This used to "default to upward normals" and return `vec![(0, 1, 0); n]` for
-/// every point of a cloud with no normals. That is a fabricated answer of the
-/// exact shape this crate has been removing elsewhere: the result has exactly
-/// the right *length*, so `assert_eq!(normals.len(), points.len())` passes, and
-/// every value is a plausible unit vector, so nothing downstream can tell it
-/// apart from a measurement. A caller that checks only `is_empty()` would be
-/// told the cloud was fully oriented along +Y. Measured: a 3-point cloud with no
-/// normals returned `[[0,1,0], [0,1,0], [0,1,0]]`.
-///
-/// Note that the returned length is *not* aligned with the input in that case -
-/// an empty result is deliberately a different length from `cloud.points.len()`,
-/// which is what lets a caller detect the absence at all.
-///
-/// `k` is accepted for signature compatibility and is not yet used: this is a
-/// placeholder for real PCA estimation, as the module doc says.
-pub fn compute_point_normals(cloud: &PointCloud, _k: usize) -> Vec<Vector3<f32>> {
-    // Simplified: return the cloud's own normals if it has them.
-    cloud.normals.clone().unwrap_or_default()
+/// A cloud that already carries normals gets those back, unchanged. A cloud
+/// that does not is estimated with PCA over `k` neighbours
+/// ([`crate::filters::estimate_normals_knn`]), oriented into the positive-z
+/// half-space. That used to return `(0, 1, 0)` for every point, a
+/// valid-length answer that was not a measurement.
+pub fn compute_point_normals(cloud: &PointCloud, k: usize) -> Vec<Vector3<f32>> {
+    if let Some(normals) = &cloud.normals {
+        return normals.clone();
+    }
+    if cloud.points.is_empty() {
+        return Vec::new();
+    }
+    let points: Vec<Point3<f64>> = cloud
+        .points
+        .iter()
+        .map(|p| Point3::new(p.x as f64, p.y as f64, p.z as f64))
+        .collect();
+    crate::filters::estimate_normals_knn(&points, k)
+        .into_iter()
+        .map(|n| Vector3::new(n.x as f32, n.y as f32, n.z as f32))
+        .collect()
 }
 
 /// Create a simple sphere point cloud for testing
@@ -187,20 +185,23 @@ mod tests {
         assert_eq!(normals.len(), 50);
     }
 
-    /// A cloud with no normals must not be handed a fabricated `(0, 1, 0)` for
-    /// every point.
+    /// A cloud with no normals is estimated from the points. Three corners of
+    /// the xy plane are a plane, so the normal is +Z, not one fabricated
+    /// `(0, 1, 0)` per point and not an empty vector.
     #[test]
-    fn test_compute_point_normals_without_normals_reports_absence() {
+    fn test_compute_point_normals_without_normals_estimates_the_plane() {
         use cv_core::PointCloud;
         let cloud = PointCloud::new(vec![
             Point3::new(0.0, 0.0, 0.0),
             Point3::new(1.0, 0.0, 0.0),
             Point3::new(0.0, 1.0, 0.0),
         ]);
-        assert!(
-            compute_point_normals(&cloud, 5).is_empty(),
-            "a cloud with no normals has none to report"
-        );
+        let normals = compute_point_normals(&cloud, 5);
+        assert_eq!(normals.len(), 3);
+        for n in &normals {
+            assert!(n.z > 0.99, "xy plane normal should be +Z, got {n:?}");
+            assert!(n.x.abs() < 1e-3 && n.y.abs() < 1e-3, "got {n:?}");
+        }
     }
 
     #[test]

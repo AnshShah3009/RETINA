@@ -63,6 +63,226 @@ impl<'a> RobustModel<(usize, usize, f32)> for GlobalRegistrationEstimator<'a> {
     }
 }
 
+/// Squared L2 between two FPFH histograms, summed in bin order. The same
+/// reduction the linear scan used, so an exact tie stays an exact tie.
+fn histogram_dist2(a: &[f32; 33], b: &[f32; 33]) -> f32 {
+    a.iter().zip(b.iter()).map(|(a, b)| (a - b).powi(2)).sum()
+}
+
+/// Exact nearest neighbour over 33-D FPFH histograms.
+///
+/// The scan kept the first strict minimum (`dist < best`), which is the lower
+/// index on a tie. A candidate replaces the incumbent only when its squared
+/// distance is strictly smaller, or equal and its index is lower. The far
+/// child is skipped only when the split plane is *strictly* farther than the
+/// current worst accepted distance, so an equal-distance point with a lower
+/// index on the other side of the split is still visited.
+struct FpfhNn {
+    hist: Vec<[f32; 33]>,
+    nodes: Vec<FpfhNode>,
+    order: Vec<usize>,
+}
+
+enum FpfhNode {
+    Leaf {
+        start: usize,
+        count: usize,
+    },
+    Split {
+        axis: u8,
+        split: f32,
+        left: usize,
+        right: usize,
+    },
+}
+
+const FPFH_LEAF: usize = 8;
+
+impl FpfhNn {
+    fn build(features: &[FPFHFeature]) -> Self {
+        let hist: Vec<[f32; 33]> = features.iter().map(|f| f.histogram).collect();
+        let n = hist.len();
+        let mut order: Vec<usize> = (0..n).collect();
+        let mut nodes = Vec::new();
+        if n > 0 {
+            Self::build_range(&hist, &mut order, &mut nodes, 0, n, 0);
+        }
+        Self { hist, nodes, order }
+    }
+
+    fn build_range(
+        hist: &[[f32; 33]],
+        order: &mut [usize],
+        nodes: &mut Vec<FpfhNode>,
+        start: usize,
+        end: usize,
+        depth: usize,
+    ) -> usize {
+        let count = end - start;
+        let id = nodes.len();
+        if count <= FPFH_LEAF {
+            nodes.push(FpfhNode::Leaf { start, count });
+            return id;
+        }
+        let axis = (depth % 33) as u8;
+        let axis_us = axis as usize;
+        order[start..end].sort_by(|&a, &b| {
+            hist[a][axis_us]
+                .partial_cmp(&hist[b][axis_us])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mid = start + count / 2;
+        let split = hist[order[mid]][axis_us];
+        nodes.push(FpfhNode::Split {
+            axis,
+            split,
+            left: 0,
+            right: 0,
+        });
+        let left = Self::build_range(hist, order, nodes, start, mid, depth + 1);
+        let right = Self::build_range(hist, order, nodes, mid, end, depth + 1);
+        if let FpfhNode::Split {
+            left: slot_l,
+            right: slot_r,
+            ..
+        } = &mut nodes[id]
+        {
+            *slot_l = left;
+            *slot_r = right;
+        }
+        id
+    }
+
+    /// `(index, Euclidean distance)`. Empty or entirely non-finite input
+    /// returns `(0, f32::MAX)`, which is what the scan left in its
+    /// initialisers (and `f32::MAX` is finite, so the RANSAC filter kept it).
+    fn nearest(&self, query: &[f32; 33]) -> (usize, f32) {
+        if self.nodes.is_empty() {
+            return (0, f32::MAX);
+        }
+        let mut best = f32::INFINITY;
+        let mut best_idx = usize::MAX;
+        self.search_one(0, query, &mut best, &mut best_idx);
+        if best_idx == usize::MAX {
+            (0, f32::MAX)
+        } else {
+            (best_idx, best)
+        }
+    }
+
+    /// `(best index, best distance, second distance)`. `second` is `f32::MAX`
+    /// when only one finite histogram exists, matching the scan's sentinel.
+    /// `None` when nothing finite was seen.
+    fn nearest_two(&self, query: &[f32; 33]) -> Option<(usize, f32, f32)> {
+        if self.nodes.is_empty() {
+            return None;
+        }
+        let mut best = f32::INFINITY;
+        let mut best_idx = usize::MAX;
+        let mut second = f32::INFINITY;
+        self.search_two(0, query, &mut best, &mut best_idx, &mut second);
+        if best_idx == usize::MAX {
+            return None;
+        }
+        // The scan's runner-up sentinel is `f32::MAX`, which is finite, so a
+        // lone target still enters the ratio test.
+        let second = if second.is_finite() { second } else { f32::MAX };
+        Some((best_idx, best, second))
+    }
+
+    fn search_one(&self, node: usize, query: &[f32; 33], best: &mut f32, best_idx: &mut usize) {
+        match self.nodes[node] {
+            FpfhNode::Leaf { start, count } => {
+                for &idx in &self.order[start..start + count] {
+                    // Euclidean, not squared: two sums of squares can share a
+                    // sqrt, and the scan's strict `<` is on the sqrt.
+                    let dist = histogram_dist2(query, &self.hist[idx]).sqrt();
+                    if dist < *best || (dist == *best && idx < *best_idx) {
+                        *best = dist;
+                        *best_idx = idx;
+                    }
+                }
+            }
+            FpfhNode::Split {
+                axis,
+                split,
+                left,
+                right,
+            } => {
+                let delta = query[axis as usize] - split;
+                let (near, far) = if delta <= 0.0 {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                self.search_one(near, query, best, best_idx);
+                // `|delta|` lower-bounds the Euclidean distance. `>` rather
+                // than `>=`: an equal plane distance can hide a tie with a
+                // lower index.
+                if !(delta.abs() > *best) {
+                    self.search_one(far, query, best, best_idx);
+                }
+            }
+        }
+    }
+
+    fn consider_two(idx: usize, dist: f32, best: &mut f32, best_idx: &mut usize, second: &mut f32) {
+        if dist < *best || (dist == *best && idx < *best_idx) {
+            if dist < *best {
+                if *best_idx != usize::MAX {
+                    *second = *best;
+                }
+                *best = dist;
+                *best_idx = idx;
+            } else {
+                // Same distance, lower index. The displaced point is still a
+                // neighbour at this distance, so the runner-up collapses onto it.
+                *second = *best;
+                *best_idx = idx;
+            }
+        } else if dist < *second {
+            *second = dist;
+        }
+    }
+
+    fn search_two(
+        &self,
+        node: usize,
+        query: &[f32; 33],
+        best: &mut f32,
+        best_idx: &mut usize,
+        second: &mut f32,
+    ) {
+        match self.nodes[node] {
+            FpfhNode::Leaf { start, count } => {
+                for &idx in &self.order[start..start + count] {
+                    let dist = histogram_dist2(query, &self.hist[idx]).sqrt();
+                    Self::consider_two(idx, dist, best, best_idx, second);
+                }
+            }
+            FpfhNode::Split {
+                axis,
+                split,
+                left,
+                right,
+            } => {
+                let delta = query[axis as usize] - split;
+                let (near, far) = if delta <= 0.0 {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                self.search_two(near, query, best, best_idx, second);
+                // The runner-up is the prune threshold. Equality is not pruned:
+                // the other side may hold a lower index at the same best distance.
+                if !(delta.abs() > *second) {
+                    self.search_two(far, query, best, best_idx, second);
+                }
+            }
+        }
+    }
+}
+
 /// Global registration using RANSAC
 pub fn registration_ransac_based_on_feature_matching(
     source: &PointCloud,
@@ -73,26 +293,15 @@ pub fn registration_ransac_based_on_feature_matching(
     ransac_n: usize,
     max_iterations: usize,
 ) -> Result<GlobalRegistrationResult> {
-    // Find correspondences (parallel brute-force — 33D histograms defeat KDTree)
+    // Exact nearest neighbour in FPFH space. The distance compared is the same
+    // Euclidean value the linear scan used, so the argmin matches its strict
+    // `<` and a tie still names the lower index.
+    let target_nn = FpfhNn::build(target_features);
     let mut correspondences: Vec<(usize, usize, f32)> = source_features
         .par_iter()
         .enumerate()
         .filter_map(|(i, source_feature)| {
-            let mut min_dist = f32::MAX;
-            let mut min_idx = 0;
-            for (j, target_feature) in target_features.iter().enumerate() {
-                let dist = source_feature
-                    .histogram
-                    .iter()
-                    .zip(target_feature.histogram.iter())
-                    .map(|(a, b)| (a - b).powi(2))
-                    .sum::<f32>()
-                    .sqrt();
-                if dist < min_dist {
-                    min_dist = dist;
-                    min_idx = j;
-                }
-            }
+            let (min_idx, min_dist) = target_nn.nearest(&source_feature.histogram);
             // Every source feature gets its nearest target feature, as in
             // Open3D. The match used to be gated by `max_correspondence_
             // distance` - a *metric* distance in the point cloud's units,
@@ -184,33 +393,16 @@ pub fn registration_fgr_based_on_feature_matching(
     // returned `Ok` with a transform derived from it. The sibling RANSAC entry
     // point in this file already validates; this one did not.
     let ratio = (option.tuple_scale.clamp(0.0, 1.0)) as f32;
+    let target_nn = FpfhNn::build(target_features);
     let correspondences: Vec<(usize, usize)> = source_features
         .par_iter()
         .enumerate()
         .filter_map(|(i, sf)| {
-            let mut best = f32::MAX;
-            let mut second = f32::MAX;
-            let mut best_idx = None;
-            for (j, tf) in target_features.iter().enumerate() {
-                let dist: f32 = sf
-                    .histogram
-                    .iter()
-                    .zip(tf.histogram.iter())
-                    .map(|(a, b)| (a - b).powi(2))
-                    .sum::<f32>()
-                    .sqrt();
-                if dist < best {
-                    second = best;
-                    best = dist;
-                    best_idx = Some(j);
-                } else if dist < second {
-                    second = dist;
-                }
-            }
-            let idx = best_idx?;
+            let (idx, best, second) = target_nn.nearest_two(&sf.histogram)?;
             // No second candidate, or the best is not clearly better than the
             // runner-up: the match is ambiguous and is dropped rather than
-            // guessed.
+            // guessed. `second` is `f32::MAX` when the target has a single
+            // finite histogram, which is finite, so the test still runs.
             if second.is_finite() && (best > ratio * second || best == second) {
                 return None;
             }
@@ -612,5 +804,81 @@ mod fgr_rejects_degenerate_matching {
             FastGlobalRegistrationOption::default(),
         );
         assert!(r.is_ok(), "distinct features should register: {r:?}");
+    }
+}
+
+#[cfg(test)]
+mod fpfh_nn_matches_the_scan {
+    use super::*;
+
+    fn hist(seed: u32) -> FPFHFeature {
+        let mut h = [0.0f32; 33];
+        let mut s = seed;
+        for bin in &mut h {
+            s = s.wrapping_mul(1103515245).wrapping_add(12345);
+            *bin = (s >> 8) as f32 / (1u32 << 24) as f32;
+        }
+        FPFHFeature { histogram: h }
+    }
+
+    fn scan_one(query: &[f32; 33], targets: &[FPFHFeature]) -> (usize, f32) {
+        let mut min_dist = f32::MAX;
+        let mut min_idx = 0usize;
+        for (j, target) in targets.iter().enumerate() {
+            let dist = histogram_dist2(query, &target.histogram).sqrt();
+            if dist < min_dist {
+                min_dist = dist;
+                min_idx = j;
+            }
+        }
+        (min_idx, min_dist)
+    }
+
+    fn scan_two(query: &[f32; 33], targets: &[FPFHFeature]) -> Option<(usize, f32, f32)> {
+        let mut best = f32::MAX;
+        let mut second = f32::MAX;
+        let mut best_idx = None;
+        for (j, target) in targets.iter().enumerate() {
+            let dist = histogram_dist2(query, &target.histogram).sqrt();
+            if dist < best {
+                second = best;
+                best = dist;
+                best_idx = Some(j);
+            } else if dist < second {
+                second = dist;
+            }
+        }
+        best_idx.map(|idx| (idx, best, second))
+    }
+
+    #[test]
+    fn nearest_histogram_keeps_the_lower_index_and_the_runner_up() {
+        let mut targets: Vec<FPFHFeature> = (0..40).map(hist).collect();
+        // Planted ties, including one that sorts onto the other side of a median.
+        targets.push(targets[3].clone());
+        targets.push(targets[7].clone());
+        targets[15] = targets[2].clone();
+        let tree = FpfhNn::build(&targets);
+        for (i, query) in targets.iter().enumerate() {
+            let (idx, dist) = tree.nearest(&query.histogram);
+            let (want_idx, want_dist) = scan_one(&query.histogram, &targets);
+            assert_eq!(idx, want_idx, "query {i}");
+            assert_eq!(dist, want_dist, "query {i}");
+            let got = tree.nearest_two(&query.histogram);
+            let want = scan_two(&query.histogram, &targets);
+            match (got, want) {
+                (Some((gi, gb, gs)), Some((wi, wb, ws))) => {
+                    assert_eq!(gi, wi, "query {i} index");
+                    assert_eq!(gb, wb, "query {i} best");
+                    assert_eq!(gs, ws, "query {i} second");
+                }
+                (None, None) => {}
+                (a, b) => panic!("query {i}: tree {a:?} scan {b:?}"),
+            }
+        }
+        // A histogram that matches two targets exactly must name the lower index.
+        let tied = targets[3].clone();
+        let (idx, _) = tree.nearest(&tied.histogram);
+        assert_eq!(idx, 3);
     }
 }

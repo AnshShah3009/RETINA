@@ -6,11 +6,18 @@ use rstar::{RTree, RTreeObject, AABB};
 
 /// Analytic minimum eigenvector of a 3×3 symmetric matrix.
 ///
-/// Thin wrapper over the single shared implementation in `cv-math`
-/// (Open3D `PointCloudImpl.h` / Geometric Tools `RobustEigenSymmetric3x3`),
-/// also used by the f32 GPU and f64 CPU normal-estimation paths.
+/// The shared implementation in `cv-math` (Open3D `PointCloudImpl.h` /
+/// Geometric Tools `RobustEigenSymmetric3x3`) is generic over the element type,
+/// and its `f32` instantiation cannot resolve a three-point neighbourhood: the
+/// out-of-plane eigenvalue is exactly zero while the in-plane spread is thin, so
+/// `det((A - qI) / p)` saturates at its `±1` clamp, the two small eigenvalues
+/// look repeated, and the returned vector is an arbitrary element of their shared
+/// span - for a planar cloud, one that lies *in* the plane. Solving the same
+/// covariance in `f64` separates the eigenvalues, so upcast the matrix, run the
+/// solver, and cast the unit eigenvector back.
 fn fast_eigen3x3_min(m: &Matrix3<f32>) -> Vector3<f32> {
-    cv_math::linalg::min_eigenvector_3x3(m)
+    let v = cv_math::linalg::min_eigenvector_3x3(&m.map(|value| value as f64));
+    Vector3::new(v.x as f32, v.y as f32, v.z as f32)
 }
 
 /// The normal given to a point whose neighbourhood cannot determine one.

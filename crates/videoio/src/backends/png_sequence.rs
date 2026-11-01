@@ -98,11 +98,17 @@ fn next_frame_index(directory: &Path, prefix: &str) -> Result<usize> {
         let Some(rest) = rest.strip_prefix('_') else {
             continue;
         };
-        if let Some(index) = rest
-            .strip_suffix(".png")
-            .and_then(|digits| digits.parse::<usize>().ok())
-        {
-            next = next.max(index + 1);
+        // The extension is matched case-insensitively for the same reason the
+        // reader's `is_frame_path` is: `f_000010.PNG` is a frame too, and a
+        // writer that overlooked it restarted at zero and interleaved the new
+        // frames with the existing ones.
+        let Some((digits, ext)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        if ext.eq_ignore_ascii_case("png") {
+            if let Ok(index) = digits.parse::<usize>() {
+                next = next.max(index + 1);
+            }
         }
     }
 
@@ -155,7 +161,11 @@ impl VideoWriter for PngSequenceWriter {
 #[derive(Debug)]
 pub struct PngSequenceCapture {
     files: Vec<PathBuf>,
-    current_index: usize,
+    /// Index of the next frame [`VideoCapture::grab`] will read.
+    next_index: usize,
+    /// Frame produced by the last successful grab. `retrieve` returns it and
+    /// does not advance.
+    grabbed: Option<GrayImage>,
 }
 
 impl PngSequenceCapture {
@@ -184,8 +194,18 @@ impl PngSequenceCapture {
 
         Ok(Self {
             files,
-            current_index: 0,
+            next_index: 0,
+            grabbed: None,
         })
+    }
+
+    fn load_frame(&self, index: usize) -> Result<GrayImage> {
+        let path = &self.files[index];
+        image::open(path)
+            .map_err(|e| {
+                VideoError::Backend(format!("Failed to open image {}: {}", path.display(), e))
+            })
+            .map(|img| img.to_luma8())
     }
 }
 
@@ -194,27 +214,24 @@ impl VideoCapture for PngSequenceCapture {
         !self.files.is_empty()
     }
 
+    /// Advance to the next frame and keep it. A second grab without
+    /// `retrieve` replaces that frame, so two grabs then one retrieve skip
+    /// a frame. OpenCV's contract, matching the FFmpeg backend.
     fn grab(&mut self) -> Result<()> {
-        if self.current_index < self.files.len() {
-            Ok(())
-        } else {
-            Err(VideoError::CaptureFailed("End of sequence".to_string()))
+        if self.next_index >= self.files.len() {
+            return Err(VideoError::CaptureFailed("End of sequence".to_string()));
         }
+        let img = self.load_frame(self.next_index)?;
+        self.next_index += 1;
+        self.grabbed = Some(img);
+        Ok(())
     }
 
+    /// Return the frame from the last successful `grab`. Does not advance.
     fn retrieve(&mut self) -> Result<GrayImage> {
-        if self.current_index < self.files.len() {
-            let path = &self.files[self.current_index];
-            let img = image::open(path)
-                .map_err(|e| {
-                    VideoError::Backend(format!("Failed to open image {}: {}", path.display(), e))
-                })?
-                .to_luma8();
-            self.current_index += 1;
-            Ok(img)
-        } else {
-            Err(VideoError::CaptureFailed("End of sequence".to_string()))
-        }
+        self.grabbed
+            .clone()
+            .ok_or_else(|| VideoError::CaptureFailed("No frame grabbed".to_string()))
     }
 }
 

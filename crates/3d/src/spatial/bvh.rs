@@ -127,6 +127,46 @@ impl Aabb {
         tmax >= tmin.max(0.0)
     }
 
+    /// Distance from `p` to the nearest point of the box. Zero when `p` is inside.
+    /// An empty box is infinitely far, so a traversal can prune it.
+    pub fn distance_to_point(&self, p: &Point3<f32>) -> f32 {
+        if self.is_empty {
+            return f32::INFINITY;
+        }
+        let dx = (self.min.x - p.x).max(p.x - self.max.x).max(0.0);
+        let dy = (self.min.y - p.y).max(p.y - self.max.y).max(0.0);
+        let dz = (self.min.z - p.z).max(p.z - self.max.z).max(0.0);
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+
+    /// Ray/box test with the box grown by a relative pad.
+    ///
+    /// The exact slab test misses a triangle the ray does hit when the hit sits
+    /// a couple of ulps outside the stored bounds. Padding only adds candidate
+    /// faces; the caller's triangle test still decides the hit. Skipping the
+    /// pad would drop crossings.
+    fn intersects_ray_padded(&self, origin: &Point3<f32>, inv_dir: &Vector3<f32>) -> bool {
+        if self.is_empty {
+            return false;
+        }
+        let ext = (self.max.x - self.min.x)
+            .abs()
+            .max((self.max.y - self.min.y).abs())
+            .max((self.max.z - self.min.z).abs());
+        let scale = ext
+            .max(origin.x.abs())
+            .max(origin.y.abs())
+            .max(origin.z.abs())
+            .max(1.0);
+        let pad = scale * 1e-3;
+        let padded = Aabb {
+            min: Point3::new(self.min.x - pad, self.min.y - pad, self.min.z - pad),
+            max: Point3::new(self.max.x + pad, self.max.y + pad, self.max.z + pad),
+            is_empty: false,
+        };
+        padded.intersect_ray(origin, inv_dir)
+    }
+
     fn longest_axis(&self) -> usize {
         // An empty Aabb has no extent. Returning a fixed axis rather than
         // subtracting the sentinel pair, which overflows to -inf and makes every
@@ -322,6 +362,149 @@ impl Bvh {
                 }
                 self.intersect_recursive(left, origin, dir, inv_dir, vertices, faces, best);
                 self.intersect_recursive(right, origin, dir, inv_dir, vertices, faces, best);
+            }
+        }
+    }
+
+    /// Closest point among the faces, pruning any box whose lower bound is
+    /// farther than the best triangle found so far.
+    ///
+    /// `on_face` returns `(point, distance)` for one face index. On a distance
+    /// tie the lower face index is kept, which is the face the linear scan
+    /// reports (it only replaces on a strict improvement and walks faces in
+    /// order).
+    pub fn closest_on_faces<F>(
+        &self,
+        query: &Point3<f32>,
+        mut on_face: F,
+    ) -> Option<(Point3<f32>, f32, usize)>
+    where
+        F: FnMut(usize) -> (Point3<f32>, f32),
+    {
+        let mut best: Option<(Point3<f32>, f32, usize)> = None;
+        self.closest_recursive(&self.root, query, &mut on_face, &mut best);
+        best
+    }
+
+    fn closest_recursive<F>(
+        &self,
+        node: &BvhNode,
+        query: &Point3<f32>,
+        on_face: &mut F,
+        best: &mut Option<(Point3<f32>, f32, usize)>,
+    ) where
+        F: FnMut(usize) -> (Point3<f32>, f32),
+    {
+        let bounds = match node {
+            BvhNode::Leaf { bounds, .. } | BvhNode::Internal { bounds, .. } => bounds,
+        };
+        if let Some((_, best_dist, _)) = *best {
+            let lb = bounds.distance_to_point(query);
+            // The box distance is a few ulps above the true distance to a
+            // triangle in the box. Prune only when that cannot hide a closer
+            // triangle, or an equally close one with a lower face index.
+            let scale = query
+                .x
+                .abs()
+                .max(query.y.abs())
+                .max(query.z.abs())
+                .max(best_dist)
+                .max(1.0);
+            if lb > best_dist + 1e-4 * scale {
+                return;
+            }
+        }
+        match node {
+            BvhNode::Leaf { start, count, .. } => {
+                for i in *start..(*start + *count) {
+                    let fi = self.tri_indices[i];
+                    let (point, dist) = on_face(fi);
+                    if !dist.is_finite() {
+                        continue;
+                    }
+                    let replace = match *best {
+                        None => true,
+                        Some((_, best_dist, best_face)) => {
+                            dist < best_dist || (dist == best_dist && fi < best_face)
+                        }
+                    };
+                    if replace {
+                        *best = Some((point, dist, fi));
+                    }
+                }
+            }
+            BvhNode::Internal { left, right, .. } => {
+                let dl = match left.as_ref() {
+                    BvhNode::Leaf { bounds, .. } | BvhNode::Internal { bounds, .. } => {
+                        bounds.distance_to_point(query)
+                    }
+                };
+                let dr = match right.as_ref() {
+                    BvhNode::Leaf { bounds, .. } | BvhNode::Internal { bounds, .. } => {
+                        bounds.distance_to_point(query)
+                    }
+                };
+                if dl <= dr {
+                    self.closest_recursive(left, query, on_face, best);
+                    self.closest_recursive(right, query, on_face, best);
+                } else {
+                    self.closest_recursive(right, query, on_face, best);
+                    self.closest_recursive(left, query, on_face, best);
+                }
+            }
+        }
+    }
+
+    /// Every face whose box the ray might meet. The caller counts hits; this
+    /// does not stop at the closest one. A box the ray misses is skipped, and
+    /// the box test is padded so a face the ray does hit is not dropped.
+    pub fn for_each_face_along_ray<F>(&self, origin: &Point3<f32>, dir: &Vector3<f32>, mut visit: F)
+    where
+        F: FnMut(usize),
+    {
+        let inv = |c: f32| {
+            if c == 0.0 {
+                f32::copysign(f32::INFINITY, c)
+            } else {
+                1.0 / c
+            }
+        };
+        let inv_dir = Vector3::new(inv(dir.x), inv(dir.y), inv(dir.z));
+        self.visit_ray_node(&self.root, origin, &inv_dir, &mut visit);
+    }
+
+    fn visit_ray_node<F>(
+        &self,
+        node: &BvhNode,
+        origin: &Point3<f32>,
+        inv_dir: &Vector3<f32>,
+        visit: &mut F,
+    ) where
+        F: FnMut(usize),
+    {
+        match node {
+            BvhNode::Leaf {
+                bounds,
+                start,
+                count,
+            } => {
+                if !bounds.intersects_ray_padded(origin, inv_dir) {
+                    return;
+                }
+                for i in *start..(*start + *count) {
+                    visit(self.tri_indices[i]);
+                }
+            }
+            BvhNode::Internal {
+                bounds,
+                left,
+                right,
+            } => {
+                if !bounds.intersects_ray_padded(origin, inv_dir) {
+                    return;
+                }
+                self.visit_ray_node(left, origin, inv_dir, visit);
+                self.visit_ray_node(right, origin, inv_dir, visit);
             }
         }
     }

@@ -25,11 +25,11 @@ fn main(
     if (out_pixel_idx >= params.len) { return; }
     
     if (params.code == 0u || params.code == 1u) { // RgbToGray or BgrToGray
-        // Input: 3 floats per pixel. Output: 1 float per pixel.
-        let src_base = out_pixel_idx * 3u;
-        let c0 = get_f32(src_base);
-        let c1 = get_f32(src_base + 1u);
-        let c2 = get_f32(src_base + 2u);
+        // Planar CHW: plane c starts at c * num_pixels.
+        let n = params.len;
+        let c0 = get_f32(out_pixel_idx);
+        let c1 = get_f32(n + out_pixel_idx);
+        let c2 = get_f32(2u * n + out_pixel_idx);
         
         var gray: f32 = 0.0;
         if (params.code == 0u) { // RGB

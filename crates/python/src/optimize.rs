@@ -226,6 +226,61 @@ fn minimize_nelder_mead(
     Ok((result.x, result.fun))
 }
 
+/// Failure from [`cg_solve_checked`], split by whose fault it is.
+#[derive(Debug, PartialEq)]
+enum CgSolveError {
+    /// The caller described no solvable system: a non-square shape, a
+    /// right-hand side that does not match the row count, or an index out of
+    /// bounds.
+    InvalidSystem(String),
+    /// The system was well formed but the solver did not converge.
+    Solver(String),
+}
+
+/// Validate a CG system, then solve it, without entering `cv-math`'s panicking
+/// entry points on bad input.
+///
+/// `cg_solve` asserts that the matrix is square and that `b` has one entry per
+/// row, and `CsrMatrix::from_triplets` asserts that every row and column index
+/// is in bounds. A binding that forwards unvalidated input turns a caller
+/// error into a Rust panic (`PanicException`), which is neither the
+/// `ValueError` this function's neighbours raise nor something the caller can
+/// catch and correct.
+///
+/// The old guard compared `b.len()` against `ncols`. For Ax = b the right-hand
+/// side has one entry per **row**, so a 1x2 system with two RHS entries slipped
+/// through and panicked inside `cg_solve`:
+/// `sparse_solve_cg([(0,0,1.0)], 1, 2, [1.0, 2.0])` -> `assertion 'left ==
+/// right' failed: Matrix must be square for CG`.
+fn cg_solve_checked(
+    nrows: usize,
+    ncols: usize,
+    triplets: &[(usize, usize, f64)],
+    b: Vec<f64>,
+) -> Result<Vec<f64>, CgSolveError> {
+    if nrows != ncols {
+        return Err(CgSolveError::InvalidSystem(format!(
+            "the matrix must be square, got {nrows} rows and {ncols} columns"
+        )));
+    }
+    if b.len() != nrows {
+        return Err(CgSolveError::InvalidSystem(format!(
+            "the right-hand side has {} entries but the matrix has {nrows} rows",
+            b.len()
+        )));
+    }
+    if let Some(&(r, c, _)) = triplets.iter().find(|&&(r, c, _)| r >= nrows || c >= ncols) {
+        return Err(CgSolveError::InvalidSystem(format!(
+            "triplet ({r}, {c}) is out of bounds for a {nrows}x{ncols} matrix"
+        )));
+    }
+    let mat = cv_scientific::sparse::CsrMatrix::from_triplets(nrows, ncols, triplets);
+    let b_vec = DVector::from_vec(b);
+    let result =
+        cv_scientific::sparse::cg_solve(&mat, &b_vec, 1000, 1e-10).map_err(CgSolveError::Solver)?;
+    Ok(result.as_slice().to_vec())
+}
+
 /// Solve a sparse linear system Ax = b using conjugate gradient.
 #[pyfunction]
 fn sparse_solve_cg(
@@ -234,26 +289,12 @@ fn sparse_solve_cg(
     ncols: usize,
     b: Vec<f64>,
 ) -> PyResult<Vec<f64>> {
-    // `cg_solve` takes the right-hand side as a `DVector` and asserts its length
-    // against the matrix row count, so a mismatch was a Rust panic surfaced to
-    // Python as a `PanicException` from inside cv-math - not a Python exception
-    // this binding chose, and not something the caller could catch and act on.
-    //
-    // Measured: `sparse_solve_cg([(0,0,2.0)], 1, 1, [4.0, 5.0])` panicked with
-    // `assertion 'left == right' failed: Dimension mismatch / left: 1 /
-    // right: 2` (crates/math/src/sparse.rs:658).
-    if b.len() != ncols {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-            "sparse_solve_cg: the right-hand side has {} entries but the matrix has \
-             {ncols} columns ({nrows} rows)",
-            b.len()
-        )));
-    }
-    let mat = cv_scientific::sparse::CsrMatrix::from_triplets(nrows, ncols, &triplets);
-    let b_vec = DVector::from_vec(b);
-    let result = cv_scientific::sparse::cg_solve(&mat, &b_vec, 1000, 1e-10)
-        .map_err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>)?;
-    Ok(result.as_slice().to_vec())
+    cg_solve_checked(nrows, ncols, &triplets, b).map_err(|e| match e {
+        CgSolveError::InvalidSystem(msg) => {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("sparse_solve_cg: {msg}"))
+        }
+        CgSolveError::Solver(msg) => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(msg),
+    })
 }
 
 /// Convert a flat Vec<f64> to the appropriate Variable type based on length.
@@ -288,4 +329,52 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(minimize_nelder_mead, m)?)?;
     m.add_function(wrap_pyfunction!(sparse_solve_cg, m)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression for the RHS guard comparing against `ncols` instead of
+    /// `nrows`.
+    ///
+    /// A 1x2 system with two RHS entries matched `ncols`, so the binding waved
+    /// it through and `cg_solve` asserted "Matrix must be square for CG" - a
+    /// `PanicException` from Python. These inputs must now come back as
+    /// `InvalidSystem`, not as a panic (and not as a solver failure).
+    #[test]
+    fn sparse_solve_cg_rejects_malformed_systems() {
+        assert!(
+            matches!(
+                cg_solve_checked(1, 2, &[(0, 0, 1.0)], vec![1.0, 2.0]),
+                Err(CgSolveError::InvalidSystem(_))
+            ),
+            "a 1x2 system is not solvable by CG"
+        );
+        assert!(
+            matches!(
+                cg_solve_checked(2, 2, &[(0, 0, 1.0)], vec![1.0]),
+                Err(CgSolveError::InvalidSystem(_))
+            ),
+            "one RHS entry cannot solve a two-row system"
+        );
+        assert!(
+            matches!(
+                cg_solve_checked(1, 1, &[(5, 0, 1.0)], vec![1.0]),
+                Err(CgSolveError::InvalidSystem(_))
+            ),
+            "row 5 is out of bounds for a 1x1 matrix"
+        );
+        assert!(
+            matches!(
+                cg_solve_checked(2, 2, &[(0, 3, 1.0)], vec![1.0, 1.0]),
+                Err(CgSolveError::InvalidSystem(_))
+            ),
+            "column 3 is out of bounds for a 2x2 matrix"
+        );
+
+        // Control: the well-formed system still solves exactly.
+        let solution = cg_solve_checked(1, 1, &[(0, 0, 2.0)], vec![4.0]).expect("2x = 4");
+        assert!((solution[0] - 2.0).abs() < 1e-10, "got {solution:?}");
+    }
 }

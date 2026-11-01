@@ -239,6 +239,56 @@ fn test_haar_rect_sum_correctness() {
     assert_eq!(right_sum, 6400);
 }
 
+/// The sliding-window scan must evaluate the window whose right and bottom
+/// edges are flush with the image edges.
+///
+/// The loop bound `0..img - win` stops one window short in each dimension, so
+/// the last valid position (`img - win`, where the window covers the final
+/// pixel of the image) is never tested. An object that ends exactly at the
+/// image border is therefore invisible. This test's only crossing window is
+/// the one at (40, 20) in a 60x40 frame.
+#[test]
+fn window_flush_with_the_bottom_right_edge_is_detected() {
+    // A 20x20 white block whose bottom-right corner is the image's
+    // bottom-right corner, so the only fully-white in-frame 20x20 window is
+    // the one at (40, 20).
+    let mut img = GrayImage::new(60, 40);
+    for y in 20..40 {
+        for x in 40..60 {
+            img.put_pixel(x, y, Luma([255]));
+        }
+    }
+
+    // Only a *fully* white window passes: 20*20*255 = 102000. A window that
+    // includes any black background scores below that, and its non-zero
+    // variance divides the response down further.
+    let feature = HaarFeature {
+        rects: vec![(Rect::new(0.0, 0.0, 20.0, 20.0), 1.0)],
+        threshold: 100_000.0,
+        left_val: -1.0,
+        right_val: 1.0,
+    };
+    let stage = CascadeStage {
+        threshold: 0.5,
+        features: vec![feature],
+    };
+    let cascade = HaarCascade {
+        stages: vec![stage],
+        size: (20, 20),
+    };
+
+    let detections = cascade.detect(&img, 1.1, 0).expect("Detection failed");
+    assert!(
+        detections.iter().any(|r| r.x == 40.0 && r.y == 20.0),
+        "the window flush with the bottom-right edge was never evaluated; \
+         detections were {:?}",
+        detections
+            .iter()
+            .map(|r| (r.x, r.y, r.w, r.h))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn test_haar_detection_no_false_positives() {
     // Create image with no features

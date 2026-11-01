@@ -42,7 +42,30 @@ pub enum DistanceMetric {
 }
 
 /// Compute the distance between two points using the given metric.
+///
+/// Both points must have the same dimension.
+///
+/// ```text
+/// debug_assert_eq!(a.len(), b.len());
+/// ```
+///
+/// `cdist` and `pdist` return a matrix, and their callers do not handle a
+/// `Result`. Debug builds assert the lengths (`debug_assert_eq`); the
+/// arithmetic below runs only when they match. Otherwise nothing is computed
+/// and the result is `NaN`. Zipping used to drop the tail, so
+/// `cdist([[0, 0, 5]], [[0, 0]])` returned `0` even though that leftover
+/// coordinate has Euclidean length 5.
 fn distance(a: &[f64], b: &[f64], metric: DistanceMetric) -> f64 {
+    debug_assert_eq!(
+        a.len(),
+        b.len(),
+        "distance: refusing to drop coordinates (lengths {} and {})",
+        a.len(),
+        b.len()
+    );
+    if a.len() != b.len() {
+        return f64::NAN;
+    }
     match metric {
         DistanceMetric::Euclidean => a
             .iter()
@@ -74,6 +97,7 @@ fn distance(a: &[f64], b: &[f64], metric: DistanceMetric) -> f64 {
 /// Compute pairwise distances between two sets of points.
 ///
 /// Returns an `m x n` matrix where `D[i,j] = distance(xa[i], xb[j])`.
+/// A pair whose dimensions differ is `NaN` — coordinates are not dropped.
 pub fn cdist(xa: &[Vec<f64>], xb: &[Vec<f64>], metric: DistanceMetric) -> DMatrix<f64> {
     let m = xa.len();
     let n = xb.len();
@@ -85,6 +109,8 @@ pub fn cdist(xa: &[Vec<f64>], xb: &[Vec<f64>], metric: DistanceMetric) -> DMatri
 /// Returns a vector of `n*(n-1)/2` distances corresponding to the upper
 /// triangle of the full distance matrix, in row-major order:
 /// `[(0,1), (0,2), ..., (0,n-1), (1,2), ..., (n-2,n-1)]`.
+/// A pair whose dimensions differ contributes `NaN` rather than a truncated
+/// distance.
 pub fn pdist(x: &[Vec<f64>], metric: DistanceMetric) -> Vec<f64> {
     let n = x.len();
     if n < 2 {
@@ -154,6 +180,9 @@ impl PartialOrd for HeapItem {
 impl Ord for HeapItem {
     fn cmp(&self, other: &Self) -> Ordering {
         // Max-heap by distance (farthest on top)
+        // Only finite distances are inserted. A failed `partial_cmp` (NaN)
+        // must not become `Equal`: that would rank a NaN neighbor level with
+        // every finite one.
         self.dist
             .partial_cmp(&other.dist)
             .unwrap_or(Ordering::Equal)
@@ -279,6 +308,14 @@ impl KDTree {
             KDNode::Leaf { indices, points } => {
                 for (i, pt) in indices.iter().zip(points.iter()) {
                     let d = euclidean_dist(point, pt);
+                    // Non-finite distances are not neighbors. Inserting one
+                    // makes `HeapItem::cmp` report `Equal` against every
+                    // finite distance, so the heap treats NaN as both the
+                    // worst and the best and the far-child test below
+                    // (`diff.abs() < worst`) never fires.
+                    if !d.is_finite() {
+                        continue;
+                    }
                     if heap.len() < k {
                         heap.push(HeapItem { dist: d, index: *i });
                     } else if let Some(top) = heap.peek() {

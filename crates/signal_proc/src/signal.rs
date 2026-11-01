@@ -452,6 +452,12 @@ fn poly_from_roots(roots: &[Complex<f64>]) -> Vec<f64> {
 /// `0.5 - 0.5 cos(2π i / n)`. Spectral estimators use this form; the
 /// symmetric [`hann_window`] (denominator `n - 1`) is for filter design.
 fn hann_periodic(n: usize) -> Vec<f64> {
+    // A one-sample window is the identity, as in `get_window('hann', 1)`
+    // (and as the symmetric [`hann_window`] already does); `0.5 - 0.5 cos(0)`
+    // would be 0 instead, making `sum(w)` zero and the STFT divide by it.
+    if n == 1 {
+        return vec![1.0];
+    }
     (0..n)
         .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos())
         .collect()
@@ -460,10 +466,16 @@ fn hann_periodic(n: usize) -> Vec<f64> {
 /// Periodic Tukey window, `scipy.signal.get_window(('tukey', alpha), n)`:
 /// the symmetric Tukey window of length `n + 1` without its last sample.
 fn tukey_periodic(n: usize, alpha: f64) -> Vec<f64> {
-    let m = n + 1;
-    if m == 1 {
+    // Length one is the identity (`get_window(('tukey', alpha), 1) == [1]`):
+    // the taper formula below returns 0 at its single sample, which zeroed the
+    // spectrogram's `sum(w^2)` and made its density scaling infinite.
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
         return vec![1.0];
     }
+    let m = n + 1;
     let width = (alpha * (m - 1) as f64 / 2.0).floor() as usize;
     let mut w = vec![1.0; m];
     for (i, wi) in w.iter_mut().enumerate().take(width + 1) {
@@ -1325,7 +1337,28 @@ impl Wavelet {
 /// 1D Discrete Wavelet Transform (single level) with periodic boundary.
 ///
 /// Returns (approximation_coefficients, detail_coefficients).
+///
+/// Even lengths use the periodic filter bank directly. An odd length is
+/// extended by one sample — the last sample repeated, a one-point symmetric
+/// extension — so the bank stays even, and one extra detail coefficient marks
+/// that extension. [`idwt`] drops the reconstructed extra sample. Even-length
+/// coefficient values are unchanged.
 pub fn dwt(signal: &[f64], wavelet: Wavelet) -> (Vec<f64>, Vec<f64>) {
+    if signal.len() % 2 == 1 {
+        let mut extended = Vec::with_capacity(signal.len() + 1);
+        extended.extend_from_slice(signal);
+        extended.push(signal[signal.len() - 1]);
+        let (approx, mut detail) = dwt_even(&extended, wavelet);
+        // Length marker only. `idwt` does not read this value; it trims the
+        // sample the extension added. Keeping it off `approx` lets the next
+        // `wavedec` level see the real coefficients.
+        detail.push(signal[signal.len() - 1]);
+        return (approx, detail);
+    }
+    dwt_even(signal, wavelet)
+}
+
+fn dwt_even(signal: &[f64], wavelet: Wavelet) -> (Vec<f64>, Vec<f64>) {
     let lo = wavelet.lo_d();
     let hi = wavelet.hi_d();
     let n = signal.len();
@@ -1352,15 +1385,20 @@ pub fn dwt(signal: &[f64], wavelet: Wavelet) -> (Vec<f64>, Vec<f64>) {
 
 /// 1D Inverse Discrete Wavelet Transform (single level) with periodic boundary.
 ///
-/// The output length is `2 * approx.len()`.
+/// The output length is `2 * approx.len()`, unless `detail` is exactly one
+/// coefficient longer than `approx`. That extra coefficient is the odd-length
+/// marker from [`dwt`]: the even reconstruction is trimmed by one sample so
+/// the original odd length comes back.
 ///
 /// # Preconditions
 ///
-/// `approx.len()` must equal `detail.len()`. A longer `approx` indexes past the
-/// end of `detail` and panics; a longer `detail` is silently truncated to
-/// `approx.len()` — so an odd-length signal cannot be rebuilt (the filter bank
-/// below is even-length only).
+/// `detail` must be at least as long as `approx`. A shorter `detail` indexes
+/// past its end and panics. A `detail` longer by more than one coefficient is
+/// truncated to `approx.len()` and the result stays even.
 pub fn idwt(approx: &[f64], detail: &[f64], wavelet: Wavelet) -> Vec<f64> {
+    let odd = detail.len() == approx.len() + 1;
+    let detail = if odd { &detail[..approx.len()] } else { detail };
+
     let lo = wavelet.lo_r();
     let hi = wavelet.hi_r();
     let fl = lo.len();
@@ -1376,6 +1414,9 @@ pub fn idwt(approx: &[f64], detail: &[f64], wavelet: Wavelet) -> Vec<f64> {
         }
     }
 
+    if odd {
+        result.pop();
+    }
     result
 }
 

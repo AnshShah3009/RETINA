@@ -841,11 +841,15 @@ const TRI_TABLE: [[i32; 16]; 256] = [
 /// The same fraction the position interpolation uses, so a vertex's colour sits
 /// where the vertex sits rather than at whichever corner happens to come first.
 fn interpolation_fraction(iso_level: f32, val1: f32, val2: f32) -> f32 {
-    let denom = val1 - val2;
+    // Exactly `mu` from `vertex_interp`: the weight on the second corner, so a
+    // vertex's colour is read at the same place along the edge as the vertex.
+    // The former `(iso - val2) / (val1 - val2)` was `1 - mu`, the complementary
+    // fraction, and coloured every vertex from the opposite end of its edge.
+    let denom = val2 - val1;
     if denom.abs() < 1.0e-12 {
         0.0
     } else {
-        ((iso_level - val2) / denom).clamp(0.0, 1.0)
+        ((iso_level - val1) / denom).clamp(0.0, 1.0)
     }
 }
 
@@ -1167,6 +1171,50 @@ mod tests {
                 "MC_EDGE_TABLE[{cfg}]: the sign rule gives {expected:#06x}, the \
                  table has {:#06x}",
                 MC_EDGE_TABLE[cfg]
+            );
+        }
+    }
+
+    /// The colour fraction must be the **same** fraction the position uses.
+    ///
+    /// `vertex_interp` places the vertex at `mu = (iso - val1) / (val2 - val1)`.
+    /// `interpolation_fraction` computed `(iso - val2) / (val1 - val2)`, which is
+    /// exactly `1 - mu` - the complementary fraction. The per-edge colour was
+    /// therefore taken from the opposite end of the edge: a vertex sitting a
+    /// sixth of the way from `c0` was coloured as if it sat five sixths of the
+    /// way, i.e. with `c1`'s colour (and vice versa).
+    #[test]
+    fn marching_cubes_colour_fraction_matches_the_vertex_position() {
+        // Asymmetric crossing, so the two fractions differ by far more than
+        // rounding: iso = 0 between val1 = -0.2 and val2 = +1.
+        let (val1, val2) = (-0.2f32, 1.0f32);
+        let mu = (0.0 - val1) / (val2 - val1); // 1/6, the position fraction
+        let f = interpolation_fraction(0.0, val1, val2);
+        assert!(
+            (f - mu).abs() < 1e-6,
+            "colour fraction {f} is not the position fraction {mu}: it is its \
+             complement, so the colour is read from the opposite end of the edge"
+        );
+
+        // End to end: one cube corner below the isosurface, so the cell emits a
+        // single triangle whose three vertices all lie close to that corner.
+        // That corner is red and every other corner is blue, so a correctly
+        // placed colour is red-dominant.
+        let mut corners = [1.0f32; 8];
+        corners[0] = -0.2;
+        let red = Vector3::new(255u8, 0, 0);
+        let blue = Vector3::new(0u8, 0, 255);
+        let mut corner_colors = [blue; 8];
+        corner_colors[0] = red;
+
+        let tris = marching_cubes_cell(&(0, 0, 0), (0, 0, 0), &corners, &corner_colors, 1.0);
+        assert_eq!(tris.len(), 1, "configuration 1 emits exactly one triangle");
+        for c in tris[0].colors {
+            assert!(
+                c.x > c.z,
+                "vertex colour {c:?} is blue-dominant at a vertex only {mu:.3} \
+                 of the way from the red corner: the blend used the complementary \
+                 fraction instead of the one placing the vertex"
             );
         }
     }

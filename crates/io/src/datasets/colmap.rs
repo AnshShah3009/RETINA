@@ -22,11 +22,16 @@
 //!
 //! ## `read_images_text` — `images.txt`
 //!
-//! Two lines per image. The first holds the registered pose (a world-to-camera
-//! transform, i.e. COLMAP projects `x = R * X + t`) and camera/name metadata;
-//! the second holds the 2-D observations as `X Y POINT3D_ID` triples where
-//! `POINT3D_ID == -1` means "no triangulated 3-D point". The second line is
-//! present even when it is empty, and a missing one is an error.
+//! Two lines per image. The first holds the registered pose and camera/name
+//! metadata; the second holds the 2-D observations as `X Y POINT3D_ID` triples
+//! where `POINT3D_ID == -1` means "no triangulated 3-D point". The second line
+//! is present even when it is empty, and a missing one is an error.
+//!
+//! On disk the pose is world-to-camera: COLMAP projects `x = R * X + t`.
+//! [`Image::pose`] is camera-to-world, the same convention as the TUM, KITTI,
+//! and EuRoC loaders (`translation` is the camera center). [`read_images_text`]
+//! inverts on load and [`write_images_text`] inverts again so the file stays
+//! in COLMAP's world-to-camera layout.
 //!
 //! ```text
 //! IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME
@@ -80,7 +85,11 @@ pub struct Point2D {
 pub struct Image {
     /// Image id.
     pub id: u32,
-    /// Registered pose (world-to-camera transform as stored by COLMAP).
+    /// Registered pose, camera-to-world. `translation` is the camera center.
+    ///
+    /// COLMAP's `images.txt` stores the inverse (world-to-camera,
+    /// `X_cam = R * X_world + t`). The reader converts on load; the writer
+    /// converts back.
     pub pose: Pose,
     /// Id of the camera this image was taken with.
     pub camera_id: u32,
@@ -259,6 +268,9 @@ fn check_intrinsics_values(ctx: &str, entries: &[(f64, &str)]) -> Result<()> {
 /// `X Y POINT3D_ID` triples (possibly empty). A header without a following
 /// points line is an error, as is a points line whose token count is not a
 /// multiple of three.
+///
+/// The header's quaternion and translation are world-to-camera. The returned
+/// [`Image::pose`] is camera-to-world: `translation` is the camera center.
 pub fn read_images_text<P: AsRef<Path>>(path: P) -> Result<Vec<Image>> {
     let path = path.as_ref();
     let text = fs::read_to_string(path)?;
@@ -305,7 +317,10 @@ pub fn read_images_text<P: AsRef<Path>>(path: P) -> Result<Vec<Image>> {
         }
 
         let rotation = unit_quaternion_from_wxyz(qw, qx, qy, qz, &ctx)?;
-        let pose = Pose::from_quat_translation(rotation, Vector3::new(tx, ty, tz));
+        // File stores world-to-camera. Pose is camera-to-world: the camera
+        // center is `-R^T * t`, and `transform_point` maps camera-frame points
+        // into the world, matching the other dataset readers.
+        let pose = Pose::from_quat_translation(rotation, Vector3::new(tx, ty, tz)).inverse();
 
         // The very next physical line is the POINTS2D[] line (possibly empty).
         if i + 1 >= lines.len() {
@@ -477,8 +492,11 @@ pub fn write_cameras_text<P: AsRef<Path>>(path: P, cameras: &[Camera]) -> Result
 /// pose/metadata header (`IMAGE_ID QW QX QY QZ TX TY TZ CAMERA_ID NAME`) and the
 /// alternating `POINTS2D[]` line of `X Y POINT3D_ID` triples. An image with no
 /// observations produces an empty (blank) `POINTS2D[]` line, matching COLMAP.
-/// Quaternion components are written in COLMAP's `(QW, QX, QY, QZ)` order. The
-/// file ends with a trailing newline.
+///
+/// [`Image::pose`] is camera-to-world. The header is COLMAP's world-to-camera
+/// transform, so the quaternion and translation written here are
+/// [`Pose::inverse`] of the stored pose. Quaternion components are written in
+/// COLMAP's `(QW, QX, QY, QZ)` order. The file ends with a trailing newline.
 ///
 /// # Errors
 ///
@@ -489,11 +507,24 @@ pub fn write_images_text<P: AsRef<Path>>(path: P, images: &[Image]) -> Result<()
     out.push_str("#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n");
     out.push_str("#   POINTS2D[] as (X, Y, POINT3D_ID)\n");
     for image in images {
-        let rotation = &image.pose.rotation;
-        let translation = &image.pose.translation;
+        // Stored pose is camera-to-world; the file wants world-to-camera.
+        // `Pose::inverse` negates zeros, and `Debug` prints those as `-0.0`.
+        // COLMAP's identity pose is positive zeros, so collapse them on write.
+        let w2c = image.pose.inverse();
+        let rotation = &w2c.rotation;
+        let translation = &w2c.translation;
         let (id, camera_id, name) = (image.id, image.camera_id, image.name.as_str());
-        let (qw, qx, qy, qz) = (rotation.w, rotation.i, rotation.j, rotation.k);
-        let (tx, ty, tz) = (translation.x, translation.y, translation.z);
+        let (qw, qx, qy, qz) = (
+            colmap_component(rotation.w),
+            colmap_component(rotation.i),
+            colmap_component(rotation.j),
+            colmap_component(rotation.k),
+        );
+        let (tx, ty, tz) = (
+            colmap_component(translation.x),
+            colmap_component(translation.y),
+            colmap_component(translation.z),
+        );
         out.push_str(&format!(
             "{id} {qw:?} {qx:?} {qy:?} {qz:?} {tx:?} {ty:?} {tz:?} {camera_id} {name}\n"
         ));
@@ -508,6 +539,16 @@ pub fn write_images_text<P: AsRef<Path>>(path: P, images: &[Image]) -> Result<()
     }
     fs::write(path, out)?;
     Ok(())
+}
+
+/// A pose component for a COLMAP text line. `-0.0` compares equal to `0.0`
+/// but formats differently; the file uses a plain zero.
+fn colmap_component(x: f64) -> f64 {
+    if x == 0.0 {
+        0.0
+    } else {
+        x
+    }
 }
 
 /// Write a COLMAP text-model `points3D.txt`.
@@ -647,7 +688,14 @@ mod tests {
         assert_eq!(images[0].points2d[2].point3d_id, -1);
 
         assert_eq!(images[1].name, "image2.jpg");
-        assert_eq!(images[1].pose.translation, Vector3::new(1.0, 2.0, 3.0));
+        // The file's `1 2 3` is COLMAP world-to-camera `t` with identity
+        // rotation. The stored pose is camera-to-world, so the camera center
+        // is the negation.
+        assert_eq!(
+            images[1].pose.translation,
+            Vector3::new(-1.0, -2.0, -3.0),
+            "camera-to-world translation is the camera center"
+        );
         assert!(images[1].points2d.is_empty());
     }
 
@@ -855,10 +903,30 @@ mod tests {
 
         // 3 comment lines + 2 lines per image; the last image has no
         // observations, so its POINTS2D[] line is blank.
+        //
+        // The Pose on `Image` is camera-to-world. The header line is COLMAP's
+        // world-to-camera encoding of that pose, i.e. its inverse.
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3 + 2 * original.len());
-        assert_eq!(lines[3], "1 0.5 0.5 0.5 0.5 1.0 2.0 3.0 1 image.jpg");
+        let w2c = original[0].pose.inverse();
+        let (qw, qx, qy, qz) = (
+            colmap_component(w2c.rotation.w),
+            colmap_component(w2c.rotation.i),
+            colmap_component(w2c.rotation.j),
+            colmap_component(w2c.rotation.k),
+        );
+        let (tx, ty, tz) = (
+            colmap_component(w2c.translation.x),
+            colmap_component(w2c.translation.y),
+            colmap_component(w2c.translation.z),
+        );
+        assert_eq!(
+            lines[3],
+            format!("1 {qw:?} {qx:?} {qy:?} {qz:?} {tx:?} {ty:?} {tz:?} 1 image.jpg"),
+            "images.txt stores world-to-camera; Image::pose is camera-to-world"
+        );
         assert_eq!(lines[4], "100.0 200.0 1 300.0 400.0 -1 12.5 -7.25 42");
+        // Identity camera-to-world inverts to identity world-to-camera.
         assert_eq!(lines[5], "2 1.0 0.0 0.0 0.0 0.0 0.0 0.0 1 empty.png");
         assert_eq!(
             lines[6], "",
@@ -885,8 +953,36 @@ mod tests {
                 want.pose.rotation.k,
             );
             assert_eq!(got_q, want_q);
+            // Reading restores the camera-to-world pose that was stored.
             assert_eq!(got.pose.translation, want.pose.translation);
         }
+    }
+
+    /// A camera at world `(1, 0, 0)` with identity rotation. COLMAP writes
+    /// that as world-to-camera `t = (-1, 0, 0)`. The stored pose is
+    /// camera-to-world: the translation is the camera center, and
+    /// `transform_point` of the camera-frame origin is that center.
+    #[test]
+    fn colmap_read_images_stores_camera_to_world() {
+        let dir = TempDir::new("colmap_camera_to_world");
+        let path = dir.write("images.txt", concat!("1 1 0 0 0 -1 0 0 1 cam.jpg\n", "\n"));
+
+        let images = read_images_text(&path).expect("parse images");
+        let pose = images[0].pose;
+        assert_eq!(
+            pose.translation,
+            Vector3::new(1.0, 0.0, 0.0),
+            "camera-to-world translation is the camera center"
+        );
+        assert_eq!(
+            pose.transform_point(&Point3::origin()),
+            Point3::new(1.0, 0.0, 0.0),
+            "camera-to-world maps the camera-frame origin to the camera center"
+        );
+        assert_eq!(
+            pose.transform_point(&Point3::new(0.0, 0.0, 1.0)),
+            Point3::new(1.0, 0.0, 1.0)
+        );
     }
 
     #[test]

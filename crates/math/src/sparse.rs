@@ -428,8 +428,11 @@ fn orthogonal_perturbation(v: &DVector<f64>, n: usize, seed: u64) -> DVector<f64
 
 /// Inverse power iteration for finding the eigenvalue closest to `sigma`.
 ///
-/// Internally solves `(A - sigma*I) * v = v_old` using CG at each step.
-/// Returns `(eigenvalue, eigenvector)`.
+/// Internally solves `(A - sigma*I) * v = v_old` using GMRES at each step.
+/// Returns `(eigenvalue, eigenvector)` only when the residual is small. Ending
+/// the iteration budget without that residual is `Err`: `diag(4, 9)` with
+/// `max_iters = 0` used to return `λ = 0`, and `max_iters = 1` about `4.825`,
+/// neither of which is an eigenvalue (they are 4 and 9).
 pub fn eigs_inverse_power(
     a: &CsrMatrix,
     sigma: f64,
@@ -448,6 +451,8 @@ pub fn eigs_inverse_power(
 
     let mut v = DVector::from_element(n, 1.0 / (n as f64).sqrt());
     let mut eigenvalue = 0.0;
+    let anorm = matrix_inf_norm(a).max(1e-300);
+    let res_tol = (tol / anorm).max(1e-8);
 
     for _ in 0..max_iters {
         // Solve B * w = v using CG (or GMRES for non-SPD)
@@ -463,10 +468,18 @@ pub fn eigs_inverse_power(
         // Rayleigh quotient with original matrix
         let av = a.spmv(&v);
         let new_eigenvalue = v.dot(&av);
-        if (new_eigenvalue - eigenvalue).abs() < tol {
+        if (new_eigenvalue - eigenvalue).abs() < tol && residual_ok(a, new_eigenvalue, &v, res_tol)
+        {
             return Ok((new_eigenvalue, v));
         }
         eigenvalue = new_eigenvalue;
+    }
+
+    if !residual_ok(a, eigenvalue, &v, res_tol) {
+        return Err(format!(
+            "Inverse power iteration failed to converge: residual test not satisfied \
+             (lambda = {eigenvalue}, tol = {tol})"
+        ));
     }
 
     Ok((eigenvalue, v))

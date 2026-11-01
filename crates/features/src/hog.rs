@@ -30,6 +30,14 @@ pub fn compute_hog(image: &GrayImage, params: &HogParams) -> Vec<f32> {
     let width = image.width() as usize;
     let height = image.height() as usize;
 
+    // No complete cell (image narrower or shorter than `cell_size`, or empty).
+    // `par_chunks_mut(n_cells_x * n_bins)` panics when `n_cells_x` is 0.
+    let n_cells_x = width / params.cell_size.max(1);
+    let n_cells_y = height / params.cell_size.max(1);
+    if params.cell_size == 0 || n_cells_x == 0 || n_cells_y == 0 {
+        return Vec::new();
+    }
+
     // 1. Compute gradients in parallel
     let mut grad_mag = vec![0.0f32; width * height];
     let mut grad_ori = vec![0.0f32; width * height];
@@ -52,14 +60,18 @@ pub fn compute_hog(image: &GrayImage, params: &HogParams) -> Vec<f32> {
                 let mut ori = gy.atan2(gx) * 180.0 / PI;
                 if ori < 0.0 {
                     ori += 180.0;
-                } // Unsigned gradients
+                }
+                // Unsigned gradients live in [0, 180). `atan2(0, -1)` is
+                // exactly 180°, the same direction as 0°; leaving it there
+                // parks a leftward edge in the last bin.
+                if ori >= 180.0 {
+                    ori = 0.0;
+                }
                 row_ori[x] = ori;
             }
         });
 
     // 2. Cell Histogramming
-    let n_cells_x = width / params.cell_size;
-    let n_cells_y = height / params.cell_size;
     let mut cell_hists = vec![0.0f32; n_cells_x * n_cells_y * params.n_bins];
 
     cell_hists
@@ -81,8 +93,12 @@ pub fn compute_hog(image: &GrayImage, params: &HogParams) -> Vec<f32> {
                     let mag = grad_mag[y * width + x];
                     let ori = grad_ori[y * width + x];
 
-                    let bin = (ori / (180.0 / params.n_bins as f32)).floor() as usize;
-                    let bin = bin.min(params.n_bins - 1);
+                    let mut bin = (ori / (180.0 / params.n_bins as f32)).floor() as usize;
+                    // 180° maps into the 0° bin; a float that still lands on
+                    // `n_bins` must not clamp into the last bin.
+                    if bin >= params.n_bins {
+                        bin = 0;
+                    }
 
                     // Note: This part has multiple threads writing to the same cx-bin.
                     // However, each cy is processed by a single chunk here, so rows are independent.
@@ -210,6 +226,59 @@ mod tests {
         let descriptor = compute_hog(&img, &params);
 
         assert!(!descriptor.is_empty());
+    }
+
+    fn vertical_edge(left: u8, right: u8) -> GrayImage {
+        let (width, height) = (8u32, 8u32);
+        let mut img = GrayImage::new(width, height);
+        for y in 0..height {
+            for x in 0..width {
+                let v = if x < width / 2 { left } else { right };
+                img.put_pixel(x, y, Luma([v]));
+            }
+        }
+        img
+    }
+
+    fn peak_bin(desc: &[f32]) -> usize {
+        desc.iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i)
+            .unwrap()
+    }
+
+    /// `atan2(0, -1)` is 180°, the same unsigned orientation as 0°. A
+    /// leftward edge must peak in bin 0, with a rightward edge.
+    #[test]
+    fn unsigned_orientation_maps_180_into_the_zero_bin() {
+        let params = HogParams {
+            cell_size: 8,
+            block_size: 1,
+            n_bins: 9,
+        };
+        let right = compute_hog(&vertical_edge(0, 255), &params);
+        let left = compute_hog(&vertical_edge(255, 0), &params);
+        assert_eq!(peak_bin(&right), 0, "rightward: {right:?}");
+        assert!(
+            right[0] > 0.5,
+            "rightward edge produced no gradient: {right:?}"
+        );
+        assert_eq!(
+            peak_bin(&left),
+            0,
+            "leftward edge peaked in bin {} ({left:?})",
+            peak_bin(&left)
+        );
+    }
+
+    /// `par_chunks_mut(n_cells_x * n_bins)` panics when the image is narrower
+    /// than a cell. A 4×16 image with cell size 8 has no cell column.
+    #[test]
+    fn image_narrower_than_a_cell_returns_empty_descriptor() {
+        let img = GrayImage::new(4, 16);
+        let descriptor = compute_hog(&img, &HogParams::default());
+        assert!(descriptor.is_empty());
     }
 
     #[test]

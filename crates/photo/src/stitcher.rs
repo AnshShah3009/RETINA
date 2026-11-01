@@ -36,8 +36,10 @@ impl Stitcher {
     /// Stitch `images` into a single panorama.
     ///
     /// Each image after the first is placed at the horizontal offset `s` in
-    /// `0..=MAX_SHIFT` that minimises the sum of absolute differences between it
-    /// and the panorama's columns `s..s + image.width()`. Where the image lands
+    /// `0..=min(MAX_SHIFT, canvas_width)` that minimises the sum of absolute
+    /// differences between it and the panorama's columns `s..s + image.width()`.
+    /// `s == canvas_width` is included, so a frame that abuts the panorama (empty
+    /// overlap) can win. Where the image lands
     /// on already-filled columns the two are cross-faded with a running weighted
     /// average whose bandwidth is [`SEAM_WIDTH`]; where it lands on empty columns
     /// it is copied in unchanged. The canvas is widened to
@@ -104,27 +106,38 @@ impl Stitcher {
             }
 
             let iw = img.width();
-            for y in 0..base_h {
-                for sx in 0..iw {
-                    let dx = shift + sx;
-                    let w_old = weight[dx as usize];
+            // The weight is per output column, not per pixel: it counts how many
+            // images have contributed to that column. Reading it and adding this
+            // image's contribution once per *row* made the blend alpha depend on
+            // the row index - `w_old = 1 + y` instead of 1 - so the same column of
+            // the same frame was blended differently on every row, and a panorama
+            // of row-constant frames was not row-constant. Keep the column outer
+            // and touch its weight once.
+            for sx in 0..iw {
+                let dx = shift + sx;
+                let w_old = weight[dx as usize];
+                let alpha = if w_old <= 0.0 {
+                    1.0
+                } else {
+                    // Classic weighted blend: the first `SEAM_WIDTH`
+                    // columns of the overlap ramp towards the new image, the
+                    // rest keeps the running average's balance. `w` counts
+                    // how many images have already contributed, so a column
+                    // stitched three times is not over-weighted.
+                    (SEAM_WIDTH as f32 / (SEAM_WIDTH as f32 + w_old)).min(1.0)
+                };
+                for y in 0..base_h {
                     let src = img.get_pixel(sx, y)[0] as f32;
                     let new = if w_old <= 0.0 {
                         // Nothing behind this column: the image defines it.
                         src
                     } else {
                         let dst = canvas.get_pixel(dx, y)[0] as f32;
-                        // Classic weighted blend: the first `SEAM_WIDTH`
-                        // columns of the overlap ramp towards the new image, the
-                        // rest keeps the running average's balance. `w` counts
-                        // how many images have already contributed, so a column
-                        // stitched three times is not over-weighted.
-                        let alpha = (SEAM_WIDTH as f32 / (SEAM_WIDTH as f32 + w_old)).min(1.0);
                         dst * (1.0 - alpha) + src * alpha
                     };
                     canvas.put_pixel(dx, y, image::Luma([new as u8]));
-                    weight[dx as usize] += 1.0;
                 }
+                weight[dx as usize] += 1.0;
             }
         }
 
@@ -135,7 +148,7 @@ impl Stitcher {
 }
 
 /// The horizontal offset that best aligns `candidate` with the running
-/// panorama, in `0..=MAX_SHIFT`.
+/// panorama. Searched over `0..=min(MAX_SHIFT, canvas_width)`.
 ///
 /// Scored by the mean absolute difference over the columns the candidate would
 /// cover. A shift that leaves the candidate with *no* overlap scores 0: nothing
@@ -144,12 +157,14 @@ impl Stitcher {
 /// makes the true offset unreachable for exactly-abutting frames, since their
 /// overlap is empty by construction; the search then slid the candidate *into*
 /// the panorama to create overlap it did not have. Measured on two abutting
-/// ramp frames of width 8: the search chose a shift of 7 and the output was
-/// `[10,13,16,19,22,25,28,33,37,...]` - off by one, with a 5-level step at the
-/// seam.
+/// ramp frames of width 8: stopping the search at `canvas_width - 1` chose a
+/// shift of 7 and the output was `[10,13,16,19,22,25,28,33,37,...]` - off by
+/// one, with a 5-level step at the seam. Shift `canvas_width` is inside the
+/// range above, so that pair concatenates.
 ///
 /// Ties keep the smaller shift, so a shift of 0 wins when the images really do
-/// match at zero, and a no-overlap shift wins over a misaligned overlap.
+/// match at zero, and a no-overlap shift wins over a misaligned overlap. A
+/// perfect overlap (cost 0) therefore still beats the empty one.
 fn best_horizontal_shift(canvas: &GrayImage, weight: &[f32], candidate: &GrayImage) -> u32 {
     let cw = canvas.width();
     let kw = candidate.width();
@@ -159,7 +174,9 @@ fn best_horizontal_shift(canvas: &GrayImage, weight: &[f32], candidate: &GrayIma
     }
 
     let mut best = (f32::INFINITY, 0u32);
-    let max_shift = MAX_SHIFT.min(cw.saturating_sub(1));
+    // `s == cw` abuts: the overlap is empty. Capping at `cw - 1` made that
+    // shift unscored, so an abutting frame was pulled back one column.
+    let max_shift = MAX_SHIFT.min(cw);
     for s in 0..=max_shift {
         let cost = mean_abs_diff(canvas, weight, candidate, s, h);
         if cost < best.0 {

@@ -369,38 +369,34 @@ fn float_to_u8<T: Float>(v: T) -> u8 {
     }
 }
 
-/// Simple adaptive mean threshold. Output: 1 = foreground (dark), 0 = background.
+/// Adaptive mean threshold. Output: 1 = foreground (dark), 0 = background.
+///
+/// Same rule as `cv_imgproc::adaptive_threshold` with `MeanC`, `BinaryInv`,
+/// and replicate borders: the local mean is rounded to an integer and a pixel
+/// is foreground when `src - mean <= -floor(constant)`. The previous
+/// shrinking window and `src < mean - constant` (float mean) disagreed with
+/// that on flat regions and along the border. `win` is forced odd and at
+/// least 3, which is what that function accepts.
 fn adaptive_threshold(gray: &[u8], w: usize, h: usize, win: usize, constant: f64) -> Vec<u8> {
-    let win = if win.is_multiple_of(2) { win + 1 } else { win };
-    let half = (win / 2) as i32;
-    // Integral image for fast mean computation.
-    let mut integral = vec![0i64; (w + 1) * (h + 1)];
-    for y in 0..h {
-        let mut row_sum = 0i64;
-        for x in 0..w {
-            row_sum += gray[y * w + x] as i64;
-            integral[(y + 1) * (w + 1) + (x + 1)] = integral[y * (w + 1) + (x + 1)] + row_sum;
-        }
+    if w == 0 || h == 0 || gray.len() != w.saturating_mul(h) {
+        return vec![0u8; w.saturating_mul(h)];
     }
-
-    let mut out = vec![0u8; w * h];
-    for y in 0..h {
-        for x in 0..w {
-            let x0 = (x as i32 - half).max(0) as usize;
-            let y0 = (y as i32 - half).max(0) as usize;
-            let x1 = ((x as i32 + half + 1) as usize).min(w);
-            let y1 = ((y as i32 + half + 1) as usize).min(h);
-            let area = ((x1 - x0) * (y1 - y0)) as f64;
-            let s = integral[y1 * (w + 1) + x1] as f64
-                - integral[y0 * (w + 1) + x1] as f64
-                - integral[y1 * (w + 1) + x0] as f64
-                + integral[y0 * (w + 1) + x0] as f64;
-            let mean = s / area;
-            let val = gray[y * w + x] as f64;
-            out[y * w + x] = if val < mean - constant { 1 } else { 0 };
-        }
+    let mut win = if win.is_multiple_of(2) { win + 1 } else { win };
+    if win < 3 {
+        win = 3;
     }
-    out
+    let Some(img) = image::GrayImage::from_raw(w as u32, h as u32, gray.to_vec()) else {
+        return vec![0u8; w * h];
+    };
+    cv_imgproc::adaptive_threshold(
+        &img,
+        1,
+        cv_imgproc::AdaptiveMethod::MeanC,
+        cv_imgproc::ThresholdType::BinaryInv,
+        win as u32,
+        constant as f32,
+    )
+    .into_raw()
 }
 
 /// Bounding-box candidate from connected-component analysis on the binary image.
@@ -1112,6 +1108,36 @@ mod tests {
         assert_eq!(codes_5.len(), 50);
         let codes_6 = dictionary_codes(ArucoDictionary::Dict6x6_250);
         assert_eq!(codes_6.len(), 250);
+    }
+
+    /// OpenCV `adaptiveThreshold` mean / replicate / `THRESH_BINARY_INV`.
+    ///
+    /// A flat field with integer `C = 0` is entirely foreground: the rounded
+    /// mean equals the pixel, and BinaryInv keeps `src <= mean - floor(C)`.
+    /// The shrinking-window `src < mean - C` rule marked none of those pixels.
+    /// The ramp, including its border, must match `cv_imgproc` byte for byte.
+    #[test]
+    fn adaptive_threshold_matches_opencv_mean_replicate_binary_inv() {
+        let (w, h) = (5usize, 5usize);
+        let flat = vec![100u8; w * h];
+        let got = adaptive_threshold(&flat, w, h, 3, 0.0);
+        assert!(
+            got.iter().all(|&v| v == 1),
+            "flat field must match OpenCV BinaryInv (all foreground), got {got:?}"
+        );
+
+        let ramp: Vec<u8> = (0..w * h).map(|i| (i * 17) as u8).collect();
+        let got = adaptive_threshold(&ramp, w, h, 3, 7.0);
+        let img = image::GrayImage::from_raw(w as u32, h as u32, ramp).unwrap();
+        let expect = cv_imgproc::adaptive_threshold(
+            &img,
+            1,
+            cv_imgproc::AdaptiveMethod::MeanC,
+            cv_imgproc::ThresholdType::BinaryInv,
+            3,
+            7.0,
+        );
+        assert_eq!(got, expect.into_raw());
     }
 
     #[test]

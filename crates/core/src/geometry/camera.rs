@@ -31,33 +31,60 @@ impl PinholeModel {
             distortion,
         }
     }
-}
 
-impl CameraModel<f64> for PinholeModel {
-    fn project(&self, point: &Point3<f64>) -> Point2<f64> {
+    /// Project a camera-frame point, or an error when it has no pixel.
+    ///
+    /// `z <= 0` is on or behind the focal plane. A non-finite `z` is not a
+    /// depth. Neither is the principal point: `(100, 0, 0)` and `(1, 0, -1)`
+    /// used to come back as `(cx, cy)` and `(-180, 240)` respectively.
+    pub fn try_project(&self, point: &Point3<f64>) -> crate::Result<Point2<f64>> {
         let z = point.z;
-        if z.abs() < 1e-10 {
-            return Point2::new(self.intrinsics.cx, self.intrinsics.cy);
+        if !z.is_finite() || z <= 0.0 {
+            return Err(crate::Error::InvalidInput(format!(
+                "cannot project a point with non-positive or non-finite depth z={z}"
+            )));
         }
         let x = point.x / z;
         let y = point.y / z;
         let (xd, yd) = self.distortion.apply(x, y);
-        Point2::new(
+        Ok(Point2::new(
             xd * self.intrinsics.fx + self.intrinsics.cx,
             yd * self.intrinsics.fy + self.intrinsics.cy,
-        )
+        ))
     }
 
-    fn unproject(&self, pixel: &Point2<f64>, depth: f64) -> Point3<f64> {
+    /// Unproject a pixel at `depth`, or an error when the focal length cannot
+    /// define a ray.
+    ///
+    /// A zero or non-finite focal length used to return the optical axis
+    /// `(0, 0, depth)`, which is what unprojecting the principal point looks
+    /// like. `fx = 500` is unchanged.
+    pub fn try_unproject(&self, pixel: &Point2<f64>, depth: f64) -> crate::Result<Point3<f64>> {
         let fx = self.intrinsics.fx;
         let fy = self.intrinsics.fy;
-        if fx.abs() < 1e-10 || fy.abs() < 1e-10 {
-            return Point3::new(0.0, 0.0, depth);
+        if !fx.is_finite() || !fy.is_finite() || fx == 0.0 || fy == 0.0 {
+            return Err(crate::Error::InvalidInput(format!(
+                "cannot unproject with non-finite or zero focal length fx={fx}, fy={fy}"
+            )));
         }
         let x = (pixel.x - self.intrinsics.cx) / fx;
         let y = (pixel.y - self.intrinsics.cy) / fy;
         let (xu, yu) = self.distortion.remove(x, y);
-        Point3::new(xu * depth, yu * depth, depth)
+        Ok(Point3::new(xu * depth, yu * depth, depth))
+    }
+}
+
+impl CameraModel<f64> for PinholeModel {
+    fn project(&self, point: &Point3<f64>) -> Point2<f64> {
+        // `CameraModel::project` returns a point, so a rejected depth is a
+        // non-finite pixel rather than the principal point.
+        self.try_project(point)
+            .unwrap_or(Point2::new(f64::NAN, f64::NAN))
+    }
+
+    fn unproject(&self, pixel: &Point2<f64>, depth: f64) -> Point3<f64> {
+        self.try_unproject(pixel, depth)
+            .unwrap_or(Point3::new(f64::NAN, f64::NAN, f64::NAN))
     }
 
     fn width(&self) -> u32 {
@@ -83,33 +110,49 @@ impl PinholeModelF32 {
             distortion,
         }
     }
-}
 
-impl CameraModel<f32> for PinholeModelF32 {
-    fn project(&self, point: &Point3<f32>) -> Point2<f32> {
+    /// `f32` twin of [`PinholeModel::try_project`].
+    pub fn try_project(&self, point: &Point3<f32>) -> crate::Result<Point2<f32>> {
         let z = point.z;
-        if z.abs() < 1e-7 {
-            return Point2::new(self.intrinsics.cx, self.intrinsics.cy);
+        if !z.is_finite() || z <= 0.0 {
+            return Err(crate::Error::InvalidInput(format!(
+                "cannot project a point with non-positive or non-finite depth z={z}"
+            )));
         }
         let x = point.x / z;
         let y = point.y / z;
         let (xd, yd) = self.distortion.apply(x, y);
-        Point2::new(
+        Ok(Point2::new(
             xd * self.intrinsics.fx + self.intrinsics.cx,
             yd * self.intrinsics.fy + self.intrinsics.cy,
-        )
+        ))
     }
 
-    fn unproject(&self, pixel: &Point2<f32>, depth: f32) -> Point3<f32> {
+    /// `f32` twin of [`PinholeModel::try_unproject`].
+    pub fn try_unproject(&self, pixel: &Point2<f32>, depth: f32) -> crate::Result<Point3<f32>> {
         let fx = self.intrinsics.fx;
         let fy = self.intrinsics.fy;
-        if fx.abs() < 1e-7 || fy.abs() < 1e-7 {
-            return Point3::new(0.0, 0.0, depth);
+        if !fx.is_finite() || !fy.is_finite() || fx == 0.0 || fy == 0.0 {
+            return Err(crate::Error::InvalidInput(format!(
+                "cannot unproject with non-finite or zero focal length fx={fx}, fy={fy}"
+            )));
         }
         let x = (pixel.x - self.intrinsics.cx) / fx;
         let y = (pixel.y - self.intrinsics.cy) / fy;
         let (xu, yu) = self.distortion.remove(x, y);
-        Point3::new(xu * depth, yu * depth, depth)
+        Ok(Point3::new(xu * depth, yu * depth, depth))
+    }
+}
+
+impl CameraModel<f32> for PinholeModelF32 {
+    fn project(&self, point: &Point3<f32>) -> Point2<f32> {
+        self.try_project(point)
+            .unwrap_or(Point2::new(f32::NAN, f32::NAN))
+    }
+
+    fn unproject(&self, pixel: &Point2<f32>, depth: f32) -> Point3<f32> {
+        self.try_unproject(pixel, depth)
+            .unwrap_or(Point3::new(f32::NAN, f32::NAN, f32::NAN))
     }
 
     fn width(&self) -> u32 {
@@ -303,6 +346,128 @@ impl From<CameraIntrinsics> for CameraIntrinsicsF32 {
     /// ```
     fn from(c: CameraIntrinsics) -> Self {
         Self::from_intrinsics(&c)
+    }
+}
+
+#[cfg(test)]
+mod projection_guard_tests {
+    use super::*;
+    use crate::geometry::distortion::{Distortion, DistortionF32};
+    use nalgebra::{Point2, Point3};
+
+    fn model_f64(fx: f64, fy: f64) -> PinholeModel {
+        PinholeModel::new(
+            CameraIntrinsics::new(fx, fy, 320.0, 240.0, 640, 480),
+            Distortion::none(),
+        )
+    }
+
+    fn model_f32(fx: f32, fy: f32) -> PinholeModelF32 {
+        PinholeModelF32::new(
+            CameraIntrinsicsF32::new(fx, fy, 320.0, 240.0, 640, 480),
+            DistortionF32::none(),
+        )
+    }
+
+    #[test]
+    fn in_front_point_projects_unchanged() {
+        let model = model_f64(500.0, 500.0);
+        // On the optical axis, in front of the camera: the principal point.
+        let axis = model.project(&Point3::new(0.0, 0.0, 5.0));
+        assert_eq!(axis, Point2::new(320.0, 240.0));
+        // (1, 0, 1) → u = 500 * 1 / 1 + 320 = 820.
+        let off = model.project(&Point3::new(1.0, 0.0, 1.0));
+        assert!((off.x - 820.0).abs() < 1e-9);
+        assert!((off.y - 240.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn non_positive_or_non_finite_depth_is_not_the_principal_point() {
+        let model = model_f64(500.0, 500.0);
+        let principal = Point2::new(320.0, 240.0);
+        // (100, 0, 0) used to come back as the principal point.
+        let on_plane = model.project(&Point3::new(100.0, 0.0, 0.0));
+        assert!(
+            !on_plane.x.is_finite() && !on_plane.y.is_finite(),
+            "z = 0 projected to {on_plane:?}"
+        );
+        assert_ne!(on_plane, principal);
+
+        // (1, 0, -1) used to project in front, to (-180, 240).
+        let behind = model.project(&Point3::new(1.0, 0.0, -1.0));
+        assert!(
+            !behind.x.is_finite() && !behind.y.is_finite(),
+            "z = -1 projected to {behind:?}"
+        );
+        assert_ne!(behind, Point2::new(-180.0, 240.0));
+
+        let inf = model.project(&Point3::new(1.0, 0.0, f64::INFINITY));
+        assert!(
+            !inf.x.is_finite() && !inf.y.is_finite(),
+            "z = +inf → {inf:?}"
+        );
+        let nan = model.project(&Point3::new(1.0, 0.0, f64::NAN));
+        assert!(
+            !nan.x.is_finite() && !nan.y.is_finite(),
+            "z = NaN → {nan:?}"
+        );
+    }
+
+    #[test]
+    fn f32_non_positive_depth_is_not_the_principal_point() {
+        let model = model_f32(500.0, 500.0);
+        let on_plane = model.project(&Point3::new(100.0, 0.0, 0.0));
+        assert!(
+            !on_plane.x.is_finite() && !on_plane.y.is_finite(),
+            "f32 z = 0 projected to {on_plane:?}"
+        );
+        let behind = model.project(&Point3::new(1.0, 0.0, -1.0));
+        assert!(
+            !behind.x.is_finite() && !behind.y.is_finite(),
+            "f32 z = -1 projected to {behind:?}"
+        );
+        let front = model.project(&Point3::new(1.0, 0.0, 1.0));
+        assert!((front.x - 820.0).abs() < 1e-3);
+        assert!((front.y - 240.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn zero_or_non_finite_focal_length_is_not_a_principal_ray() {
+        let pixel = Point2::new(1000.0, 800.0);
+        let bogus = Point3::new(0.0, 0.0, 2.0);
+        for (fx, fy, label) in [
+            (0.0, 500.0, "fx = 0"),
+            (500.0, 0.0, "fy = 0"),
+            (f64::INFINITY, 500.0, "fx = inf"),
+            (500.0, f64::NAN, "fy = NaN"),
+        ] {
+            let ray = model_f64(fx, fy).unproject(&pixel, 2.0);
+            assert!(
+                !ray.x.is_finite() && !ray.y.is_finite(),
+                "{label} unprojected to {ray:?}"
+            );
+            assert_ne!(ray, bogus, "{label}");
+        }
+
+        // fx = 500, pixel (1000, 800), depth 2 → ((1000-320)/500*2, (800-240)/500*2, 2).
+        let ray = model_f64(500.0, 500.0).unproject(&pixel, 2.0);
+        assert!((ray.x - 2.72).abs() < 1e-12, "x {}", ray.x);
+        assert!((ray.y - 2.24).abs() < 1e-12, "y {}", ray.y);
+        assert!((ray.z - 2.0).abs() < 1e-12, "z {}", ray.z);
+    }
+
+    #[test]
+    fn f32_zero_focal_length_is_not_a_principal_ray() {
+        let pixel = Point2::new(1000.0f32, 800.0);
+        let ray = model_f32(0.0, 500.0).unproject(&pixel, 2.0);
+        assert!(
+            !ray.x.is_finite() && !ray.y.is_finite(),
+            "f32 fx = 0 unprojected to {ray:?}"
+        );
+        let ok = model_f32(500.0, 500.0).unproject(&pixel, 2.0);
+        assert!((ok.x - 2.72).abs() < 1e-5, "x {}", ok.x);
+        assert!((ok.y - 2.24).abs() < 1e-5, "y {}", ok.y);
+        assert!((ok.z - 2.0).abs() < 1e-5, "z {}", ok.z);
     }
 }
 

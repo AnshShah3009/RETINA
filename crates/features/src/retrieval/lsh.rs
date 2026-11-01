@@ -75,10 +75,28 @@ impl LshIndex {
 
     /// Insert `descriptor` under `id`, adding it to every table's bucket.
     ///
-    /// Re-inserting the same `id` overwrites its stored descriptor; query results
-    /// are always deduplicated by id.
+    /// Re-inserting the same `id` overwrites its stored descriptor and removes
+    /// that id from the buckets it occupied before. Query results are always
+    /// deduplicated by id.
     pub fn insert<D: AsRef<[u8]>>(&mut self, id: usize, descriptor: D) {
         let desc = descriptor.as_ref().to_vec();
+        let old_keys: Option<Vec<u64>> = self.descriptors.get(&id).map(|previous| {
+            self.positions
+                .iter()
+                .map(|positions| bucket_key(previous, positions))
+                .collect()
+        });
+        if let Some(old_keys) = old_keys {
+            for (table, key) in old_keys.into_iter().enumerate() {
+                let Some(ids) = self.buckets[table].get_mut(&key) else {
+                    continue;
+                };
+                ids.retain(|&stored| stored != id);
+                if ids.is_empty() {
+                    self.buckets[table].remove(&key);
+                }
+            }
+        }
         for (table, positions) in self.positions.iter().enumerate() {
             let key = bucket_key(&desc, positions);
             self.buckets[table].entry(key).or_default().push(id);
@@ -247,6 +265,22 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), count, "ids must not repeat across tables");
+    }
+
+    #[test]
+    fn reinsert_removes_the_id_from_previous_buckets() {
+        let mut index = LshIndex::new(4, 4, 8, 1);
+        index.insert(1, [0u8, 0, 0, 0]);
+        index.insert(0, [0u8, 0, 0, 0]);
+        // Overwrite id 0. The old zero-bucket must not still name it.
+        index.insert(0, [0xFFu8, 0xFF, 0xFF, 0xFF]);
+
+        assert_eq!(
+            index.query([0u8, 0, 0, 0], 4),
+            vec![(1, 0)],
+            "query of the overwritten zeros still returned id 0"
+        );
+        assert_eq!(index.query([0xFFu8, 0xFF, 0xFF, 0xFF], 4), vec![(0, 0)]);
     }
 
     #[test]

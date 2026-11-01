@@ -201,7 +201,7 @@ pub fn registration_icp_point_to_plane(
             for &(src_idx, tgt_idx, _) in &correspondences {
                 n_used += 1;
                 let (jacobian, residual) = point_to_plane_row(
-                    &transformation.transform_point(&source.points[src_idx]),
+                    &transformed_source_point(&source.points[src_idx], &transformation),
                     &target.points[tgt_idx],
                     &normals[tgt_idx],
                 );
@@ -229,7 +229,7 @@ pub fn registration_icp_point_to_plane(
         if !delta.iter().all(|v| v.is_finite()) {
             return None;
         }
-        transformation = exponential_map_se3(&delta) * transformation;
+        transformation = compose_point_to_plane_update(&transformation, &delta);
         iterations = iter + 1;
 
         // Re-evaluate at the pose just reached.
@@ -271,6 +271,42 @@ pub fn registration_icp_point_to_plane(
 const RELATIVE_FITNESS: f32 = 1e-6;
 /// Open3D's default `ICPConvergenceCriteria::relative_rmse`.
 const RELATIVE_RMSE: f32 = 1e-6;
+
+/// Source point the point-to-plane residual is linearised at.
+///
+/// The GPU loop uploads this point and hands the accumulator the identity,
+/// because the pose is already applied. Linearising the raw point and then
+/// composing `update * initial` applies the initial pose twice: a source point
+/// at x = 1, a target at x = 0 with normal +x, and an initial translation of
+/// -1 (already correct) produces a twist of -1 from the untransformed point,
+/// and one iteration returns translation -2.
+pub(crate) fn transformed_source_point(p: &Point3<f32>, pose: &Matrix4<f32>) -> Point3<f32> {
+    pose.transform_point(p)
+}
+
+/// Tightly packed `(x, y, z, 1)` for the GPU ICP kernels.
+///
+/// `icp_correspondences` and `icp_accumulate` take the point count as `len/4`
+/// and read `vec4`s. An xyz `(3, N, 1)` buffer of
+/// `(0.1, 0.2, 0.3), (1, 2, 3), (4, 5, 6), (7, 8, 9)` has length 12, so the
+/// shader sees 3 points assembled from the wrong offsets. `pose` is applied
+/// first, including on iteration 0.
+pub(crate) fn pack_points_xyz1(points: &[Point3<f32>], pose: &Matrix4<f32>) -> Vec<f32> {
+    let mut packed = Vec::with_capacity(points.len() * 4);
+    for p in points {
+        let moved = transformed_source_point(p, pose);
+        packed.extend_from_slice(&[moved.x, moved.y, moved.z, 1.0]);
+    }
+    packed
+}
+
+/// Left-compose the solved twist onto the pose the residual was linearised at.
+pub(crate) fn compose_point_to_plane_update(
+    transformation: &Matrix4<f32>,
+    delta: &nalgebra::Vector6<f32>,
+) -> Matrix4<f32> {
+    exponential_map_se3(delta) * transformation
+}
 
 /// One point-to-plane row for a source point already moved to `p`: the
 /// Jacobian with respect to a left-multiplied twist `[v; w]` (translation
@@ -361,16 +397,9 @@ pub fn registration_icp_point_to_plane_ctx(
     let mut final_iterations = 0;
     let mut prev_metrics: Option<(f32, f32)> = None;
 
-    // Convert point clouds to tensors for GPU processing
-    let source_tensor: cv_core::CpuTensor<f32> = Tensor::from_vec(
-        source
-            .points
-            .iter()
-            .flat_map(|p| [p.x, p.y, p.z, 1.0])
-            .collect(),
-        cv_core::TensorShape::new(1, source.points.len(), 4),
-    )
-    .map_err(|e| Error::RuntimeError(format!("Failed to create source tensor: {:?}", e)))?;
+    // Target stays fixed. The source is packed at the pose of each iteration,
+    // including the first: the shader reads `(x, y, z, 1)` and the count is
+    // `len/4`, and the residual is linearised at that pose.
     let target_tensor: cv_core::CpuTensor<f32> = Tensor::from_vec(
         target
             .points
@@ -392,76 +421,45 @@ pub fn registration_icp_point_to_plane_ctx(
     )
     .map_err(|e| Error::RuntimeError(format!("Failed to create target normals tensor: {:?}", e)))?;
 
-    // If using GPU, upload once
-    let (s_gpu, t_gpu, n_gpu) = if let cv_hal::compute::ComputeDevice::Gpu(gpu) = ctx {
-        (
-            source_tensor.to_gpu_ctx(gpu).map_err(|e| {
-                Error::RuntimeError(format!("Failed to upload source tensor to GPU: {:?}", e))
-            })?,
-            target_tensor.to_gpu_ctx(gpu).map_err(|e| {
-                Error::RuntimeError(format!("Failed to upload target tensor to GPU: {:?}", e))
-            })?,
-            target_normals_tensor.to_gpu_ctx(gpu).map_err(|e| {
-                Error::RuntimeError(format!(
-                    "Failed to upload target normals tensor to GPU: {:?}",
-                    e
-                ))
-            })?,
-        )
-    } else {
-        // CPU fallback: we'll use the tensors directly but it's less efficient than specialized CPU code
-        return registration_icp_point_to_plane(
-            source,
-            target,
-            max_correspondence_distance,
-            init_transformation,
-            max_iterations,
-        )
-        .ok_or_else(|| Error::RuntimeError("CPU fallback ICP failed to converge".to_string()));
+    let gpu = match ctx {
+        cv_hal::compute::ComputeDevice::Gpu(gpu) => gpu,
+        // CPU fallback: the specialised CPU loop already linearises at the
+        // initial pose. This branch never reaches the device kernels.
+        _ => {
+            return registration_icp_point_to_plane(
+                source,
+                target,
+                max_correspondence_distance,
+                init_transformation,
+                max_iterations,
+            )
+            .ok_or_else(|| Error::RuntimeError("CPU fallback ICP failed to converge".to_string()));
+        }
     };
-
-    // The source as it stands under the current pose.
-    //
-    // The correspondence search has to see the *moved* source, or it recomputes
-    // the same untransformed associations every iteration: the source was
-    // uploaded once before the loop and passed unchanged, so the association set
-    // was a fixed point rather than an iteration, and the whole "ICP" was a
-    // single Gauss-Newton step with the update applied repeatedly to a
-    // correspondence set that never moved. The existing parity test takes the
-    // CPU early-return above and so never reached this.
-    let mut s_gpu = s_gpu;
+    let t_gpu = target_tensor.to_gpu_ctx(gpu).map_err(|e| {
+        Error::RuntimeError(format!("Failed to upload target tensor to GPU: {:?}", e))
+    })?;
+    let n_gpu = target_normals_tensor.to_gpu_ctx(gpu).map_err(|e| {
+        Error::RuntimeError(format!(
+            "Failed to upload target normals tensor to GPU: {:?}",
+            e
+        ))
+    })?;
 
     for iter in 0..max_iterations {
-        // Apply the running transform to the source before searching, so the
-        // correspondences reflect the pose reached so far.
-        if iter > 0 {
-            let moved: Vec<Point3<f32>> = source
-                .points
-                .iter()
-                .map(|p| {
-                    // `transform_point` is f64; the tensors are f32. The transform
-                    // itself is computed in f64 and narrowed on the way out, so no
-                    // precision is lost in the accumulation that follows.
-                    transformation.transform_point(&nalgebra::Point3::new(p.x, p.y, p.z))
-                })
-                .collect();
-            let mut flat: Vec<f32> = Vec::with_capacity(moved.len() * 3);
-            for p in &moved {
-                flat.extend_from_slice(&[p.x, p.y, p.z]);
-            }
-            let moved_tensor: cv_core::CpuTensor<f32> =
-                Tensor::from_vec(flat, cv_core::TensorShape::new(3, source.points.len(), 1))
-                    .map_err(|e| {
-                        Error::RuntimeError(format!("Failed to build moved source: {e:?}"))
-                    })?;
-            let gpu = match ctx {
-                cv_hal::compute::ComputeDevice::Gpu(g) => g,
-                _ => unreachable!("the CPU branch returns above"),
-            };
-            s_gpu = moved_tensor
-                .to_gpu_ctx(gpu)
-                .map_err(|e| Error::RuntimeError(format!("Failed to re-upload source: {e:?}")))?;
-        }
+        // Move the source by the pose this iteration linearises at — the
+        // initial pose on the way in, not the identity — and pack `(x, y, z, 1)`.
+        // The accumulator is handed identity because the point is already moved;
+        // passing the pose as well would apply it twice. An xyz `(3, N, 1)`
+        // buffer is what the shader used to see from iteration 1 on: `len/4`
+        // scrambled points.
+        let packed = pack_points_xyz1(&source.points, &transformation);
+        let moved_tensor: cv_core::CpuTensor<f32> =
+            Tensor::from_vec(packed, cv_core::TensorShape::new(1, source.points.len(), 4))
+                .map_err(|e| Error::RuntimeError(format!("Failed to build moved source: {e:?}")))?;
+        let s_gpu = moved_tensor
+            .to_gpu_ctx(gpu)
+            .map_err(|e| Error::RuntimeError(format!("Failed to upload source: {e:?}")))?;
 
         // Find correspondences on device
         let correspondences_raw = ctx
@@ -542,8 +540,7 @@ pub fn registration_icp_point_to_plane_ctx(
         match ata.try_inverse() {
             Some(ata_inv) => {
                 let delta = -(ata_inv * atb);
-                let update = exponential_map_se3(&delta);
-                transformation = update * transformation;
+                transformation = compose_point_to_plane_update(&transformation, &delta);
             }
             None => {
                 let Ok(pinv) = ata.clone().pseudo_inverse(1e-6) else {
@@ -562,8 +559,7 @@ pub fn registration_icp_point_to_plane_ctx(
                             .to_string(),
                     ));
                 }
-                let update = exponential_map_se3(&delta);
-                transformation = update * transformation;
+                transformation = compose_point_to_plane_update(&transformation, &delta);
             }
         }
 
@@ -899,5 +895,105 @@ mod point_to_plane_no_normals {
             "with normals the pose should have moved in y, got {:?}",
             with.transformation
         );
+    }
+}
+
+#[cfg(test)]
+mod icp_pose_and_packing {
+    use super::*;
+    use nalgebra::Vector3;
+
+    /// One Gauss-Newton step from correspondences of an already-moved source.
+    /// Rank-1 (a single plane) goes through the same pseudo-inverse the GPU
+    /// loop uses when `ata` is singular.
+    fn step_at_pose(
+        source: Point3<f32>,
+        target: Point3<f32>,
+        normal: Vector3<f32>,
+        pose: &Matrix4<f32>,
+    ) -> (nalgebra::Vector6<f32>, Matrix4<f32>) {
+        let moved = transformed_source_point(&source, pose);
+        let (jacobian, residual) = point_to_plane_row(&moved, &target, &normal);
+        let ata = jacobian * jacobian.transpose();
+        let atb = jacobian * residual;
+        let delta = match ata.try_inverse() {
+            Some(inv) => -(inv * atb),
+            None => {
+                -(ata
+                    .pseudo_inverse(1e-6)
+                    .expect("rank-1 plane has a pseudo-inverse")
+                    * atb)
+            }
+        };
+        let updated = compose_point_to_plane_update(pose, &delta);
+        (delta, updated)
+    }
+
+    /// Source at x=1, target at x=0 with normal +x, initial translation -1.
+    /// The point is already on the target. Linearising there is a zero twist,
+    /// so one iteration stays at translation -1. Linearising the raw point
+    /// instead yields twist -1 and the composed pose translates by -2.
+    #[test]
+    fn first_iteration_linearises_at_the_initial_pose() {
+        let source = Point3::new(1.0, 0.0, 0.0);
+        let target = Point3::new(0.0, 0.0, 0.0);
+        let normal = Vector3::new(1.0, 0.0, 0.0);
+        let mut init = Matrix4::identity();
+        init[(0, 3)] = -1.0;
+
+        let (delta, updated) = step_at_pose(source, target, normal, &init);
+        assert!(
+            delta[0].abs() < 1e-5,
+            "twist from the moved point is {delta:?}, want ~0"
+        );
+        assert!(
+            (updated[(0, 3)] + 1.0).abs() < 1e-5,
+            "translation {}, want -1",
+            updated[(0, 3)]
+        );
+
+        // The untransformed point is what the old first iteration uploaded.
+        let raw = point_to_plane_row(&source, &target, &normal);
+        let ata = raw.0 * raw.0.transpose();
+        let atb = raw.0 * raw.1;
+        let wrong = -(ata.pseudo_inverse(1e-6).unwrap() * atb);
+        assert!(
+            (wrong[0] + 1.0).abs() < 1e-5,
+            "untransformed residual must be the twist of -1 that the bug composed, got {}",
+            wrong[0]
+        );
+        let doubled = compose_point_to_plane_update(&init, &wrong);
+        assert!(
+            (doubled[(0, 3)] + 2.0).abs() < 1e-5,
+            "composing that twist with the initial pose is translation -2, got {}",
+            doubled[(0, 3)]
+        );
+    }
+
+    /// The shader reads `array<vec4<f32>>` and sets `count = len/4`.
+    #[test]
+    fn packed_source_is_xyz1_and_count_is_the_point_count() {
+        let points = [
+            Point3::new(0.1, 0.2, 0.3),
+            Point3::new(1.0, 2.0, 3.0),
+            Point3::new(4.0, 5.0, 6.0),
+            Point3::new(7.0, 8.0, 9.0),
+        ];
+        let packed = pack_points_xyz1(&points, &Matrix4::identity());
+        assert_eq!(packed.len() / 4, points.len(), "count is len/4");
+        let expected = [
+            0.1, 0.2, 0.3, 1.0, 1.0, 2.0, 3.0, 1.0, 4.0, 5.0, 6.0, 1.0, 7.0, 8.0, 9.0, 1.0,
+        ];
+        assert_eq!(packed, expected);
+
+        // Iteration 0 packs the *moved* source, not the raw one.
+        let mut init = Matrix4::identity();
+        init[(0, 3)] = -1.0;
+        let moved = pack_points_xyz1(&[Point3::new(1.0, 2.0, 3.0)], &init);
+        assert_eq!(moved.len() / 4, 1);
+        assert!((moved[0] - 0.0).abs() < 1e-6, "x {}", moved[0]);
+        assert!((moved[1] - 2.0).abs() < 1e-6);
+        assert!((moved[2] - 3.0).abs() < 1e-6);
+        assert_eq!(moved[3], 1.0);
     }
 }
