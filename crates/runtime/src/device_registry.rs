@@ -6,6 +6,20 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Borrow an `Arc`'s contents for the rest of the process.
+///
+/// `cv_hal::compute::ComputeDevice` is a borrowed enum (`ComputeDevice::Cpu(&'a
+/// CpuBackend)`), and the only way to hand back one that outlives this call is a
+/// `'static` reference. The registry is a process-lifetime singleton, so a
+/// device registered in it lives that long anyway.
+///
+/// Callers pin the result in a `OnceLock` ([`DeviceRuntime::static_cpu`]) so the
+/// `Arc` clone is leaked *once per device*, not once per dispatch.
+fn leak_for_process<T>(arc: &Arc<T>) -> &'static T {
+    let leaked: &'static Arc<T> = Box::leak(Box::new(Arc::clone(arc)));
+    leaked.as_ref()
+}
+
 /// Supported compute backend contexts.
 pub enum BackendContext {
     Cpu(Arc<cv_hal::cpu::CpuBackend>),
@@ -45,6 +59,13 @@ pub struct DeviceRuntime {
 
     executors: Mutex<ExecutorPool>,
     memory: Arc<MemoryManager>,
+    /// The device's `'static` handle for [`DeviceRuntime::compute_device`].
+    ///
+    /// Populated at most once, on the first dispatch that needs it. Holding it
+    /// here is what keeps [`leak_for_process`] to a single leak per device -
+    /// `ComputeDevice` borrows, and its CPU arm must point at this registry's
+    /// `CpuBackend`, not HAL's unrelated global one.
+    static_cpu: std::sync::OnceLock<&'static cv_hal::cpu::CpuBackend>,
 }
 
 impl DeviceRuntime {
@@ -73,6 +94,7 @@ impl DeviceRuntime {
             last_completed: Mutex::new(SubmissionIndex(0)),
             executors: Mutex::new(ExecutorPool::new(id)),
             memory,
+            static_cpu: std::sync::OnceLock::new(),
         }
     }
 
@@ -90,6 +112,34 @@ impl DeviceRuntime {
 
     pub fn memory(&self) -> &Arc<MemoryManager> {
         &self.memory
+    }
+
+    /// The HAL compute device this runtime owns, for kernel dispatch.
+    ///
+    /// CPU is answered from *this* registry's own `CpuBackend` - the instance the
+    /// runtime created and gave a device id to. Resolving that id through
+    /// `cv_hal::compute::get_device_by_id` cannot work: HAL owns a separate,
+    /// lazily-initialised `CPU_CONTEXT` whose `CpuBackend` draws its id from the
+    /// same counter, so the two ids differ and the lookup fails. That is what made
+    /// every CPU `ResourceGroup`/`RuntimeRunner` report "device not found" for the
+    /// device it was itself bound to (see `tests/cpu_runner_device_resolution.rs`).
+    ///
+    /// GPU and MLX contexts are process-wide singletons that the registry obtained
+    /// from HAL, so the HAL lookup is the right answer for them.
+    pub fn compute_device(&self) -> Result<cv_hal::compute::ComputeDevice<'static>> {
+        match &self.context {
+            BackendContext::Cpu(cpu) => Ok(cv_hal::compute::ComputeDevice::Cpu(
+                *self.static_cpu.get_or_init(|| leak_for_process(cpu)),
+            )),
+            BackendContext::Gpu(_) | BackendContext::Mlx(_) => {
+                cv_hal::compute::get_device_by_id(self.id).map_err(|e| {
+                    crate::Error::RuntimeError(format!(
+                        "Could not find compute device {:?}: {}",
+                        self.id, e
+                    ))
+                })
+            }
+        }
     }
 
     pub fn executors(&self) -> &Mutex<ExecutorPool> {

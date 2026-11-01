@@ -248,13 +248,13 @@ impl ResourceGroup {
     }
 
     /// Try to resolve the HAL compute device for this group.
+    ///
+    /// Resolved through this group's [`DeviceRuntime`] rather than a bare
+    /// `cv_hal::compute::get_device_by_id`, because a CPU device's id belongs to
+    /// the `CpuBackend` the runtime registry owns, not to HAL's separate global
+    /// one - see [`DeviceRuntime::compute_device`].
     pub fn try_device(&self) -> Result<cv_hal::compute::ComputeDevice<'static>> {
-        cv_hal::compute::get_device_by_id(self.device_id).map_err(|e| {
-            crate::Error::RuntimeError(format!(
-                "Could not find compute device {:?}: {}",
-                self.device_id, e
-            ))
-        })
+        self.device_runtime()?.compute_device()
     }
 
     /// Resize the thread pool. Fails if `allow_dynamic_scaling` is false.
@@ -410,14 +410,11 @@ impl RuntimeRunner {
     }
 
     /// Try to resolve the HAL compute device for this runner.
+    ///
+    /// Same path as [`ResourceGroup::try_device`]: the registry owns the
+    /// `CpuBackend` whose id this runner's `DeviceId` refers to.
     pub fn try_device(&self) -> Result<cv_hal::compute::ComputeDevice<'static>> {
-        cv_hal::compute::get_device_by_id(self.device_id()).map_err(|e| {
-            crate::Error::RuntimeError(format!(
-                "Could not find compute device {:?}: {}",
-                self.device_id(),
-                e
-            ))
-        })
+        self.device_runtime()?.compute_device()
     }
 }
 
