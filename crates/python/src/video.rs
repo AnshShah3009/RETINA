@@ -21,10 +21,8 @@ impl PyVideoCapture {
     }
 
     pub fn read(&mut self) -> PyResult<Option<Vec<u8>>> {
-        match self.inner.read() {
-            Ok(img) => Ok(Some(img.into_vec())),
-            Err(_) => Ok(None),
-        }
+        map_capture_read(self.inner.read())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))
     }
 
     pub fn is_opened(&self) -> bool {
@@ -103,6 +101,24 @@ impl PySlam {
     }
 }
 
+/// `VideoCapture::read` as the Python binding sees it.
+///
+/// End of stream stays `Ok(None)`. Every other failure stays an error:
+/// folding it into `None` makes a corrupt frame indistinguishable from EOF.
+fn map_capture_read(
+    frame: std::result::Result<image::GrayImage, cv_videoio::VideoError>,
+) -> std::result::Result<Option<Vec<u8>>, String> {
+    match frame {
+        Ok(img) => Ok(Some(img.into_vec())),
+        Err(cv_videoio::VideoError::CaptureFailed(msg))
+            if msg == "End of stream" || msg == "End of sequence" =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// The 4x4 world -> camera pose matrix flattened for Python, so that
 /// `np.array(flat).reshape(4, 4)` is the matrix itself.
 ///
@@ -119,7 +135,7 @@ fn pose_matrix_row_major(pose: &cv_core::Pose) -> Vec<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::pose_matrix_row_major;
+    use super::{map_capture_read, pose_matrix_row_major};
     use cv_core::Pose;
     use nalgebra::{UnitQuaternion, Vector3};
 
@@ -146,6 +162,38 @@ mod tests {
         }
         assert_eq!([flat[3], flat[7], flat[11]], [1.5, -2.0, 3.25]);
         assert_eq!(&flat[12..], &[0.0, 0.0, 0.0, 1.0]);
+    }
+
+    /// EOF is `Ok(None)`. A decode or device failure must not be.
+    #[test]
+    fn read_maps_eof_to_none_and_surfaces_real_errors() {
+        use cv_videoio::VideoError;
+        use image::{GrayImage, Luma};
+
+        let frame = map_capture_read(Ok(GrayImage::from_pixel(1, 1, Luma([7])))).unwrap();
+        assert_eq!(frame, Some(vec![7]));
+
+        assert_eq!(
+            map_capture_read(Err(VideoError::CaptureFailed("End of stream".into()))).unwrap(),
+            None
+        );
+        assert_eq!(
+            map_capture_read(Err(VideoError::CaptureFailed("End of sequence".into()))).unwrap(),
+            None
+        );
+
+        let corrupt = map_capture_read(Err(VideoError::Backend("corrupt frame".into())));
+        assert!(
+            corrupt.is_err(),
+            "a corrupt frame must not look like EOF, got {corrupt:?}"
+        );
+        let device = map_capture_read(Err(VideoError::CaptureFailed(
+            "Failed to grab frame: device error".into(),
+        )));
+        assert!(
+            device.is_err(),
+            "a capture failure must not look like EOF, got {device:?}"
+        );
     }
 }
 
