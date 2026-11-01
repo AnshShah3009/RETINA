@@ -345,6 +345,11 @@ impl Isam2Solver {
 
         for &fi in factor_indices {
             let factor = &self.factors[fi];
+            // Same contract as `FactorGraph::linearize`: a factor naming a
+            // variable that has no value yet contributes to neither `H` nor `b`.
+            if !self.theta.contains_all(factor.keys()) {
+                continue;
+            }
             let err = factor.error(&self.theta);
             let sqrt_info = factor.noise_model().sqrt_information();
             let raw_jacs = factor
@@ -376,6 +381,17 @@ impl Isam2Solver {
     fn compute_total_error(&self) -> f64 {
         self.factors
             .iter()
+            // A factor may name a variable whose value has not arrived yet:
+            // `update` deliberately tolerates that (see the missing-key comment
+            // in `update`, and the missing-key case in `build_ordering`), and
+            // `build_linear_system` only ever assembles the factors whose
+            // variables all have values. The cost that `H`/`b` minimises must be
+            // the same set of factors, so skip the others here too. Evaluating
+            // them panicked on `Values::get(..).expect(..)` inside the
+            // ready-made factors, which turned the ordinary incremental order
+            // (a pose's value delivered one update after the constraint that
+            // reaches the next pose) into a panic.
+            .filter(|f| self.theta.contains_all(f.keys()))
             .map(|f| {
                 let we = f.whitened_error(&self.theta);
                 we.dot(&we)
