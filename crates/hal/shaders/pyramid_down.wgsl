@@ -22,13 +22,20 @@ fn reflect101(p: i32, len: i32) -> i32 {
     if (len <= 1) {
         return 0;
     }
-    let period = 2 * len - 2;
-    var c = p % period;
-    if (c < 0) {
-        c = c + period;
-    }
-    if (c >= len) {
-        c = period - c;
+    // Fold by reflection until in range, without `%`: the signed-remainder
+    // form gave wrong taps for negative coordinates on this backend, so row 0
+    // and column 0 disagreed with the CPU path and cv2.pyrDown (row 0 of a
+    // 2x + y ramp read 15.6 instead of 2.25). The taps reach at most 2 past
+    // an edge, so this loops at most a few times even for len 2.
+    var c = p;
+    loop {
+        if (c < 0) {
+            c = -c;
+        } else if (c >= len) {
+            c = 2 * len - 2 - c;
+        } else {
+            break;
+        }
     }
     return c;
 }

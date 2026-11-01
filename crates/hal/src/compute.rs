@@ -769,18 +769,10 @@ pub fn get_device_by_id(id: crate::DeviceId) -> Result<ComputeDevice<'static>> {
     }
 
     // Check CPU last
-    if let Some(cpu) = CPU_CONTEXT.get() {
-        if cpu.device_id() == id {
-            return Ok(ComputeDevice::Cpu(cpu));
-        }
-    } else {
-        // Try to init if it's the only one
-        if let Some(cpu_backend) = CpuBackend::new() {
-            let cpu = CPU_CONTEXT.get_or_init(move || cpu_backend);
-            if cpu.device_id() == id {
-                return Ok(ComputeDevice::Cpu(cpu));
-            }
-        }
+    if let Ok(cpu) = global_cpu()
+        && cpu.device_id() == id
+    {
+        return Ok(ComputeDevice::Cpu(cpu));
     }
 
     Err(crate::Error::DeviceError(format!(
@@ -797,11 +789,22 @@ pub fn get_device() -> Result<ComputeDevice<'static>> {
 
     match GpuContext::global() {
         Ok(gpu) => Ok(ComputeDevice::Gpu(gpu)),
-        Err(_) => {
-            let cpu_backend = CpuBackend::new()
-                .ok_or_else(|| crate::Error::InitError("CPU backend unavailable".into()))?;
-            let cpu = CPU_CONTEXT.get_or_init(|| cpu_backend);
-            Ok(ComputeDevice::Cpu(cpu))
-        }
+        Err(_) => Ok(ComputeDevice::Cpu(global_cpu()?)),
     }
+}
+
+/// The process-wide CPU backend.
+///
+/// There is exactly one, so its `DeviceId` means the same thing to HAL and to
+/// `cv-runtime`'s device registry (which registers a clone of it rather than
+/// creating its own). With two `CpuBackend`s drawing ids from one counter, a
+/// group built from `get_device()` carried an id the registry did not know -
+/// "Device DeviceId(0) not found" - and the reverse lookup failed the same way.
+pub fn global_cpu() -> Result<&'static CpuBackend> {
+    if let Some(cpu) = CPU_CONTEXT.get() {
+        return Ok(cpu);
+    }
+    let backend = CpuBackend::new()
+        .ok_or_else(|| crate::Error::InitError("CPU backend unavailable".into()))?;
+    Ok(CPU_CONTEXT.get_or_init(|| backend))
 }
