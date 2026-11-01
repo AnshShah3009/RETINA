@@ -133,16 +133,12 @@ fn probe_pyramid_down() {
     let gr = g.pyramid_down(&gt).unwrap();
     let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
 
-    // Still a real divergence, now measured honestly rather than drowned in
-    // noise: the CPU takes `src[2y][2x]` after a Gaussian blur, the GPU runs a
-    // full bilinear `resize`. Those are different filters with different
-    // footprints, so on a smooth ramp they still differ - but by a bounded
-    // amount rather than 55%, and the number now means something.
-    //
-    // Left asserted rather than loosened or skipped: a 0.5 relative disagreement
-    // between two backends that are documented to implement "the same" pyramid
-    // is a genuine finding, and the probe only surfaced it once it asserted.
-    assert_parity("PYRAMID_DOWN (ramp)", &cs, &gs, 0.5);
+    // Both backends are OpenCV's pyrDown (5x5 [1 4 6 4 1], BORDER_REFLECT_101,
+    // (w+1)/2) since a7c10ff, and the CPU side matches cv2.pyrDown on this
+    // ramp exactly. The bound was 0.5 relative while the GPU ran a bilinear
+    // resize; it is now near-exact, which is what caught the GPU shader's
+    // border reflection reading the wrong rows/columns (row 0: 15.6 vs 2.25).
+    assert_parity("PYRAMID_DOWN (ramp)", &cs, &gs, 1e-5);
 }
 
 #[test]
