@@ -417,8 +417,13 @@ pub fn fisheye_stereo_rectify(
     p1[(1, 1)] *= scale; // fy
     p2[(0, 0)] *= scale;
     p2[(1, 1)] *= scale;
-    // Adjust tx proportionally
+    // The baseline lives in the row of the axis it lies on: row 0 for a
+    // side-by-side rig, row 1 for a vertical one (see `stereo_rectify_matrices`,
+    // which writes `P2[idx][3]`). Scaling only row 0 left a vertical rig's
+    // baseline unscaled while its focal length shrank, so Q recovered a depth
+    // off by exactly `fov_scale` (measured: 1.5 instead of 3.0 at scale 0.5).
     p2[(0, 3)] *= scale;
+    p2[(1, 3)] *= scale;
 
     // Keep Q consistent with the scaled projection matrices so disparity-to-depth
     // mapping stays correct. Only the focal length in Q changes: scaling P1/P2
