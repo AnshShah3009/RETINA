@@ -695,8 +695,19 @@ pub fn solve_pnp_refine_ctx(
 }
 
 fn extrinsics_to_params(ext: &Pose) -> [f64; 6] {
+    // Go through a quaternion, not `Rotation3::scaled_axis()`.
+    //
+    // That conversion takes the angle from `acos((trace - 1) / 2)`, and a
+    // rotation that is the identity only up to roundoff can have a trace a few
+    // ulps *above* 3: `solve_pnp_dlt` on 20 exactly projected points at world
+    // scale 0.75 measured 3.0000000000000013. `acos` of an argument marginally
+    // greater than 1 is NaN, and so is the whole axis, which poisons every LM
+    // step and returns an all-NaN pose. The quaternion angle is an `atan2` of
+    // the vector and scalar parts, so it stays finite and zero at identity
+    // however the trace rounded. The conversion agrees with the old one to
+    // roundoff for every genuinely non-identity rotation.
     let r = Rotation3::from_matrix_unchecked(ext.rotation_matrix());
-    let omega = r.scaled_axis();
+    let omega = nalgebra::UnitQuaternion::from_rotation_matrix(&r).scaled_axis();
     [
         omega[0],
         omega[1],
