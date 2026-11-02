@@ -5,6 +5,10 @@ on:
     branches: [ master, develop ]
     paths:
       - '**/*.rs'
+      # Shaders are compiled into the crates with include_str!, and the
+      # .npy files are test fixtures; changes to either change results.
+      - '**/*.wgsl'
+      - '**/*.npy'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - '.github/workflows/build.yml'
@@ -12,6 +16,10 @@ on:
     branches: [ master, develop ]
     paths:
       - '**/*.rs'
+      # Shaders are compiled into the crates with include_str!, and the
+      # .npy files are test fixtures; changes to either change results.
+      - '**/*.wgsl'
+      - '**/*.npy'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
       - '.github/workflows/build.yml'
