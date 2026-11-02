@@ -344,8 +344,18 @@ pub fn stereo_rectify_matrices(
     let r2 = w_r * r_r;
     let t_new = r2 * t_rel;
 
-    let fx = 0.5 * (left_intrinsics.fx + right_intrinsics.fx);
-    let fy = 0.5 * (left_intrinsics.fy + right_intrinsics.fy);
+    // One focal length for both axes and both cameras, as `cvStereoRectify`
+    // does: the smaller of the two cameras' focal lengths on the axis *across*
+    // the baseline (`fy` for a side-by-side rig, `fx` for a vertical one).
+    // `Q` below carries a single focal length in `Q(2, 3)` and reprojects
+    // `X = (u - cx)·B/d`, `Y = (v - cy)·B/d`, which inverts `P1` only when
+    // `P1` has `fx == fy`. Averaging `fx` and `fy` separately kept them
+    // distinct, so with `fx = 500`, `fy = 650` a point at `Y = 0.4` came back
+    // from `Q` at `Y = 0.52` (and a vertical rig's depth was off by fx/fy).
+    let f_across = |k: &CameraIntrinsics| if idx == 0 { k.fy } else { k.fx };
+    let f_new = f_across(left_intrinsics).min(f_across(right_intrinsics));
+    let fx = f_new;
+    let fy = f_new;
     let cx1 = 0.5 * (left_intrinsics.cx + right_intrinsics.cx);
     let cx2 = cx1;
     let cy = 0.5 * (left_intrinsics.cy + right_intrinsics.cy);
@@ -513,7 +523,8 @@ mod rectify_tests {
         // Depth via Q must equal true Z (fx·B/d), not fx²·B/d.
         let baseline = b_w.norm();
         let expected_z = {
-            let f = 0.5 * (intr_l.fx + intr_r.fx);
+            // The rectified focal length (one for both axes, see the function).
+            let f = m.p1[(0, 0)];
             f * baseline / disparity
         };
         assert!(
@@ -548,7 +559,8 @@ mod rectify_tests {
             .expect("fisheye rectification must succeed");
 
         // Rectified focal must have been scaled down by exactly `fov_scale`.
-        let fx_unscaled = 0.5 * (intr_l.fx + intr_r.fx);
+        // cv2.stereoRectify: min of the focal lengths across the baseline.
+        let fx_unscaled = intr_l.fy.min(intr_r.fy);
         assert!((m.p1[(0, 0)] - fov_scale * fx_unscaled).abs() < 1e-9);
 
         let c_l = -(left.rotation_matrix().transpose() * left.translation);
