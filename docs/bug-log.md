@@ -358,6 +358,21 @@ stored in the tests, so CI needs no OpenCV.
   angle_degrees, scale) -> [[f64; 3]; 2]` is the drop-in form, bit-identical to
   OpenCV 4.13 on all four cases. `tests/rotation_matrix_opencv_parity.rs`.
 
+- **`features::fast::corner_score` claimed to be OpenCV's FAST score but was
+  Rosten's** (the arc's summed `|difference|` minus `9t`): `372` where
+  `cv2.FastFeatureDetector` reports `44` on the first corner of a noise image,
+  and a different ordering of corners. It is now OpenCV's `cornerScore<16>` (the
+  largest threshold that keeps the pixel a corner; `0` for a non-corner, border
+  taps still clamped). New `fast_detect_opencv(img, t, nonmax)` is `cv::FAST`
+  with `TYPE_9_16`: OpenCV's strict 3x3 suppression on that score, `response`
+  = score (or 0 with suppression off), `size` 7, raster order. Compared with
+  `cv2.FastFeatureDetector` on 4 images and 7 (image, threshold) settings, with
+  suppression on and off: identical keypoint lists and responses (148 scores);
+  `fast_detect` already found exactly OpenCV's unsuppressed corners. ORB still
+  uses its own greedy 5-pixel `non_max_suppression` (now ordered by the
+  OpenCV score) rather than OpenCV's 3x3 one; its tests are unchanged and
+  pass. `crates/features/tests/fast_opencv_parity.rs`.
+
 ## OPEN: `erf` is accurate to ~1.5e-7, where SciPy is ~1e-16
 
 Found from a failing `scientific` test, and the diagnosis is not the obvious one.
