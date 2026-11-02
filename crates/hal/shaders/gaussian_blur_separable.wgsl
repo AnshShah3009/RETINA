@@ -16,6 +16,15 @@ fn get_input_index(x: i32, y: i32, ch: i32) -> i32 {
     let w = i32(params.width);
     let h = i32(params.height);
 
+    // Divisor guard (docs/wgsl_int_div_audit.md): `main` already returns for a
+    // zero width or height, but a width or height of 2^31 or more turns
+    // negative here, and `2 * w` is then 0 at exactly 2^31. With w, h >= 1
+    // every `%` below divides by w, h, 2w or (n > 1) 2n - 2, none of
+    // which is 0 or -1.
+    if (w <= 0 || h <= 0) {
+        return -1;
+    }
+
     var ix = x;
     var iy = y;
 

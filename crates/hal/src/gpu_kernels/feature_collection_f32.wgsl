@@ -64,10 +64,13 @@ fn collect_points(
     let score = score_map_2[gid];
     if (score > 0.0) {
         let base_idx = indices[gid];
-        let real_x = gid % params_2.width;
-        let real_y = gid / params_2.width;
 
+        // The bounds check comes first: width == 0 makes the product 0, so
+        // the divisions below only run with width >= 1
+        // (docs/wgsl_int_div_audit.md).
         if (gid < params_2.width * params_2.height) {
+            let real_x = gid % params_2.width;
+            let real_y = gid / params_2.width;
             out_keypoints[base_idx].x = f32(real_x);
             out_keypoints[base_idx].y = f32(real_y);
             out_keypoints[base_idx].response = score;
