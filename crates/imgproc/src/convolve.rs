@@ -66,7 +66,48 @@ pub fn box_kernel(size: usize) -> Kernel {
     Kernel::new(vec![value; size * size], size, size)
 }
 
+/// OpenCV's fixed kernels for `getGaussianKernel(size, sigma <= 0)` with
+/// `size <= 9` (`small_gaussian_tab` in `smooth.dispatch.cpp`).
+fn small_gaussian_table(size: usize) -> Option<&'static [f32]> {
+    match size {
+        1 => Some(&[1.0]),
+        3 => Some(&[0.25, 0.5, 0.25]),
+        5 => Some(&[0.0625, 0.25, 0.375, 0.25, 0.0625]),
+        7 => Some(&[
+            0.03125, 0.109375, 0.21875, 0.28125, 0.21875, 0.109375, 0.03125,
+        ]),
+        9 => Some(&[
+            0.015625, 0.05078125, 0.1171875, 0.19921875, 0.234375, 0.19921875, 0.1171875,
+            0.05078125, 0.015625,
+        ]),
+        _ => None,
+    }
+}
+
+/// OpenCV's sigma for a kernel `size` when the given sigma is not positive:
+/// `0.3 * ((size - 1) * 0.5 - 1) + 0.8`.
+fn sigma_from_size(size: usize) -> f32 {
+    (0.3 * ((size as f64 - 1.0) * 0.5 - 1.0) + 0.8) as f32
+}
+
+/// 2-D Gaussian kernel of `size x size` taps, normalised to sum to 1.
+///
+/// A `sigma` that is not positive (zero, negative or NaN) is derived from
+/// `size` as `cv::getGaussianKernel` does: OpenCV's fixed tables for sizes
+/// 1-9 (the kernel is then their outer product), otherwise
+/// `0.3 * ((size - 1) * 0.5 - 1) + 0.8`. It used to divide by `sigma² = 0`
+/// and return NaN taps.
 pub fn gaussian_kernel(sigma: f32, size: usize) -> Kernel {
+    if !(sigma > 0.0) {
+        if let Some(t) = small_gaussian_table(size) {
+            let data = t
+                .iter()
+                .flat_map(|&a| t.iter().map(move |&b| a * b))
+                .collect();
+            return Kernel::new(data, size, size);
+        }
+        return gaussian_kernel(sigma_from_size(size), size);
+    }
     let mut data = Vec::with_capacity(size * size);
     let center = size / 2;
     let sigma2 = sigma * sigma;
@@ -120,8 +161,22 @@ pub fn gaussian_kernel(sigma: f32, size: usize) -> Kernel {
     Kernel::new(data, size, size)
 }
 
+/// 1-D Gaussian kernel of `size` (odd) taps, normalised to sum to 1.
+///
+/// A `sigma` that is not positive (zero, negative or NaN) is derived from
+/// `size` exactly as `cv::getGaussianKernel(size, sigma)` does: OpenCV's fixed
+/// tables for sizes 1, 3, 5, 7 and 9, otherwise
+/// `sigma = 0.3 * ((size - 1) * 0.5 - 1) + 0.8`. This is what
+/// `cv2.GaussianBlur(img, (size, size), 0)` blurs with. It used to divide by
+/// `sigma² = 0` and return NaN taps.
 pub fn gaussian_kernel_1d(sigma: f32, size: usize) -> Vec<f32> {
     assert!(size % 2 == 1, "gaussian kernel size must be odd");
+    if !(sigma > 0.0) {
+        if let Some(t) = small_gaussian_table(size) {
+            return t.to_vec();
+        }
+        return gaussian_kernel_1d(sigma_from_size(size), size);
+    }
     let mut kernel = Vec::with_capacity(size);
     let center = (size / 2) as isize;
     let sigma2 = sigma * sigma;
@@ -302,6 +357,10 @@ pub fn gaussian_blur_ctx(
     border: BorderMode,
     group: &RuntimeRunner,
 ) -> GrayImage {
+    if !(sigma > 0.0) {
+        // See `gaussian_blur`: no kernel size to derive one from.
+        return image.clone();
+    }
     if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
         && let Ok(result) = gaussian_blur_gpu(gpu, image, sigma, border)
     {
@@ -614,9 +673,7 @@ pub fn gaussian_blur_ctx_into(
     border: BorderMode,
     group: &RuntimeRunner,
 ) {
-    let size = ((sigma * 6.0).ceil() as usize) | 1;
-    let kernel_1d = gaussian_kernel_1d(sigma, size);
-    separable_convolve_into_ctx(image, out, &kernel_1d, &kernel_1d, border, group);
+    gaussian_blur_with_border_into_ctx_into(image, out, sigma, border, group);
 }
 
 fn gaussian_blur_with_border_into_ctx_into(
@@ -626,6 +683,15 @@ fn gaussian_blur_with_border_into_ctx_into(
     border: BorderMode,
     group: &RuntimeRunner,
 ) {
+    if !(sigma > 0.0) {
+        // See `gaussian_blur`: no kernel size to derive one from.
+        if out.dimensions() != image.dimensions() {
+            *out = image.clone();
+        } else {
+            out.copy_from_slice(image.as_raw());
+        }
+        return;
+    }
     let size = ((sigma * 6.0).ceil() as usize) | 1;
     let kernel_1d = gaussian_kernel_1d(sigma, size);
     separable_convolve_into_ctx(image, out, &kernel_1d, &kernel_1d, border, group);
@@ -634,6 +700,13 @@ fn gaussian_blur_with_border_into_ctx_into(
 /// Gaussian blur with OpenCV's default border, [`BorderMode::Reflect101`]
 /// (it used to be `Replicate`). Use [`gaussian_blur_with_border`] for any
 /// other border.
+///
+/// The kernel has `ceil(6 sigma) | 1` taps. A `sigma` that is not positive
+/// (zero, negative or NaN) returns the image unchanged: with no kernel size
+/// to derive a sigma from, `cv2.GaussianBlur(img, (0, 0), 0)` raises, and the
+/// unchanged image is what OpenCV returns for the 1x1 kernel. For OpenCV's
+/// sigma-from-size rule, build the kernel with
+/// `gaussian_kernel_1d(0.0, size)`.
 pub fn gaussian_blur(image: &GrayImage, sigma: f32) -> GrayImage {
     gaussian_blur_with_border(image, sigma, BorderMode::Reflect101)
 }

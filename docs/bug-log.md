@@ -285,10 +285,10 @@ a crash that does not happen.
   recovered translation direction is near-degenerate on that synthetic scene and
   the assertion fails intermittently. Pre-existing, and left alone here.
 
-## OPEN, measured, not fixed: `gaussian_blur` at `sigma = 0` returns an all-zero image
+## RESOLVED: `gaussian_blur` at `sigma = 0` (was OPEN: "returns an all-zero image")
 
-Found while judging a `ctx`-variant test whose expectation turned out to be
-mis-framed. The observation under it is real. Measured on a constant 123 image:
+Originally found while judging a `ctx`-variant test whose expectation turned
+out to be mis-framed. Measured then, on a constant 123 image:
 
 ```text
 sigma 0:   non-ctx -> min 0     ctx -> min 0
@@ -297,22 +297,44 @@ sigma 1:   non-ctx -> min 123   ctx -> min 123
 sigma 3:   non-ctx -> min 123   ctx -> min 123
 ```
 
-Two things follow, and only the first is a defect.
+**What changed before anyone fixed it.** By the time it was re-checked,
+`gaussian_blur(img, 0.0)` returned the image unchanged - but by accident. The
+kernel size is `ceil(6 sigma) | 1 = 1`, the one tap is `exp(-0 / 0) = NaN`, and
+the later "force the taps to sum to exactly 1" correction overwrote the last
+(only) tap with `1 - 0 = 1.0`. Any size above 1 still produced NaN:
+`gaussian_kernel_1d(0.0, 3)` was `[NaN, NaN, NaN]`, and blurring with it gave
+an all-zero image - the original symptom, one call away.
 
-**`sigma = 0` destroys the image.** A zero-sigma Gaussian is a delta, so the
-correct output is the input unchanged; instead the whole image becomes `0`. Both
-paths agree, so this is a property of the shared kernel construction rather than of
-the `_ctx` entry points — which is why the test that surfaced it, asserting of a
-`ctx` variant "the blur broke a constant image" while its non-`ctx` reference
-behaved identically, was the wrong framing.
+**What OpenCV 4.13 does**, measured:
+
+- `cv2.GaussianBlur(img, (0, 0), 0)` (and any sigma `<= 0` with no size):
+  raises, `Assertion failed: ksize.width > 0 && ksize.width % 2 == 1`.
+- `cv2.GaussianBlur(img, (1, 1), 0)`: the image unchanged.
+- `cv2.GaussianBlur(img, (k, k), 0)` for `k > 1`: a real blur.
+  `getGaussianKernel(k, sigma <= 0)` takes fixed tables for `k` = 1, 3, 5, 7, 9
+  (`[0.25, 0.5, 0.25]`, `[1, 4, 6, 4, 1] / 16`, ...) and otherwise
+  `sigma = 0.3 * ((k - 1) * 0.5 - 1) + 0.8`.
+
+**Now:** `gaussian_kernel_1d(sigma, size)` and `gaussian_kernel(sigma, size)`
+- the "size given" form - follow OpenCV's rule for any sigma that is not
+positive (including NaN). `gaussian_blur(img, sigma)` has no size, so it is
+the `(0, 0)` case; it cannot raise, and returns the image unchanged (OpenCV's
+1x1 result) through an explicit check on every CPU and GPU entry point rather
+than the NaN accident. `tests/gaussian_sigma_zero_opencv_parity.rs` checks the
+five tables exactly, the size-11 kernel to `5e-7`, `cv2.GaussianBlur(img,
+(k, k), 0)` byte for byte for k = 5, 7, 9, and identity for sigma 0, -2 and
+NaN; four of its five tests failed before.
 
 **`sigma = 0.5` off by one is not a defect.** `123 -> 122` is rounding in a
 near-delta kernel, and it is stable across both paths.
 
-Left unfixed because the fix belongs in the shared kernel builder and changes
-behaviour for every caller of both entry points — a decision about whether
-`sigma = 0` means "identity" or "invalid". The latter would want an error channel
-that `gaussian_blur(&GrayImage, f32) -> GrayImage` does not have.
+*Found on the way, not ours:* OpenCV 4.13's 8-bit `GaussianBlur` is not
+deterministic on a 9x7 image with its default thread pool - repeated
+`cv2.GaussianBlur(img, (5, 5), 0)` calls returned different bytes in row 1
+(and five different rows with `setUseOptimized(False)`).
+`cv2.setNumThreads(1)` makes it stable and equal to the rounded f64 result,
+which is how every reference in these tests was generated (the others were
+regenerated single-threaded and came out identical).
 
 ## FIXED: `cv-imgproc` / `cv-features` divergences from OpenCV 4.13
 
@@ -398,6 +420,15 @@ stored in the tests, so CI needs no OpenCV.
   `(0, 3)` and grey input in up to 59 of 80 pixels; after, all eight outputs
   plus the two special cases match OpenCV 4.13 exactly.
   `tests/hit_or_miss_opencv_parity.rs`.
+
+- **`UsacResult::score` was documented "higher is better"** while
+  `estimate_usac` keeps the hypothesis with the *lowest* score and every
+  scorer in `usac::scorers` returns a cost (MSAC/MAGSAC truncated residuals,
+  RANSAC's outlier count). The code is the contract - nothing outside
+  `cv-features` calls it - so the documentation changed, and a unit test pins
+  that the reported score is the minimum the scorer returned. Noticed, not
+  changed: local optimisation replaces a hypothesis with its refit even when
+  the refit scores worse.
 
 ## OPEN: `erf` is accurate to ~1.5e-7, where SciPy is ~1e-16
 
