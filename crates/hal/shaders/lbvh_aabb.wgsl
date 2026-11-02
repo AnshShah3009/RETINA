@@ -62,6 +62,34 @@ fn store_vec3(node: u32, word: u32, v: vec3<f32>) {
     atomicStore(&nodes[base + 3u], 0u);
 }
 
+// The sibling stored its bounds before its counter increment, but WGSL
+// atomics are relaxed and there is no cross-workgroup fence, so seeing the
+// increment does not make those stores visible. Metal showed it: 55 of
+// 20000 sphere normals came out wrong in CI. Each word is coherent on its
+// own, though, so wait per word until it leaves the sentinel that
+// init_nodes wrote. The producer has already executed its stores, so this
+// ends; the cap only guards against a lost store hanging the GPU.
+const UNPUBLISHED: u32 = 0xFFFFFFFFu;
+
+fn load_word_published(index: u32) -> u32 {
+    var v = atomicLoad(&nodes[index]);
+    var spins = 0u;
+    while (v == UNPUBLISHED && spins < 1000000u) {
+        v = atomicLoad(&nodes[index]);
+        spins = spins + 1u;
+    }
+    return v;
+}
+
+fn load_vec3_published(node: u32, word: u32) -> vec3<f32> {
+    let base = node * NODE_WORDS + word;
+    return vec3<f32>(
+        bitcast<f32>(load_word_published(base)),
+        bitcast<f32>(load_word_published(base + 1u)),
+        bitcast<f32>(load_word_published(base + 2u)),
+    );
+}
+
 @compute @workgroup_size(256)
 fn compute_aabbs(
     @builtin(global_invocation_id) global_id: vec3<u32>,
@@ -106,8 +134,8 @@ fn compute_aabbs(
         let l = load_i32(node, W_LEFT);
         let r = load_i32(node, W_RIGHT);
         let sibling = u32(select(l, r, u32(l) == child));
-        bmin = min(bmin, load_vec3(sibling, W_MIN));
-        bmax = max(bmax, load_vec3(sibling, W_MAX));
+        bmin = min(bmin, load_vec3_published(sibling, W_MIN));
+        bmax = max(bmax, load_vec3_published(sibling, W_MAX));
         store_vec3(node, W_MIN, bmin);
         store_vec3(node, W_MAX, bmax);
 
