@@ -829,9 +829,10 @@ fn the_whole_shader_corpus_is_covered() {
     let files = all_wgsl_files();
     assert_eq!(
         files.len(),
-        // 105 since a7c10ff added shaders/pyramid_down.wgsl.
-        105,
-        "expected 105 .wgsl files across shaders/ and src/gpu_kernels/"
+        // 105 since a7c10ff added shaders/pyramid_down.wgsl; 106 with
+        // shaders/threshold_f16_packed.wgsl, the no-SHADER_F16 fallback.
+        106,
+        "expected 106 .wgsl files across shaders/ and src/gpu_kernels/"
     );
     let kernels = files
         .iter()

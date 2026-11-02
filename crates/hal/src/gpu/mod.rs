@@ -81,6 +81,13 @@ impl GpuContext {
         self.is_unified
     }
 
+    /// True when the device was created with `wgpu::Features::SHADER_F16`, so
+    /// a WGSL module that says `enable f16;` can be compiled on it. The
+    /// feature is requested whenever the adapter offers it.
+    pub fn supports_f16(&self) -> bool {
+        self.device.features().contains(wgpu::Features::SHADER_F16)
+    }
+
     /// Safely downcasts a GpuStorage result to the requested generic storage S.
     /// Uses TypeId checks to avoid allocations when S is GpuStorage.
     #[allow(dead_code)]
@@ -380,6 +387,11 @@ impl GpuContext {
         let mut features = wgpu::Features::empty();
         if adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             features |= wgpu::Features::TIMESTAMP_QUERY;
+        }
+        // Native f16 in WGSL (`enable f16;`). Optional: kernels that have an
+        // f16 shader check `supports_f16` and fall back without it.
+        if adapter.features().contains(wgpu::Features::SHADER_F16) {
+            features |= wgpu::Features::SHADER_F16;
         }
 
         let limits = requested_device_limits(&adapter.limits());

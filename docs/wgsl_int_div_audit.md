@@ -39,7 +39,7 @@ with `Device::create_shader_module`.
 
 The corpus is every `.wgsl` file under `crates/hal/shaders`, `crates/hal/src`,
 `crates/calib3d/src` and `crates/features/src`, plus every Rust raw string in
-`crates/hal/src` that contains `@compute`. That comes to 107 files and 13 inline
+`crates/hal/src` that contains `@compute`. That comes to 108 files and 13 inline
 shaders. `crates/viewer` is not included because it holds render shaders only.
 The fused-kernel WGSL generated in `crates/runtime/src/pipeline/fusion.rs` is
 not included either: it is stored as a string and never compiled.
@@ -77,7 +77,7 @@ remaining B source, `spatial.rs`, is not reachable through `dispatch`.
 
 ## Summary
 
-92 integer divisions or modulos, spread over 34 of the 115 sources that naga
+92 integer divisions or modulos, spread over 34 of the 117 sources that naga
 accepts (70 table rows):
 
 | class | sites | rows | before this audit |
@@ -196,14 +196,12 @@ integer divisions, read from the text:
 
 | source | error | integer divisions |
 | --- | --- | --- |
-| `crates/hal/shaders/threshold_f16.wgsl` | `bitcast<f16>(f32)` | none |
 | `crates/hal/src/gpu_kernels/icp.rs#colored_icp_kernel` | passes a runtime-sized array by value | none |
 | `crates/hal/src/gpu_kernels/icp.rs#compute_color_gradients_kernel` | same | `idx % width`, `idx / width`. Would be C: `width` is a raw uniform with no guard. |
 | `crates/hal/src/gpu_kernels/icp.rs#generalized_icp_kernel` | same | none |
 | `crates/hal/src/gpu_kernels/icp.rs#gicp_accumulate_kernel` | atomic op on a non-atomic | none |
 
-`threshold_f16.wgsl` and the four ICP strings are never compiled. `perf_tests`
-only reads the ICP strings.
+The four ICP strings are never compiled. `perf_tests` only reads them.
 
 `morphology.wgsl` used to be on this list: `var val = if (...) { 255u } else
 { 0u };` is not WGSL, so `GpuContext::morphology` could never create its
@@ -211,6 +209,15 @@ pipeline, and no test reached it. The shader was rewritten to match the CPU
 backend (replicate border, packed mask read on the device, CHW planes, dense
 output words) and `crates/hal/tests/gpu_morphology.rs` compares the two byte
 for byte. Its divisions are in the table above.
+
+`threshold_f16.wgsl` was on it too: it declared the threshold and max value
+`u32` and read them with `bitcast<f16>(...)`, and a bitcast cannot change the
+operand's size. It also had no caller, since `gpu_kernels::threshold` returned
+`NotSupported` for f16, and the device never requested `SHADER_F16`. The
+device now requests the feature when the adapter offers it, the uniform
+carries the values as f32 (an exact widening), and `threshold` runs this
+shader when `GpuContext::supports_f16` and `threshold_f16_packed.wgsl`
+otherwise. Neither divides.
 
 ## Signed modulo of negative operands
 

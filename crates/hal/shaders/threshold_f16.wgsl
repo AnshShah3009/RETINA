@@ -1,9 +1,20 @@
+// Threshold on an f16 tensor, in native f16.
+//
+// Needs `wgpu::Features::SHADER_F16`. `gpu_kernels::threshold` selects this
+// shader only when the device was created with it
+// (`GpuContext::supports_f16`) and `threshold_f16_packed.wgsl` otherwise.
+// Both give the same bits.
 enable f16;
+
+// Same layout as `threshold_f32.wgsl`. The host widens the f16 threshold and
+// max value to f32, which is exact, so `f16(...)` below recovers them exactly.
+// (This used to declare them `u32` and `bitcast<f16>` them, which is not
+// valid: a bitcast cannot change the size of its operand.)
 struct Params {
     width: u32,
     height: u32,
-    thresh: u32,
-    max_value: u32,
+    thresh: f32,
+    max_value: f32,
     typ: u32, // 0: Binary, 1: BinaryInv, 2: Trunc, 3: ToZero, 4: ToZeroInv
     len: u32,
     _pad0: u32,
@@ -14,23 +25,21 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> output_data: array<f16>;
 @group(0) @binding(2) var<uniform> params: Params;
 
+// The comparisons are the CPU backend's scalar path, written out: Trunc is
+// `if v > t { t } else { v }` rather than `min`, which WGSL leaves
+// unspecified for NaN and for signed zeros.
 fn apply_thresh(val: f16) -> f16 {
-    var res: f16 = 0.0h;
-    let thresh_f16 = bitcast<f16>(params.thresh);
-    let max_val_f16 = bitcast<f16>(params.max_value);
-    
-    if (params.typ == 0u) { // Binary
-        if (val > thresh_f16) { res = max_val_f16; } else { res = 0.0h; }
-    } else if (params.typ == 1u) { // BinaryInv
-        if (val > thresh_f16) { res = 0.0h; } else { res = max_val_f16; }
-    } else if (params.typ == 2u) { // Trunc
-        res = min(val, thresh_f16);
-    } else if (params.typ == 3u) { // ToZero
-        if (val > thresh_f16) { res = val; } else { res = 0.0h; }
-    } else if (params.typ == 4u) { // ToZeroInv
-        if (val > thresh_f16) { res = 0.0h; } else { res = val; }
+    let t = f16(params.thresh);
+    let m = f16(params.max_value);
+    let above = val > t;
+    switch params.typ {
+        case 0u: { return select(0.0h, m, above); }     // Binary
+        case 1u: { return select(m, 0.0h, above); }     // BinaryInv
+        case 2u: { return select(val, t, above); }      // Trunc
+        case 3u: { return select(0.0h, val, above); }   // ToZero
+        case 4u: { return select(val, 0.0h, above); }   // ToZeroInv
+        default: { return 0.0h; }
     }
-    return res;
 }
 
 @compute @workgroup_size(64)
@@ -46,6 +55,5 @@ fn main(
         return;
     }
 
-    let val = input_data[idx];
-    output_data[idx] = apply_thresh(val);
+    output_data[idx] = apply_thresh(input_data[idx]);
 }
