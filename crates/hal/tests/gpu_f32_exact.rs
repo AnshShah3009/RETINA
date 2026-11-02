@@ -1,6 +1,10 @@
 //! f32 GPU kernels that must reproduce the CPU backend bit for bit, through
 //! the public `ComputeContext` entries.
 //!
+//! * `cvt_color` summed the BGR terms in the opposite order from the CPU
+//!   (`wb * b + wg * g + wr * r` against `wr * r + wg * g + wb * b`), left
+//!   the compiler free to fuse a product into the following add, and the
+//!   device flushed subnormal inputs, products and sums to zero.
 //! * `threshold` compared floats, so the device flushed subnormal inputs and
 //!   thresholds to zero (`0 > -1e-45` was false). Its Trunc was `min`, which
 //!   WGSL leaves to the implementation for NaN; the CPU's was `min` as well,
@@ -8,10 +12,13 @@
 //!   `cpu_f32_trunc_keeps_ties_and_nan_on_every_lane`).
 //!
 //! Results must match bit for bit, signed zero, subnormals and NaN payloads
-//! included. Skips without an adapter.
+//! included. The one exception is a NaN that colour conversion computes: its
+//! payload comes from the host FPU (x86 and AArch64 generate different NaNs
+//! for `inf - inf`), so there only "both NaN" is part of the contract. Skips
+//! without an adapter.
 
 use cv_core::{CpuTensor, Tensor, TensorShape};
-use cv_hal::context::{ComputeContext, ThresholdType};
+use cv_hal::context::{ColorConversion, ComputeContext, ThresholdType};
 use cv_hal::cpu::CpuBackend;
 use cv_hal::gpu::GpuContext;
 use cv_hal::tensor_ext::{TensorToCpu, TensorToGpu};
@@ -34,6 +41,9 @@ impl Lcg {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         (self.0 >> 32) as u32
+    }
+    fn range(&mut self, lo: f32, hi: f32) -> f32 {
+        lo + (self.next() >> 8) as f32 / (1u32 << 24) as f32 * (hi - lo)
     }
 }
 
@@ -212,4 +222,97 @@ fn cpu_f32_trunc_keeps_ties_and_nan_on_every_lane() {
     for (g, x) in got.as_slice().unwrap().iter().zip(&v) {
         assert!(same(*g, *x, false), "Trunc NaN thresh: {x:?} -> {g:?}");
     }
+}
+
+// ---------------------------------------------------------------- cvt_color
+
+/// Runs both conversions and returns how many CPU results were subnormal.
+fn cvt_color_case(
+    gpu: &GpuContext,
+    cpu: &CpuBackend,
+    v: Vec<f32>,
+    h: usize,
+    w: usize,
+    what: &str,
+) -> usize {
+    let mut subnormal = 0;
+    let t = tensor(v.clone(), 3, h, w);
+    let gt = t.to_gpu_ctx(gpu).unwrap();
+    let plane = h * w;
+    for code in [ColorConversion::RgbToGray, ColorConversion::BgrToGray] {
+        let want = cpu.cvt_color(&t, code).unwrap();
+        let got = gpu.cvt_color(&gt, code).unwrap();
+        assert_eq!(got.shape, want.shape);
+        let got = got.to_cpu_ctx(gpu).unwrap();
+        subnormal += want
+            .as_slice()
+            .unwrap()
+            .iter()
+            .filter(|x| x.is_subnormal())
+            .count();
+        assert_bits_eq(
+            got.as_slice().unwrap(),
+            want.as_slice().unwrap(),
+            true,
+            &|i| {
+                format!(
+                    "planes {:e} {:e} {:e}",
+                    v[i],
+                    v[plane + i],
+                    v[2 * plane + i]
+                )
+            },
+            &format!("f32 cvt_color {code:?} {what} {h}x{w}"),
+        );
+    }
+    subnormal
+}
+
+#[test]
+fn f32_cvt_color_matches_cpu_bit_for_bit() {
+    let Some(gpu) = gpu() else { return };
+    let cpu = CpuBackend::new().unwrap();
+    let mut r = Lcg(17);
+    let mut subnormal = 0;
+    for (h, w) in [(1usize, 1usize), (5, 7), (64, 64), (33, 129)] {
+        let n = 3 * h * w;
+        // Ordinary pixel values, where the summation order and any fused
+        // multiply-add show.
+        for scale in [255.0f32, 1.0] {
+            let v: Vec<f32> = (0..n).map(|_| r.range(0.0, scale)).collect();
+            let _ = cvt_color_case(gpu, &cpu, v, h, w, &format!("range [0, {scale})"));
+        }
+        // Mixed signs: cancellation leaves small sums.
+        let v: Vec<f32> = (0..n).map(|_| r.range(-1.0, 1.0)).collect();
+        let _ = cvt_color_case(gpu, &cpu, v, h, w, "range [-1, 1)");
+        // Every exponent: subnormal inputs, products and sums, overflow.
+        let v: Vec<f32> = (0..n).map(|_| any_bits(&mut r)).collect();
+        let _ = cvt_color_case(gpu, &cpu, v, h, w, "any bits");
+        // Tiny values only, so every product and most sums are subnormal or
+        // near the boundary.
+        let v: Vec<f32> = (0..n)
+            .map(|_| {
+                let b = r.next();
+                // Exponent field 0..=7: subnormals and the first normals.
+                f32::from_bits((b & 0x8000_0000) | ((b >> 4) & 0x03ff_ffff))
+            })
+            .collect();
+        subnormal += cvt_color_case(gpu, &cpu, v, h, w, "tiny");
+    }
+    // The tiny inputs must really exercise subnormal results.
+    assert!(subnormal > 1000, "only {subnormal} subnormal results");
+    // Specials in every channel position.
+    let sp = specials();
+    let k = sp.len();
+    let (h, w) = (k, k);
+    let mut v = vec![0.0f32; 3 * h * w];
+    for y in 0..k {
+        for x in 0..k {
+            let i = y * w + x;
+            v[i] = sp[y];
+            v[h * w + i] = sp[x];
+            v[2 * h * w + i] = sp[(x + y) % k];
+        }
+    }
+    let _ = cvt_color_case(gpu, &cpu, v, h, w, "specials");
 }
