@@ -335,6 +335,8 @@ impl ComputeContext for GpuContext {
         theta: T,
         threshold: u32,
     ) -> crate::Result<Vec<cv_core::HoughLine>> {
+        // `cv::HoughLines` takes a single-channel edge map (`CV_8UC1`).
+        crate::context::require_single_channel("hough_lines", &input.shape)?;
         use std::marker::PhantomData;
 
         if let Some(input_storage) = input
@@ -374,6 +376,8 @@ impl ComputeContext for GpuContext {
         max_radius: T,
         threshold: u32,
     ) -> crate::Result<Vec<cv_core::HoughCircle>> {
+        // `cv::HoughCircles` takes a single-channel image (`CV_8UC1`).
+        crate::context::require_single_channel("hough_circles", &input.shape)?;
         use std::marker::PhantomData;
 
         if let Some(input_storage) = input
@@ -706,6 +710,8 @@ impl ComputeContext for GpuContext {
         threshold: T,
         window_size: usize,
     ) -> crate::Result<Tensor<T, S>> {
+        // A response map has one channel, as on the CPU.
+        crate::context::require_single_channel("nms", &input.shape)?;
         use crate::storage::GpuStorage;
         use std::any::TypeId;
         use std::marker::PhantomData;
@@ -1229,6 +1235,11 @@ impl ComputeContext for GpuContext {
         window_size: usize,
         max_iters: u32,
     ) -> crate::Result<Vec<[T; 2]>> {
+        // Each pyramid level is one plane: `cv::calcOpticalFlowPyrLK` sums a
+        // colour image's channels jointly, which is not implemented here.
+        for level in prev_pyramid.iter().chain(next_pyramid) {
+            crate::context::require_single_channel("optical_flow_lk", &level.shape)?;
+        }
         use crate::storage::GpuStorage;
         use std::any::TypeId;
         use std::marker::PhantomData;
@@ -1566,6 +1577,8 @@ impl ComputeContext for GpuContext {
         threshold: T,
         non_max_suppression: bool,
     ) -> crate::Result<Tensor<T, S>> {
+        // FAST scores a gray image, as on the CPU.
+        crate::context::require_single_channel("fast_detect", &input.shape)?;
         use crate::storage::GpuStorage;
         use std::marker::PhantomData;
 
@@ -1760,6 +1773,10 @@ impl ComputeContext for GpuContext {
         threshold: T,
         edge_threshold: T,
     ) -> crate::Result<Tensor<u8, cv_core::storage::CpuStorage<u8>>> {
+        // A DoG level is single-channel by definition (SIFT runs on gray).
+        for level in [dog_prev, dog_curr, dog_next] {
+            crate::context::require_single_channel("sift_extrema", &level.shape)?;
+        }
         use crate::storage::GpuStorage;
         use crate::tensor_ext::TensorToCpu;
         use std::any::TypeId;
@@ -1839,6 +1856,8 @@ impl ComputeContext for GpuContext {
         image: &Tensor<T, S>,
         keypoints: &cv_core::KeyPoints,
     ) -> crate::Result<cv_core::Descriptors> {
+        // SIFT describes a gray (single-channel) scale-space image.
+        crate::context::require_single_channel("compute_sift_descriptors", &image.shape)?;
         use crate::storage::GpuStorage;
         use std::any::TypeId;
         use std::marker::PhantomData;
@@ -2182,6 +2201,8 @@ impl ComputeContext for GpuContext {
         tau: T,
         diffusivity: crate::context::DiffusivityType,
     ) -> crate::Result<Tensor<T, S>> {
+        // AKAZE's nonlinear scale space is built on a gray image.
+        crate::context::require_single_channel("akaze_diffusion", &input.shape)?;
         use crate::storage::GpuStorage;
         use std::any::TypeId;
         use std::marker::PhantomData;
@@ -2235,6 +2256,8 @@ impl ComputeContext for GpuContext {
         &self,
         input: &Tensor<T, S>,
     ) -> crate::Result<(Tensor<T, S>, Tensor<T, S>, Tensor<T, S>)> {
+        // AKAZE's nonlinear scale space is built on a gray image.
+        crate::context::require_single_channel("akaze_derivatives", &input.shape)?;
         use crate::storage::GpuStorage;
         use std::any::TypeId;
         use std::marker::PhantomData;
@@ -2304,6 +2327,8 @@ impl ComputeContext for GpuContext {
         &self,
         input: &Tensor<T, S>,
     ) -> crate::Result<T> {
+        // AKAZE's contrast factor is taken from a gray image.
+        crate::context::require_single_channel("akaze_contrast_k", &input.shape)?;
         use crate::storage::GpuStorage;
         use std::any::TypeId;
         use std::marker::PhantomData;

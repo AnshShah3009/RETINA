@@ -17,7 +17,8 @@ struct Params {
 @group(0) @binding(2) var<uniform> matrix: mat3x3<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
-fn get_pixel_bilinear(x: f32, y: f32) -> f32 {
+// `base` is the first element of the source plane being sampled.
+fn get_pixel_bilinear(base: u32, x: f32, y: f32) -> f32 {
     if (x < 0.0 || x > f32(params.src_w - 1u) || y < 0.0 || y > f32(params.src_h - 1u)) {
         return 0.0;
     }
@@ -30,14 +31,16 @@ fn get_pixel_bilinear(x: f32, y: f32) -> f32 {
     let dx = x - f32(x0);
     let dy = y - f32(y0);
 
-    let p00 = input_data[y0 * params.src_w + x0];
-    let p10 = input_data[y0 * params.src_w + x1];
-    let p01 = input_data[y1 * params.src_w + x0];
-    let p11 = input_data[y1 * params.src_w + x1];
+    let p00 = input_data[base + y0 * params.src_w + x0];
+    let p10 = input_data[base + y0 * params.src_w + x1];
+    let p01 = input_data[base + y1 * params.src_w + x0];
+    let p11 = input_data[base + y1 * params.src_w + x1];
 
     return mix(mix(p00, p10, dx), mix(p01, p11, dx), dy);
 }
 
+// One dispatch layer (`global_id.z`) per CHW plane, each warped on its own
+// with the same mapping, as the CPU backend and `cv::warpAffine` do.
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x_dst = global_id.x;
@@ -65,5 +68,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // outside [0, 255] return different data depending on the backend. f32 is
     // the only dtype this path supports, so that is the normal case for anything
     // that is not a u8 image.
-    output_data[y_dst * params.dst_w + x_dst] = get_pixel_bilinear(src_x, src_y);
+    let plane = global_id.z;
+    output_data[plane * params.dst_w * params.dst_h + y_dst * params.dst_w + x_dst] =
+        get_pixel_bilinear(plane * params.src_w * params.src_h, src_x, src_y);
 }

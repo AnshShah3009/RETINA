@@ -170,9 +170,10 @@ pub fn nms_pixel(
     let (h, w) = input.shape.hw();
     let c = input.shape.channels;
 
+    // A response map has one channel; the CPU says InvalidInput too.
     if c != 1 {
-        return Err(crate::Error::NotSupported(
-            "GPU NMS currently only for single-channel".into(),
+        return Err(crate::Error::InvalidInput(
+            "NMS expects a single-channel response map".into(),
         ));
     }
 

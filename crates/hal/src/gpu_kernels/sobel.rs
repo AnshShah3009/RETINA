@@ -39,6 +39,15 @@ pub fn sobel(
             super::zeros_tensor(ctx, input.shape, input.dtype),
         ));
     }
+    // Each CHW plane is filtered on its own, one dispatch layer per plane
+    // (`len > 0` makes the channel count at least 1).
+    let planes = input.shape.channels as u32;
+    let max_z = ctx.device.limits().max_compute_workgroups_per_dimension;
+    if planes > max_z {
+        return Err(crate::Error::NotSupported(format!(
+            "GPU Sobel: {planes} channels exceed the dispatch limit {max_z}"
+        )));
+    }
     let byte_size = (len * 4) as u64;
 
     // Output buffers
@@ -113,7 +122,7 @@ pub fn sobel(
 
         let wg_x = (w as u32).div_ceil(16);
         let wg_y = (h as u32).div_ceil(16);
-        pass.dispatch_workgroups(wg_x, wg_y, 1);
+        pass.dispatch_workgroups(wg_x, wg_y, planes);
     }
     ctx.submit(encoder);
 

@@ -159,11 +159,23 @@ impl ComputeContext for CpuBackend {
             ));
         }
 
-        if dx > 0 {
-            self.convolve_separable(src, gx_slice, w, h, &kx_deriv, &kx_smooth)?;
-        }
-        if dy > 0 {
-            self.convolve_separable(src, gy_slice, w, h, &kx_smooth, &kx_deriv)?;
+        // Each CHW plane is filtered on its own, as `cv::Sobel` filters each
+        // channel. The whole `c * h * w` buffer used to go through one
+        // `h x w` pass: plane 0 was right, and every row of the other planes
+        // was a copy of plane 0's last (row-clamped) gradient row.
+        let plane = h * w;
+        for (k, (gx_plane, gy_plane)) in gx_slice
+            .chunks_mut(plane)
+            .zip(gy_slice.chunks_mut(plane))
+            .enumerate()
+        {
+            let src = &src[k * plane..(k + 1) * plane];
+            if dx > 0 {
+                self.convolve_separable(src, gx_plane, w, h, &kx_deriv, &kx_smooth)?;
+            }
+            if dy > 0 {
+                self.convolve_separable(src, gy_plane, w, h, &kx_smooth, &kx_deriv)?;
+            }
         }
 
         Ok((
@@ -244,6 +256,8 @@ impl ComputeContext for CpuBackend {
         theta: T,
         threshold: u32,
     ) -> Result<Vec<cv_core::HoughLine>> {
+        // `cv::HoughLines` takes a single-channel edge map (`CV_8UC1`).
+        crate::context::require_single_channel("hough_lines", &input.shape)?;
         let src = input
             .storage
             .as_slice()
@@ -316,6 +330,8 @@ impl ComputeContext for CpuBackend {
         max_radius: T,
         threshold: u32,
     ) -> Result<Vec<cv_core::HoughCircle>> {
+        // `cv::HoughCircles` takes a single-channel image (`CV_8UC1`).
+        crate::context::require_single_channel("hough_circles", &input.shape)?;
         let src = input
             .storage
             .as_slice()
@@ -543,6 +559,8 @@ impl ComputeContext for CpuBackend {
         input: &Tensor<T, S>,
         threshold: T,
     ) -> Result<Vec<cv_core::Detection>> {
+        // The cascade scores a gray image.
+        crate::context::require_single_channel("detect_objects", &input.shape)?;
         // Sliding-window cascade classifier using an integral image approach.
         // The input tensor is expected to be a single-channel image (1, H, W).
         let data = input
@@ -1050,6 +1068,8 @@ impl ComputeContext for CpuBackend {
         image: &Tensor<T, S>,
         pattern_size: (usize, usize),
     ) -> Result<Vec<cv_core::KeyPoint>> {
+        // Corners are found on a gray image (`cv::findChessboardCorners` converts colour).
+        crate::context::require_single_channel("find_chessboard_corners", &image.shape)?;
         // Basic chessboard corner finder via Harris corner detection + grid ordering.
         //
         // Algorithm:
@@ -3188,6 +3208,11 @@ impl ComputeContext for CpuBackend {
         window_size: usize,
         max_iters: u32,
     ) -> Result<Vec<[T; 2]>> {
+        // Each pyramid level is one plane: `cv::calcOpticalFlowPyrLK` sums a
+        // colour image's channels jointly, which is not implemented here.
+        for level in prev_pyramid.iter().chain(next_pyramid) {
+            crate::context::require_single_channel("optical_flow_lk", &level.shape)?;
+        }
         if prev_pyramid.is_empty() || next_pyramid.is_empty() {
             return Err(crate::Error::InvalidInput(
                 "Optical flow requires non-empty pyramids".into(),
@@ -4337,6 +4362,10 @@ impl ComputeContext for CpuBackend {
         threshold: T,
         edge_threshold: T,
     ) -> Result<Tensor<u8, cv_core::storage::CpuStorage<u8>>> {
+        // A DoG level is single-channel by definition (SIFT runs on gray).
+        for level in [dog_prev, dog_curr, dog_next] {
+            crate::context::require_single_channel("sift_extrema", &level.shape)?;
+        }
         let (h, w) = dog_curr.shape.hw();
         let prev = dog_prev
             .storage
@@ -4457,6 +4486,8 @@ impl ComputeContext for CpuBackend {
         image: &Tensor<T, S>,
         keypoints: &cv_core::KeyPoints,
     ) -> Result<cv_core::Descriptors> {
+        // SIFT describes a gray (single-channel) scale-space image.
+        crate::context::require_single_channel("compute_sift_descriptors", &image.shape)?;
         let (h, w) = image.shape.hw();
         let src = image
             .storage
@@ -4747,6 +4778,8 @@ impl ComputeContext for CpuBackend {
         tau: T,
         diffusivity: crate::context::DiffusivityType,
     ) -> crate::Result<Tensor<T, S>> {
+        // AKAZE's nonlinear scale space is built on a gray image.
+        crate::context::require_single_channel("akaze_diffusion", &input.shape)?;
         use crate::context::DiffusivityType;
 
         let src = input
@@ -4830,6 +4863,8 @@ impl ComputeContext for CpuBackend {
         &self,
         input: &Tensor<T, S>,
     ) -> crate::Result<(Tensor<T, S>, Tensor<T, S>, Tensor<T, S>)> {
+        // AKAZE's nonlinear scale space is built on a gray image.
+        crate::context::require_single_channel("akaze_derivatives", &input.shape)?;
         let src = input
             .storage
             .as_slice()
@@ -4938,6 +4973,8 @@ impl ComputeContext for CpuBackend {
         &self,
         input: &Tensor<T, S>,
     ) -> crate::Result<T> {
+        // AKAZE's contrast factor is taken from a gray image.
+        crate::context::require_single_channel("akaze_contrast_k", &input.shape)?;
         let src = input
             .storage
             .as_slice()

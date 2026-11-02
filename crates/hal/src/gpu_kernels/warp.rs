@@ -28,13 +28,16 @@ pub fn warp(
     let (dst_w, dst_h) = new_shape;
     let c = input.shape.channels;
 
-    if c != 1 {
-        return Err(crate::Error::NotSupported(
-            "GPU Warp currently only for grayscale".into(),
-        ));
+    // Every CHW plane is warped with the same mapping, one dispatch layer
+    // each, as on the CPU. Only one channel used to be accepted.
+    let max_z = ctx.device.limits().max_compute_workgroups_per_dimension;
+    if c as u64 > max_z as u64 {
+        return Err(crate::Error::NotSupported(format!(
+            "GPU warp: {c} channels exceed the dispatch limit {max_z}"
+        )));
     }
 
-    let out_len = dst_w * dst_h;
+    let out_len = c * dst_w * dst_h;
     // `cv::warpAffine` / `cv::warpPerspective` reject an empty source, as the
     // CPU backend does: there is no pixel to sample. An empty output needs
     // no dispatch. Either way no zero-size buffer is bound.
@@ -47,7 +50,7 @@ pub fn warp(
     if out_len == 0 {
         return Ok(super::zeros_tensor(
             ctx,
-            cv_core::TensorShape::new(1, dst_h, dst_w),
+            cv_core::TensorShape::new(c, dst_h, dst_w),
             input.dtype,
         ));
     }
@@ -142,7 +145,7 @@ pub fn warp(
         // the first 16 columns were written at all.
         let x = (dst_w as u32).div_ceil(16);
         let y = (dst_h as u32).div_ceil(16);
-        pass.dispatch_workgroups(x, y, 1);
+        pass.dispatch_workgroups(x, y, c as u32);
     }
     ctx.submit(encoder);
 

@@ -27,10 +27,13 @@
 //!   channel count), `pointcloud_transform`, `pointcloud_normals`, `spmv`
 //!   (no rows). Also every operation asked for an empty output: `warp`,
 //!   `remap`, `undistort`, `tsdf_raycast` and `resize` to a zero size.
-//!   Channel-count checks come first, so `canny`, `nms`, `fast_detect`,
-//!   `stereo_match`, `bilateral_filter` and `cvt_color` reject a wrong channel
-//!   count even when the image is empty (the GPU says `NotSupported` where it
-//!   only implements one channel count; see `GPU_UNSUPPORTED`).
+//!   Channel-count checks come first, so the single-channel operations
+//!   (`canny`, `nms`, `fast_detect`, `stereo_match`, `hough_lines`,
+//!   `hough_circles`, `sift_extrema`, `compute_sift_descriptors`, the three
+//!   `akaze_*`, `optical_flow_lk`, `mog2_update`, `find_chessboard_corners`,
+//!   `detect_objects`; see `tests/multichannel_planes.rs`) reject a
+//!   `(3, 0, 8)` or `(0, 4, 4)` image with `InvalidInput` even though it is
+//!   empty, as do `bilateral_filter` (`NotSupported`) and `cvt_color`.
 //! * **Empty list** - nothing to find: `hough_lines`, `hough_circles`,
 //!   `detect_objects`, `nms_boxes`, `nms_rotated_boxes`, `nms_polygons`,
 //!   `icp_correspondences` (either cloud empty), `match_descriptors` (either
@@ -142,21 +145,14 @@ fn show_gpu<T: Clone + Copy + bytemuck::Pod + Debug + Send + Sync>(
 
 /// Operations (or variants) the GPU backend does not implement for any
 /// input; for these an empty input may get the same `NotSupported` as a
-/// non-empty one.
+/// non-empty one. (`fast_detect`, `nms` and `warp` used to be listed for
+/// three channels or none: the GPU said `NotSupported` where the CPU says
+/// `InvalidInput`, or warped every plane. They now agree.)
 const GPU_UNSUPPORTED: &[&str] = &[
     "cvt_color GrayToRgb",
     "detect_objects",
     "find_chessboard_corners",
     "triangulate_points",
-    // Single-channel only on the GPU: three channels, or none.
-    "fast_detect nms false (3",
-    "fast_detect nms true (3",
-    "fast_detect nms false (0",
-    "fast_detect nms true (0",
-    "nms (3",
-    "nms (0",
-    "warp input (3",
-    "warp input (0",
 ];
 
 struct Report {

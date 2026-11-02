@@ -10,13 +10,16 @@ struct Params {
 @group(0) @binding(2) var<storage, read_write> gy_data: array<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
-fn get_f32(x: i32, y: i32) -> f32 {
+// `base` is the first element of the CHW plane being filtered.
+fn get_f32(base: u32, x: i32, y: i32) -> f32 {
     let cl_x = clamp(x, 0, i32(params.width) - 1);
     let cl_y = clamp(y, 0, i32(params.height) - 1);
-    let idx = u32(cl_y) * params.width + u32(cl_x);
+    let idx = base + u32(cl_y) * params.width + u32(cl_x);
     return input_data[idx];
 }
 
+// One dispatch layer (`global_id.z`) per CHW plane: each channel is filtered
+// on its own, as `cv::Sobel` does. Only plane 0 used to be written.
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = i32(global_id.x);
@@ -25,20 +28,21 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (u32(x) >= params.width || u32(y) >= params.height) {
         return;
     }
+    let base = global_id.z * params.width * params.height;
 
-    let p00 = get_f32(x - 1, y - 1);
-    let p01 = get_f32(x,     y - 1);
-    let p02 = get_f32(x + 1, y - 1);
-    let p10 = get_f32(x - 1, y);
-    let p12 = get_f32(x + 1, y);
-    let p20 = get_f32(x - 1, y + 1);
-    let p21 = get_f32(x,     y + 1);
-    let p22 = get_f32(x + 1, y + 1);
+    let p00 = get_f32(base, x - 1, y - 1);
+    let p01 = get_f32(base, x,     y - 1);
+    let p02 = get_f32(base, x + 1, y - 1);
+    let p10 = get_f32(base, x - 1, y);
+    let p12 = get_f32(base, x + 1, y);
+    let p20 = get_f32(base, x - 1, y + 1);
+    let p21 = get_f32(base, x,     y + 1);
+    let p22 = get_f32(base, x + 1, y + 1);
 
     let gx = (p02 + 2.0 * p12 + p22) - (p00 + 2.0 * p10 + p20);
     let gy = (p20 + 2.0 * p21 + p22) - (p00 + 2.0 * p01 + p02);
 
-    let idx = u32(y) * params.width + u32(x);
+    let idx = base + u32(y) * params.width + u32(x);
     gx_data[idx] = gx;
     gy_data[idx] = gy;
 }
