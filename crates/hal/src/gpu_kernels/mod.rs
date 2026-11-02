@@ -121,6 +121,8 @@ pub mod nms;
 pub mod odometry;
 pub mod optical_flow;
 pub mod orientation;
+#[cfg(feature = "half-precision")]
+pub(crate) mod packed16;
 pub mod pointcloud;
 pub mod pointcloud_transform;
 pub mod pyramid;

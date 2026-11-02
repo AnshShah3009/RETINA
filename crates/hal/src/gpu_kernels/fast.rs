@@ -1,33 +1,40 @@
 use crate::Result;
 use crate::gpu::GpuContext;
-use cv_core::storage::Storage;
+#[cfg(feature = "half-precision")]
+use crate::gpu_kernels::packed16::{self, Packed16};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+/// Uniform shared by the detection and suppression passes.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct FastParams {
     width: u32,
     height: u32,
-    threshold: u32,
-    nonmax: u32, // pad to 16 bytes; matches upload layout
+    /// As f32 rather than truncated to u32, which destroyed fractional values
+    /// like 0.1. The f32 shaders declare it u32 and bitcast. For f16 / bf16 it
+    /// is the threshold as that type, widened (exact).
+    threshold: f32,
+    /// The packed16 shaders' `format` (0: f16, 1: bf16); the f32 shaders'
+    /// unused `nonmax`.
+    mode: u32,
 }
 
+/// FAST-9 corner score map of a single-channel image, optionally with 3x3
+/// non-maximum suppression.
+///
+/// f32 runs `fast_f32.wgsl` / `fast_nms_f32.wgsl`. f16 and bf16 run
+/// `fast_packed16.wgsl` / `fast_nms_packed16.wgsl` on every device (no
+/// `SHADER_F16` needed), which reproduce the CPU backend's per-operation
+/// rounding, so their score maps are bit-identical to the CPU's for the same
+/// type. Other types return `NotSupported`.
 pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     ctx: &GpuContext,
     input: &crate::GpuTensor<T>,
     threshold: T,
     nonmax_suppression: bool,
 ) -> Result<crate::GpuTensor<T>> {
-    // Only f32-backed WGSL shaders exist; reject other dtypes instead of
-    // panicking on the downcast below.
-    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
-        return Err(crate::Error::NotSupported(
-            "FAST GPU kernel only supports f32".into(),
-        ));
-    }
-    use crate::storage::GpuStorage;
     let (h, w) = input.shape.hw();
     let c = input.shape.channels;
 
@@ -38,64 +45,119 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
     }
 
     let out_len = w * h;
-    let byte_size = (out_len * std::mem::size_of::<T>()) as u64;
+    let (detect_src, nms_src, mode, byte_size): (&str, &str, u32, u64) =
+        match cv_core::DataType::from_type::<T>() {
+            Ok(cv_core::DataType::F32) => (
+                include_str!("../../shaders/fast_f32.wgsl"),
+                include_str!("../../shaders/fast_nms_f32.wgsl"),
+                u32::from(nonmax_suppression),
+                (out_len * std::mem::size_of::<f32>()) as u64,
+            ),
+            #[cfg(feature = "half-precision")]
+            Ok(cv_core::DataType::F16) => (
+                include_str!("../../shaders/fast_packed16.wgsl"),
+                include_str!("../../shaders/fast_nms_packed16.wgsl"),
+                Packed16::F16.code(),
+                packed16::buffer_bytes(out_len),
+            ),
+            #[cfg(feature = "half-precision")]
+            Ok(cv_core::DataType::BF16) => (
+                include_str!("../../shaders/fast_packed16.wgsl"),
+                include_str!("../../shaders/fast_nms_packed16.wgsl"),
+                Packed16::Bf16.code(),
+                packed16::buffer_bytes(out_len),
+            ),
+            _ => {
+                return Err(crate::Error::NotSupported(
+                    "FAST GPU kernel supports f32, f16 and bf16".into(),
+                ));
+            }
+        };
 
-    let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("FAST Output Buffer"),
-        size: byte_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    // Bug 3 fix: pass threshold as f32 bits (bitcast in shader) instead of
-    // truncating to u32, which destroys fractional values like 0.1.
-    let params_data: [u32; 4] = [
-        w as u32,
-        h as u32,
-        threshold.to_f32().to_bits(),
-        if nonmax_suppression { 1u32 } else { 0u32 },
-    ];
-
+    let params = FastParams {
+        width: w as u32,
+        height: h as u32,
+        threshold: threshold.to_f32(),
+        mode,
+    };
     let params_buffer = ctx
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("FAST Params"),
-            contents: bytemuck::bytes_of(&params_data),
+            contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let shader_source = match cv_core::DataType::from_type::<T>() {
-        #[cfg(feature = "half-precision")]
-        Ok(cv_core::DataType::F16) => include_str!("../../shaders/fast_f16.wgsl"),
-        #[cfg(feature = "half-precision")]
-        Ok(cv_core::DataType::BF16) => include_str!("../../shaders/fast_bf16.wgsl"),
-        _ => {
-            include_str!("../../shaders/fast_f32.wgsl")
-        }
+    // The packed16 shaders OR each result into its half of a word, so both
+    // outputs must start zeroed, which a freshly created wgpu buffer is.
+    let new_output = |label| {
+        ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: byte_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
     };
-    let pipeline = ctx.create_compute_pipeline(shader_source, "main");
 
+    let score_buffer = new_output("FAST Output Buffer");
+    run_pass(
+        ctx,
+        detect_src,
+        input.storage.buffer(),
+        &score_buffer,
+        &params_buffer,
+        (w as u32, h as u32),
+    );
+
+    let result_buffer = if nonmax_suppression {
+        let nms_buffer = new_output("FAST NMS Output");
+        run_pass(
+            ctx,
+            nms_src,
+            &score_buffer,
+            &nms_buffer,
+            &params_buffer,
+            (w as u32, h as u32),
+        );
+        nms_buffer
+    } else {
+        score_buffer
+    };
+
+    Ok(crate::GpuTensor {
+        storage: crate::storage::WgpuGpuStorage::from_buffer(Arc::new(result_buffer), out_len),
+        shape: input.shape,
+        dtype: input.dtype,
+        _phantom: PhantomData::<T>,
+    })
+}
+
+/// Dispatch one 16x16-tiled pass of `shader_source` over a `w x h` image with
+/// bindings (input, output, params).
+fn run_pass(
+    ctx: &GpuContext,
+    shader_source: &str,
+    input: &wgpu::Buffer,
+    output: &wgpu::Buffer,
+    params: &wgpu::Buffer,
+    (w, h): (u32, u32),
+) {
+    let pipeline = ctx.create_compute_pipeline(shader_source, "main");
     let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("FAST Bind Group"),
         layout: &pipeline.get_bind_group_layout(0),
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: input
-                    .storage
-                    .as_any()
-                    .downcast_ref::<GpuStorage<f32>>()
-                    .unwrap()
-                    .buffer()
-                    .as_entire_binding(),
+                resource: input.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: output_buffer.as_entire_binding(),
+                resource: output.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
-                resource: params_buffer.as_entire_binding(),
+                resource: params.as_entire_binding(),
             },
         ],
     });
@@ -110,97 +172,9 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (w as u32).div_ceil(16);
-        let y = (h as u32).div_ceil(16);
-        pass.dispatch_workgroups(x, y, 1);
+        pass.dispatch_workgroups(w.div_ceil(16), h.div_ceil(16), 1);
     }
     ctx.submit(encoder);
-
-    let score_map = crate::GpuTensor {
-        storage: crate::storage::WgpuGpuStorage::from_buffer(Arc::new(output_buffer), out_len),
-        shape: input.shape,
-        dtype: input.dtype,
-        _phantom: PhantomData::<T>,
-    };
-
-    if nonmax_suppression {
-        let nms_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("FAST NMS Output"),
-            size: byte_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        let shader_source_nms = match cv_core::DataType::from_type::<T>() {
-            Ok(cv_core::DataType::F32) => include_str!("../../shaders/fast_nms_f32.wgsl"),
-            Ok(_) => {
-                return Err(crate::Error::NotSupported(
-                    "Unsupported fast precision type".into(),
-                ));
-            }
-            _ => {
-                include_str!("../../shaders/fast_nms_f32.wgsl")
-            }
-        };
-        let pipeline_nms = ctx.create_compute_pipeline(shader_source_nms, "main");
-
-        let nms_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("FAST NMS Bind Group"),
-            layout: &pipeline_nms.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: score_map
-                        .storage
-                        .as_any()
-                        .downcast_ref::<crate::storage::GpuStorage<T>>()
-                        .unwrap()
-                        .buffer()
-                        .as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: nms_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: params_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut nms_encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut pass = nms_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: None,
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&pipeline_nms);
-            pass.set_bind_group(0, &nms_bind_group, &[]);
-            let x = (w as u32).div_ceil(16);
-            let y = (h as u32).div_ceil(16);
-            pass.dispatch_workgroups(x, y, 1);
-        }
-        ctx.submit(nms_encoder);
-
-        let nms_map = crate::GpuTensor {
-            storage: GpuStorage::from_buffer(Arc::new(nms_buffer), out_len),
-            shape: score_map.shape,
-            dtype: cv_core::DataType::from_type::<T>().unwrap(),
-            _phantom: PhantomData::<T>,
-        };
-        Ok(nms_map)
-    } else {
-        let res_gpu = crate::GpuTensor {
-            storage: score_map.storage.clone(),
-            shape: score_map.shape,
-            dtype: cv_core::DataType::from_type::<T>().unwrap(),
-            _phantom: PhantomData::<T>,
-        };
-        Ok(res_gpu)
-    }
 }
 
 #[repr(C)]
@@ -212,11 +186,18 @@ struct CollectParams {
     padding: u32,
 }
 
+/// Keypoints of an f32 score map from [`fast_detect`]. Other score types
+/// return `NotSupported`: the collection shader reads f32 scores.
 pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
     ctx: &GpuContext,
     score_map: &crate::GpuTensor<T>,
 ) -> Result<Vec<cv_core::KeyPointF32>> {
-    use crate::storage::GpuStorage;
+    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
+        return Err(crate::Error::NotSupported(
+            "GPU keypoint extraction reads f32 score maps only".into(),
+        ));
+    }
+    let score_buffer = score_map.storage.buffer();
     let (h, w) = score_map.shape.hw();
     let num_pixels: u32 = (w * h) as u32;
     if num_pixels == 0 {
@@ -287,13 +268,7 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: score_map
-                        .storage
-                        .as_any()
-                        .downcast_ref::<GpuStorage<f32>>()
-                        .unwrap()
-                        .buffer()
-                        .as_entire_binding(),
+                    resource: score_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -381,13 +356,7 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: score_map
-                        .storage
-                        .as_any()
-                        .downcast_ref::<GpuStorage<f32>>()
-                        .unwrap()
-                        .buffer()
-                        .as_entire_binding(),
+                    resource: score_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,

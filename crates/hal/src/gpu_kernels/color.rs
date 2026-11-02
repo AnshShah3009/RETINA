@@ -2,7 +2,8 @@ use crate::GpuTensor;
 use crate::Result;
 use crate::context::ColorConversion;
 use crate::gpu::GpuContext;
-use cv_core::storage::Storage;
+#[cfg(feature = "half-precision")]
+use crate::gpu_kernels::packed16::{self, Packed16};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -16,19 +17,34 @@ struct ColorParams {
     _pad1: u32, // pad to 16 bytes for WGSL uniform alignment
 }
 
+/// Uniform of `color_cvt_packed16.wgsl`: the f32 layout plus the format and
+/// the gray weights as the CPU backend uses them, `T::from_f32(0.299)` etc.,
+/// widened back to f32 (exact).
+#[cfg(feature = "half-precision")]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct ColorParamsPacked16 {
+    len: u32,
+    code: u32,
+    format: u32,
+    _pad0: u32,
+    wr: f32,
+    wg: f32,
+    wb: f32,
+    _pad1: u32,
+}
+
+/// Colour conversion of a planar CHW image. RGB / BGR to gray only.
+///
+/// f32 runs `color_cvt_f32.wgsl`. f16 and bf16 run `color_cvt_packed16.wgsl`
+/// on every device (no `SHADER_F16` needed), which reproduces the CPU
+/// backend's per-operation rounding, so the result is bit-identical to the
+/// CPU's for the same type. Other types return `NotSupported`.
 pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     ctx: &GpuContext,
     input: &GpuTensor<T>,
     conv: ColorConversion,
 ) -> Result<GpuTensor<T>> {
-    // Only the f32 WGSL shader exists; reject other dtypes instead of
-    // panicking on the downcasts below.
-    if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
-        return Err(crate::Error::NotSupported(
-            "Color convert GPU kernel only supports f32".into(),
-        ));
-    }
-    use crate::storage::GpuStorage;
     let (h, w) = input.shape.hw();
     let num_pixels = h * w;
 
@@ -41,9 +57,64 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
     if code_int == 2 {
         return Err(crate::Error::NotSupported("GPU GrayToRgb pending".into()));
     }
+    // The shaders read three planes; with fewer they would read past the
+    // buffer (robust access returns zeros) and give a wrong gray image.
+    if input.shape.channels != 3 {
+        return Err(crate::Error::InvalidInput(
+            "RgbToGray requires 3 channels".into(),
+        ));
+    }
 
     let out_len = w * h * out_channels;
-    let byte_size = (out_len * std::mem::size_of::<T>()) as u64;
+    // The f32 shader runs one invocation per pixel, the packed one one per
+    // output word (two pixels).
+    let (shader_source, params, byte_size, invocations): (&str, Vec<u8>, u64, u32) =
+        match cv_core::DataType::from_type::<T>() {
+            Ok(cv_core::DataType::F32) => {
+                let params = ColorParams {
+                    len: num_pixels as u32,
+                    code: code_int,
+                    _pad0: 0,
+                    _pad1: 0,
+                };
+                (
+                    include_str!("../../shaders/color_cvt_f32.wgsl"),
+                    bytemuck::bytes_of(&params).to_vec(),
+                    (out_len * std::mem::size_of::<f32>()) as u64,
+                    num_pixels as u32,
+                )
+            }
+            #[cfg(feature = "half-precision")]
+            Ok(dt @ (cv_core::DataType::F16 | cv_core::DataType::BF16)) => {
+                let format = if dt == cv_core::DataType::F16 {
+                    Packed16::F16
+                } else {
+                    Packed16::Bf16
+                };
+                let params = ColorParamsPacked16 {
+                    len: num_pixels as u32,
+                    code: code_int,
+                    format: format.code(),
+                    _pad0: 0,
+                    wr: packed16::rounded::<T>(0.299),
+                    wg: packed16::rounded::<T>(0.587),
+                    wb: packed16::rounded::<T>(0.114),
+                    _pad1: 0,
+                };
+                (
+                    include_str!("../../shaders/color_cvt_packed16.wgsl"),
+                    bytemuck::bytes_of(&params).to_vec(),
+                    packed16::buffer_bytes(out_len),
+                    (num_pixels as u32).div_ceil(2),
+                )
+            }
+            _ => {
+                return Err(crate::Error::NotSupported(
+                    "Color convert GPU kernel supports f32, f16 and bf16".into(),
+                ));
+            }
+        };
+
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Color Convert Output"),
         size: byte_size,
@@ -51,37 +122,14 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
         mapped_at_creation: false,
     });
 
-    let params = ColorParams {
-        len: num_pixels as u32,
-        code: code_int,
-        _pad0: 0,
-        _pad1: 0,
-    };
-
     let params_buffer = ctx
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Color Params"),
-            contents: bytemuck::bytes_of(&params),
+            contents: &params,
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let shader_source = match cv_core::DataType::from_type::<T>() {
-        #[cfg(feature = "half-precision")]
-        Ok(cv_core::DataType::F16) => include_str!("../../shaders/color_cvt_f16.wgsl"),
-        // There is no bf16 colour-conversion shader. This arm used to
-        // `include_str!` one that does not exist, so the `half-precision`
-        // feature did not compile at all; it now declines loudly.
-        #[cfg(feature = "half-precision")]
-        Ok(cv_core::DataType::BF16) => {
-            return Err(crate::Error::NotSupported(
-                "GPU colour conversion has no bf16 kernel; convert to f32 or f16 first".into(),
-            ));
-        }
-        _ => {
-            include_str!("../../shaders/color_cvt_f32.wgsl")
-        }
-    };
     let pipeline = ctx.create_compute_pipeline(shader_source, "main");
 
     let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -90,13 +138,7 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: input
-                    .storage
-                    .as_any()
-                    .downcast_ref::<GpuStorage<f32>>()
-                    .unwrap()
-                    .buffer()
-                    .as_entire_binding(),
+                resource: input.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -119,7 +161,7 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let (x, y, z) = super::dispatch_1d(num_pixels as u32, 64);
+        let (x, y, z) = super::dispatch_1d(invocations, 64);
         pass.dispatch_workgroups(x, y, z);
     }
     ctx.submit(encoder);

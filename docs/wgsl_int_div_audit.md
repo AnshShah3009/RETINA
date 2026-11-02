@@ -39,7 +39,7 @@ with `Device::create_shader_module`.
 
 The corpus is every `.wgsl` file under `crates/hal/shaders`, `crates/hal/src`,
 `crates/calib3d/src` and `crates/features/src`, plus every Rust raw string in
-`crates/hal/src` that contains `@compute`. That comes to 108 files and 9 inline
+`crates/hal/src` that contains `@compute`. That comes to 105 files and 9 inline
 shaders. `crates/viewer` is not included because it holds render shaders only.
 The fused-kernel WGSL generated in `crates/runtime/src/pipeline/fusion.rs` is
 not included either: it is stored as a string and never compiled.
@@ -77,12 +77,12 @@ remaining B source, `spatial.rs`, is not reachable through `dispatch`.
 
 ## Summary
 
-92 integer divisions or modulos, spread over 34 of the 117 sources that naga
-accepts (70 table rows):
+80 integer divisions or modulos, spread over 31 of the 114 sources that naga
+accepts (64 table rows):
 
 | class | sites | rows | before this audit |
 | --- | ---: | ---: | --- |
-| A, nonzero constant | 57 | 37 | 55 |
+| A, nonzero constant | 45 | 31 | 55 |
 | B, host-guaranteed | 2 | 2 | 4 (`feature_collection_f32.wgsl` moved to S) |
 | S, shader-proven | 33 | 31 | 8 |
 | C, needs a guard | 0 | 0 | 20 |
@@ -137,12 +137,8 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
 | `crates/hal/shaders/fast.wgsl` | `%` | `4u` | 1 | A | literal |
 | `crates/hal/shaders/fast.wgsl` | `/` | `16u` | 1 | A | literal |
 | `crates/hal/shaders/fast.wgsl` | `/` | `4u` | 2 | A | literal |
-| `crates/hal/shaders/fast_bf16.wgsl` | `%` | `2u` | 3 | A | literal |
-| `crates/hal/shaders/fast_bf16.wgsl` | `/` | `2u` | 3 | A | literal |
 | `crates/hal/shaders/fast_nms.wgsl` | `%` | `4u` | 1 | A | literal |
 | `crates/hal/shaders/fast_nms.wgsl` | `/` | `4u` | 2 | A | literal |
-| `crates/hal/shaders/fast_nms_bf16.wgsl` | `%` | `2u` | 2 | A | literal |
-| `crates/hal/shaders/fast_nms_bf16.wgsl` | `/` | `2u` | 2 | A | literal |
 | `crates/hal/shaders/gaussian_blur_separable.wgsl` | `%` | `2 * h - 2` | 1 | S | Reflect101 branch runs only for `h > 1`, so `2h - 2 >= 2` (guard added for `h >= 1`) |
 | `crates/hal/shaders/gaussian_blur_separable.wgsl` | `%` | `2 * h` | 1 | S | Reflect branch runs only for `h > 1` |
 | `crates/hal/shaders/gaussian_blur_separable.wgsl` | `%` | `2 * w - 2` | 1 | S | Reflect101 branch runs only for `w > 1` |
@@ -169,8 +165,6 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
 | `crates/hal/shaders/sobel.wgsl` | `%` | `4u` | 1 | A | literal |
 | `crates/hal/shaders/sobel.wgsl` | `/` | `4u` | 3 | A | literal |
 | `crates/hal/shaders/stereo_match.wgsl` | `/` | `2u` | 1 | A | literal |
-| `crates/hal/shaders/threshold_bf16.wgsl` | `%` | `2u` | 1 | A | literal |
-| `crates/hal/shaders/threshold_bf16.wgsl` | `/` | `2u` | 1 | A | literal |
 | `crates/hal/shaders/undistort.wgsl` | `%` | `2 * n - 2` | 1 | S | as `remap.wgsl`, the same `map_coord` (guard added) |
 | `crates/hal/shaders/undistort.wgsl` | `%` | `2 * n` | 1 | S | as `remap.wgsl` (guard added) |
 | `crates/hal/shaders/undistort.wgsl` | `%` | `i32(len)` | 1 | S | as `remap.wgsl` (guard added) |
@@ -216,6 +210,14 @@ device now requests the feature when the adapter offers it, the uniform
 carries the threshold and max value as f32 (an exact widening), and
 `threshold` runs this shader when `GpuContext::supports_f16` and
 `threshold_f16_packed.wgsl` otherwise. Neither divides.
+
+The other 16-bit shaders were valid but either unreachable or wrong. The
+`fast_bf16`, `fast_nms_bf16` and `threshold_bf16` rows (12 sites, all
+literal `/ 2u` and `% 2u`) are gone: `fast_bf16.wgsl`, `fast_nms_bf16.wgsl`,
+their f16 siblings, both bilateral shaders and `color_cvt_f16.wgsl` were
+replaced by the `*_packed16.wgsl` shaders (one per kernel, f16 and bf16),
+and `threshold_bf16.wgsl` was rewritten. They address packed halves with
+`>> 1u` and `& 1u`, so none of them divides.
 
 The four ICP strings were public `&'static str` accessors with no host: no
 code created a pipeline from them, and `perf_tests` only timed returning the

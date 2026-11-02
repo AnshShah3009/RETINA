@@ -37,9 +37,9 @@ unsafe impl<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable> bytem
 }
 const _: () = assert!(std::mem::size_of::<ThresholdParams<f32>>() == 32);
 
-/// Uniform for the two f16 shaders: the `threshold_f32.wgsl` layout with the
-/// threshold and max value widened to f32 (exact), plus their f16 bits for
-/// `threshold_f16_packed.wgsl`, which writes results back as raw bits.
+/// Uniform for the f16 and bf16 shaders: the `threshold_f32.wgsl` layout with
+/// the threshold and max value widened to f32 (exact), plus their 16-bit
+/// patterns for the packed shaders, which write results back as raw bits.
 #[cfg(feature = "half-precision")]
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -87,6 +87,20 @@ pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
             };
             return threshold_f16(ctx, input, thresh, max_value, thresh_type, path);
         }
+        // `threshold_bf16.wgsl`, two bf16 per u32 word, on any device: WGSL
+        // has no bf16 type, so there is no native path.
+        #[cfg(feature = "half-precision")]
+        Ok(cv_core::DataType::BF16) => {
+            return run_16(
+                ctx,
+                input,
+                thresh,
+                max_value,
+                thresh_type,
+                include_str!("../../shaders/threshold_bf16.wgsl"),
+                (len as u32).div_ceil(2),
+            );
+        }
         Ok(_) => {
             return Err(crate::Error::NotSupported(
                 "Unsupported threshold precision type".into(),
@@ -126,28 +140,46 @@ fn threshold_f16<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     thresh_type: ThresholdType,
     path: F16Path,
 ) -> Result<GpuTensor<T>> {
-    debug_assert_eq!(std::mem::size_of::<T>(), 2);
-    let len = input.shape.len();
-    let bits = |v: &T| -> u32 {
-        let b = bytemuck::bytes_of(v);
-        u16::from_le_bytes([b[0], b[1]]) as u32
+    let len = input.shape.len() as u32;
+    let (shader, invocations) = match path {
+        F16Path::Native => (include_str!("../../shaders/threshold_f16.wgsl"), len),
+        F16Path::Packed => (
+            include_str!("../../shaders/threshold_f16_packed.wgsl"),
+            len.div_ceil(2),
+        ),
     };
+    run_16(
+        ctx,
+        input,
+        thresh,
+        max_value,
+        thresh_type,
+        shader,
+        invocations,
+    )
+}
+
+/// Run one of the 16-bit shaders, which share the `ThresholdParamsF16`
+/// uniform.
+#[cfg(feature = "half-precision")]
+fn run_16<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
+    ctx: &GpuContext,
+    input: &GpuTensor<T>,
+    thresh: T,
+    max_value: T,
+    thresh_type: ThresholdType,
+    shader: &str,
+    invocations: u32,
+) -> Result<GpuTensor<T>> {
     let params = ThresholdParamsF16 {
         width: input.shape.width as u32,
         height: input.shape.height as u32,
         thresh: thresh.to_f32(),
         max_value: max_value.to_f32(),
         thresh_type: thresh_type as u32,
-        len: len as u32,
-        thresh_bits: bits(&thresh),
-        max_bits: bits(&max_value),
-    };
-    let (shader, invocations) = match path {
-        F16Path::Native => (include_str!("../../shaders/threshold_f16.wgsl"), len as u32),
-        F16Path::Packed => (
-            include_str!("../../shaders/threshold_f16_packed.wgsl"),
-            (len as u32).div_ceil(2),
-        ),
+        len: input.shape.len() as u32,
+        thresh_bits: crate::gpu_kernels::packed16::bits_of(thresh)?,
+        max_bits: crate::gpu_kernels::packed16::bits_of(max_value)?,
     };
     run(ctx, input, shader, bytemuck::bytes_of(&params), invocations)
 }
