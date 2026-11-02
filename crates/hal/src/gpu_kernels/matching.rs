@@ -23,7 +23,9 @@ pub fn match_descriptors(
     let t_len = train.shape.height;
     let d_size = query.shape.width;
 
-    if q_len == 0 || t_len == 0 {
+    // No descriptors on either side - also a set with rows but no channels,
+    // whose zero-size buffer cannot be bound: nothing to match.
+    if q_len == 0 || t_len == 0 || query.shape.len() == 0 || train.shape.len() == 0 {
         return Ok(Matches {
             matches: Vec::new(),
             mask: None,

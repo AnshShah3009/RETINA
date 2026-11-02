@@ -63,6 +63,21 @@ impl CpuBackend {
     }
 }
 
+/// A zero-filled tensor of `shape`: what an operation returns for an empty
+/// input whose output shape is known. It has no elements when `shape` has
+/// none (a zero width, height or channel count), which is the usual case.
+fn zeros_tensor<T: Float + 'static, S: cv_core::StorageFactory<T>>(
+    shape: TensorShape,
+    dtype: cv_core::DataType,
+) -> Result<Tensor<T, S>> {
+    Ok(Tensor {
+        storage: S::new(shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?,
+        shape,
+        dtype,
+        _phantom: std::marker::PhantomData,
+    })
+}
+
 #[allow(clippy::needless_range_loop)]
 pub fn gaussian_kernel_1d<T: Float>(sigma: T, size: usize) -> Vec<T> {
     let mut kernel = vec![T::ZERO; size];
@@ -126,6 +141,11 @@ impl CpuBackend {
         kx: &[T],
         ky: &[T],
     ) -> Result<()> {
+        // Nothing to filter. The pooled byte buffer below would be empty, and
+        // an empty `Vec<u8>` is not aligned for `T`, so the cast would panic.
+        if w == 0 || h == 0 {
+            return Ok(());
+        }
         let rx = kx.len() / 2;
         let ry = ky.len() / 2;
 

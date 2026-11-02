@@ -29,10 +29,10 @@
 
 use cv_calib3d::{corner_subpix, solve_dlt_homography};
 use cv_core::{CpuTensor, Error, Float, Result, TensorShape};
+use cv_imgproc::{Contour, approx_poly_dp, find_contours};
 use nalgebra::Point2;
 use rayon::prelude::*;
 
-mod contours;
 #[cfg(test)]
 mod detector_tests;
 
@@ -419,9 +419,11 @@ impl ArucoDetector {
     ///
     /// On the same image the result (ids, corners, and with
     /// [`ArucoDetector::detect_with_rejected`] the rejected candidates) is
-    /// OpenCV 4.13's with [`CornerRefineMethod::None`]; `Subpix` uses
-    /// `cv_calib3d::corner_subpix`, which weights its window uniformly, so
-    /// refined corners differ from OpenCV's by a fraction of a pixel.
+    /// OpenCV 4.13's, with [`CornerRefineMethod::None`] or `Subpix`
+    /// (`cv_calib3d::corner_subpix` is OpenCV's `cornerSubPix` without IPP;
+    /// the pip build of cv2 resamples with IPP by default, which moves an
+    /// occasional weakly conditioned refined corner, by up to a pixel on a
+    /// steeply tilted marker).
     pub fn detect<T: Float>(&self, image: &CpuTensor<T>) -> Result<Vec<DetectedMarker>> {
         let (gray, w, h) = tensor_to_gray(image)?;
         self.detect_gray(&gray, w, h)
@@ -484,9 +486,9 @@ impl ArucoDetector {
             .par_iter()
             .map(|&win| {
                 let binary = adaptive_threshold(gray, w, h, win, p.adaptive_thresh_constant);
-                find_marker_quads(&binary, w, h, p)
+                find_marker_quads(binary, w, h, p)
             })
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>>>()?
             .into_iter()
             .flatten()
             .map(clockwise)
@@ -786,10 +788,13 @@ impl ArucoDetector {
         code
     }
 
-    /// `CORNER_REFINE_SUBPIX`: `cornerSubPix` in a half-window of
-    /// `relative_corner_refinement_win_size` marker cells, clamped to
-    /// `1..=corner_refinement_win_size` pixels. Like OpenCV, a corner that
-    /// moves further than the window keeps its unrefined position.
+    /// `CORNER_REFINE_SUBPIX`: `cornerSubPix(grey, corners, Size(w, w),
+    /// Size(-1, -1), (MAX_ITER | EPS, max_iterations, min_accuracy))` with
+    /// `w = max(1, cvRound(relative_corner_refinement_win_size * module))`
+    /// capped at `corner_refinement_win_size`, `module` the marker's mean
+    /// side over its cell count (in `f32`, as OpenCV's
+    /// `getAverageModuleSize`). Like OpenCV, a corner that moves further
+    /// than the window keeps its unrefined position.
     fn refine_subpix(
         &self,
         gray: &[u8],
@@ -801,11 +806,13 @@ impl ArucoDetector {
         let Some(img) = image::GrayImage::from_raw(w as u32, h as u32, gray.to_vec()) else {
             return Ok(());
         };
-        let cells = (self.dictionary.marker_size() + 2 * p.marker_border_bits) as f64;
+        let cells = (self.dictionary.marker_size() + 2 * p.marker_border_bits) as f32;
         for m in markers {
-            let module = perimeter(&m.corners) as f64 / (4.0 * cells);
-            let win = ((p.relative_corner_refinement_win_size * module).round() as usize)
-                .clamp(1, p.corner_refinement_win_size);
+            let module = perimeter(&m.corners) / (4.0 * cells);
+            let win = ((p.relative_corner_refinement_win_size * f64::from(module)).round_ties_even()
+                as i64)
+                .max(1)
+                .min(p.corner_refinement_win_size as i64) as usize;
             let mut pts = m.corners.map(|(x, y)| Point2::new(x, y));
             corner_subpix(
                 &img,
@@ -814,11 +821,7 @@ impl ArucoDetector {
                 p.corner_refinement_max_iterations,
                 p.corner_refinement_min_accuracy,
             )?;
-            for (c, q) in m.corners.iter_mut().zip(pts) {
-                if (q.x - c.0).abs() <= win as f64 && (q.y - c.1).abs() <= win as f64 {
-                    *c = (q.x, q.y);
-                }
-            }
+            m.corners = pts.map(|q| (q.x, q.y));
         }
         Ok(())
     }
@@ -1024,25 +1027,35 @@ fn adaptive_threshold(gray: &[u8], w: usize, h: usize, win: usize, constant: f64
 /// `min_corner_distance_rate` of the contour. (The border distance is checked
 /// later, on the candidate representing each group, as in OpenCV 4.7+.)
 fn find_marker_quads(
-    binary: &[u8],
+    binary: Vec<u8>,
     w: usize,
     h: usize,
     p: &DetectorParameters,
-) -> Vec<[(f64, f64); 4]> {
+) -> Result<Vec<[(f64, f64); 4]>> {
     let max_side = w.max(h) as f64;
     let min_perimeter = (p.min_marker_perimeter_rate * max_side) as usize;
     let max_perimeter = (p.max_marker_perimeter_rate * max_side) as usize;
+    let binary = CpuTensor::from_vec(binary, TensorShape::new(1, h, w))?;
     let mut out = Vec::new();
-    for contour in contours::find_contours_list(binary, w, h) {
-        let len = contour.len();
+    for contour in find_contours(&binary)? {
+        let len = contour.points.len();
         if len < min_perimeter || len > max_perimeter {
             continue;
         }
-        let approx = contours::approx_poly_dp_closed(
+        let contour = Contour {
+            points: contour
+                .points
+                .iter()
+                .map(|&(x, y)| (x as i32, y as i32))
+                .collect(),
+        };
+        let approx = approx_poly_dp(
             &contour,
             len as f64 * p.polygonal_approx_accuracy_rate,
+            true,
         );
-        if approx.len() != 4 || !contours::is_convex(&approx) {
+        let approx = approx.points;
+        if approx.len() != 4 || !is_contour_convex(&approx) {
             continue;
         }
         let min_side_sq = (0..4)
@@ -1058,7 +1071,37 @@ fn find_marker_quads(
         }
         out.push([0, 1, 2, 3].map(|k| (approx[k].0 as f64, approx[k].1 as f64)));
     }
-    out
+    Ok(out)
+}
+
+/// OpenCV's `isContourConvex` on integer points: every turn has the same,
+/// non-zero orientation. (`cv_imgproc::is_convex` accepts collinear
+/// vertices and fewer than three points, which OpenCV does not.)
+fn is_contour_convex(p: &[(i32, i32)]) -> bool {
+    let n = p.len();
+    if n < 3 {
+        return false;
+    }
+    let mut prev = p[n - 2];
+    let mut cur = p[n - 1];
+    let (mut dx0, mut dy0) = (cur.0 as i64 - prev.0 as i64, cur.1 as i64 - prev.1 as i64);
+    let mut orientation = 0u8;
+    for &q in p {
+        prev = cur;
+        cur = q;
+        let (dx, dy) = (cur.0 as i64 - prev.0 as i64, cur.1 as i64 - prev.1 as i64);
+        let (dxdy0, dydx0) = (dx * dy0, dy * dx0);
+        orientation |= match dydx0.cmp(&dxdy0) {
+            std::cmp::Ordering::Greater => 1,
+            std::cmp::Ordering::Less => 2,
+            std::cmp::Ordering::Equal => 3,
+        };
+        if orientation == 3 {
+            return false;
+        }
+        (dx0, dy0) = (dx, dy);
+    }
+    true
 }
 
 /// OpenCV's `_reorderCandidatesCorners`: make the corners clockwise in the
@@ -1451,6 +1494,17 @@ fn rotation_matrix_to_rodrigues(r: &nalgebra::Matrix3<f64>) -> nalgebra::Vector3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OpenCV's `isContourConvex`: both orientations are convex; a reflex or
+    /// a straight vertex is not.
+    #[test]
+    fn contour_convexity() {
+        assert!(is_contour_convex(&[(0, 0), (10, 0), (10, 10), (0, 10)]));
+        assert!(is_contour_convex(&[(0, 0), (0, 10), (10, 10), (10, 0)]));
+        assert!(!is_contour_convex(&[(0, 0), (10, 0), (3, 3), (0, 10)]));
+        assert!(!is_contour_convex(&[(0, 0), (5, 0), (10, 0), (0, 10)]));
+        assert!(!is_contour_convex(&[(0, 0), (1, 1)]));
+    }
 
     #[test]
     fn dictionary_marker_size() {

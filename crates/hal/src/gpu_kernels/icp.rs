@@ -137,7 +137,15 @@ pub fn icp_accumulate(
     use crate::gpu_kernels::buffer_utils::create_buffer;
 
     let num_corr = correspondences.len();
-    if num_corr == 0 {
+    // No correspondences, or no point or normal for them to index (an empty
+    // cloud is a zero-size buffer, which cannot be bound, and one of fewer
+    // than four floats holds no point): a zero system, as on the CPU, which
+    // skips every out-of-range pair.
+    if num_corr == 0
+        || source.shape.len() < 4
+        || target.shape.len() < 4
+        || target_normals.shape.len() == 0
+    {
         return Ok((nalgebra::Matrix6::zeros(), nalgebra::Vector6::zeros()));
     }
 

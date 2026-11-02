@@ -30,8 +30,8 @@ use crate::aruco::{
     tensor_to_gray,
 };
 use cv_calib3d::{
-    corner_subpix, project_points_with_distortion, solve_dlt_homography, solve_pnp_refine,
-    undistort_points,
+    SubpixCriteria, corner_subpix_with, project_points_with_distortion, solve_dlt_homography,
+    solve_pnp_refine, undistort_points,
 };
 use cv_core::{CameraIntrinsics, CpuTensor, Distortion, Error, Float, Pose, Result};
 use image::GrayImage;
@@ -548,20 +548,11 @@ impl CharucoDetector {
     }
 
     /// `selectAndRefineChessboardCorners` with `getMaximumSubPixWindowSizes`:
-    /// `cornerSubPix` each corner in a half-window of `int(d - 2)` pixels,
-    /// clamped to `1..=10`; corners without a detected adjacent marker use
-    /// the default half-window of 5.
-    ///
-    /// OpenCV takes `d` as the Euclidean distance to the nearest corner of an
-    /// adjacent detected marker. That marker corner lies diagonally from the
-    /// chessboard corner, so a square window of half-size `d - 2` still
-    /// reaches into the marker; OpenCV's `cornerSubPix` damps the window's
-    /// rim with a Gaussian weight, but `cv_calib3d::corner_subpix` weights
-    /// every pixel equally and the marker's edges pull the corner away
-    /// (measured on the tilted test render: half-window 10 gives mean
-    /// 0.86 px / max 2.16 px error, half-window 8 gives 0.13 / 0.26). So `d`
-    /// here is the smaller of the horizontal and vertical offsets to that
-    /// marker corner, which keeps the window clear of the marker.
+    /// `cornerSubPix(image, corner, Size(w, w), Size(), (MAX_ITER | EPS, 30,
+    /// 0.1))` with `w = int(d - 2)` clamped to `1..=10`, `d` the Euclidean
+    /// distance to the nearest corner of an adjacent detected marker;
+    /// corners without one use the default half-window of 5. `Size()` is a
+    /// zero zone of half-size 0: the window's centre pixel gets no weight.
     ///
     /// OpenCV shifts the point by -0.5 px before `cornerSubPix` and back
     /// after, because its marker corners use the pixel-edge convention; this
@@ -580,7 +571,7 @@ impl CharucoDetector {
                 .iter()
                 .filter_map(|&(mid, corner)| {
                     let (x, y) = markers[index_of_id[mid]?].corners[corner];
-                    Some((x - p[0]).abs().min((y - p[1]).abs()))
+                    Some((x - p[0]).hypot(y - p[1]))
                 })
                 .reduce(f64::min);
             let half_win = match min_dist {
@@ -588,7 +579,16 @@ impl CharucoDetector {
                 None => SUBPIX_DEFAULT_HALF_WIN,
             };
             let mut pt = [Point2::new(p[0], p[1])];
-            corner_subpix(image, &mut pt, half_win, SUBPIX_MAX_ITERS, SUBPIX_EPS)?;
+            corner_subpix_with(
+                image,
+                &mut pt,
+                (half_win, half_win),
+                Some((0, 0)),
+                SubpixCriteria {
+                    max_iters: Some(SUBPIX_MAX_ITERS),
+                    epsilon: Some(SUBPIX_EPS),
+                },
+            )?;
             *slot = Some([pt[0].x, pt[0].y]);
         }
         Ok(())

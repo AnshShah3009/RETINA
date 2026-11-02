@@ -37,6 +37,17 @@ pub fn morphology(
     if iterations == 0 || len == 0 {
         return Ok(input.clone());
     }
+    // An empty structuring element means OpenCV's default, a 3x3 rectangle
+    // (`cv::erode` / `cv::dilate` / `cv::morphologyEx` with `noArray()`), as
+    // on the CPU. Taken literally it would have no taps and turn every pixel
+    // into the operation's identity (0 for dilate, 255 for erode).
+    if kernel.shape.len() == 0 {
+        use crate::tensor_ext::TensorToGpu;
+        let rect = cv_core::CpuTensor::from_vec(vec![1u8; 9], cv_core::TensorShape::new(1, 3, 3))
+            .map_err(|e| crate::Error::RuntimeError(e.to_string()))?
+            .to_gpu_ctx(ctx)?;
+        return morphology(ctx, input, typ, &rect, iterations);
+    }
 
     let (h, w) = input.shape.hw();
     let (kh, kw) = kernel.shape.hw();

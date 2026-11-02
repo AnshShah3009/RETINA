@@ -45,57 +45,15 @@ pub fn match_template<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     let out_w = img_w - templ_w + 1;
     let out_h = img_h - templ_h + 1;
     let out_len = out_w * out_h;
-    let out_shape = TensorShape::new(1, out_h, out_w);
 
-    // Empty inputs are zero-size buffers, which a binding rejects.
-    if templ_w * templ_h == 0 {
-        // A template with no taps still has a well-defined score per window
-        // (each method's empty sums and its epsilon guard), so compute it
-        // exactly as the CPU backend does, on the image read back.
-        if image.shape.len() < img_w * img_h {
-            return Ok(super::zeros_tensor(ctx, out_shape, image.dtype));
-        }
-        let img: Vec<f32> = pollster::block_on(super::buffer_utils::read_buffer(
-            ctx.device.clone(),
-            &ctx.queue,
-            image.storage.buffer(),
-            0,
-            img_w * img_h * std::mem::size_of::<f32>(),
-        ))?;
-        let img64: Vec<f64> = img.iter().map(|&v| v as f64).collect();
-        let scores = crate::cpu::template_match::match_template_f64(
-            &img64,
-            img_w,
-            img_h,
-            &[],
-            templ_w,
-            templ_h,
-            method,
-            f32::EPSILON as f64,
-        );
-        let scores: Vec<f32> = scores.iter().map(|&v| v as f32).collect();
-        let buffer = ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Match Template Output"),
-                contents: bytemuck::cast_slice(&scores),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            });
-        return Ok(cv_core::Tensor {
-            storage: WgpuGpuStorage::from_buffer(Arc::new(buffer), out_len),
-            shape: out_shape,
-            dtype: image.dtype,
-            _phantom: PhantomData,
-        });
-    }
-    // Planes of nonzero size but no channels: nothing to correlate.
-    if image.shape.len() == 0 {
-        return Ok(super::zeros_tensor(ctx, out_shape, image.dtype));
-    }
-    if template.shape.len() == 0 {
-        return Err(crate::Error::InvalidInput(
-            "match_template: the template has no channels".into(),
-        ));
+    // `cv::matchTemplate` rejects an empty image or template, as the CPU
+    // backend does: no window can be scored against nothing. Checked before
+    // any binding, since an empty tensor is a zero-size buffer.
+    if image.shape.len() == 0 || template.shape.len() == 0 {
+        return Err(crate::Error::InvalidInput(format!(
+            "match_template: empty image {:?} or template {:?}",
+            image.shape, template.shape
+        )));
     }
 
     let byte_size = (out_len * std::mem::size_of::<f32>()) as u64;

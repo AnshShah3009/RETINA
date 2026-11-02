@@ -816,6 +816,11 @@ impl ComputeContext for GpuContext {
                         "NMS Rotated Boxes expects (N, 6) tensor".into(),
                     ));
                 }
+                // No boxes (a set with no channels has none either): none
+                // kept, as on the CPU.
+                if input.shape.len() == 0 {
+                    return Ok(Vec::new());
+                }
 
                 let mut boxes: Vec<(usize, f32)> = (0..rows)
                     .map(|i| {
@@ -1793,7 +1798,27 @@ impl ComputeContext for GpuContext {
                     threshold.to_f32(),
                     edge_threshold.to_f32(),
                 )?;
-                result_gpu.to_cpu_ctx(self)
+                let packed = result_gpu.to_cpu_ctx(self)?;
+                // The kernel packs four mask bytes per u32, so each of its rows
+                // is padded to `ceil(w / 4) * 4` bytes and its shape says so.
+                // That padding is the kernel's storage detail: drop it, so the
+                // mask is one byte per pixel with the shape the CPU backend
+                // returns for the same level.
+                let (h, w) = dog_curr.shape.hw();
+                let stride = packed.shape.width;
+                if stride == w || h * w == 0 {
+                    return Ok(packed);
+                }
+                let bytes = packed.storage.as_slice().ok_or_else(|| {
+                    crate::Error::MemoryError("SIFT extrema mask not on CPU".into())
+                })?;
+                let mask: Vec<u8> = bytes
+                    .chunks(stride)
+                    .take(h)
+                    .flat_map(|row| row[..w].iter().copied())
+                    .collect();
+                Tensor::from_vec(mask, cv_core::TensorShape::new(1, h, w))
+                    .map_err(|e| crate::Error::RuntimeError(e.to_string()))
             } else {
                 Err(crate::Error::InvalidInput(
                     "GpuContext requires GpuStorage tensors".into(),

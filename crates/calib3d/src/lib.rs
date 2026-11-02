@@ -25,7 +25,7 @@ pub use project::{
 };
 
 pub mod pattern;
-pub use pattern::{corner_subpix, find_chessboard_corners};
+pub use pattern::{SubpixCriteria, corner_subpix, corner_subpix_with, find_chessboard_corners};
 
 pub mod pnp;
 pub use pnp::{solve_pnp_dlt, solve_pnp_ransac, solve_pnp_refine};

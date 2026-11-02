@@ -18,7 +18,9 @@ pub fn nms_boxes(
     iou_threshold: f32,
 ) -> Result<Vec<usize>> {
     let num_boxes = input.shape.height;
-    if num_boxes == 0 {
+    // No boxes - also a set with rows but no channels, whose zero-size buffer
+    // cannot be bound: none kept, as on the CPU.
+    if num_boxes == 0 || input.shape.len() == 0 {
         return Ok(Vec::new());
     }
     if num_boxes > 4096 {

@@ -34,13 +34,16 @@ pub fn convolve_2d<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     let (h, w) = input.shape.hw();
     let (kh, kw) = kernel.shape.hw();
 
-    // An empty input binds a zero-size buffer, which wgpu rejects. The
-    // output has the input's shape, so it is empty too.
-    if input.shape.len() == 0 {
-        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
-    }
-    // An empty kernel sums no taps: every output is 0, as on the CPU.
+    // `cv::filter2D` rejects an empty kernel (`!_kernel.empty()`), as the
+    // CPU backend does. An empty input binds a zero-size buffer, which wgpu
+    // rejects; the output has the input's shape, so it is empty too.
     if kernel.shape.len() == 0 {
+        return Err(crate::Error::InvalidInput(format!(
+            "convolve_2d: the kernel {:?} is empty",
+            kernel.shape
+        )));
+    }
+    if input.shape.len() == 0 {
         return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
     }
 
