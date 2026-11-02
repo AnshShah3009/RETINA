@@ -275,7 +275,9 @@ fn gpu_bf16_resize_keeps_constant_planes() {
     constant_planes_stay_constant::<bf16>();
 }
 
-/// Empty target: empty tensor; empty source: zeros. CPU and GPU agree.
+/// Empty target: empty tensor; empty source with a non-empty target:
+/// `InvalidInput` (`cv::resize` asserts `!ssize.empty()`; it used to be
+/// zeros). CPU and GPU agree.
 fn empty_sizes<T: Half>() {
     let cpu = CpuBackend::new().unwrap();
     let g = gpu();
@@ -292,6 +294,24 @@ fn empty_sizes<T: Half>() {
         let shape = TensorShape::new(c, nh, nw);
         let zeros = vec![T::ZERO; shape.len()];
         let what = format!("{} ({c},{h},{w}) -> {nw}x{nh}", T::NAME);
+
+        if shape.len() > 0 && c * h * w == 0 {
+            let e = cpu.resize(&input, (nw, nh)).unwrap_err();
+            assert!(
+                matches!(e, cv_hal::Error::InvalidInput(_)),
+                "CPU {what}: {e:?}"
+            );
+            let Some(g) = g else { continue };
+            let on_gpu = input.to_gpu_ctx(g).unwrap();
+            for interp in [Interpolation::Linear, Interpolation::Lanczos] {
+                let e = g.resize_with(&on_gpu, (nw, nh), interp).unwrap_err();
+                assert!(
+                    matches!(e, cv_hal::Error::InvalidInput(_)),
+                    "GPU {interp:?} {what}: {e:?}"
+                );
+            }
+            continue;
+        }
 
         let out = cpu.resize(&input, (nw, nh)).unwrap();
         assert_eq!(out.shape, shape, "CPU {what}");
