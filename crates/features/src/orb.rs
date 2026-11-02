@@ -834,12 +834,9 @@ fn scale_image(image: &GrayImage, scale: f32) -> GrayImage {
     let new_width = (image.width() as f32 / scale) as u32;
     let new_height = (image.height() as f32 / scale) as u32;
 
-    image::imageops::resize(
-        image,
-        new_width,
-        new_height,
-        image::imageops::FilterType::Triangle,
-    )
+    // Byte-identical to `image::imageops::resize(.., FilterType::Triangle)`,
+    // which is serial and was most of `Orb::detect`'s time; see `resize`.
+    crate::resize::resize_triangle(image, new_width, new_height)
 }
 
 /// Compute Harris corner response at a single pixel using the same

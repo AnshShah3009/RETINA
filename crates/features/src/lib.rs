@@ -74,6 +74,8 @@ pub mod matcher;
 pub mod orb;
 /// RANSAC-based model estimation and outlier rejection
 pub mod ransac;
+/// Row-parallel Triangle resize for the ORB pyramid (byte-identical to `image`)
+mod resize;
 /// Visual-localization retrieval: bag-of-words vocabulary and inverted-file
 /// database, plus an LSH index over binary descriptors
 pub mod retrieval;
