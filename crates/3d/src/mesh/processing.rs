@@ -66,13 +66,25 @@ pub fn laplacian_smooth(mesh: &mut TriangleMesh, iterations: usize, lambda: f32)
     mesh.compute_vertex_normals();
 }
 
-/// Taubin smoothing: Two-step Laplacian with shrinkage compensation
+/// Taubin smoothing: two Laplacian passes per iteration, `lambda` then `mu`,
+/// with shrinkage compensation (Taubin, *Curve and Surface Smoothing Without
+/// Shrinkage*, 1995).
+///
+/// `mu` is the second pass's Laplacian factor *as given*, as in Open3D's
+/// `filter_smooth_taubin`: pass a negative value (Open3D's defaults are
+/// `lambda = 0.5`, `mu = -0.53`), with `|mu| > lambda`, so the second pass
+/// inflates. This used to apply `-mu`, the opposite convention, so Open3D's
+/// parameters made both passes shrink.
+///
+/// The Laplacian is [`laplacian_smooth`]'s uniform one; Open3D weights
+/// neighbours by inverse distance, so the two agree where each vertex's
+/// neighbours are equidistant.
 pub fn taubin_smooth(mesh: &mut TriangleMesh, iterations: usize, lambda: f32, mu: f32) {
     for _ in 0..iterations {
-        // Forward Laplacian (shrink)
+        // Forward Laplacian (shrink).
         laplacian_smooth(mesh, 1, lambda);
-        // Backward Laplacian (inflate)
-        laplacian_smooth(mesh, 1, -mu);
+        // Backward Laplacian (inflate, for mu < 0).
+        laplacian_smooth(mesh, 1, mu);
     }
 }
 
