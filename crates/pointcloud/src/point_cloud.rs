@@ -536,6 +536,8 @@ pub fn remove_statistical_outliers(
 
 /// Remove radius outliers.
 /// Points with fewer than `min_points` neighbors within `radius` are removed.
+/// A neighbour is another point (the point itself is not counted), as in
+/// Open3D's `remove_radius_outlier(nb_points, radius)`.
 ///
 /// A negative radius contains no point at all, so every point is an outlier;
 /// `locate_within_distance` takes a *squared* radius, which used to turn
@@ -561,14 +563,23 @@ pub fn remove_radius_outliers(
     // empty set for it rather than panicking).
     let r2 = if radius < 0.0 { -1.0 } else { radius * radius };
 
+    // A neighbour is another point: the point itself is not counted. Counting
+    // it (as this used to) made every threshold one too lenient, so with
+    // `min_points = 1` an isolated point with no neighbour at all was kept -
+    // measured on 500 spread points at radius 0.2: all 500 kept, where Open3D's
+    // `remove_radius_outlier(1, 0.2)` keeps 131. Duplicates of a point are
+    // distinct points and do count.
     let inlier_mask: Vec<bool> = pc
         .points
         .par_iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             let query_point = [p.x, p.y, p.z];
             // locate_within_distance uses squared distance
-            let count = tree.locate_within_distance(query_point, r2).count();
-            // count includes self.
+            let count = tree
+                .locate_within_distance(query_point, r2)
+                .filter(|w| w.0 != i)
+                .count();
             count >= min_points
         })
         .collect();

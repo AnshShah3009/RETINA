@@ -158,7 +158,11 @@ fn a_negative_radius_does_not_behave_like_a_positive_one() {
     ]);
 
     // Nothing is within a negative radius, so nothing is an inlier.
-    let (kept_negative, inliers_negative) = remove_radius_outliers(&two, -1.0, 2);
+    // `min_points = 1`: each point has exactly one neighbour (the other), so
+    // the positive-radius control below keeps both. (This used to pass 2,
+    // relying on the filter counting each point as its own neighbour; Open3D
+    // 0.20's `remove_radius_outlier(2, 1.0)` keeps neither of these points.)
+    let (kept_negative, inliers_negative) = remove_radius_outliers(&two, -1.0, 1);
     assert_eq!(
         kept_negative.len(),
         0,
@@ -169,7 +173,7 @@ fn a_negative_radius_does_not_behave_like_a_positive_one() {
     assert!(inliers_negative.is_empty());
 
     // Control: the positive radius keeps both (each has one neighbour).
-    let (kept_positive, inliers_positive) = remove_radius_outliers(&two, 1.0, 2);
+    let (kept_positive, inliers_positive) = remove_radius_outliers(&two, 1.0, 1);
     assert_eq!(kept_positive.len(), 2);
     assert_eq!(inliers_positive, vec![0, 1]);
 }
