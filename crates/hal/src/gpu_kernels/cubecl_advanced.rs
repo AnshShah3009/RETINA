@@ -265,9 +265,10 @@ mod optical_flow {
     /// Lucas-Kanade optical flow, one iteration, per pixel.
     ///
     /// `prev`/`next`/`grad_x`/`grad_y` are `[height, width]`, `flow` is
-    /// `[height, width, 2]`. Pixels whose `window_size`-sized window does not
-    /// fit inside the image, or whose structure tensor is singular, get zero
-    /// flow.
+    /// `[2, height, width]`, planar like every multichannel tensor in the
+    /// workspace: u at `[idx]`, v at `[width * height + idx]`. Pixels whose
+    /// `window_size`-sized window does not fit inside the image, or whose
+    /// structure tensor is singular, get zero flow.
     ///
     /// BUG(original): none. The window loop is checked against the image
     /// bounds by the `half_win` guard, so every gradient and image read is in
@@ -302,8 +303,8 @@ mod optical_flow {
             || y < half_win
             || y >= h - half_win
         {
-            flow[idx * 2] = 0.0;
-            flow[idx * 2 + 1] = 0.0;
+            flow[idx] = 0.0;
+            flow[w * h + idx] = 0.0;
             terminate!();
         }
 
@@ -335,8 +336,8 @@ mod optical_flow {
         let det = sum_ixx * sum_iyy - sum_ixy * sum_ixy;
 
         if det.abs() < 1e-8 {
-            flow[idx * 2] = 0.0;
-            flow[idx * 2 + 1] = 0.0;
+            flow[idx] = 0.0;
+            flow[w * h + idx] = 0.0;
             terminate!();
         }
 
@@ -344,18 +345,17 @@ mod optical_flow {
         let inv_ixy = -sum_ixy / det;
         let inv_iyy = sum_ixx / det;
 
-        // `A u = b` with `b = sum(i * It)`, matching `crates/video`'s
-        // `b_vec[0] += -ix * it` convention by folding that minus into the
-        // definition of the temporal term here.
+        // Brightness constancy, `Ix u + Iy v + It = 0` with `It = next - prev`,
+        // gives `A u = -b`, `b = sum(grad * It)`: `crates/video`'s
+        // `b_vec[0] += -ix * it`. The flow then follows the convention of the
+        // dense flows in `gpu_kernels::optical_flow`, prev(x) ~ next(x + u):
+        // content moving right gives u > 0.
         //
-        // The textbook form is `A u = -b` with `b = sum(i * It)`. Both are the
-        // same equation; getting it wrong negates the flow. Verified: the
-        // un-negated solve reproduces the CPU reference exactly on an 8 px
-        // horizontal shift, and negating it produces a clean sign flip
-        // (gpu +1.4969 vs cpu -1.4969) rather than an error that would suggest
-        // anything else.
-        flow[idx * 2] = inv_ixx * sum_ixt + inv_ixy * sum_iyt;
-        flow[idx * 2 + 1] = inv_ixy * sum_ixt + inv_iyy * sum_iyt;
+        // This used to solve `A u = b` and return the negated flow (u = -1 for
+        // a one-pixel shift to the right), interleaved per pixel under a
+        // `[height, width, 2]` shape.
+        flow[idx] = -(inv_ixx * sum_ixt + inv_ixy * sum_iyt);
+        flow[w * h + idx] = -(inv_ixy * sum_ixt + inv_iyy * sum_iyt);
     }
 }
 
@@ -409,7 +409,8 @@ fn launch_gradients_into(
 /// * `window_size` — odd; pixels with less than a full window of margin are
 ///   left at zero flow
 ///
-/// Returns `[height, width, 2]` flow (dx, dy per pixel).
+/// Returns `[2, height, width]` flow, planar: plane 0 is u (x), plane 1 is v
+/// (y), with prev(x, y) ~ next(x + u, y + v).
 pub fn lucas_kanade_flow(
     ctx: &AdvancedContext,
     prev: &TensorHandle,
@@ -433,7 +434,7 @@ pub fn lucas_kanade_flow(
 
     let (grad_x, grad_y) = compute_gradients(ctx, prev)?;
 
-    let flow = TensorHandle::empty(client, vec![h, w, 2], f32_storage());
+    let flow = TensorHandle::empty(client, vec![2, h, w], f32_storage());
 
     unsafe {
         optical_flow::lk_flow_kernel::launch_unchecked(
