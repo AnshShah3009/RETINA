@@ -314,6 +314,23 @@ behaviour for every caller of both entry points — a decision about whether
 `sigma = 0` means "identity" or "invalid". The latter would want an error channel
 that `gaussian_blur(&GrayImage, f32) -> GrayImage` does not have.
 
+## FIXED: `cv-imgproc` / `cv-features` divergences from OpenCV 4.13
+
+Each item was confirmed against `cv2` 4.13 first; the reference values are
+stored in the tests, so CI needs no OpenCV.
+
+- **`bilateral_filter_rgb` / `bilateral_filter_depth` / `joint_bilateral_filter`
+  used a square window, skipped out-of-image taps and took the radius as
+  `kernel_size / 2` with no floor**, where `cv::bilateralFilter` uses the disc
+  `sqrt(dx² + dy²) <= r`, a reflect-101 border, `cvRound(1.5 * sigma_space)`
+  for `d <= 0` and `max(r, 1)`. The RGB path also weighted colour by the L2
+  distance; OpenCV's 3-channel `u8` table is indexed by the **L1** distance
+  `|db| + |dg| + |dr|`. Before: 158 of 297 bytes of an 11x9 RGB image off
+  `cv2.bilateralFilter` (d = 5, sigmaColor = 25.5), the depth path up to
+  `0.36` off. After: all six RGB settings and a 1x4 column byte-exact, depth
+  within `1.2e-6` (OpenCV interpolates its f32 range weight from a table).
+  `tests/bilateral_opencv_parity.rs`.
+
 ## OPEN: `erf` is accurate to ~1.5e-7, where SciPy is ~1e-16
 
 Found from a failing `scientific` test, and the diagnosis is not the obvious one.
