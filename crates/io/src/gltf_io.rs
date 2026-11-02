@@ -94,7 +94,7 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
                 // panic surfaced much later in `cv_3d`, at
                 // `TriangleMesh::compute_face_normals`'s `self.vertices[face[0]]`.
                 // `read_obj` already rejects out-of-range face indices; do the same.
-                let faces: Vec<[usize; 3]> = if let Some(indices) = reader.read_indices() {
+                let mut faces: Vec<[usize; 3]> = if let Some(indices) = reader.read_indices() {
                     let idx: Vec<usize> = indices.into_u32().map(|i| i as usize).collect();
                     for &i in &idx {
                         if i >= positions.len() {
@@ -116,6 +116,19 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
                         .map(|i| [i * 3, i * 3 + 1, i * 3 + 2])
                         .collect()
                 };
+
+                // glTF 2.0 §3.7.2.1: a node whose global transform has a
+                // negative determinant (a mirror) makes its triangles wind
+                // clockwise. The transform is baked into the positions above,
+                // so restore counter-clockwise winding by swapping two corners.
+                // Without this a mirrored instance came back inside out: the
+                // winding normal pointed opposite the (inverse-transposed)
+                // vertex normals.
+                if world.fixed_view::<3, 3>(0, 0).determinant() < 0.0 {
+                    for face in &mut faces {
+                        face.swap(1, 2);
+                    }
+                }
 
                 meshes.push(GltfMesh {
                     name: mesh_name.clone(),
