@@ -313,10 +313,22 @@ fn hamming_distance(a: &[u8], b: &[u8]) -> u32 {
     if a.len() != b.len() {
         return u32::MAX;
     }
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x ^ y).count_ones())
-        .sum()
+    // Eight bytes per popcount: the count of set bits in the XOR of two
+    // little-endian words is the sum of the counts of their bytes, so this is
+    // the byte-wise sum it replaces.
+    let (a_words, a_tail) = a.as_chunks::<8>();
+    let (b_words, b_tail) = b.as_chunks::<8>();
+    let words: u32 = a_words
+        .iter()
+        .zip(b_words)
+        .map(|(x, y)| (u64::from_le_bytes(*x) ^ u64::from_le_bytes(*y)).count_ones())
+        .sum();
+    words
+        + a_tail
+            .iter()
+            .zip(b_tail)
+            .map(|(x, y)| (x ^ y).count_ones())
+            .sum::<u32>()
 }
 
 /// FLANN-based matcher
@@ -515,5 +527,67 @@ mod tests {
         let mut index = FlannIndex::new(4, 1).with_checks(4);
         index.build(&descs);
         assert_eq!(index.search_knn(&[0, 0], 1), vec![(32, 0)]);
+    }
+
+    fn random_bytes(len: usize, state: &mut u64) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                *state ^= *state << 13;
+                *state ^= *state >> 7;
+                *state ^= *state << 17;
+                *state as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn word_hamming_equals_the_byte_wise_count() {
+        let mut state = 0x0123_4567_89ab_cdefu64;
+        for len in 0..=70 {
+            for _ in 0..20 {
+                let a = random_bytes(len, &mut state);
+                let b = random_bytes(len, &mut state);
+                let expect: u32 = a.iter().zip(&b).map(|(x, y)| (x ^ y).count_ones()).sum();
+                assert_eq!(hamming_distance(&a, &b), expect, "len {len}");
+            }
+            let zeros = vec![0u8; len];
+            let ones = vec![255u8; len];
+            assert_eq!(hamming_distance(&zeros, &ones), 8 * len as u32);
+        }
+    }
+
+    /// The parallel batch search returns, per query and in query order, what a
+    /// serial `search_knn` call returns.
+    #[test]
+    fn knn_search_equals_per_query_search() {
+        let mut state = 0xfeed_beef_u64;
+        let mut train = Descriptors::new();
+        for i in 0..400 {
+            train.push(Descriptor::new(
+                random_bytes(32, &mut state),
+                KeyPoint::new(i as f64, 0.0),
+            ));
+        }
+        let mut queries = Descriptors::new();
+        for i in 0..300 {
+            // Half exact copies of training descriptors, half fresh.
+            let data = if i % 2 == 0 {
+                train.descriptors[i].data.clone()
+            } else {
+                random_bytes(32, &mut state)
+            };
+            queries.push(Descriptor::new(data, KeyPoint::new(i as f64, 1.0)));
+        }
+        queries.push(Descriptor::new(vec![0u8; 8], KeyPoint::new(0.0, 0.0)));
+        let mut index = FlannIndex::new(32, 4);
+        index.build(&train);
+        for k in [1, 2, 5] {
+            let batch = index.knn_search(&queries, k);
+            let serial: Vec<_> = queries
+                .iter()
+                .map(|q| index.search_knn(&q.data, k))
+                .collect();
+            assert_eq!(batch, serial, "k = {k}");
+        }
     }
 }
