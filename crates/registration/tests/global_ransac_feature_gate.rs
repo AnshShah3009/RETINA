@@ -50,8 +50,11 @@ fn small_metric_threshold_does_not_discard_feature_matches() {
             .expect("registration must find correspondences");
     let expected = (t * r).to_homogeneous();
     let err = (res.transformation - expected).norm();
-    // Coarse alignment (Open3D refines this with ICP): 0.05-0.07 measured
-    // with 3 mm noise; the gated matcher was off by 2.8.
-    assert!(err < 0.15, "transformation error {err}");
+    // Coarse alignment (Open3D refines this with ICP). RANSAC is randomised:
+    // 60 local runs gave median 0.055, p95 0.084, max 0.094, and one CI run
+    // reached 0.1505 - over the old 0.15 bound. The metric-gated matcher this
+    // guards against was off by 2.8, so 0.5 keeps a 5x margin from the bug and
+    // a 3x margin above every observed value.
+    assert!(err < 0.5, "transformation error {err}");
     assert!(res.fitness > 0.5, "fitness {}", res.fitness);
 }
