@@ -373,6 +373,19 @@ stored in the tests, so CI needs no OpenCV.
   OpenCV score) rather than OpenCV's 3x3 one; its tests are unchanged and
   pass. `crates/features/tests/fast_opencv_parity.rs`.
 
+- **`convert_rgb_to_gray` used f32 weights** (through
+  `cv_hal::cpu::simd::rgb_to_gray_simd`, `0.299 R + 0.587 G + 0.114 B`,
+  rounded half away). Checked against `cv2.cvtColor` on all 2^24 colours:
+  21,247 (0.127%) were one grey level off, e.g. `(0, 0, 250)` gave 29 where
+  OpenCV gives 28. OpenCV 4.13's 8-bit weights are **15-bit**, `(9798 R +
+  19235 G + 3735 B + 2^14) >> 15` - zero mismatches on all 2^24 colours, RGB
+  and BGR - not the 14-bit `4899/9617/1868` table of older releases (43,864
+  mismatches). `convert_rgb_to_gray` now uses it, and `rgb_to_gray_u8` /
+  `bgr_to_gray_u8` expose it on slices.
+  `tests/rgb_to_gray_opencv_parity.rs` (exhaustive, via a checksum of OpenCV's
+  output). *Not fixed:* `cv_hal::cpu::simd::rgb_to_gray_simd` itself still
+  uses the float weights; it lives in `cv-hal`.
+
 ## OPEN: `erf` is accurate to ~1.5e-7, where SciPy is ~1e-16
 
 Found from a failing `scientific` test, and the diagnosis is not the obvious one.
