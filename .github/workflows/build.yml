@@ -157,3 +157,7 @@ jobs:
       # The only CI runner with a GPU, so the only place the CubeCL kernels
       # (feature `cubecl`) run in CI.
       run: cargo test -p cv-hal --features cubecl --test cubecl_kernels_test
+
+    - name: Test f16/bf16 GPU kernels (Metal)
+      # Behind `half-precision`, which no other step tests, and GPU-only.
+      run: cargo test -p cv-hal --features half-precision --test gpu_half_kernels --test gpu_threshold_f16
