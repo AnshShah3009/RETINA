@@ -1,20 +1,18 @@
 #![cfg(feature = "cubecl")]
 
 use cubecl::prelude::*;
-use cubecl_wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_wgpu::WgpuDevice;
 use cv_hal::gpu_kernels::cubecl_advanced as adv;
 use cv_hal::gpu_kernels::cubecl_proto as proto;
 
-type Rt = WgpuRuntime;
-
-fn client() -> ComputeClient<Rt> {
-    <Rt as Runtime>::client(&WgpuDevice::DefaultDevice)
+fn client() -> Client {
+    cubecl::Device::Wgpu(WgpuDevice::default()).client()
 }
 
 #[test]
 fn normal_orientation_on_a_fronto_parallel_plane() {
     let c = client();
-    let ctx = adv::AdvancedContext::<Rt>::new(c.clone());
+    let ctx = adv::AdvancedContext::new(c.clone());
     let (h, w) = (5usize, 5usize);
     let flat = vec![2.0f32; h * w];
     let t = proto::tensor_from_slice(&c, &flat, vec![h, w]).unwrap();
@@ -33,7 +31,7 @@ fn normal_orientation_on_a_fronto_parallel_plane() {
 #[test]
 fn icp_residual_of_a_translated_cloud() {
     let c = client();
-    let ctx = adv::AdvancedContext::<Rt>::new(c.clone());
+    let ctx = adv::AdvancedContext::new(c.clone());
     // 20 source points on a line; target = the same points shifted by 0.5 in x.
     let ns = 20usize;
     let mut source = vec![0.0f32; ns * 3];

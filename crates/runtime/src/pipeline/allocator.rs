@@ -266,7 +266,10 @@ impl TransientBufferPool {
             .map_err(|_| crate::Error::RuntimeError("GPU readback map timed out".into()))?
             .map_err(|e| crate::Error::RuntimeError(format!("GPU readback map: {:?}", e)))?;
 
-        let mut bytes = slice.get_mapped_range().to_vec();
+        let mut bytes = slice
+            .get_mapped_range()
+            .map_err(|e| crate::Error::RuntimeError(format!("GPU readback range: {e}")))?
+            .to_vec();
         staging.unmap();
         bytes.truncate(size);
         Ok(bytes)

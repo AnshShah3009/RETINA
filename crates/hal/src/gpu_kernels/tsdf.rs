@@ -193,7 +193,7 @@ pub fn integrate(
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("TSDF Pipeline Layout"),
-            bind_group_layouts: &[&bgl_0, &bgl_1],
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1)],
             immediate_size: 0,
         });
 
@@ -431,7 +431,7 @@ pub fn raycast(
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Raycast Pipeline Layout"),
-            bind_group_layouts: &[&bgl],
+            bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
         });
 

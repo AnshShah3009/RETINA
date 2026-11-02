@@ -1,4 +1,4 @@
-//! Shared CubeCL 0.9 plumbing for the ported `cubecl_*` kernel modules.
+//! Shared CubeCL plumbing for the ported `cubecl_*` kernel modules.
 //!
 //! This module holds the pieces that more than one of the ported files needs:
 //! element-wise kernels, a reference matmul, and a host-side reduction.
@@ -8,31 +8,47 @@ use cubecl::std::tensor::TensorHandle;
 
 /// Storage type for `f32` tensors.
 #[inline]
-pub fn f32_storage() -> StorageType {
-    StorageType::from(cubecl::ir::FloatKind::F32)
+pub fn f32_storage() -> ElemType {
+    ElemType::Float(cubecl::ir::FloatKind::F32)
 }
 
 /// Storage type for `u32` tensors.
 #[inline]
-pub fn u32_storage() -> StorageType {
-    StorageType::from(cubecl::ir::UIntKind::U32)
+pub fn u32_storage() -> ElemType {
+    ElemType::UInt(cubecl::ir::UIntKind::U32)
 }
 
 /// Units per cube for element-wise launches.
 pub const CUBE_DIM: u32 = 64;
 
-/// Number of cubes needed to cover `n` working units in 1D.
+/// WebGPU's guaranteed `maxComputeWorkgroupsPerDimension`.
+pub const MAX_CUBES_PER_DIM: u32 = 65535;
+
+/// Cubes covering `n` working units of a kernel indexed by `ABSOLUTE_POS`.
+///
+/// Up to [`MAX_CUBES_PER_DIM`] cubes this is a 1-D count. Beyond it the
+/// count spreads over y as `(65535, ceil(cubes / 65535), 1)`: a 1-D count of
+/// more than 65535 is a wgpu validation error (it poisoned the device for any
+/// launch over 4,194,240 units). `ABSOLUTE_POS` is linear over the whole grid,
+/// so the kernels need no change; the surplus cubes of the last row fall past
+/// `n` and every kernel launched with this bounds-checks `ABSOLUTE_POS`.
 #[inline]
 pub fn cubes_for(n: usize) -> CubeCount {
-    CubeCount::new_1d((n as u32).div_ceil(CUBE_DIM).max(1))
+    let cubes = (n.div_ceil(CUBE_DIM as usize)).max(1);
+    let cubes = u32::try_from(cubes).expect("cube count fits in u32");
+    if cubes <= MAX_CUBES_PER_DIM {
+        CubeCount::new_1d(cubes)
+    } else {
+        CubeCount::new_2d(MAX_CUBES_PER_DIM, cubes.div_ceil(MAX_CUBES_PER_DIM))
+    }
 }
 
 /// Upload `data` to a new contiguous `f32` tensor.
-pub fn tensor_from_slice<R: Runtime>(
-    client: &ComputeClient<R>,
+pub fn tensor_from_slice(
+    client: &Client,
     data: &[f32],
     shape: Vec<usize>,
-) -> crate::Result<TensorHandle<R>> {
+) -> crate::Result<TensorHandle> {
     let expected: usize = shape.iter().product();
     if expected != data.len() {
         return Err(crate::Error::InvalidInput(format!(
@@ -45,12 +61,21 @@ pub fn tensor_from_slice<R: Runtime>(
     Ok(TensorHandle::new_contiguous(shape, handle, f32_storage()))
 }
 
+/// Read a tensor's bytes back to the host.
+///
+/// CubeCL 0.11 launches are fire-and-forget: a kernel that fails to compile
+/// or launch records the error on the stream, and the next synchronising call
+/// returns it. This read is that call, so it is where launch failures surface.
+fn read_bytes(client: &Client, tensor: &TensorHandle) -> crate::Result<Vec<u8>> {
+    let mut bytes = client
+        .read_tensor(vec![tensor.clone().into_copy_descriptor()])
+        .map_err(|e| crate::Error::RuntimeError(format!("cubecl readback failed: {e:?}")))?;
+    Ok(bytes.remove(0).to_vec())
+}
+
 /// Download a `f32` tensor to the host.
-pub fn tensor_to_slice<R: Runtime>(
-    client: &ComputeClient<R>,
-    tensor: &TensorHandle<R>,
-) -> crate::Result<Vec<f32>> {
-    let bytes = client.read_one_tensor(tensor.as_copy_descriptor());
+pub fn tensor_to_slice(client: &Client, tensor: &TensorHandle) -> crate::Result<Vec<f32>> {
+    let bytes = read_bytes(client, tensor)?;
     Ok(bytes
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -58,11 +83,8 @@ pub fn tensor_to_slice<R: Runtime>(
 }
 
 /// Download a `u32` tensor to the host.
-pub fn tensor_to_slice_u32<R: Runtime>(
-    client: &ComputeClient<R>,
-    tensor: &TensorHandle<R>,
-) -> crate::Result<Vec<u32>> {
-    let bytes = client.read_one_tensor(tensor.as_copy_descriptor());
+pub fn tensor_to_slice_u32(client: &Client, tensor: &TensorHandle) -> crate::Result<Vec<u32>> {
+    let bytes = read_bytes(client, tensor)?;
     Ok(bytes
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -126,20 +148,21 @@ fn un_kernel(input: &Tensor<f32>, output: &mut Tensor<f32>, n: usize, op: u32) {
 }
 
 /// Run a binary element-wise op, allocating the output.
-pub fn binary_elemwise<R: Runtime>(
-    client: &ComputeClient<R>,
-    lhs: &TensorHandle<R>,
-    rhs: &TensorHandle<R>,
+pub fn binary_elemwise(
+    client: &Client,
+    lhs: &TensorHandle,
+    rhs: &TensorHandle,
     op: BinOp,
-) -> crate::Result<TensorHandle<R>> {
-    if lhs.shape != rhs.shape {
+) -> crate::Result<TensorHandle> {
+    if lhs.shape() != rhs.shape() {
         return Err(crate::Error::InvalidInput(format!(
             "shape mismatch: {:?} vs {:?}",
-            lhs.shape, rhs.shape
+            lhs.shape(),
+            rhs.shape()
         )));
     }
-    let n: usize = lhs.shape.iter().product();
-    let output = TensorHandle::empty(client, lhs.shape.clone(), f32_storage());
+    let n: usize = lhs.shape().iter().product();
+    let output = TensorHandle::empty(client, lhs.shape().clone(), f32_storage());
 
     let op_code = match op {
         BinOp::Add => 0u32,
@@ -152,26 +175,25 @@ pub fn binary_elemwise<R: Runtime>(
             client,
             cubes_for(n),
             CubeDim::new_1d(CUBE_DIM),
-            lhs.as_ref().as_tensor_arg(1),
-            rhs.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(n),
-            ScalarArg::new(op_code),
+            lhs.clone().into_arg(),
+            rhs.clone().into_arg(),
+            output.clone().into_arg(),
+            n,
+            op_code,
         )
-    }
-    .map_err(|e| crate::Error::RuntimeError(format!("elemwise launch failed: {e:?}")))?;
+    };
 
     Ok(output)
 }
 
 /// Run a unary element-wise op, allocating the output.
-pub fn unary_elemwise<R: Runtime>(
-    client: &ComputeClient<R>,
-    input: &TensorHandle<R>,
+pub fn unary_elemwise(
+    client: &Client,
+    input: &TensorHandle,
     op: UnOp,
-) -> crate::Result<TensorHandle<R>> {
-    let n: usize = input.shape.iter().product();
-    let output = TensorHandle::empty(client, input.shape.clone(), f32_storage());
+) -> crate::Result<TensorHandle> {
+    let n: usize = input.shape().iter().product();
+    let output = TensorHandle::empty(client, input.shape().clone(), f32_storage());
 
     let op_code = match op {
         UnOp::Relu => 0u32,
@@ -184,13 +206,12 @@ pub fn unary_elemwise<R: Runtime>(
             client,
             cubes_for(n),
             CubeDim::new_1d(CUBE_DIM),
-            input.as_ref().as_tensor_arg(1),
-            output.as_ref().as_tensor_arg(1),
-            ScalarArg::new(n),
-            ScalarArg::new(op_code),
+            input.clone().into_arg(),
+            output.clone().into_arg(),
+            n,
+            op_code,
         )
-    }
-    .map_err(|e| crate::Error::RuntimeError(format!("unary launch failed: {e:?}")))?;
+    };
 
     Ok(output)
 }
@@ -224,18 +245,18 @@ fn matmul_kernel(a: &Tensor<f32>, b: &Tensor<f32>, c: &mut Tensor<f32>, m: u32, 
 /// This is the naive O(M*N*K) kernel, not a tiled/tensor-core GEMM. It exists
 /// so `cubecl_backend::matmul` has a real implementation; it is a correctness
 /// reference, not a performance path.
-pub fn launch_matmul<R: Runtime>(
-    client: &ComputeClient<R>,
-    a: &TensorHandle<R>,
-    b: &TensorHandle<R>,
-) -> crate::Result<TensorHandle<R>> {
-    if a.shape.len() != 2 || b.shape.len() != 2 {
+pub fn launch_matmul(
+    client: &Client,
+    a: &TensorHandle,
+    b: &TensorHandle,
+) -> crate::Result<TensorHandle> {
+    if a.shape().len() != 2 || b.shape().len() != 2 {
         return Err(crate::Error::InvalidInput(
             "matmul expects rank-2 tensors".into(),
         ));
     }
-    let (m, k) = (a.shape[0], a.shape[1]);
-    let (k2, n) = (b.shape[0], b.shape[1]);
+    let (m, k) = (a.shape()[0], a.shape()[1]);
+    let (k2, n) = (b.shape()[0], b.shape()[1]);
     if k != k2 {
         return Err(crate::Error::InvalidInput(format!(
             "matmul inner dimensions disagree: {k} vs {k2}"
@@ -249,15 +270,14 @@ pub fn launch_matmul<R: Runtime>(
             client,
             cubes_for(m * n),
             CubeDim::new_1d(CUBE_DIM),
-            a.as_ref().as_tensor_arg(1),
-            b.as_ref().as_tensor_arg(1),
-            c.as_ref().as_tensor_arg(1),
-            ScalarArg::new(m as u32),
-            ScalarArg::new(n as u32),
-            ScalarArg::new(k as u32),
+            a.clone().into_arg(),
+            b.clone().into_arg(),
+            c.clone().into_arg(),
+            m as u32,
+            n as u32,
+            k as u32,
         )
-    }
-    .map_err(|e| crate::Error::RuntimeError(format!("matmul launch failed: {e:?}")))?;
+    };
 
     Ok(c)
 }
@@ -299,13 +319,13 @@ pub enum RedOp {
 /// input, `i == 0`, which is correct for every axis and for every shape. Found by
 /// `crates/hal/tests/cubecl_kernels_test.rs`, which is checked against a broken
 /// `host_reduce` on purpose.
-pub fn host_reduce<R: Runtime>(
-    client: &ComputeClient<R>,
-    input: &TensorHandle<R>,
+pub fn host_reduce(
+    client: &Client,
+    input: &TensorHandle,
     axis: usize,
     op: RedOp,
-) -> crate::Result<TensorHandle<R>> {
-    let shape = input.shape.clone();
+) -> crate::Result<TensorHandle> {
+    let shape = input.shape().clone();
     if axis >= shape.len() {
         return Err(crate::Error::InvalidInput(format!(
             "axis {axis} out of range for rank {}",

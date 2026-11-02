@@ -45,11 +45,12 @@ fn gpu_test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// A device and queue, or `None` when the machine has no wgpu adapter.
 fn device_and_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::None,
         compatible_surface: None,
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .ok()?;
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -125,8 +126,8 @@ fn measure_sprite(points: &[[f32; 3]], radius_px: f32) -> Measured {
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
-        bind_group_layouts: &[&bgl],
-        push_constant_ranges: &[],
+        bind_group_layouts: &[Some(&bgl)],
+        immediate_size: 0,
     });
 
     // 3 position + 3 colour + 1 has_color, 28 bytes, as `render::Vertex`.
@@ -161,7 +162,7 @@ fn measure_sprite(points: &[[f32; 3]], radius_px: f32) -> Measured {
             module: &shader,
             entry_point: Some("vs_main"),
             compilation_options: Default::default(),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: 28,
                 // One vertex per point, six vertices per point drawn: the buffer
                 // advances per instance and the shader's `vertex_index` picks the
@@ -185,7 +186,7 @@ fn measure_sprite(points: &[[f32; 3]], radius_px: f32) -> Measured {
                         shader_location: 2,
                     },
                 ],
-            }],
+            })],
         },
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
@@ -200,7 +201,7 @@ fn measure_sprite(points: &[[f32; 3]], radius_px: f32) -> Measured {
                 write_mask: wgpu::ColorWrites::ALL,
             })],
         }),
-        multiview: None,
+        multiview_mask: None,
         cache: None,
     });
 
@@ -245,6 +246,7 @@ fn measure_sprite(points: &[[f32; 3]], radius_px: f32) -> Measured {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bg, &[]);
@@ -296,7 +298,9 @@ fn measure_sprite(points: &[[f32; 3]], radius_px: f32) -> Measured {
         .expect("poll");
     rx.recv().expect("map callback").expect("readback");
 
-    let data = slice.get_mapped_range();
+    let data = slice
+        .get_mapped_range()
+        .expect("the buffer was just mapped for reading");
     let (mut lo_x, mut hi_x, mut lo_y, mut hi_y) = (i64::MAX, i64::MIN, i64::MAX, i64::MIN);
     let mut lit = 0u32;
     let mut centres_lit = Vec::with_capacity(points.len());

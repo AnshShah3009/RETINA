@@ -124,6 +124,7 @@ impl MarkerGpuContext {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .ok()?;
@@ -213,7 +214,7 @@ impl MarkerGpuContext {
         // Create pipeline
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Marker Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -443,7 +444,9 @@ impl MarkerGpuContext {
             .map_err(|e| Error::AlgorithmError(format!("GPU sync failed: {}", e)))?
             .map_err(|e| Error::AlgorithmError(format!("GPU buffer map failed: {:?}", e)))?;
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice
+            .get_mapped_range()
+            .map_err(|e| Error::AlgorithmError(format!("GPU mapped range unavailable: {e}")))?;
         let results: Vec<GpuMarkerResult> = bytemuck::cast_slice(&data).to_vec();
         drop(data);
         staging_buffer.unmap();

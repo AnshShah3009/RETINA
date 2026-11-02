@@ -136,7 +136,10 @@ impl GpuTimer {
             return Vec::new();
         }
 
-        let data = slice.get_mapped_range();
+        let Ok(data) = slice.get_mapped_range() else {
+            self.readback_buffer.unmap();
+            return Vec::new();
+        };
         let timestamps: &[u64] = bytemuck::cast_slice(&data[..count as usize * 2 * 8]);
 
         let mut durations = Vec::with_capacity(count as usize);

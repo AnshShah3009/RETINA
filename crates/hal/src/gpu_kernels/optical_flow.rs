@@ -238,19 +238,17 @@ pub fn farneback(
         let level_stride = level_w;
 
         let flow_len = (level_w * level_h * 2) as usize;
-        // Zero before the first iteration. A singular update (`det == 0`)
-        // writes the buffer back unchanged, so an uninitialised allocation
-        // was returned as the flow.
+        // Must start at zero: a singular update (`det == 0`) writes the buffer
+        // back unchanged, so an uninitialised allocation would be returned as
+        // the flow. wgpu zero-initialises every new buffer, so this needs no
+        // mapping and no host-side fill (it used to map the whole buffer and
+        // write `flow_len * 4` zero bytes through a staging copy).
         let flow_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Farneback Flow"),
             size: (flow_len * 4) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
+            mapped_at_creation: false,
         });
-        {
-            flow_buffer.slice(..).get_mapped_range_mut().fill(0);
-        }
-        flow_buffer.unmap();
 
         if let Some(prev_flow) = flow {
             let flow_w = prev_flow.shape.width as u32;

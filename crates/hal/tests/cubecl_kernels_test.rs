@@ -25,31 +25,29 @@
 
 use cubecl::prelude::*;
 use cubecl::std::tensor::TensorHandle;
-use cubecl_wgpu::{WgpuDevice, WgpuRuntime};
+use cubecl_wgpu::WgpuDevice;
 
 use cv_hal::gpu_kernels::cubecl_advanced as adv;
 use cv_hal::gpu_kernels::cubecl_backend as be;
 use cv_hal::gpu_kernels::cubecl_optimized as opt;
 use cv_hal::gpu_kernels::cubecl_proto as proto;
 
-type Rt = WgpuRuntime;
-
 /// A live compute client, or a loud failure.
 ///
 /// There is no `skip` here on purpose: a test suite that quietly turns itself
 /// off on the CI machine is exactly the failure mode this crate is trying to
 /// avoid. If the client cannot be built the test fails and says why.
-fn client() -> ComputeClient<Rt> {
-    <Rt as Runtime>::client(&WgpuDevice::DefaultDevice)
+fn client() -> Client {
+    cubecl::Device::Wgpu(WgpuDevice::default()).client()
 }
 
-fn ctx_be(c: &ComputeClient<Rt>) -> be::CubeCLContext<Rt> {
+fn ctx_be(c: &Client) -> be::CubeCLContext {
     be::CubeCLContext::new(c.clone())
 }
-fn ctx_adv(c: &ComputeClient<Rt>) -> adv::AdvancedContext<Rt> {
+fn ctx_adv(c: &Client) -> adv::AdvancedContext {
     adv::AdvancedContext::new(c.clone())
 }
-fn ctx_opt(c: &ComputeClient<Rt>) -> opt::OptimizedContext<Rt> {
+fn ctx_opt(c: &Client) -> opt::OptimizedContext {
     opt::OptimizedContext::new(c.clone(), false)
 }
 
@@ -57,23 +55,23 @@ fn ctx_opt(c: &ComputeClient<Rt>) -> opt::OptimizedContext<Rt> {
 // Small helpers: upload, download, compare, deterministic data
 // ---------------------------------------------------------------------------
 
-fn up(c: &ComputeClient<Rt>, data: &[f32], shape: Vec<usize>) -> TensorHandle<Rt> {
+fn up(c: &Client, data: &[f32], shape: Vec<usize>) -> TensorHandle {
     proto::tensor_from_slice(c, data, shape).expect("upload")
 }
-fn up_u32(c: &ComputeClient<Rt>, data: &[u32], shape: Vec<usize>) -> TensorHandle<Rt> {
+fn up_u32(c: &Client, data: &[u32], shape: Vec<usize>) -> TensorHandle {
     let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
     let handle = c.create_from_slice(&bytes);
     TensorHandle::new_contiguous(shape, handle, proto::u32_storage())
 }
-fn upz(c: &ComputeClient<Rt>, shape: Vec<usize>) -> TensorHandle<Rt> {
+fn upz(c: &Client, shape: Vec<usize>) -> TensorHandle {
     let bytes: Vec<u8> = vec![0u8; shape.iter().product::<usize>() * 4];
     let handle = c.create_from_slice(&bytes);
     TensorHandle::new_contiguous(shape, handle, proto::f32_storage())
 }
-fn down(c: &ComputeClient<Rt>, t: &TensorHandle<Rt>) -> Vec<f32> {
+fn down(c: &Client, t: &TensorHandle) -> Vec<f32> {
     proto::tensor_to_slice(c, t).expect("readback")
 }
-fn down_u32(c: &ComputeClient<Rt>, t: &TensorHandle<Rt>) -> Vec<u32> {
+fn down_u32(c: &Client, t: &TensorHandle) -> Vec<u32> {
     proto::tensor_to_slice_u32(c, t).expect("readback")
 }
 
@@ -160,6 +158,41 @@ fn proto_binary_elemwise_matches_cpu() {
     let got = down(&c, &be::mul(&ctx, &ta, &tb).unwrap());
     let want: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x * y).collect();
     assert_close("mul", &got, &want, 1e-5);
+}
+
+/// One-unit-per-element launches past 65535 cubes.
+///
+/// WebGPU caps every dispatch axis at 65535 workgroups, and these launches
+/// used a 1-D cube count, so anything over 65535 * 64 = 4,194,240 elements (a
+/// 16-channel 640x480 conv output, a 4M-point cloud) was a wgpu validation
+/// error that poisoned the device. The count now spreads over y.
+#[test]
+fn elementwise_and_naive_conv_launches_past_65535_cubes_match_cpu() {
+    let c = client();
+    let ctx = ctx_be(&c);
+
+    let n = 65535 * proto::CUBE_DIM as usize + 1001;
+    let a = data(n, 11);
+    let b = data(n, 12);
+    let ta = up(&c, &a, vec![n]);
+    let tb = up(&c, &b, vec![n]);
+    let got = down(&c, &be::add(&ctx, &ta, &tb).unwrap());
+    let want: Vec<f32> = a.iter().zip(&b).map(|(x, y)| x + y).collect();
+    assert_close("add past 65535 cubes", &got, &want, 0.0);
+
+    let got = down(&c, &be::relu(&ctx, &ta).unwrap());
+    let want: Vec<f32> = a.iter().map(|x| x.max(0.0)).collect();
+    assert_close("relu past 65535 cubes", &got, &want, 0.0);
+
+    // 8 * 600 * 900 = 4.32M outputs, one unit each.
+    let (batch, ci, co, h, w, k, stride, pad) = (1, 1, 8, 600, 900, 3, 1, 1);
+    let input = data(batch * ci * h * w, 13);
+    let weights = data(co * ci * k * k, 14);
+    let ti = up(&c, &input, vec![batch, ci, h, w]);
+    let tw = up(&c, &weights, vec![co, ci, k, k]);
+    let got = down(&c, &be::conv2d(&ctx, &ti, &tw, stride, pad).unwrap());
+    let want = cpu_conv2d(&input, &weights, batch, ci, co, h, w, k, stride, pad);
+    assert_close("naive conv2d past 65535 cubes", &got, &want, 1e-4);
 }
 
 #[test]
@@ -400,25 +433,78 @@ fn optimized_conv2d_matches_cpu_and_separates_channels() {
     let ti = up(&c, &input, vec![batch, ci, h, w]);
     let tw = up(&c, &weights, vec![co, ci, k, k]);
 
-    let got = down(&c, &opt::conv2d(&ctx, &ti, &tw, stride, pad).unwrap());
     let want = cpu_conv2d(&input, &weights, batch, ci, co, h, w, k, stride, pad);
-
     let oh = (h + 2 * pad - k) / stride + 1;
     let ow = (w + 2 * pad - k) / stride + 1;
-    assert_close("optimized conv2d", &got, &want, 1e-4);
-    assert_eq!(got.len(), batch * co * oh * ow);
 
-    // Explicit anti-regression: the five output channels must not be identical
-    // clones of channel 0.
-    let plane = oh * ow;
-    let ch0 = &got[..plane];
-    for o in 1..co {
-        assert_ne!(
-            &got[o * plane..(o + 1) * plane],
-            ch0,
-            "output channel {o} is a byte-for-byte copy of channel 0 \
-             (the original collapsed-channels bug)"
-        );
+    // The tiled kernel directly, and the autotuned entry point (which may pick
+    // either kernel): both must be right, whichever one the tuner chose.
+    for (label, got) in [
+        (
+            "tiled conv2d",
+            down(&c, &opt::conv2d_tiled(&ctx, &ti, &tw, stride, pad).unwrap()),
+        ),
+        (
+            "autotuned conv2d",
+            down(&c, &opt::conv2d(&ctx, &ti, &tw, stride, pad).unwrap()),
+        ),
+    ] {
+        assert_close(label, &got, &want, 1e-4);
+        assert_eq!(got.len(), batch * co * oh * ow);
+
+        // Explicit anti-regression: the five output channels must not be
+        // identical clones of channel 0.
+        let plane = oh * ow;
+        let ch0 = &got[..plane];
+        for o in 1..co {
+            assert_ne!(
+                &got[o * plane..(o + 1) * plane],
+                ch0,
+                "{label}: output channel {o} is a byte-for-byte copy of channel 0 \
+                 (the original collapsed-channels bug)"
+            );
+        }
+    }
+}
+
+/// The autotuned conv2d on shapes where the two candidates trade places, and
+/// on repeat calls once the tuner has settled.
+///
+/// The tuner benchmarks both kernels on the first call for a key and runs the
+/// winner afterwards, so the first and the later calls may run different
+/// kernels. Every call must match the CPU reference; the direct and tiled
+/// kernels also have to agree with each other, since a tuner choosing between
+/// two kernels that disagree would make the result depend on timing.
+#[test]
+fn autotuned_conv2d_matches_cpu_on_every_call_and_both_candidates_agree() {
+    let c = client();
+    let be_ctx = ctx_be(&c);
+    let ctx = ctx_opt(&c);
+    for (seed, (batch, ci, co, h, w, k, stride, pad)) in [
+        (
+            1usize, 3usize, 16usize, 48usize, 64usize, 3usize, 1usize, 1usize,
+        ),
+        (1, 16, 32, 30, 40, 3, 1, 1),
+        (2, 1, 8, 37, 53, 5, 2, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = data(batch * ci * h * w, 70 + seed as u64);
+        let weights = data(co * ci * k * k, 80 + seed as u64);
+        let ti = up(&c, &input, vec![batch, ci, h, w]);
+        let tw = up(&c, &weights, vec![co, ci, k, k]);
+        let want = cpu_conv2d(&input, &weights, batch, ci, co, h, w, k, stride, pad);
+
+        let direct = down(&c, &be::conv2d(&be_ctx, &ti, &tw, stride, pad).unwrap());
+        let tiled = down(&c, &opt::conv2d_tiled(&ctx, &ti, &tw, stride, pad).unwrap());
+        assert_close("direct vs cpu", &direct, &want, 1e-4);
+        assert_close("tiled vs direct", &tiled, &direct, 1e-5);
+
+        for call in 0..3 {
+            let got = down(&c, &opt::conv2d(&ctx, &ti, &tw, stride, pad).unwrap());
+            assert_close(&format!("autotuned call {call}"), &got, &want, 1e-4);
+        }
     }
 }
 
@@ -779,7 +865,7 @@ fn backend_knn_matches_cpu() {
     }
 }
 
-fn down_val<R: Runtime>(c: &ComputeClient<R>, t: &TensorHandle<R>, i: usize) -> f32 {
+fn down_val(c: &Client, t: &TensorHandle, i: usize) -> f32 {
     proto::tensor_to_slice(c, t).expect("readback")[i]
 }
 
@@ -1658,7 +1744,7 @@ fn upload_download_roundtrip_is_bit_exact() {
     let c = client();
     let a = data(1024, 401);
     let t = up(&c, &a, vec![32, 32]);
-    assert_eq!(t.shape, vec![32, 32]);
+    assert_eq!(t.shape()[..], [32, 32]);
     let got = down(&c, &t);
     assert_close("roundtrip", &got, &a, 0.0);
 }

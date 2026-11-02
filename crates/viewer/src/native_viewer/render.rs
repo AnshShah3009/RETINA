@@ -145,8 +145,8 @@ impl PointCloudRenderer {
 
         let layout = device.create_pipeline_layout(&eframe::wgpu::PipelineLayoutDescriptor {
             label: Some("Point Cloud PL"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&eframe::wgpu::RenderPipelineDescriptor {
@@ -156,7 +156,7 @@ impl PointCloudRenderer {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[vertex_layout()],
+                buffers: &[Some(vertex_layout())],
             },
             primitive: eframe::wgpu::PrimitiveState {
                 topology: eframe::wgpu::PrimitiveTopology::TriangleList,
@@ -176,7 +176,7 @@ impl PointCloudRenderer {
                     write_mask: eframe::wgpu::ColorWrites::ALL,
                 })],
             }),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
