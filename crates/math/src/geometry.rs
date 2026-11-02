@@ -57,14 +57,14 @@ impl SpatialIndex {
     pub fn query_bbox(&self, min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Vec<usize> {
         let envelope = AABB::from_corners([min_x, min_y], [max_x, max_y]);
         self.tree
-            .locate_in_envelope_intersecting(&envelope)
+            .locate_in_envelope_intersecting(envelope)
             .map(|ip| ip.id)
             .collect()
     }
 
     /// Find nearest neighbor to a point.
     pub fn nearest(&self, x: f64, y: f64) -> Option<usize> {
-        self.tree.nearest_neighbor(&[x, y]).map(|ip| ip.id)
+        self.tree.nearest_neighbor([x, y]).map(|ip| ip.id)
     }
 
     /// Find all polygons containing the given point.
@@ -73,7 +73,7 @@ impl SpatialIndex {
         let point = geo::Point::new(x, y);
         let envelope = AABB::from_point([x, y]);
         self.tree
-            .locate_in_envelope_intersecting(&envelope)
+            .locate_in_envelope_intersecting(envelope)
             .filter(|ip| ip.polygon.contains(&point))
             .map(|ip| ip.id)
             .collect()
@@ -88,7 +88,7 @@ impl SpatialIndex {
             let envelope = AABB::from_corners([min.x, min.y], [max.x, max.y]);
 
             self.tree
-                .locate_in_envelope_intersecting(&envelope)
+                .locate_in_envelope_intersecting(envelope)
                 .filter(|ip| ip.polygon.intersects(polygon))
                 .map(|ip| ip.id)
                 .collect()

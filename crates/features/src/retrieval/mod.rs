@@ -58,7 +58,7 @@ pub fn descriptors_to_bytes(descriptors: &Descriptors) -> Vec<Vec<u8>> {
 #[cfg(test)]
 pub(crate) mod test_support {
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
 
     /// Create a deterministically seeded RNG.
     pub(crate) fn seeded(seed: u64) -> StdRng {

@@ -616,7 +616,7 @@ mod tests {
         threshold: f64,
         max_iterations: u32,
     ) -> ([[f64; 3]; 3], Vec<bool>) {
-        use rand::Rng;
+        use rand::RngExt;
         let n = src_points.len();
         let thresh_sq = threshold * threshold;
         let mut best_inlier_count = 0usize;

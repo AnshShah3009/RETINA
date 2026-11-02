@@ -5,7 +5,7 @@
 
 use cv_plot::{Plot, Plot3D, PointCloud3D};
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 fn main() {
     println!("=== cv-plot Example ===\n");

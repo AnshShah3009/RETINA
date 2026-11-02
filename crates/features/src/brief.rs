@@ -1,7 +1,7 @@
 use crate::descriptor::{Descriptor, DescriptorExtractor, Descriptors};
 use cv_core::KeyPoints;
 use image::GrayImage;
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 
 /// BRIEF binary descriptor extractor.

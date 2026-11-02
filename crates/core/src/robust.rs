@@ -503,7 +503,7 @@ mod tests {
         n_outliers: usize,
         noise: f64,
     ) -> Vec<Point2<f64>> {
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
         let mut points = Vec::new();
 

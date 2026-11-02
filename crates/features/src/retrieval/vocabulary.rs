@@ -3,7 +3,7 @@
 
 use crate::retrieval::hamming_distance;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// A trained vocabulary of binary visual words.
 ///

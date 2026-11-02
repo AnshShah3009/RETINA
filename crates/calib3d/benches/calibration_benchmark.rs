@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use cv_calib3d::*;
 use nalgebra::{Point2, Point3, Rotation3, Vector3};
+use std::hint::black_box;
 
 fn generate_synthetic_calibration_data() -> (Vec<Vec<Point3<f64>>>, Vec<Vec<Point2<f64>>>) {
     let pattern_size = (7, 6);

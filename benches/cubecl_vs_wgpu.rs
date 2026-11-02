@@ -12,11 +12,12 @@
 //!   cargo bench --bench cubecl_vs_wgpu -- threshold    # single group
 
 #[allow(unused_imports)]
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use cv_core::{CpuTensor, KeyPointF32, Storage, Tensor, TensorShape};
 use cv_hal::context::{BorderMode, ComputeContext, ThresholdType};
 use cv_hal::cpu::CpuBackend;
 use cv_hal::gpu::GpuContext;
+use std::hint::black_box;
 use std::marker::PhantomData;
 use std::time::Duration;
 
