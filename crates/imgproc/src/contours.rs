@@ -219,75 +219,197 @@ pub fn convex_hull(contour: &Contour) -> Contour {
     Contour { points: lower }
 }
 
-fn point_line_distance(p: (i32, i32), a: (i32, i32), b: (i32, i32)) -> f64 {
-    let (px, py) = (p.0 as f64, p.1 as f64);
-    let (ax, ay) = (a.0 as f64, a.1 as f64);
-    let (bx, by) = (b.0 as f64, b.1 as f64);
-    let dx = bx - ax;
-    let dy = by - ay;
-    if dx == 0.0 && dy == 0.0 {
-        let ex = px - ax;
-        let ey = py - ay;
-        return (ex * ex + ey * ey).sqrt();
+/// OpenCV 4.13's `approxPolyDP(curve, epsilon, closed)` on integer points:
+/// Ramer-Douglas-Peucker, returning a subset of the contour's points.
+///
+/// A closed curve is not split at its first point: the algorithm first
+/// looks for two far-apart points (from point 0 to the point farthest from
+/// it, then to the point farthest from that one, three times) and simplifies
+/// the two arcs between them, so the output starts at one of those points.
+/// An open curve keeps both end points (unless they coincide, in which case
+/// it is treated as closed). A point's deviation is its distance to the
+/// chord *segment*. A final pass drops vertices lying within
+/// `epsilon / sqrt(2)` of the line through their neighbours when the turn is
+/// not back-tracking and the neighbours differ in both `x` and `y`, exactly
+/// as OpenCV does. A negative or NaN `epsilon` is treated as zero (OpenCV
+/// rejects it).
+pub fn approx_poly_dp(contour: &Contour, epsilon: f64, closed: bool) -> Contour {
+    let pts = &contour.points;
+    let keep = approx_poly_dp_indices(
+        pts.len(),
+        |i| (pts[i].0 as f64, pts[i].1 as f64),
+        epsilon,
+        closed,
+    );
+    Contour {
+        points: keep.into_iter().map(|i| pts[i]).collect(),
     }
-    let t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
-    let proj_x = ax + t * dx;
-    let proj_y = ay + t * dy;
-    let ex = px - proj_x;
-    let ey = py - proj_y;
-    (ex * ex + ey * ey).sqrt()
 }
 
-fn rdp(points: &[(i32, i32)], epsilon: f64, out: &mut Vec<(i32, i32)>) {
-    if points.len() < 2 {
-        return;
+/// `approxPolyDP_` on `count` points read through `pt`, returning the
+/// indices of the points kept, in output order. Coordinates and their
+/// differences are taken in `f64`, which for integer points is exactly
+/// OpenCV's arithmetic.
+pub(crate) fn approx_poly_dp_indices(
+    count: usize,
+    pt: impl Fn(usize) -> (f64, f64),
+    epsilon: f64,
+    closed: bool,
+) -> Vec<usize> {
+    if count == 0 {
+        return Vec::new();
     }
-    let first = points[0];
-    let last = points[points.len() - 1];
-    let mut max_dist = 0.0f64;
-    let mut idx = 0usize;
-    for (i, &p) in points
-        .iter()
-        .enumerate()
-        .skip(1)
-        .take(points.len().saturating_sub(2))
-    {
-        let d = point_line_distance(p, first, last);
-        if d > max_dist {
-            max_dist = d;
-            idx = i;
+    let eps = epsilon.max(0.0);
+    let eps = eps * eps;
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut dst: Vec<usize> = Vec::with_capacity(count);
+    let mut is_closed = closed;
+    let mut init_iters = 3;
+
+    if !is_closed {
+        let (sx, sy) = pt(count - 1);
+        let (ex, ey) = pt(0);
+        if sx != ex || sy != ey {
+            stack.push((0, count - 1));
+        } else {
+            is_closed = true;
+            init_iters = 1;
         }
     }
 
-    if max_dist > epsilon && idx > 0 {
-        rdp(&points[..=idx], epsilon, out);
-        out.pop();
-        rdp(&points[idx..], epsilon, out);
-    } else {
-        out.push(first);
-        out.push(last);
+    if is_closed {
+        // 1. Approximately the two farthest points of the curve.
+        let mut right_start = 0usize;
+        let mut pos = 0usize;
+        let mut le_eps = false;
+        for _ in 0..init_iters {
+            pos = (pos + right_start) % count;
+            let (sx, sy) = pt(pos);
+            let mut max_dist = 0.0;
+            for j in 1..count {
+                let (x, y) = pt((pos + j) % count);
+                let (dx, dy) = (x - sx, y - sy);
+                let dist = dx * dx + dy * dy;
+                if dist > max_dist {
+                    max_dist = dist;
+                    right_start = j;
+                }
+            }
+            le_eps = max_dist <= eps;
+        }
+        // 2. Seed the stack with the two arcs between them.
+        if !le_eps {
+            let start = pos % count;
+            let far = (right_start + start) % count;
+            stack.push((far, start));
+            stack.push((start, far));
+        } else {
+            dst.push(pos);
+        }
     }
-}
 
-/// Douglas-Peucker contour approximation.
-pub fn approx_poly_dp(contour: &Contour, epsilon: f64, closed: bool) -> Contour {
-    let mut pts = contour.points.clone();
-    if pts.len() < 3 {
-        return Contour { points: pts };
+    // 3. Split each slice at its point farthest from the chord segment.
+    while let Some((s0, s1)) = stack.pop() {
+        let (ex, ey) = pt(s1);
+        let (sx, sy) = pt(s0);
+        let mut pos = (s0 + 1) % count;
+        let le_eps = if pos != s1 {
+            let (dx, dy) = (ex - sx, ey - sy);
+            let segment_len_2 = dx * dx + dy * dy;
+            let mut max_dist = 0.0;
+            let mut split = s0;
+            while pos != s1 {
+                let (x, y) = pt(pos);
+                let projection = (x - sx) * dx + (y - sy) * dy;
+                let dist = if projection < 0.0 {
+                    ((x - sx) * (x - sx) + (y - sy) * (y - sy)) * segment_len_2
+                } else if projection > segment_len_2 {
+                    ((x - ex) * (x - ex) + (y - ey) * (y - ey)) * segment_len_2
+                } else {
+                    let d = (y - sy) * dx - (x - sx) * dy;
+                    d * d
+                };
+                if dist > max_dist {
+                    max_dist = dist;
+                    split = pos;
+                }
+                pos = (pos + 1) % count;
+            }
+            if max_dist <= eps * segment_len_2 {
+                true
+            } else {
+                stack.push((split, s1));
+                stack.push((s0, split));
+                false
+            }
+        } else {
+            true
+        };
+        if le_eps {
+            dst.push(s0);
+        }
+    }
+    if !is_closed {
+        dst.push(count - 1);
     }
 
-    if closed && pts.first() != pts.last() {
-        pts.push(pts[0]);
+    // 4. Clean-up: drop vertices on an almost straight line, reading ahead
+    // in place exactly as OpenCV does.
+    let is_closed = closed;
+    let count = dst.len();
+    let mut new_count = count;
+    let open = usize::from(!is_closed);
+    let mut pos = if is_closed { count - 1 } else { 0 };
+    let read = |pos: &mut usize, dst: &[usize]| {
+        let v = dst[*pos];
+        *pos += 1;
+        if *pos >= count {
+            *pos = 0;
+        }
+        v
+    };
+    let mut start = read(&mut pos, &dst);
+    let mut wpos = pos;
+    let mut cur = read(&mut pos, &dst);
+    let mut i = open;
+    while i < count - open && new_count > 2 {
+        let end = read(&mut pos, &dst);
+        let (sx, sy) = pt(start);
+        let (px, py) = pt(cur);
+        let (ex, ey) = pt(end);
+        let (dx, dy) = (ex - sx, ey - sy);
+        let dist = ((px - sx) * dy - (py - sy) * dx).abs();
+        let successive_inner_product = (px - sx) * (ex - px) + (py - sy) * (ey - py);
+        if dist * dist <= 0.5 * eps * (dx * dx + dy * dy)
+            && dx != 0.0
+            && dy != 0.0
+            && successive_inner_product >= 0.0
+        {
+            new_count -= 1;
+            start = end;
+            dst[wpos] = end;
+            wpos += 1;
+            if wpos >= count {
+                wpos = 0;
+            }
+            cur = read(&mut pos, &dst);
+            i += 2;
+            continue;
+        }
+        start = cur;
+        dst[wpos] = cur;
+        wpos += 1;
+        if wpos >= count {
+            wpos = 0;
+        }
+        cur = end;
+        i += 1;
     }
-
-    let mut out = Vec::new();
-    rdp(&pts, epsilon.max(0.0), &mut out);
-
-    out.dedup();
-    if closed && out.len() > 2 && out.first() == out.last() {
-        out.pop();
+    if !is_closed {
+        dst[wpos] = cur;
     }
-    Contour { points: out }
+    dst.truncate(new_count);
+    dst
 }
 
 /// Contour perimeter with explicit open/closed option.
