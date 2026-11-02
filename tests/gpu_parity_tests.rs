@@ -603,12 +603,8 @@ fn every_shader_compiles() {
             include_str!("../crates/hal/shaders/tvl1_warp.wgsl"),
         ),
         (
-            "tvl1_primal",
-            include_str!("../crates/hal/shaders/tvl1_primal.wgsl"),
-        ),
-        (
-            "tvl1_dual",
-            include_str!("../crates/hal/shaders/tvl1_dual.wgsl"),
+            "tvl1_primal_dual",
+            include_str!("../crates/hal/shaders/tvl1_primal_dual.wgsl"),
         ),
         (
             "tvl1_median",

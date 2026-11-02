@@ -3,10 +3,15 @@
 // `medianFiltering` = 3 or 5, replicated border). Reads `src`, writes `dst`;
 // the host swaps the two buffers afterwards.
 //
+// `src` and `dst` are whole TV-L1 states (see tvl1_primal_dual.wgsl): the flow
+// in planes 0 and 1, the four dual variables in planes 2..5. The dual
+// variables are copied across unchanged so `dst` is a complete state.
+//
 // median_radius is 1 (3x3) or 2 (5x5); the host never dispatches this shader
 // for any other value, and the window is capped at 5x5 here regardless.
 //
-// Planar layout: u1 at [i], u2 at [width * height + i].
+// Planar layout: u1 at [i], u2 at [width * height + i], p11..p22 at
+// [k * width * height + i] for k = 2..5.
 
 struct Tvl1Params {
     width: u32,
@@ -63,4 +68,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let i = y * w + x;
     dst[i] = median_at(x, y, 0u);
     dst[n + i] = median_at(x, y, n);
+    for (var k = 2u; k < 6u; k++) {
+        dst[k * n + i] = src[k * n + i];
+    }
 }
