@@ -88,10 +88,24 @@ impl Database {
 
     /// Add a database image. Any previously built index is invalidated until
     /// [`Database::build`] is called again.
-    pub fn add_image(&mut self, image: DatabaseImage) {
-        self.id_to_index.insert(image.id, self.images.len());
-        self.images.push(image);
+    ///
+    /// Ids are unique: adding an image whose id is already present replaces
+    /// that image in place (keeping its position in insertion order) and
+    /// returns the replaced one. It used to keep both, so every index built
+    /// afterwards - including the bag-of-words database - held two images
+    /// under one id, and the old image's descriptors resolved to keypoints of
+    /// the new one.
+    pub fn add_image(&mut self, image: DatabaseImage) -> Option<DatabaseImage> {
+        let replaced = match self.id_to_index.get(&image.id) {
+            Some(&index) => Some(std::mem::replace(&mut self.images[index], image)),
+            None => {
+                self.id_to_index.insert(image.id, self.images.len());
+                self.images.push(image);
+                None
+            }
+        };
         self.invalidate();
+        replaced
     }
 
     /// Add a landmark. Landmarks are addressed by their insertion index.
