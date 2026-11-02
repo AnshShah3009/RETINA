@@ -29,3 +29,8 @@ gpu = ["dep:wgpu", "dep:pollster"]
 
 [dev-dependencies]
 pollster = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "features_cpu"
+harness = false
