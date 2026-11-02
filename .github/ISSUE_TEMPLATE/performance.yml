@@ -1,0 +1,39 @@
+name: Performance
+description: Something is slower than it should be.
+title: "[perf] "
+labels: ["performance", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Timings are only comparable with the size, hardware and build settings that produced them.
+        Please measure a release build (`--release` or `cargo bench`).
+  - type: input
+    id: function
+    attributes:
+      label: Function or pipeline
+      description: e.g. `cv_features::Orb::detect_and_compute` on 1920x1080
+    validations:
+      required: true
+  - type: textarea
+    id: measurement
+    attributes:
+      label: Measurement
+      description: How you timed it, the input size, and the result. A criterion benchmark is ideal.
+      render: rust
+    validations:
+      required: true
+  - type: textarea
+    id: comparison
+    attributes:
+      label: What it should be, and why
+      description: e.g. the same call in OpenCV takes X ms on this machine; or a profile showing the hot spot.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Hardware and build
+      description: CPU (cores), GPU + driver if relevant, OS, `rustc --version`, features, profile.
+    validations:
+      required: true

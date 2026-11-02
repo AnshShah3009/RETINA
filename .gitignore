@@ -41,3 +41,12 @@ reference/
 # not compile, and one hung the run for 360s. They are diagnostics, not tests.
 zz_scratch*
 zz_probe*
+
+# Outputs of `cargo run -p cv-examples --example plot_demo`
+/plot_line.svg
+/plot_scatter.svg
+/plot_3d.html
+/plot_3d.svg
+
+# Agent worktrees created by Claude Code
+/.claude/worktrees/

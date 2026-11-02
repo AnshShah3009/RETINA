@@ -4,6 +4,10 @@ version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Native Rust computer vision library with multi-backend acceleration"
+repository = "https://github.com/AnshShah3009/RETINA"
+readme = "README.md"
+keywords = ["computer-vision", "image-processing", "point-cloud", "gpu", "opencv"]
+categories = ["computer-vision", "multimedia::images", "science"]
 
 [dependencies]
 cv-core = { workspace = true }

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/AnshShah3009/RETINA/security/advisories/new
+    about: Please report security problems privately, not in a public issue.
+  - name: Contributing guide
+    url: https://github.com/AnshShah3009/RETINA/blob/master/CONTRIBUTING.md
+    about: How to set up, what a pull request needs, and where to start.

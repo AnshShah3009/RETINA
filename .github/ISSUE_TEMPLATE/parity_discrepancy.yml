@@ -1,0 +1,66 @@
+name: Parity discrepancy
+description: A result that differs from OpenCV, Open3D, SciPy or Matplotlib.
+title: "[parity] "
+labels: ["parity", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        RETINA aims to match its reference libraries. Known, deliberate differences are listed in
+        `docs/PARITY.md` — please check there first. Deterministic inputs (seeded or closed-form)
+        make a discrepancy reproducible on both sides.
+  - type: input
+    id: retina-fn
+    attributes:
+      label: RETINA function
+      description: e.g. `cv_imgproc::bilateral_filter`
+    validations:
+      required: true
+  - type: dropdown
+    id: reference
+    attributes:
+      label: Reference library
+      options:
+        - OpenCV
+        - Open3D
+        - SciPy / NumPy
+        - Matplotlib
+        - shapely
+        - Other (say below)
+    validations:
+      required: true
+  - type: input
+    id: reference-fn
+    attributes:
+      label: Reference function and version
+      description: e.g. `cv2.bilateralFilter`, opencv-python 4.13.0
+    validations:
+      required: true
+  - type: textarea
+    id: reference-code
+    attributes:
+      label: Reference code
+      description: Python that produces the reference output.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: retina-code
+    attributes:
+      label: RETINA code
+      description: Rust that produces RETINA's output on the same input.
+      render: rust
+    validations:
+      required: true
+  - type: textarea
+    id: difference
+    attributes:
+      label: The difference
+      description: Where the outputs differ and by how much (max abs diff, number of differing elements, a few example values).
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Your guess at the cause (border mode, rounding, units, coordinate convention…), if any.

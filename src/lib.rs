@@ -45,3 +45,9 @@ pub async fn init() -> Result<(), String> {
 pub fn init_thread_pool(num_threads: Option<usize>) -> Result<(), String> {
     cv_core::init_global_thread_pool(num_threads)
 }
+
+// Compile the Rust examples in README.md as doctests, so the quick start
+// cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
