@@ -181,8 +181,15 @@ pub fn curve_fit(
         }
     }
 
-    let dof = if m > np { m - np } else { 1 };
-    let s2 = cost / dof as f64;
+    // With `m == np` there are no residual degrees of freedom: the residual
+    // variance, and with it the covariance, is not estimable. SciPy's
+    // `curve_fit` fills `pcov` with `inf` in that case. Dividing by a
+    // substitute `dof = 1` instead scaled `(JᵀJ)⁻¹` by the round-off RSS of an
+    // exact interpolation and reported a covariance of zero - "known exactly"
+    // for parameters whose uncertainty the data says nothing about. The
+    // covariance below is therefore `inf` when `m == np`; `s2` is only used
+    // when `m > np` (`m < np` is rejected above).
+    let s2 = cost / (m - np).max(1) as f64;
 
     // Covariance approximation: (J^T J)^{-1} * cost / (m - np).
     //
@@ -193,23 +200,27 @@ pub fn curve_fit(
     // its diagonal is large exactly where the parameters are unidentifiable. A
     // zero matrix is not: it reports a covariance of zero, i.e. parameters known
     // exactly, in the one case where they are not determined at all.
-    let covariance = match invert_matrix(&jtj) {
-        Some(inv) => inv
-            .iter()
-            .map(|row| row.iter().map(|v| v * s2).collect())
-            .collect(),
-        None => {
-            // SVD failed to converge: leave the covariance at zero rather than
-            // fabricate numbers, but say so on stderr.
-            match DMatrix::from_fn(np, np, |i, j| jtj[i][j]).pseudo_inverse(1e-12) {
-                Ok(pinv) => (0..np)
-                    .map(|i| (0..np).map(|j| pinv[(i, j)] * s2).collect())
-                    .collect(),
-                Err(e) => {
-                    eprintln!(
-                        "curve_fit: pseudo-inverse of J^T J failed ({e:?}); covariance unset"
-                    );
-                    vec![vec![0.0; np]; np]
+    let covariance = if m <= np {
+        vec![vec![f64::INFINITY; np]; np]
+    } else {
+        match invert_matrix(&jtj) {
+            Some(inv) => inv
+                .iter()
+                .map(|row| row.iter().map(|v| v * s2).collect())
+                .collect(),
+            None => {
+                // SVD failed to converge: leave the covariance at zero rather than
+                // fabricate numbers, but say so on stderr.
+                match DMatrix::from_fn(np, np, |i, j| jtj[i][j]).pseudo_inverse(1e-12) {
+                    Ok(pinv) => (0..np)
+                        .map(|i| (0..np).map(|j| pinv[(i, j)] * s2).collect())
+                        .collect(),
+                    Err(e) => {
+                        eprintln!(
+                            "curve_fit: pseudo-inverse of J^T J failed ({e:?}); covariance unset"
+                        );
+                        vec![vec![0.0; np]; np]
+                    }
                 }
             }
         }
