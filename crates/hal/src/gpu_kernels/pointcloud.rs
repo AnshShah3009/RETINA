@@ -100,7 +100,9 @@ pub fn compute_normals(
     k_neighbors: u32,
 ) -> Result<Tensor<f32, GpuStorage<f32>>> {
     let num_points = points.shape.height;
-    if num_points == 0 {
+    // No points - also a cloud with rows but no channels, whose zero-size
+    // buffer cannot be bound: no normals, as on the CPU.
+    if num_points == 0 || points.shape.len() == 0 {
         return Ok(points.clone());
     }
 
@@ -466,7 +468,9 @@ pub fn compute_normals_fast_gpu(
     k_neighbors: u32,
 ) -> Result<Tensor<f32, GpuStorage<f32>>> {
     let num_points = points.shape.height;
-    if num_points == 0 {
+    // No points - also a cloud with rows but no channels, whose zero-size
+    // buffer cannot be bound: no normals, as on the CPU.
+    if num_points == 0 || points.shape.len() == 0 {
         return Ok(points.clone());
     }
 

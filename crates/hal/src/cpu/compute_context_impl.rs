@@ -34,6 +34,19 @@ impl ComputeContext for CpuBackend {
         let (h, w) = input.shape.hw();
         let (kh, kw) = kernel.shape.hw();
 
+        // `cv::filter2D` rejects an empty kernel (`!_kernel.empty()`): with
+        // no taps there is no filter. An empty image filters to an empty
+        // image of its shape.
+        if kernel.shape.len() == 0 {
+            return Err(crate::Error::InvalidInput(format!(
+                "convolve_2d: the kernel {:?} is empty",
+                kernel.shape
+            )));
+        }
+        if input.shape.len() == 0 {
+            return zeros_tensor(input.shape, input.dtype);
+        }
+
         let mut output_storage =
             S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
@@ -138,6 +151,14 @@ impl ComputeContext for CpuBackend {
             }
         };
 
+        // An empty image has empty gradients.
+        if input.shape.len() == 0 {
+            return Ok((
+                zeros_tensor(input.shape, input.dtype)?,
+                zeros_tensor(input.shape, input.dtype)?,
+            ));
+        }
+
         if dx > 0 {
             self.convolve_separable(src, gx_slice, w, h, &kx_deriv, &kx_smooth)?;
         }
@@ -228,6 +249,11 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
+        // No pixels, no votes. A plane with no channels has none either,
+        // although its height and width are not zero.
+        if input.shape.len() == 0 {
+            return Ok(Vec::new());
+        }
 
         // Layout, binning and peak rule live in `cpu::hough_standard` so the GPU
         // backend reports exactly the same lines.
@@ -302,6 +328,10 @@ impl ComputeContext for CpuBackend {
             return Err(crate::Error::InvalidInput(
                 "hough_circles: min_radius must be less than max_radius".into(),
             ));
+        }
+        // No pixels, no circles; `h - 1` below would also underflow.
+        if input.shape.len() == 0 {
+            return Ok(Vec::new());
         }
 
         // Step 1: Compute gradients for direction voting
@@ -450,6 +480,14 @@ impl ComputeContext for CpuBackend {
         let (img_h, img_w) = image.shape.hw();
         let (tmpl_h, tmpl_w) = template.shape.hw();
 
+        // `cv::matchTemplate` rejects an empty image or template: no window
+        // can be scored against nothing.
+        if image.shape.len() == 0 || template.shape.len() == 0 {
+            return Err(crate::Error::InvalidInput(format!(
+                "match_template: empty image {:?} or template {:?}",
+                image.shape, template.shape
+            )));
+        }
         if tmpl_h > img_h || tmpl_w > img_w {
             return Err(crate::Error::InvalidInput(
                 "Template larger than image".into(),
@@ -503,7 +541,7 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
-        if h < 24 || w < 24 {
+        if h < 24 || w < 24 || input.shape.len() == 0 {
             return Ok(Vec::new());
         }
 
@@ -649,6 +687,10 @@ impl ComputeContext for CpuBackend {
             return Err(crate::Error::InvalidInput(
                 "Left and right images must have the same dimensions".into(),
             ));
+        }
+        // An empty pair has an empty disparity map.
+        if h * w == 0 {
+            return zeros_tensor(TensorShape::new(1, h, w), left.dtype);
         }
 
         let block_size = params.block_size;
@@ -1015,7 +1057,8 @@ impl ComputeContext for CpuBackend {
         let (pattern_rows, pattern_cols) = pattern_size;
         let expected_corners = pattern_rows * pattern_cols;
 
-        if h < 3 || w < 3 {
+        // A plane with no channels is as empty as one with no rows.
+        if h < 3 || w < 3 || image.shape.len() == 0 {
             return Err(crate::Error::InvalidInput(
                 "Image too small for chessboard detection".into(),
             ));
@@ -1450,6 +1493,30 @@ impl ComputeContext for CpuBackend {
         let (kh, kw) = kernel.shape.hw();
         let (cx, cy) = (kw / 2, kh / 2);
 
+        // An empty image erodes or dilates to an empty image.
+        if input.shape.len() == 0 {
+            return Ok(Tensor {
+                storage: S::new(0, 0u8).map_err(crate::Error::MemoryError)?,
+                shape: input.shape,
+                dtype: input.dtype,
+                _phantom: std::marker::PhantomData,
+            });
+        }
+        // An empty structuring element means OpenCV's default, a 3x3
+        // rectangle (`cv::erode` / `cv::dilate` / `cv::morphologyEx` with
+        // `noArray()`; iterated, the same as its `2k+1` square). Taken
+        // literally it has no taps, and every pixel became the operation's
+        // identity (0 for dilate, 255 for erode).
+        if kernel.shape.len() == 0 {
+            let rect = Tensor {
+                storage: S::new(9, 1u8).map_err(crate::Error::MemoryError)?,
+                shape: TensorShape::new(1, 3, 3),
+                dtype: kernel.dtype,
+                _phantom: std::marker::PhantomData,
+            };
+            return self.morphology(input, typ, &rect, iterations);
+        }
+
         // `Open` and `Close` are compositions, not one min/max pass: open is
         // erode-then-dilate and close is dilate-then-erode. `is_max` below is
         // "not Erode", so without this branch *both* ran a plain dilate - the
@@ -1638,6 +1705,19 @@ impl ComputeContext for CpuBackend {
         // a single `nw * nh` plane was produced before, sampled from rows of
         // the whole `c * h` buffer as if it were one plane.
         let c = input.shape.channels.max(1);
+        // `cv::warpAffine` / `cv::warpPerspective` reject an empty source
+        // (`src.cols > 0 && src.rows > 0`, `_src.total() > 0`): there is no
+        // pixel to sample, whatever the destination size. An empty
+        // destination is an empty image.
+        if input.shape.len() == 0 {
+            return Err(crate::Error::InvalidInput(format!(
+                "warp: the source image {:?} is empty",
+                input.shape
+            )));
+        }
+        if nw * nh == 0 {
+            return zeros_tensor(TensorShape::new(c, nh, nw), input.dtype);
+        }
         let mut output_storage = S::new(c * nw * nh, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
@@ -1719,6 +1799,9 @@ impl ComputeContext for CpuBackend {
             )));
         }
         let (h, w) = input.shape.hw();
+        if input.shape.len() == 0 {
+            return zeros_tensor(input.shape, input.dtype);
+        }
         let mut output_storage =
             S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
@@ -1792,6 +1875,10 @@ impl ComputeContext for CpuBackend {
                 "NMS Boxes expects (N, 5) tensor".into(),
             ));
         }
+        // No boxes (a box set with no channels has none either): none kept.
+        if input.shape.len() == 0 {
+            return Ok(Vec::new());
+        }
 
         let mut boxes: Vec<(usize, f32)> = (0..rows)
             .map(|i| {
@@ -1859,6 +1946,10 @@ impl ComputeContext for CpuBackend {
             return Err(crate::Error::InvalidInput(
                 "NMS Rotated Boxes expects (N, 6) tensor".into(),
             ));
+        }
+        // No boxes (a box set with no channels has none either): none kept.
+        if input.shape.len() == 0 {
+            return Ok(Vec::new());
         }
 
         let mut boxes: Vec<(usize, T)> = (0..rows)
@@ -1970,6 +2061,10 @@ impl ComputeContext for CpuBackend {
             .storage
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Points not on CPU".into()))?;
+        // No points (a cloud with no channels has none either): no output.
+        if points.shape.len() == 0 {
+            return zeros_tensor(points.shape, points.dtype);
+        }
         let num_points = points.shape.height;
         let mut output_storage =
             S::new(num_points * 4, T::ZERO).map_err(crate::Error::MemoryError)?;
@@ -2025,6 +2120,10 @@ impl ComputeContext for CpuBackend {
             .storage
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Points not on CPU".into()))?;
+        // No points (a cloud with no channels has none either): no normals.
+        if points.shape.len() == 0 {
+            return zeros_tensor(points.shape, points.dtype);
+        }
 
         // Special case for f32 since the implementation uses rstar and specific eigensolver
         use std::any::TypeId;
@@ -2243,6 +2342,11 @@ impl ComputeContext for CpuBackend {
                         vx, vy, vz
                     ),
                 ));
+            }
+            // An empty depth image observes nothing: the volume is unchanged.
+            // A depth plane with no channels has no samples to read.
+            if depth_image.shape.len() == 0 {
+                return Ok(());
             }
 
             let fx = intrinsics_f32[0];
@@ -3354,6 +3458,12 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Target data not on CPU".into()))?;
 
+        // No pixels, no correspondences: a zero system. A depth plane with no
+        // channels has no pixels either, although its size is not zero.
+        if source_depth.shape.len() == 0 || target_data.shape.len() == 0 {
+            return Ok((nalgebra::Matrix6::zeros(), nalgebra::Vector6::zeros()));
+        }
+
         let (src_h, src_w) = source_depth.shape.hw();
 
         // target_data is expected to be (h, w) with 7 channels: depth, vx, vy, vz, nx, ny, nz
@@ -3542,6 +3652,9 @@ impl ComputeContext for CpuBackend {
                         "RgbToGray requires 3 channels".into(),
                     ));
                 }
+                if h * w == 0 {
+                    return zeros_tensor(TensorShape::new(1, h, w), input.dtype);
+                }
                 let mut output_storage =
                     S::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
                 let dst = output_storage
@@ -3578,6 +3691,9 @@ impl ComputeContext for CpuBackend {
                     return Err(crate::Error::InvalidInput(
                         "GrayToRgb requires 1 channel".into(),
                     ));
+                }
+                if h * w == 0 {
+                    return zeros_tensor(TensorShape::new(3, h, w), input.dtype);
                 }
                 let mut output_storage =
                     S::new(h * w * 3, T::ZERO).map_err(crate::Error::MemoryError)?;
@@ -3665,6 +3781,10 @@ impl ComputeContext for CpuBackend {
             return Err(crate::Error::NotSupported(
                 "Bilateral filter currently only for grayscale".into(),
             ));
+        }
+        // An empty image filters to an empty image.
+        if h * w == 0 {
+            return zeros_tensor(input.shape, input.dtype);
         }
 
         let mut output_storage = S::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
@@ -3764,6 +3884,17 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
+        // The score map is one plane of the input's size, and only the first
+        // plane was ever scored. A single-channel image is required, as on
+        // the GPU and as `nms` and `canny` require: a multi-channel input got
+        // a `(c, h, w)` shape over `h * w` scores, and a channel-less one 16
+        // zeros labelled `(0, 4, 4)`.
+        if input.shape.channels != 1 {
+            return Err(crate::Error::InvalidInput(format!(
+                "fast_detect expects a single-channel image, got {} channels",
+                input.shape.channels
+            )));
+        }
         let mut output_storage = S::new(h * w, T::ZERO).map_err(crate::Error::MemoryError)?;
         // `h - 3` and `w - 3` are usize: for a dimension below 3 they wrap to a
         // huge value, the row guard never fires, and the loop reads past the end
@@ -3893,6 +4024,10 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
         let c = input.shape.channels;
+        // An empty image blurs to an empty image.
+        if input.shape.len() == 0 {
+            return zeros_tensor(input.shape, input.dtype);
+        }
 
         let mut output_storage = S::new(h * w * c, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
@@ -4109,6 +4244,14 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Train not on CPU".into()))?;
 
+        // No descriptors on either side (a set with no channels has none,
+        // whatever its height): nothing to match.
+        if query.shape.len() == 0 || train.shape.len() == 0 {
+            return Ok(cv_core::Matches {
+                matches: Vec::new(),
+                mask: None,
+            });
+        }
         let q_len = query.shape.height;
         let t_len = train.shape.height;
         let d_size = query.shape.width; // Desc size in bytes
@@ -4191,6 +4334,22 @@ impl ComputeContext for CpuBackend {
 
         use std::any::TypeId;
         if TypeId::of::<T>() == TypeId::of::<f32>() {
+            // An empty level has no extrema: an empty mask of its shape. A
+            // neighbour level smaller than the current one would be read out
+            // of range.
+            if dog_curr.shape.len() == 0 {
+                return Tensor::from_vec(Vec::new(), dog_curr.shape)
+                    .map_err(|e| crate::Error::RuntimeError(e.to_string()));
+            }
+            if dog_prev.shape.len() < dog_curr.shape.len()
+                || dog_next.shape.len() < dog_curr.shape.len()
+                || prev.len().min(curr.len()).min(next.len()) < h * w
+            {
+                return Err(crate::Error::InvalidInput(format!(
+                    "sift_extrema: DoG levels {:?} / {:?} / {:?} differ in size",
+                    dog_prev.shape, dog_curr.shape, dog_next.shape
+                )));
+            }
             let prev_f32: &[f32] = bytemuck::cast_slice(prev);
             let curr_f32: &[f32] = bytemuck::cast_slice(curr);
             let next_f32: &[f32] = bytemuck::cast_slice(next);
@@ -4287,6 +4446,20 @@ impl ComputeContext for CpuBackend {
 
         use std::any::TypeId;
         if TypeId::of::<T>() == TypeId::of::<f32>() {
+            // No keypoints: no descriptors. An empty image (or one with no
+            // channels) has no pixel to describe a keypoint with: sampling
+            // clamps to the border, and there is no border.
+            if keypoints.keypoints.is_empty() {
+                return Ok(cv_core::Descriptors {
+                    descriptors: Vec::new(),
+                });
+            }
+            if image.shape.len() == 0 || src.len() < h * w {
+                return Err(crate::Error::InvalidInput(format!(
+                    "compute_sift_descriptors: the image {:?} is empty",
+                    image.shape
+                )));
+            }
             let src_f32: &[f32] = bytemuck::cast_slice(src);
 
             let descs: Vec<cv_core::Descriptor> = keypoints
@@ -4395,8 +4568,15 @@ impl ComputeContext for CpuBackend {
             let tgt_f32: &[f32] = bytemuck::cast_slice(tgt_points);
             let max_dist_f32 = max_dist.to_f32();
 
-            let num_src = src.shape.height;
-            let num_tgt = tgt.shape.height;
+            // Each point is four floats `(x, y, z, 1)`, so the point count is
+            // a quarter of the element count, as on the GPU. `shape.height`
+            // read a `(1, N, 3)` cloud as N points of stride 4 and ran past
+            // its end - even with no target point to compare against.
+            let num_src = src.shape.len().min(src_f32.len()) / 4;
+            let num_tgt = tgt.shape.len().min(tgt_f32.len()) / 4;
+            if num_src == 0 || num_tgt == 0 {
+                return Ok(Vec::new());
+            }
             let max_dist_sq = max_dist_f32 * max_dist_f32;
 
             let correspondences: Vec<(usize, usize, T)> = (0..num_src)
@@ -4489,7 +4669,10 @@ impl ComputeContext for CpuBackend {
                 // "index out of bounds". Skip rather than read past the buffer;
                 // a bad correspondence costs an inlier, not the whole call.
                 let src_ok = src_idx.saturating_mul(4).saturating_add(3) < src_f32.len();
-                let tgt_ok = tgt_idx.saturating_mul(4).saturating_add(3) < tgt_f32.len();
+                // The target's normal is read at the target's index too: an
+                // empty (or short) normal set skips the pair as well.
+                let tgt_ok = tgt_idx.saturating_mul(4).saturating_add(3)
+                    < tgt_f32.len().min(norm_f32.len());
                 if !src_ok || !tgt_ok {
                     continue;
                 }
@@ -4552,6 +4735,10 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
+        // An empty image diffuses to an empty image.
+        if input.shape.len() == 0 {
+            return zeros_tensor(input.shape, input.dtype);
+        }
         let mut output_storage =
             S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
@@ -4629,6 +4816,14 @@ impl ComputeContext for CpuBackend {
             .as_slice()
             .ok_or_else(|| crate::Error::MemoryError("Input not on CPU".into()))?;
         let (h, w) = input.shape.hw();
+        // An empty image has empty derivatives.
+        if input.shape.len() == 0 {
+            return Ok((
+                zeros_tensor(input.shape, input.dtype)?,
+                zeros_tensor(input.shape, input.dtype)?,
+                zeros_tensor(input.shape, input.dtype)?,
+            ));
+        }
 
         let mut lx_storage =
             S::new(input.shape.len(), T::ZERO).map_err(crate::Error::MemoryError)?;
@@ -4735,7 +4930,9 @@ impl ComputeContext for CpuBackend {
         // square on black, blurred) they put the 70th percentile at k = 0, and
         // the Perona-Malik conductance `1 / (1 + |grad|^2 / k^2)` then turned
         // 4032 of 4096 pixels into NaN (`0 / 0`) in a single diffusion step.
-        if h < 3 || w < 3 {
+        // Too small for a central difference, or no pixels at all (a plane
+        // with no channels): OpenCV's fallback contrast.
+        if h < 3 || w < 3 || src.len() < h * w {
             return Ok(T::from_f32(0.03));
         }
         let mut mags: Vec<T> = (1..h - 1)
@@ -4850,6 +5047,11 @@ impl ComputeContext for CpuBackend {
             .storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Mask not on CPU".into()))?;
+
+        // No pixels: nothing to update or classify, as on the GPU.
+        if frame.shape.len() == 0 {
+            return Ok(());
+        }
 
         let width = params.width as usize;
         let _height = params.height as usize;

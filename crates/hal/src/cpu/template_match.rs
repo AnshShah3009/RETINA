@@ -57,6 +57,11 @@ fn sq_dist(a: &[f64], b: &[f64]) -> f64 {
 ///
 /// `eps` is the caller's "zero denominator" threshold (the element type's
 /// `EPSILON`): a normalised score whose denominator is not above it is 0.
+///
+/// An empty image or template (no taps, or slices shorter than their sizes,
+/// as for a tensor with no channels) scores no window: the map is empty.
+/// `cv::matchTemplate` rejects both, and the backends return `InvalidInput`
+/// before getting here.
 #[allow(clippy::too_many_arguments)]
 pub fn match_template_f64(
     img: &[f64],
@@ -69,6 +74,9 @@ pub fn match_template_f64(
     eps: f64,
 ) -> Vec<f64> {
     assert!(tw <= iw && th <= ih);
+    if tw * th == 0 || img.len() < iw * ih || tmpl.len() < tw * th {
+        return Vec::new();
+    }
     let (ow, oh) = (iw - tw + 1, ih - th + 1);
     let n = (tw * th) as f64;
 

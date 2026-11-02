@@ -816,6 +816,11 @@ impl ComputeContext for GpuContext {
                         "NMS Rotated Boxes expects (N, 6) tensor".into(),
                     ));
                 }
+                // No boxes (a set with no channels has none either): none
+                // kept, as on the CPU.
+                if input.shape.len() == 0 {
+                    return Ok(Vec::new());
+                }
 
                 let mut boxes: Vec<(usize, f32)> = (0..rows)
                     .map(|i| {

@@ -35,11 +35,16 @@ pub fn warp(
     }
 
     let out_len = dst_w * dst_h;
-    // An empty output needs no dispatch; an empty input has no pixel inside
-    // the image, and an outside sample is 0 (the shader's and the CPU's
-    // rule), so the output is all zeros. Either way no zero-size buffer is
-    // bound.
-    if out_len == 0 || input.shape.len() == 0 {
+    // `cv::warpAffine` / `cv::warpPerspective` reject an empty source, as the
+    // CPU backend does: there is no pixel to sample. An empty output needs
+    // no dispatch. Either way no zero-size buffer is bound.
+    if input.shape.len() == 0 {
+        return Err(crate::Error::InvalidInput(format!(
+            "warp: the source image {:?} is empty",
+            input.shape
+        )));
+    }
+    if out_len == 0 {
         return Ok(super::zeros_tensor(
             ctx,
             cv_core::TensorShape::new(1, dst_h, dst_w),

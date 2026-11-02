@@ -300,6 +300,12 @@ impl ComputeContext for MlxContext {
     ) -> Result<Tensor<T, S>> {
         use crate::Error;
         use std::any::TypeId;
+        // No points (also a cloud with rows but no channels): the CPU
+        // backend's empty result, rather than `num_points` zero normals
+        // labelled with an empty shape.
+        if points.shape.len() == 0 {
+            return self.cpu_fallback.pointcloud_normals(points, k_neighbors);
+        }
         if TypeId::of::<T>() == TypeId::of::<f32>() {
             let src = points.storage.as_slice().ok_or_else(|| {
                 Error::InvalidInput("Points not on CPU -- transfer to CPU first".into())
