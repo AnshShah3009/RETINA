@@ -4,10 +4,12 @@
 // does each operation on f16 / bf16 values, which `half` evaluates as the f32
 // operation rounded back to the type; the inputs here are widened exactly and
 // every intermediate the CPU rounds (`p + t`, `p - t`, each `|v - p|`, each
-// partial sum and the final `/ 16`) is rounded with `round16`. An f32 add or
+// partial sum and the final `/ 16`) is rounded with `r16`. An f32 add or
 // subtract of two such values rounded once more to f16 / bf16 is the
 // correctly rounded result (f32 has at least 2p + 2 bits for p = 11 and 8),
-// so this matches the CPU exactly.
+// so this matches the CPU exactly. The f32 operations are done on bits
+// (`add_bits`, `greater`, `div16_bits`) so that a device which flushes f32
+// subnormals cannot change them: bf16 subnormals widen to f32 subnormals.
 //
 // Replaces `fast_f16.wgsl` (native f16 arithmetic, needed SHADER_F16, and
 // clamped the low threshold at 0, unlike the CPU and f32 shaders) and
@@ -17,7 +19,9 @@
 struct Params {
     width: u32,
     height: u32,
-    threshold: f32, // the threshold as the tensor type, widened (exact)
+    // The threshold as the tensor type, widened to f32 (exact), read as
+    // bits.
+    threshold_bits: u32,
     format: u32,    // 0: f16, 1: bf16
 }
 
@@ -115,10 +119,92 @@ fn encode(v: f32) -> u32 {
 }
 // ---- end of packed 16-bit helpers ----
 
-// `v` rounded to the tensor's format, as the CPU rounds after every operation.
-fn round16(v: f32) -> f32 {
-    return decode(encode(v));
+// ---- Exact f32 add, subnormals included ----
+//
+// A bf16 value below 2^-126 widens to an f32 subnormal, and the device
+// flushes those in float arithmetic and comparisons (the RTX 5070 Ti on
+// Vulkan does), so plain `a + b` and `a < b` went wrong on bf16 subnormals
+// and on sums and differences that land below 2^-126. Comparisons go through
+// `order_key` on the bits instead, and adds through `add_bits`, which is the
+// IEEE f32 sum, subnormal or not. The f32 shader `color_cvt_f32.wgsl` has the
+// same functions and the argument for them.
+
+// x * 2^64 for |x| < 2^-60 (bits), exact and normal unless x is zero.
+fn scale_up(x: u32) -> f32 {
+    let mag = x & 0x7FFFFFFFu;
+    if (mag >= 0x00800000u) {
+        return bitcast<f32>(x + (64u << 23u));
+    }
+    let v = f32(mag) * bitcast<f32>(0x15000000u); // mag * 2^-85
+    return bitcast<f32>(bitcast<u32>(v) | (x & 0x80000000u));
 }
+
+// s * 2^-64 as f32 bits, for an `s` that is a multiple of 2^-85.
+fn scale_down(s: f32) -> u32 {
+    let bits = bitcast<u32>(s);
+    if ((bits & 0x7FFFFFFFu) >= 0x20800000u) {
+        return bits - (64u << 23u);
+    }
+    return (bits & 0x80000000u) | u32(abs(s) * bitcast<f32>(0x6A000000u)); // * 2^85
+}
+
+// The IEEE f32 sum of `a` and `b` (bits): one float add when no operand or
+// result can be subnormal, otherwise the same add scaled by 2^64.
+fn add_bits(a: u32, b: u32) -> u32 {
+    let ma = a & 0x7FFFFFFFu;
+    let mb = b & 0x7FFFFFFFu;
+    if (min(ma, mb) >= 0x0D800000u || max(ma, mb) >= 0x21800000u) {
+        return bitcast<u32>(bitcast<f32>(a) + bitcast<f32>(b));
+    }
+    return scale_down(scale_up(a) + scale_up(b));
+}
+
+fn is_nan_bits(x: u32) -> bool {
+    return (x & 0x7FFFFFFFu) > 0x7F800000u;
+}
+
+// Non-NaN f32 bits -> u32 in value order, -0 equal to +0.
+fn order_key(x: u32) -> u32 {
+    if ((x & 0x80000000u) != 0u) {
+        return 0x80000000u - (x & 0x7FFFFFFFu);
+    }
+    return 0x80000000u + x;
+}
+
+// `a > b` on f32 bits, false when either is NaN, as a float compare.
+fn greater(a: u32, b: u32) -> bool {
+    return !is_nan_bits(a) && !is_nan_bits(b) && order_key(a) > order_key(b);
+}
+
+// f32 bits rounded to the tensor's format and widened back, with no float
+// operation on the value.
+fn r16(x: u32) -> u32 {
+    return bitcast<u32>(decode(encode(bitcast<f32>(x))));
+}
+
+// x / 16 as f32 bits, round to nearest even (exact for the scores here).
+fn div16_bits(x: u32) -> u32 {
+    let e = (x >> 23u) & 0xFFu;
+    if (e > 4u) {
+        if (e == 0xFFu) {
+            return x;
+        }
+        return x - (4u << 23u);
+    }
+    // Subnormal result: the significand moves right by 5 - max(e, 1).
+    var m = x & 0x7FFFFFu;
+    var s = 4u;
+    if (e != 0u) {
+        m |= 0x800000u;
+        s = 5u - e;
+    }
+    let q = m >> s;
+    let rem = m & ((1u << s) - 1u);
+    let half = 1u << (s - 1u);
+    let up = select(0u, 1u, rem > half || (rem == half && (q & 1u) != 0u));
+    return (x & 0x80000000u) | (q + up);
+}
+// ---- end of exact f32 add ----
 
 fn load(idx: u32) -> f32 {
     return decode((input_data[idx >> 1u] >> ((idx & 1u) << 4u)) & 0xFFFFu);
@@ -151,19 +237,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         vec2<i32>(-3, 0), vec2<i32>(-3, -1), vec2<i32>(-2, -2), vec2<i32>(-1, -3),
     );
 
-    let p = get_val(x, y);
-    let high = round16(p + params.threshold);
-    let low = round16(p - params.threshold);
+    // Everything below works on f32 bits (see `add_bits`), so bf16
+    // subnormals and sums or differences below 2^-126 are exact.
+    let p = bitcast<u32>(get_val(x, y));
+    let t = params.threshold_bits;
+    let high = r16(add_bits(p, t));
+    let low = r16(add_bits(p, t ^ 0x80000000u));
 
-    var vals: array<f32, 16>;
+    var vals: array<u32, 16>;
     var b_mask = 0u;
     var d_mask = 0u;
     for (var i = 0u; i < 16u; i++) {
-        let v = get_val(x + circle[i].x, y + circle[i].y);
+        let v = bitcast<u32>(get_val(x + circle[i].x, y + circle[i].y));
         vals[i] = v;
         // Two independent tests, as `has_9_contiguous_generic`.
-        if (v > high) { b_mask |= 1u << i; }
-        if (v < low) { d_mask |= 1u << i; }
+        if (greater(v, high)) { b_mask |= 1u << i; }
+        if (greater(low, v)) { d_mask |= 1u << i; }
     }
 
     let b_ext = b_mask | (b_mask << 16u);
@@ -178,13 +267,20 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Mean absolute difference, summed in order and rounded at each step.
-    var score = 0.0;
+    // Mean absolute difference as the CPU spells it, `v > p ? v - p : p - v`,
+    // summed in order and rounded at each step.
+    var score = 0u;
     for (var i = 0u; i < 16u; i++) {
-        score = round16(score + round16(abs(vals[i] - p)));
+        let v = vals[i];
+        var diff: u32;
+        if (greater(v, p)) {
+            diff = add_bits(v, p ^ 0x80000000u);
+        } else {
+            diff = add_bits(p, v ^ 0x80000000u);
+        }
+        score = r16(add_bits(score, r16(diff)));
     }
-    // `* 0.0625` is the exact `/ 16` in f32; the rounding is the CPU's.
-    let bits = encode(score * 0.0625);
+    let bits = encode(bitcast<f32>(div16_bits(score)));
 
     let idx = u32(y) * params.width + u32(x);
     atomicOr(&output_data[idx >> 1u], bits << ((idx & 1u) << 4u));

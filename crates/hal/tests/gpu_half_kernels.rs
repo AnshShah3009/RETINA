@@ -279,6 +279,78 @@ fn bf16_cvt_color_matches_cpu() {
     cvt_color_matches_cpu::<bf16>();
 }
 
+/// bf16 values below 2^-126 widen to f32 subnormals, and sums, differences
+/// and products of small bf16 values land there too; the device flushes f32
+/// subnormals in float arithmetic and comparisons. FAST and colour conversion
+/// used plain f32 operations and returned 0 (or missed corners) on such
+/// images: every pixel of a gray conversion and up to 417 of 1280 FAST
+/// scores differed from the CPU. Both now do their f32 operations on bits.
+#[test]
+fn bf16_subnormal_fast_and_cvt_color_match_cpu() {
+    let Some(gpu) = gpu() else { return };
+    let cpu = CpuBackend::new().unwrap();
+    let mut r = Lcg(23);
+    let (h, w) = (32usize, 40usize);
+    let mut subnormal = 0usize;
+    let mut corners = 0usize;
+    // bf16 exponent fields 0 (subnormal), 2 and 6 (normal, but with
+    // products, differences and scores below 2^-126).
+    for exp in [0u16, 2, 6] {
+        let v: Vec<bf16> = (0..3 * h * w)
+            .map(|i| {
+                let (y, x) = ((i / w) % h, i % w);
+                let base: u16 = if (x / 5 + y / 4) % 2 == 0 { 0x10 } else { 0x70 };
+                let bits = (exp << 7) + base + (r.next() >> 28) as u16;
+                // Some negative values too.
+                let sign = if (x * 3 + y) % 13 == 0 { 0x8000 } else { 0 };
+                bf16::from_bits(bits | sign)
+            })
+            .collect();
+        subnormal += v.iter().filter(|x| x.to_f32().is_subnormal()).count();
+
+        let t3 = tensor(&v, 3, h, w);
+        let g3 = t3.to_gpu_ctx(gpu).unwrap();
+        for code in [ColorConversion::RgbToGray, ColorConversion::BgrToGray] {
+            let want = cpu.cvt_color(&t3, code).unwrap();
+            let got = gpu.cvt_color(&g3, code).unwrap().to_cpu_ctx(gpu).unwrap();
+            assert_bits_eq(
+                got.as_slice().unwrap(),
+                want.as_slice().unwrap(),
+                &format!("bf16 cvt_color {code:?} exponent field {exp}"),
+            );
+        }
+
+        let t1 = tensor(&v[..h * w], 1, h, w);
+        let g1 = t1.to_gpu_ctx(gpu).unwrap();
+        for th in [
+            bf16::from_bits((exp << 7) + 0x08),
+            bf16::from_bits(0),
+            bf16::from_bits(0x8004),
+        ] {
+            for nms in [false, true] {
+                let want = cpu.fast_detect(&t1, th, nms).unwrap();
+                let got = gpu
+                    .fast_detect(&g1, th, nms)
+                    .unwrap()
+                    .to_cpu_ctx(gpu)
+                    .unwrap();
+                let want = want.as_slice().unwrap();
+                corners += want.iter().filter(|s| s.to_bits() & 0x7fff != 0).count();
+                assert_bits_eq(
+                    got.as_slice().unwrap(),
+                    want,
+                    &format!(
+                        "bf16 FAST thresh {:#06x} nms {nms} exponent field {exp}",
+                        th.to_bits()
+                    ),
+                );
+            }
+        }
+    }
+    assert!(subnormal > 1000, "only {subnormal} subnormal inputs");
+    assert!(corners > 1000, "only {corners} corners");
+}
+
 // --------------------------------------------------------- bilateral_filter
 
 /// Distance in units in the last place between two finite values of the same
