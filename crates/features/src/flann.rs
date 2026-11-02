@@ -5,6 +5,7 @@
 
 use crate::descriptor::Descriptors;
 use cv_core::{FeatureMatch, Matches};
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -129,9 +130,13 @@ impl FlannIndex {
     }
 
     /// Find approximate nearest neighbors for all query descriptors
+    ///
+    /// Each query's search only reads the index, so queries run in parallel;
+    /// the indexed collect keeps the results in query order.
     pub fn knn_search(&self, queries: &Descriptors, k: usize) -> Vec<Vec<(usize, u32)>> {
         queries
-            .iter()
+            .descriptors
+            .par_iter()
             .map(|desc| self.search_knn(&desc.data, k))
             .collect()
     }
