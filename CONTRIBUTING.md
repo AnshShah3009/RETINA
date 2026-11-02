@@ -319,13 +319,17 @@ out. See [GOVERNANCE.md](GOVERNANCE.md) for how releases are cut.
 Known open items, each small enough for a first PR and with a clear way to
 verify it:
 
-- **Parity:** `imgproc` filters default to replicate borders where OpenCV uses
-  reflect-101; `get_rotation_matrix` takes radians where OpenCV takes degrees;
-  `features::fast::corner_score` is Rosten's score rather than OpenCV's.
-- **3D:** `estimate_normals_knn` may use one more neighbour than Open3D's `k`.
-- **Performance:** FLANN's private Hamming distance is byte-wise (the brute-force
-  matcher's packed u64 version is about 3x faster); GPU `fast::extract_keypoints`
-  reads its count buffer back to the CPU to scan it.
+- **GPU parity:** the GPU Gaussian blur and Sobel paths in `cv-hal` ignore the
+  border-mode argument (the CPU paths now default to OpenCV's reflect-101).
+- **Colour:** `rgb_to_gray_simd` in `cv-hal` still uses float weights; OpenCV and
+  `cv-imgproc` use 15-bit fixed point (`(9798 R + 19235 G + 3735 B + 2^14) >> 15`).
+- **Features:** ORB suppresses FAST corners with its own 5-pixel rule rather than
+  OpenCV's 3x3 non-maximum suppression (`fast_detect_opencv` already implements
+  OpenCV's); USAC's local refinement keeps a refit model even when it scores worse.
+- **Joint bilateral filter:** uses an L2 colour distance; OpenCV's colour
+  bilateral uses L1.
+- **Performance:** GPU `fast::extract_keypoints` waits on the GPU twice (count,
+  then keypoints); readback staging buffers are allocated per call.
 - **Docs:** examples for crates that have none (`crates/*/examples/`).
 
 Check the issue tracker for `good first issue` and comment before starting, in
