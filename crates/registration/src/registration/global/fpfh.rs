@@ -13,6 +13,7 @@
 use cv_core::point_cloud::PointCloud;
 use cv_core::{Error, Result};
 use nalgebra::{Point3, Vector3};
+use rayon::prelude::*;
 
 /// FPFH (Fast Point Feature Histogram) feature
 #[derive(Debug, Clone)]
@@ -124,7 +125,10 @@ pub fn compute_fpfh_features(cloud: &PointCloud, radius: f32) -> Result<Vec<FPFH
     // `cv-pointcloud`'s, shared with `cv_pointcloud::compute_fpfh_feature`.
     let points64: Vec<Vector3<f64>> = points.iter().map(|p| p.coords.cast::<f64>()).collect();
     let normals64: Vec<Vector3<f64>> = normals.iter().map(|v| v.cast::<f64>()).collect();
-    let neighborhoods: Vec<Vec<usize>> = (0..n).map(|i| radius_search(&points[i], i)).collect();
+    let neighborhoods: Vec<Vec<usize>> = (0..n)
+        .into_par_iter()
+        .map(|i| radius_search(&points[i], i))
+        .collect();
 
     Ok(
         cv_pointcloud::fpfh_from_neighbourhoods(&points64, &normals64, &neighborhoods)
@@ -167,85 +171,95 @@ fn estimate_normals_pca(points: &[Point3<f32>], radius: f32) -> (Vec<Vector3<f32
         voxel_grid.entry((vx, vy, vz)).or_default().push(i);
     }
 
-    for (i, center) in points.iter().enumerate() {
-        let vx = (center.x / voxel_size).floor() as i32;
-        let vy = (center.y / voxel_size).floor() as i32;
-        let vz = (center.z / voxel_size).floor() as i32;
+    // Each point's normal reads only the points and the grid, so the points
+    // are solved in parallel; `None` marks a point left at the default.
+    let solved: Vec<Option<Vector3<f32>>> = points
+        .par_iter()
+        .map(|center| {
+            let vx = (center.x / voxel_size).floor() as i32;
+            let vy = (center.y / voxel_size).floor() as i32;
+            let vz = (center.z / voxel_size).floor() as i32;
 
-        let mut cov = nalgebra::Matrix3::<f32>::zeros();
-        let mut centroid = Vector3::zeros();
-        let mut count = 0u32;
+            let mut cov = nalgebra::Matrix3::<f32>::zeros();
+            let mut centroid = Vector3::zeros();
+            let mut count = 0u32;
 
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    if let Some(indices) = voxel_grid.get(&(vx + dx, vy + dy, vz + dz)) {
-                        for &idx in indices {
-                            let p = &points[idx];
-                            let dist_sq = (center.x - p.x).powi(2)
-                                + (center.y - p.y).powi(2)
-                                + (center.z - p.z).powi(2);
-                            if dist_sq <= radius_sq {
-                                centroid += p.coords;
-                                count += 1;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(indices) = voxel_grid.get(&(vx + dx, vy + dy, vz + dz)) {
+                            for &idx in indices {
+                                let p = &points[idx];
+                                let dist_sq = (center.x - p.x).powi(2)
+                                    + (center.y - p.y).powi(2)
+                                    + (center.z - p.z).powi(2);
+                                if dist_sq <= radius_sq {
+                                    centroid += p.coords;
+                                    count += 1;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        if count < 3 {
-            unsolved += 1;
-            continue; // keep the (0, 0, 1) default
-        }
+            if count < 3 {
+                return None; // keep the (0, 0, 1) default
+            }
 
-        centroid /= count as f32;
+            centroid /= count as f32;
 
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    if let Some(indices) = voxel_grid.get(&(vx + dx, vy + dy, vz + dz)) {
-                        for &idx in indices {
-                            let p = &points[idx];
-                            let dist_sq = (center.x - p.x).powi(2)
-                                + (center.y - p.y).powi(2)
-                                + (center.z - p.z).powi(2);
-                            if dist_sq <= radius_sq {
-                                let diff = p.coords - centroid;
-                                cov += diff * diff.transpose();
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(indices) = voxel_grid.get(&(vx + dx, vy + dy, vz + dz)) {
+                            for &idx in indices {
+                                let p = &points[idx];
+                                let dist_sq = (center.x - p.x).powi(2)
+                                    + (center.y - p.y).powi(2)
+                                    + (center.z - p.z).powi(2);
+                                if dist_sq <= radius_sq {
+                                    let diff = p.coords - centroid;
+                                    cov += diff * diff.transpose();
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // The normal is the eigenvector corresponding to the smallest eigenvalue.
-        let eig = cov.symmetric_eigen();
-        let mut min_idx = 0;
-        let mut min_val = eig.eigenvalues[0].abs();
-        for k in 1..3 {
-            if eig.eigenvalues[k].abs() < min_val {
-                min_val = eig.eigenvalues[k].abs();
-                min_idx = k;
+            // The normal is the eigenvector corresponding to the smallest eigenvalue.
+            let eig = cov.symmetric_eigen();
+            let mut min_idx = 0;
+            let mut min_val = eig.eigenvalues[0].abs();
+            for k in 1..3 {
+                if eig.eigenvalues[k].abs() < min_val {
+                    min_val = eig.eigenvalues[k].abs();
+                    min_idx = k;
+                }
             }
-        }
 
-        let mut normal = eig.eigenvectors.column(min_idx).into_owned();
-        let norm = normal.norm();
-        if norm > 1e-6 {
-            normal /= norm;
-        } else {
-            normal = Vector3::z();
-        }
+            let mut normal = eig.eigenvectors.column(min_idx).into_owned();
+            let norm = normal.norm();
+            if norm > 1e-6 {
+                normal /= norm;
+            } else {
+                normal = Vector3::z();
+            }
 
-        // Orient towards positive-z half-space (convention)
-        if normal.z < 0.0 {
-            normal = -normal;
-        }
+            // Orient towards positive-z half-space (convention)
+            if normal.z < 0.0 {
+                normal = -normal;
+            }
 
-        normals[i] = normal;
+            Some(normal)
+        })
+        .collect();
+    for (normal, solution) in normals.iter_mut().zip(solved) {
+        match solution {
+            Some(v) => *normal = v,
+            None => unsolved += 1,
+        }
     }
 
     (normals, unsolved)
