@@ -1053,7 +1053,7 @@ fn find_marker_quads(
             &contour,
             len as f64 * p.polygonal_approx_accuracy_rate,
             true,
-        );
+        )?;
         let approx = approx.points;
         if approx.len() != 4 || !is_contour_convex(&approx) {
             continue;

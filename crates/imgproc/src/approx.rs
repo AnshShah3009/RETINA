@@ -12,8 +12,17 @@ use nalgebra::Point2;
 /// OpenCV's `float` path takes coordinate differences in `f32`, so on
 /// coordinates whose differences are not exact in `f32` a near-tie in
 /// distance may resolve differently.
-pub fn approx_poly_dp(curve: &[Point2<f64>], epsilon: f64, closed: bool) -> Vec<Point2<f64>> {
-    crate::contours::approx_poly_dp_indices(
+///
+/// `epsilon` must satisfy OpenCV's `epsilon >= 0 && epsilon < 1e30`, else
+/// the result is `InvalidInput` (it used to be clamped to 0 when negative or
+/// NaN).
+pub fn approx_poly_dp(
+    curve: &[Point2<f64>],
+    epsilon: f64,
+    closed: bool,
+) -> crate::Result<Vec<Point2<f64>>> {
+    crate::contours::check_approx_epsilon(epsilon)?;
+    Ok(crate::contours::approx_poly_dp_indices(
         curve.len(),
         |i| (curve[i].x, curve[i].y),
         epsilon,
@@ -21,7 +30,7 @@ pub fn approx_poly_dp(curve: &[Point2<f64>], epsilon: f64, closed: bool) -> Vec<
     )
     .into_iter()
     .map(|i| curve[i])
-    .collect()
+    .collect())
 }
 
 #[cfg(test)]
@@ -36,7 +45,7 @@ mod tests {
             Point2::new(2.0, 0.0),
             Point2::new(3.0, 0.0),
         ];
-        let approx = approx_poly_dp(&curve, 0.5, false);
+        let approx = approx_poly_dp(&curve, 0.5, false).unwrap();
         assert!(approx.len() <= curve.len());
         assert_eq!(approx[0], curve[0]);
         assert_eq!(*approx.last().unwrap(), *curve.last().unwrap());
@@ -53,7 +62,7 @@ mod tests {
             Point2::new(1.0, 5.0), // 5 px off the closing chord, epsilon 0.5
             Point2::new(2.0, 0.0),
         ];
-        let open = approx_poly_dp(&spike, 0.5, false);
+        let open = approx_poly_dp(&spike, 0.5, false).unwrap();
         assert_eq!(
             open.len(),
             3,
@@ -77,7 +86,7 @@ mod tests {
         for i in (1..9).rev() {
             square.push(Point2::new(0.0, i as f64));
         }
-        let closed = approx_poly_dp(&square, 0.5, true);
+        let closed = approx_poly_dp(&square, 0.5, true).unwrap();
         assert_eq!(
             closed.len(),
             4,

@@ -174,7 +174,7 @@ fn digests(cs: &[Vec<(i32, i32)>]) -> [u32; 4] {
         for c in cs {
             let contour = Contour { points: c.clone() };
             for eps in epsilons(c.len()) {
-                let a = approx_poly_dp(&contour, eps, closed);
+                let a = approx_poly_dp(&contour, eps, closed).unwrap();
                 d.polygon(a.points.iter().map(|&(x, y)| (i64::from(x), i64::from(y))));
             }
         }
@@ -187,7 +187,7 @@ fn digests(cs: &[Vec<(i32, i32)>]) -> [u32; 4] {
                 .map(|&(x, y)| Point2::new(x as f64 * 0.25, y as f64 * 0.25))
                 .collect();
             for eps in epsilons(c.len()) {
-                let a = approx::approx_poly_dp(&curve, eps, closed);
+                let a = approx::approx_poly_dp(&curve, eps, closed).unwrap();
                 d.polygon(a.iter().map(|p| ((p.x * 4.0) as i64, (p.y * 4.0) as i64)));
             }
         }
@@ -233,7 +233,7 @@ fn tilted_square_is_a_quadrilateral() {
     let c = Contour {
         points: cs[0].clone(),
     };
-    let a = approx_poly_dp(&c, c.points.len() as f64 * 0.03, true);
+    let a = approx_poly_dp(&c, c.points.len() as f64 * 0.03, true).unwrap();
     assert_eq!(a.points, [(30, 8), (8, 30), (30, 52), (52, 30)]);
 }
 
@@ -260,9 +260,9 @@ fn end_points() {
     }
     let c = Contour { points: pts };
     // cv2.approxPolyDP(c, 1.0, True) and (c, 1.0, False).
-    let closed = approx_poly_dp(&c, 1.0, true);
+    let closed = approx_poly_dp(&c, 1.0, true).unwrap();
     assert_eq!(closed.points, [(0, 0), (10, 0), (10, 10), (0, 10)]);
-    let open = approx_poly_dp(&c, 1.0, false);
+    let open = approx_poly_dp(&c, 1.0, false).unwrap();
     assert_eq!(
         open.points,
         [(5, 0), (10, 0), (10, 10), (0, 10), (0, 0), (4, 0)]
@@ -375,3 +375,47 @@ const CASES: &[(&str, Gen, [u32; 4])] = &[
     ("blob_18", Gen::Smooth { w: 21, h: 60, seed: 791632202, density: 128, thr: 5 }, [0x6b80ebf5, 0x134c1d06, 0x2380ab49, 0xe0dbda42]),
     ("blob_19", Gen::Smooth { w: 46, h: 47, seed: 222221254, density: 128, thr: 6 }, [0xb1ec4e7d, 0x56f0eb4f, 0x5fe874bd, 0xa6dbca59]),
 ];
+
+/// `cv2.approxPolyDP` raises "Epsilon not valid" unless
+/// `epsilon >= 0 && epsilon < 1e30`; checked against cv2 4.13 for -1, NaN,
+/// 1e30 and infinity (0 is accepted). Both versions used to clamp a negative
+/// or NaN epsilon to 0 and return the curve unchanged, and to collapse it to
+/// one point for 1e30 or infinity.
+#[test]
+fn invalid_epsilon_is_rejected_as_opencv_does() {
+    let c = Contour {
+        points: vec![(0, 0), (5, 1), (10, 0), (10, 10), (0, 10)],
+    };
+    let f: Vec<Point2<f64>> = c
+        .points
+        .iter()
+        .map(|&(x, y)| Point2::new(x as f64, y as f64))
+        .collect();
+    for eps in [
+        -1.0,
+        -f64::MIN_POSITIVE,
+        f64::NAN,
+        1e30,
+        f64::INFINITY,
+        -f64::INFINITY,
+    ] {
+        for closed in [true, false] {
+            let e = approx_poly_dp(&c, eps, closed).unwrap_err();
+            assert!(
+                matches!(e, cv_core::Error::InvalidInput(_)),
+                "int {eps}: {e:?}"
+            );
+            let e = approx::approx_poly_dp(&f, eps, closed).unwrap_err();
+            assert!(
+                matches!(e, cv_core::Error::InvalidInput(_)),
+                "f64 {eps}: {e:?}"
+            );
+        }
+    }
+    // The boundary values OpenCV accepts.
+    for eps in [0.0, 1e29] {
+        assert!(approx_poly_dp(&c, eps, true).is_ok(), "int {eps}");
+        assert!(approx::approx_poly_dp(&f, eps, true).is_ok(), "f64 {eps}");
+    }
+    assert_eq!(approx_poly_dp(&c, 0.0, true).unwrap().points.len(), 5);
+}
