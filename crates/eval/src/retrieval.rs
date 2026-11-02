@@ -34,6 +34,22 @@ fn distinct_hits(pred: &[usize], gt: &[usize], k: usize) -> usize {
     hits
 }
 
+/// Number of distinct relevant ids in a ground-truth list.
+///
+/// The relevant set is a set: `[2, 2]` names one item. Dividing by the list
+/// length made a perfect retrieval of item 2 score 0.5 in [`recall_at_k`] and
+/// [`mean_average_precision`], while the predictions were already counted as
+/// distinct ids.
+fn relevant_count(gt: &[usize]) -> usize {
+    let mut seen: Vec<usize> = Vec::with_capacity(gt.len());
+    for &id in gt {
+        if !seen.contains(&id) {
+            seen.push(id);
+        }
+    }
+    seen.len()
+}
+
 /// Mean recall@K over all queries.
 ///
 /// For each query the recall is `|top-k predictions ∩ relevant| / |relevant|`,
@@ -53,7 +69,7 @@ pub fn recall_at_k(predictions: &[Vec<usize>], ground_truth: &[Vec<usize>], k: u
             continue;
         }
         let hits = distinct_hits(pred, gt, k);
-        sum += hits as f64 / gt.len() as f64;
+        sum += hits as f64 / relevant_count(gt) as f64;
         counted += 1;
     }
 
@@ -177,7 +193,7 @@ pub fn mean_average_precision(predictions: &[Vec<usize>], ground_truth: &[Vec<us
         // dividing by the hits made a query that found one of ten relevant items
         // at rank 1 score exactly 1.0, and made a query that found nothing
         // vanish from the mean instead of pulling it down.
-        sum += average_precision / gt.len() as f64;
+        sum += average_precision / relevant_count(gt) as f64;
         counted += 1;
     }
 
