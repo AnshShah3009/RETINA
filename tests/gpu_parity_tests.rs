@@ -1559,8 +1559,10 @@ fn shader_storage_element_types_match_their_hosts() {
             "tvl1_warp.wgsl",
             &[(0, "f32"), (1, "f32"), (2, "f32"), (3, "f32")],
         ),
-        ("tvl1_primal.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
-        ("tvl1_dual.wgsl", &[(0, "f32"), (1, "f32")]),
+        (
+            "tvl1_primal_dual.wgsl",
+            &[(0, "f32"), (1, "f32"), (2, "f32")],
+        ),
         ("tvl1_median.wgsl", &[(0, "f32"), (1, "f32")]),
     ];
 
