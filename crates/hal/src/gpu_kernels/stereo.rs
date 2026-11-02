@@ -33,8 +33,25 @@ pub fn stereo_match<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         ));
     }
 
+    // The CPU backend's validation, which this kernel lacked: the shader
+    // reads one plane of each image at the left image's size.
+    if left.shape.channels != 1 || right.shape.channels != 1 {
+        return Err(crate::Error::InvalidInput(
+            "stereo_match expects single-channel (grayscale) images".into(),
+        ));
+    }
+    if left.shape.hw() != right.shape.hw() {
+        return Err(crate::Error::InvalidInput(
+            "Left and right images must have the same dimensions".into(),
+        ));
+    }
+
     let (h, w) = left.shape.hw();
     let out_len = w * h;
+    // Empty images would bind zero-size buffers; the disparity map is empty.
+    if out_len == 0 {
+        return Ok(super::zeros_tensor(ctx, left.shape, left.dtype));
+    }
     let byte_size = (out_len * std::mem::size_of::<f32>()) as u64;
     let usages = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
     let output_buffer = ctx.get_buffer(byte_size, usages);

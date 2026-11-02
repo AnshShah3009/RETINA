@@ -34,6 +34,16 @@ pub fn convolve_2d<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     let (h, w) = input.shape.hw();
     let (kh, kw) = kernel.shape.hw();
 
+    // An empty input binds a zero-size buffer, which wgpu rejects. The
+    // output has the input's shape, so it is empty too.
+    if input.shape.len() == 0 {
+        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
+    }
+    // An empty kernel sums no taps: every output is 0, as on the CPU.
+    if kernel.shape.len() == 0 {
+        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
+    }
+
     let output_size = input.shape.len();
     let output_byte_size = (output_size * std::mem::size_of::<f32>()) as u64;
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -170,6 +180,10 @@ pub fn gaussian_blur_with_border<T: Float + bytemuck::Pod + bytemuck::Zeroable +
 
     let (h, w) = input.shape.hw();
     let c = input.shape.channels;
+    // An empty input would bind a zero-size buffer; its blur is empty.
+    if input.shape.len() == 0 {
+        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
+    }
     let kernel_1d = crate::cpu::gaussian_kernel_1d(sigma.to_f32(), k_size);
 
     let output_size = input.shape.len();

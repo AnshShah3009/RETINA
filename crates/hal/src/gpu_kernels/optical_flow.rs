@@ -44,7 +44,7 @@ pub fn lucas_kanade(
     }
     for (level, (p, n)) in prev_pyramid.iter().zip(next_pyramid).enumerate() {
         let (h, w) = p.shape.hw();
-        if n.shape.hw() != (h, w) || w == 0 || h == 0 {
+        if n.shape.hw() != (h, w) || p.shape.len() == 0 || n.shape.len() == 0 {
             return Err(crate::Error::InvalidInput(format!(
                 "optical_flow_lk: level {level} prev and next sizes differ or are empty"
             )));

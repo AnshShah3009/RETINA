@@ -128,6 +128,15 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
             }
         };
 
+    // An empty image would bind a zero-size buffer; its gray image is empty.
+    if out_len == 0 {
+        return Ok(super::zeros_tensor(
+            ctx,
+            cv_core::TensorShape::new(out_channels, h, w),
+            input.dtype,
+        ));
+    }
+
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Color Convert Output"),
         size: byte_size,

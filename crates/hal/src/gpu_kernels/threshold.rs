@@ -200,6 +200,11 @@ fn run<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     invocations: u32,
 ) -> Result<GpuTensor<T>> {
     let len = input.shape.len();
+    // An empty input is a zero-size buffer, which a binding rejects; the
+    // result is empty.
+    if len == 0 {
+        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
+    }
     // A storage binding must be a multiple of 4 bytes, which an odd number
     // of f16 is not.
     let byte_size = ((len * std::mem::size_of::<T>()).div_ceil(4) * 4) as u64;

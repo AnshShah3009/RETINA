@@ -88,6 +88,11 @@ pub fn bilateral_filter<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zer
             }
         };
 
+    // An empty image would bind a zero-size buffer; its result is empty.
+    if out_len == 0 {
+        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
+    }
+
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Bilateral Output"),
         size: byte_size,

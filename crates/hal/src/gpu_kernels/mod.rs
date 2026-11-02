@@ -70,6 +70,38 @@ pub fn dispatch_size_3d(width: u32, height: u32, depth: u32) -> (u32, u32, u32) 
     )
 }
 
+/// A zero-filled GPU tensor of `shape`, without a dispatch.
+///
+/// The result of an operation whose input is empty (a zero dimension) but
+/// whose output is fully determined: an empty tensor when `shape` has no
+/// elements, or zeros. Kernels return it instead of dispatching, because an
+/// empty input is a zero-size buffer and wgpu rejects a zero-size storage
+/// binding (its default error handler panics). A fresh wgpu buffer is zeroed;
+/// the buffer is at least 4 bytes so that the tensor itself can be bound,
+/// while its length stays `shape.len()`.
+pub(crate) fn zeros_tensor<T: bytemuck::Pod + std::fmt::Debug + 'static>(
+    ctx: &crate::gpu::GpuContext,
+    shape: cv_core::TensorShape,
+    dtype: cv_core::DataType,
+) -> crate::GpuTensor<T> {
+    let len = shape.len();
+    let bytes = (len * std::mem::size_of::<T>()).div_ceil(4).max(1) * 4;
+    let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Empty-input result"),
+        size: bytes as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    cv_core::Tensor {
+        storage: crate::storage::WgpuGpuStorage::from_buffer(std::sync::Arc::new(buffer), len),
+        shape,
+        dtype,
+        _phantom: std::marker::PhantomData,
+    }
+}
+
 /// Encode 3D coordinates to Morton code
 pub fn morton_encode(x: u32, y: u32, z: u32) -> u32 {
     let mut mx = x & 0x000003ffu32;
@@ -181,6 +213,12 @@ pub fn mog2_update(
     params: &crate::context::Mog2Params<f32>,
 ) -> crate::Result<()> {
     use wgpu::util::DeviceExt;
+
+    // No pixels: nothing to update, and the zero-size buffers cannot be
+    // bound.
+    if frame.shape.len() == 0 {
+        return Ok(());
+    }
 
     let params_buffer = ctx
         .device

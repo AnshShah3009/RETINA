@@ -76,6 +76,16 @@ pub fn pyramid_down<T: cv_core::Float + bytemuck::Pod + bytemuck::Zeroable + 'st
         ));
     }
 
+    // No channels: the output has none either, and the input's zero-size
+    // buffer must not be bound.
+    if input.shape.channels == 0 {
+        return Ok(super::zeros_tensor(
+            ctx,
+            cv_core::TensorShape::new(0, new_h, new_w),
+            input.dtype,
+        ));
+    }
+
     use cv_core::storage::Storage;
     if let Some(input_f32) = input
         .storage

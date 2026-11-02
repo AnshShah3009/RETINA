@@ -31,6 +31,14 @@ pub fn sobel(
 
     let len = input.shape.len();
     let (h, w) = input.shape.hw();
+    // An empty input would bind a zero-size buffer; both gradients are
+    // empty.
+    if len == 0 {
+        return Ok((
+            super::zeros_tensor(ctx, input.shape, input.dtype),
+            super::zeros_tensor(ctx, input.shape, input.dtype),
+        ));
+    }
     let byte_size = (len * 4) as u64;
 
     // Output buffers

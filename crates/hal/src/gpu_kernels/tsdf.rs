@@ -55,6 +55,19 @@ pub fn integrate(
 ) -> Result<()> {
     let (h, w) = depth_image.shape.hw();
     let vol_shape = voxel_volume.shape;
+    // The CPU backend's validation: the volume interleaves tsdf and weight
+    // per voxel, so it needs at least two channels and a nonzero plane. An
+    // empty volume would also bind a zero-size buffer.
+    if vol_shape.width == 0 || vol_shape.height == 0 || vol_shape.channels < 2 {
+        return Err(crate::Error::InvalidInput(format!(
+            "TSDF volume must have at least 2 depth slices, got {}x{}x{}",
+            vol_shape.width, vol_shape.height, vol_shape.channels
+        )));
+    }
+    // An empty depth image observes nothing: the volume is unchanged.
+    if depth_image.shape.len() == 0 {
+        return Ok(());
+    }
     let (vx, vy, vz) = (
         vol_shape.width as u32,
         vol_shape.height as u32,
@@ -295,6 +308,16 @@ pub fn raycast(
     );
 
     let output_len = (w * h * 4) as usize;
+    // An empty volume has no surface for a ray to hit: every pixel keeps the
+    // shader's miss value, 0, as on the CPU. Its zero-size buffer cannot be
+    // bound.
+    if voxel_volume.shape.len() == 0 {
+        return Ok(super::zeros_tensor(
+            ctx,
+            TensorShape::new(4, h as usize, w as usize),
+            voxel_volume.dtype,
+        ));
+    }
     let output_buffer = ctx.get_buffer(
         (output_len * 4) as u64,
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,

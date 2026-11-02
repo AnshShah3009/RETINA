@@ -165,6 +165,10 @@ pub fn nms_pixel(
     }
 
     let out_len = w * h;
+    // An empty input would bind a zero-size buffer; its result is empty.
+    if out_len == 0 {
+        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
+    }
     let byte_size = (out_len * 4) as u64;
     let usages =
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;

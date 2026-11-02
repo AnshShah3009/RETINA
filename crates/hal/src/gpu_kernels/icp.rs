@@ -315,6 +315,11 @@ pub fn dense_step(
 ) -> Result<(nalgebra::Matrix6<f32>, nalgebra::Vector6<f32>)> {
     let (h, w) = source_depth.shape.hw();
     let num_pixels = (w * h) as u32;
+    // No pixels, no correspondences: an empty system, as on the CPU, without
+    // binding a zero-size buffer.
+    if source_depth.shape.len() == 0 || target_data.shape.len() == 0 {
+        return Ok((nalgebra::Matrix6::zeros(), nalgebra::Vector6::zeros()));
+    }
 
     let scratch_size = (num_pixels * 27 * 4) as u64;
     let scratch_buffer = ctx.get_buffer(
