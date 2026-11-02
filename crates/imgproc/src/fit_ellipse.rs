@@ -169,46 +169,49 @@ pub fn fit_ellipse_direct(points: &[Point2<f64>]) -> Option<EllipseResult> {
     conic_to_ellipse_result(&conic)
 }
 
-/// Solve the AMS generalized eigenvalue problem
+/// Solve the AMS (Taubin) problem: minimise `u'Au / u'Bu`.
+///
+/// `B` is the gradient scatter matrix, and the gradient of the constant
+/// monomial is zero, so its last row and column are zero and `B` is
+/// singular - a Cholesky factorisation of it always fails, which is why this
+/// returned `None` for every input. The constant term `f` is instead
+/// eliminated: for fixed `v = (a..e)` the optimal `f = -A[5,0..5] v / A[5,5]`,
+/// which leaves `S v = lambda B5 v` with `S` the Schur complement of `A[5,5]`
+/// and `B5` the (positive definite) top-left 5x5 block of `B`. The fit is the
+/// eigenvector of the *smallest* eigenvalue that is an ellipse.
 fn solve_ams_eigen(a: &DMatrix<f64>, b: &DMatrix<f64>) -> Option<[f64; 6]> {
-    let b = b.clone();
-    // Solve the generalized eigenvalue problem A*u = λ*B*u.
-    // A and B are both symmetric and B is SPD (a sum of outer products), so
-    // reduce to an ordinary SYMMETRIC problem via Cholesky: with B = L·Lᵀ,
-    // C = L⁻¹AL⁻ᵀ shares the eigenvalues and u = L⁻ᵀz recovers vectors.
-    // (B⁻¹A itself is NOT symmetric — symmetric_eigen on it solves the wrong
-    // problem.)
-    let n_dim = b.nrows();
-    let chol_b = b.cholesky()?;
-    // Column j of L⁻ᵀ is the solution of B x = e_j (since B = L·Lᵀ ⇒
-    // B⁻¹ = L⁻ᵀL⁻¹ is symmetric, so B⁻¹'s columns are L⁻ᵀ's columns).
-    let mut linv_t = nalgebra::DMatrix::<f64>::zeros(n_dim, n_dim);
-    for j in 0..n_dim {
-        let mut e = nalgebra::DVector::<f64>::zeros(n_dim);
-        e[j] = 1.0;
-        let col = chol_b.solve(&e);
-        linv_t.set_column(j, &col);
+    let a55 = a[(5, 5)];
+    if !(a55 > 0.0) {
+        return None;
     }
+    let a1 = a.view((0, 0), (5, 5)).into_owned();
+    let a12 = a.view((0, 5), (5, 1)).into_owned();
+    let s = &a1 - &a12 * a12.transpose() / a55;
+    let b5 = b.view((0, 0), (5, 5)).into_owned();
 
-    let c_sym = {
-        let tmp = &linv_t.transpose() * a;
-        &tmp * &linv_t
-    };
-    // Symmetrize away rounding drift.
-    let c_sym = (&c_sym + c_sym.transpose()) * 0.5;
+    // B5 = L L'. With z = L' v the problem becomes the symmetric
+    // C z = lambda z, C = L^-1 S L^-T, and v = L^-T z.
+    let chol = b5.cholesky()?;
+    let mut linv_t = DMatrix::<f64>::zeros(5, 5);
+    for j in 0..5 {
+        // Column j of B5^-1 = L^-T L^-1 ...
+        let mut e = DVector::<f64>::zeros(5);
+        e[j] = 1.0;
+        linv_t.set_column(j, &chol.solve(&e));
+    }
+    // ... and L^-T = B5^-1 L, so build L^-T from it.
+    let linv_t = &linv_t * chol.l();
+    let c = linv_t.transpose() * &s * &linv_t;
+    let c = (&c + c.transpose()) * 0.5;
 
-    let eig = c_sym.symmetric_eigen();
-    let mut order: Vec<usize> = (0..eig.eigenvalues.len()).collect();
-    order.sort_by(|&i, &j| {
-        eig.eigenvalues[j]
-            .partial_cmp(&eig.eigenvalues[i])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let eig = c.symmetric_eigen();
+    let mut order: Vec<usize> = (0..5).collect();
+    order.sort_by(|&i, &j| eig.eigenvalues[i].total_cmp(&eig.eigenvalues[j]));
 
     for &idx in &order {
-        let z = eig.eigenvectors.column(idx);
-        let u = &linv_t * z; // u = L⁻ᵀ z
-        let conic: [f64; 6] = [u[0], u[1], u[2], u[3], u[4], u[5]];
+        let v = &linv_t * eig.eigenvectors.column(idx);
+        let f = -(a12.transpose() * &v)[(0, 0)] / a55;
+        let conic = [v[0], v[1], v[2], v[3], v[4], f];
         if 4.0 * conic[0] * conic[2] - conic[1] * conic[1] > 0.0 {
             return Some(conic);
         }

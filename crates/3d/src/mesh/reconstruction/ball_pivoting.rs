@@ -2,13 +2,29 @@
 //!
 //! Implements the Ball Pivoting Algorithm by Bernardini et al. (1999)
 //! for surface reconstruction from point clouds.
+//!
+//! A triangle is accepted only when a ball of radius `ball_radius` touches its
+//! three vertices **and contains no other point** (the defining BPA condition),
+//! with the ball on the side the point normals face. Triangles are wound so
+//! their normals agree with the point normals, and every shared edge is
+//! traversed in opposite directions by its two triangles, so the result is a
+//! consistently oriented, non-overlapping surface. On a plane the empty-ball
+//! condition is the empty-circumcircle condition, so the triangles are Delaunay
+//! triangles with circumradius at most `ball_radius`.
 
 use super::TriangleMesh;
 use cv_core::point_cloud::PointCloud;
-use nalgebra::Point3;
+use nalgebra::{Point3, Vector3};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Ball Pivoting Algorithm
+///
+/// Uses the cloud's normals to decide which side of the surface the ball
+/// rolls on (as Open3D's `create_from_point_cloud_ball_pivoting` requires).
+/// A cloud without normals gets them from
+/// [`super::compute_point_normals`], which orients them into the positive-z
+/// half-space - adequate for a height field, not for a closed object, so pass
+/// oriented normals for those.
 pub fn ball_pivoting(cloud: &PointCloud, ball_radius: f32) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
@@ -16,41 +32,54 @@ pub fn ball_pivoting(cloud: &PointCloud, ball_radius: f32) -> TriangleMesh {
         return mesh;
     }
 
-    let spatial_index = SpatialIndex::new(cloud, ball_radius * 2.0);
+    mesh.vertices = cloud.points.clone();
+    if !(ball_radius > 0.0) || !ball_radius.is_finite() {
+        return mesh;
+    }
 
-    let mut edge_count: HashMap<(usize, usize), u8> = HashMap::new();
-    let mut mesh_faces: Vec<[usize; 3]> = Vec::new();
-    let mut used_in_mesh: HashSet<usize> = HashSet::new();
+    let normals: Vec<Vector3<f64>> = match &cloud.normals {
+        Some(n) if n.len() == cloud.points.len() => n.iter().map(|v| v.cast::<f64>()).collect(),
+        _ => super::compute_point_normals(cloud, 10)
+            .iter()
+            .map(|v| v.cast::<f64>())
+            .collect(),
+    };
+    let points: Vec<Point3<f64>> = cloud.points.iter().map(|p| p.cast::<f64>()).collect();
 
-    for i in 0..cloud.points.len() {
-        // Skip vertices already incorporated into the mesh
-        if used_in_mesh.contains(&i) {
+    let mut bpa = Bpa {
+        points: &points,
+        normals: &normals,
+        radius: ball_radius as f64,
+        index: SpatialIndex::new(cloud, ball_radius * 2.0),
+        edge_count: HashMap::new(),
+        directed: HashSet::new(),
+        used: vec![false; points.len()],
+        faces: Vec::new(),
+    };
+
+    // The previous version accepted any triangle whose circumradius fitted the
+    // ball, never asked whether the ball was empty, and placed the ball on
+    // whichever side the vertex order happened to give: on a jittered 10x10
+    // planar grid at radius 0.2 it produced 845 triangles covering 19.27 m^2
+    // of a 0.86 m^2 patch, half of them facing down.
+    for i in 0..points.len() {
+        if bpa.used[i] || !is_finite(&points[i]) {
             continue;
         }
-        if let Some(seed) = find_seed_triangle(i, cloud, &spatial_index, ball_radius) {
-            // Only start a new seed if none of the seed vertices have all edges saturated
-            if try_add_triangle(seed, &mut edge_count, &mut mesh_faces) {
-                for &v in &seed {
-                    used_in_mesh.insert(v);
-                }
-                expand_front(
-                    seed,
-                    cloud,
-                    &spatial_index,
-                    ball_radius,
-                    &mut edge_count,
-                    &mut mesh_faces,
-                    &mut used_in_mesh,
-                );
-            }
+        if let Some((seed, center)) = bpa.find_seed(i) {
+            bpa.add_face(seed);
+            bpa.expand(seed, center);
         }
     }
 
-    mesh.vertices = cloud.points.clone();
-    mesh.faces = mesh_faces;
+    mesh.faces = bpa.faces;
     mesh.compute_vertex_normals();
 
     mesh
+}
+
+fn is_finite(p: &Point3<f64>) -> bool {
+    p.x.is_finite() && p.y.is_finite() && p.z.is_finite()
 }
 
 pub(crate) struct SpatialIndex {
@@ -63,23 +92,31 @@ impl SpatialIndex {
         let mut grid: HashMap<(i32, i32, i32), Vec<usize>> = HashMap::new();
 
         for (i, point) in cloud.points.iter().enumerate() {
-            let key = (
-                (point.x / cell_size) as i32,
-                (point.y / cell_size) as i32,
-                (point.z / cell_size) as i32,
-            );
-            grid.entry(key).or_default().push(i);
+            if !(point.x.is_finite() && point.y.is_finite() && point.z.is_finite()) {
+                continue;
+            }
+            grid.entry(Self::cell(point, cell_size))
+                .or_default()
+                .push(i);
         }
 
         Self { grid, cell_size }
     }
 
+    fn cell(point: &Point3<f32>, cell_size: f32) -> (i32, i32, i32) {
+        (
+            (point.x / cell_size).floor() as i32,
+            (point.y / cell_size).floor() as i32,
+            (point.z / cell_size).floor() as i32,
+        )
+    }
+
+    /// Every indexed point in the cells within `radius` of `point` (a
+    /// superset of the points within `radius`; callers filter by distance).
     pub(crate) fn find_neighbors(&self, point: &Point3<f32>, radius: f32) -> Vec<usize> {
         let mut neighbors = Vec::new();
         let r = (radius / self.cell_size).ceil() as i32;
-        let cx = (point.x / self.cell_size) as i32;
-        let cy = (point.y / self.cell_size) as i32;
-        let cz = (point.z / self.cell_size) as i32;
+        let (cx, cy, cz) = Self::cell(point, self.cell_size);
 
         for dx in -r..=r {
             for dy in -r..=r {
@@ -95,84 +132,50 @@ impl SpatialIndex {
     }
 }
 
-fn find_seed_triangle(
-    start_idx: usize,
-    cloud: &PointCloud,
-    spatial_index: &SpatialIndex,
-    ball_radius: f32,
-) -> Option<[usize; 3]> {
-    let point = &cloud.points[start_idx];
-    let neighbors = spatial_index.find_neighbors(point, ball_radius * 2.0);
-
-    for i in 0..neighbors.len() {
-        for j in (i + 1)..neighbors.len() {
-            let idx1 = neighbors[i];
-            let idx2 = neighbors[j];
-
-            if find_ball_center(
-                &cloud.points[start_idx],
-                &cloud.points[idx1],
-                &cloud.points[idx2],
-                ball_radius,
-            )
-            .is_some()
-            {
-                return Some([start_idx, idx1, idx2]);
-            }
-        }
-    }
-
-    None
-}
-
+/// Centre of the ball of `radius` resting on the triangle `(p1, p2, p3)`, on
+/// the side its winding normal `(p2 - p1) x (p3 - p1)` points to, or `None`
+/// when the triangle is degenerate or its circumradius exceeds `radius`.
+#[cfg(test)]
 fn find_ball_center(
     p1: &Point3<f32>,
     p2: &Point3<f32>,
     p3: &Point3<f32>,
     radius: f32,
 ) -> Option<Point3<f32>> {
+    ball_center(
+        &p1.cast::<f64>(),
+        &p2.cast::<f64>(),
+        &p3.cast::<f64>(),
+        radius as f64,
+    )
+    .map(|c| c.cast::<f32>())
+}
+
+fn ball_center(
+    p1: &Point3<f64>,
+    p2: &Point3<f64>,
+    p3: &Point3<f64>,
+    radius: f64,
+) -> Option<Point3<f64>> {
     let a = p2 - p1;
     let b = p3 - p1;
     let normal = a.cross(&b);
-    let normal_len = normal.norm();
-
-    if normal_len < 1e-6 {
+    let normal_len_sq = normal.norm_squared();
+    // Relative to the edge lengths: an absolute floor on this length^2 quantity
+    // called every small triangle degenerate.
+    if !(normal_len_sq > 1e-24 * a.norm_squared() * b.norm_squared()) {
         return None;
     }
 
-    let normal = normal / normal_len;
-
-    let a_len = a.norm();
-    let b_len = b.norm();
-    let c_len = (p3 - p2).norm();
-
-    let circumradius = (a_len * b_len * c_len) / (2.0 * normal_len);
-
-    if circumradius > radius {
+    // Circumcentre relative to p1: (|a|^2 (b x n) + |b|^2 (n x a)) / (2 |n|^2).
+    let offset = (b.cross(&normal) * a.norm_squared() + normal.cross(&a) * b.norm_squared())
+        / (2.0 * normal_len_sq);
+    let h_sq = radius * radius - offset.norm_squared();
+    if h_sq < 0.0 {
         return None;
     }
-
-    let a_len_sq = a_len * a_len;
-    let b_len_sq = b_len * b_len;
-    let c_len_sq = c_len * c_len;
-
-    // Barycentric weights of the circumcenter:
-    //   wA = c²(a²+b²−c²), wB = b²(a²+c²−b²), wC = a²(b²+c²−a²)
-    // where a = |p2−p1|, b = |p3−p1|, c = |p3−p2|.
-    let w_a = c_len_sq * (a_len_sq + b_len_sq - c_len_sq);
-    let w_b = b_len_sq * (a_len_sq + c_len_sq - b_len_sq);
-    let w_c = a_len_sq * (b_len_sq + c_len_sq - a_len_sq);
-    let w_sum = w_a + w_b + w_c;
-    if w_sum.abs() < 1e-20 {
-        return None;
-    }
-
-    let circumcenter = (p1 * w_a + p2.coords * w_b + p3.coords * w_c) / w_sum;
-
-    let height = (radius * radius - circumradius * circumradius).sqrt();
-    let center1 = circumcenter + normal * height;
-
-    Some(center1)
+    let n_hat = normal / normal_len_sq.sqrt();
+    Some(p1 + offset + n_hat * h_sq.sqrt())
 }
 
 /// Canonical (undirected) edge key: smaller index first.
@@ -180,214 +183,189 @@ fn edge_key(a: usize, b: usize) -> (usize, usize) {
     (a.min(b), a.max(b))
 }
 
-fn try_add_triangle(
-    face: [usize; 3],
-    edge_count: &mut HashMap<(usize, usize), u8>,
-    mesh_faces: &mut Vec<[usize; 3]>,
-) -> bool {
-    let e0 = edge_key(face[0], face[1]);
-    let e1 = edge_key(face[1], face[2]);
-    let e2 = edge_key(face[2], face[0]);
-
-    // An edge that already has 2 uses is complete; cannot add another triangle to it.
-    if *edge_count.get(&e0).unwrap_or(&0) >= 2
-        || *edge_count.get(&e1).unwrap_or(&0) >= 2
-        || *edge_count.get(&e2).unwrap_or(&0) >= 2
-    {
-        return false;
-    }
-
-    *edge_count.entry(e0).or_insert(0) += 1;
-    *edge_count.entry(e1).or_insert(0) += 1;
-    *edge_count.entry(e2).or_insert(0) += 1;
-    mesh_faces.push(face);
-
-    true
-}
-
-/// A directed edge on the expansion front.
-/// `a` and `b` are the edge vertices (in winding order), `opposite` is the
-/// vertex of the triangle on the other side of this edge, and `ball_center`
-/// is the centre of the ball that rests on that triangle.
+/// A directed edge on the expansion front, in the winding of the triangle it
+/// belongs to; `opposite` is that triangle's third vertex and `ball_center`
+/// the centre of the ball resting on it.
 struct FrontEdge {
     a: usize,
     b: usize,
     opposite: usize,
-    ball_center: Point3<f32>,
+    ball_center: Point3<f64>,
 }
 
-/// Attempt to find the point `c` that the ball of the given `radius` touches
-/// when pivoting around the directed edge (a -> b).
-///
-/// Among all candidate points in the neighborhood, we choose the one with the
-/// smallest positive pivot angle (Bernardini et al. 1999).
-fn pivot_ball(
-    edge: &FrontEdge,
-    cloud: &PointCloud,
-    spatial_index: &SpatialIndex,
-    ball_radius: f32,
-    edge_count: &HashMap<(usize, usize), u8>,
-) -> Option<(usize, Point3<f32>)> {
-    let pa = &cloud.points[edge.a];
-    let pb = &cloud.points[edge.b];
+struct Bpa<'a> {
+    points: &'a [Point3<f64>],
+    normals: &'a [Vector3<f64>],
+    radius: f64,
+    index: SpatialIndex,
+    /// Triangles per undirected edge.
+    edge_count: HashMap<(usize, usize), u8>,
+    /// Directed edges already used by a triangle.
+    directed: HashSet<(usize, usize)>,
+    used: Vec<bool>,
+    faces: Vec<[usize; 3]>,
+}
 
-    // Edge midpoint and axis
-    let mid = Point3::from((pa.coords + pb.coords) * 0.5);
-    let edge_vec = pb - pa;
-    let edge_len = edge_vec.norm();
-    if edge_len < 1e-10 {
-        return None;
-    }
-    let edge_axis = edge_vec / edge_len;
-
-    // Reference direction: from edge midpoint towards the old ball centre,
-    // projected onto the plane perpendicular to the edge axis.
-    let old_center_vec = edge.ball_center - mid;
-    let old_center_proj = old_center_vec - edge_axis * old_center_vec.dot(&edge_axis);
-    let proj_len = old_center_proj.norm();
-    if proj_len < 1e-10 {
-        return None;
+impl Bpa<'_> {
+    fn neighbors(&self, center: &Point3<f64>, radius: f64) -> Vec<usize> {
+        let r2 = radius * radius;
+        self.index
+            .find_neighbors(&center.cast::<f32>(), radius as f32)
+            .into_iter()
+            .filter(|&j| (self.points[j] - center).norm_squared() <= r2)
+            .collect()
     }
 
-    let candidates = spatial_index.find_neighbors(&mid, ball_radius * 2.0);
+    /// No point other than the triangle's own lies strictly inside the ball.
+    /// Points on the sphere (co-circular samples) are allowed, with a relative
+    /// tolerance for rounding.
+    fn ball_is_empty(&self, center: &Point3<f64>, tri: [usize; 3]) -> bool {
+        let inner = self.radius * (1.0 - 1e-6);
+        self.neighbors(center, self.radius)
+            .into_iter()
+            .all(|j| tri.contains(&j) || (self.points[j] - center).norm_squared() >= inner * inner)
+    }
 
-    let mut best_angle = f32::MAX;
-    let mut best_candidate: Option<(usize, Point3<f32>)> = None;
+    /// The winding normal of `tri` agrees with the normal of each vertex.
+    fn compatible(&self, tri: [usize; 3]) -> bool {
+        let [i, j, k] = tri;
+        let n = (self.points[j] - self.points[i]).cross(&(self.points[k] - self.points[i]));
+        tri.iter().all(|&v| n.dot(&self.normals[v]) > 0.0)
+    }
 
-    for &idx in &candidates {
-        // Skip the edge endpoints and the opposite vertex of the current triangle
-        if idx == edge.a || idx == edge.b || idx == edge.opposite {
-            continue;
+    /// The ball resting on `tri` when it is a valid BPA triangle: compatible
+    /// with the normals, ball on the normal side, ball empty.
+    fn valid_ball(&self, tri: [usize; 3]) -> Option<Point3<f64>> {
+        if !self.compatible(tri) {
+            return None;
         }
+        let center = ball_center(
+            &self.points[tri[0]],
+            &self.points[tri[1]],
+            &self.points[tri[2]],
+            self.radius,
+        )?;
+        self.ball_is_empty(&center, tri).then_some(center)
+    }
 
-        // Skip if both edges from the candidate are already complete (count >= 2)
-        let ek_ca = edge_key(idx, edge.a);
-        let ek_cb = edge_key(idx, edge.b);
-        if *edge_count.get(&ek_ca).unwrap_or(&0) >= 2 || *edge_count.get(&ek_cb).unwrap_or(&0) >= 2
-        {
-            continue;
+    fn find_seed(&self, i: usize) -> Option<([usize; 3], Point3<f64>)> {
+        let p = self.points[i];
+        let mut nbrs: Vec<usize> = self
+            .neighbors(&p, 2.0 * self.radius)
+            .into_iter()
+            .filter(|&j| j != i && !self.used[j])
+            .collect();
+        nbrs.sort_by(|&a, &b| {
+            (self.points[a] - p)
+                .norm_squared()
+                .total_cmp(&(self.points[b] - p).norm_squared())
+                .then(a.cmp(&b))
+        });
+        for x in 0..nbrs.len() {
+            for y in (x + 1)..nbrs.len() {
+                let (j, k) = (nbrs[x], nbrs[y]);
+                // Wind the triangle so its normal faces the point normals.
+                let n = (self.points[j] - p).cross(&(self.points[k] - p));
+                let facing = n.dot(&(self.normals[i] + self.normals[j] + self.normals[k]));
+                let tri = if facing >= 0.0 { [i, j, k] } else { [i, k, j] };
+                if let Some(center) = self.valid_ball(tri) {
+                    return Some((tri, center));
+                }
+            }
         }
+        None
+    }
 
-        // Try to place a ball on (a, b, candidate)
-        if let Some(new_center) = find_ball_center(pa, pb, &cloud.points[idx], ball_radius) {
-            // The new ball centre must be on the correct side. We check this
-            // by computing the pivot angle around the edge axis.
-            let new_center_vec = new_center - mid;
-            let new_center_proj = new_center_vec - edge_axis * new_center_vec.dot(&edge_axis);
-            let new_proj_len = new_center_proj.norm();
-            if new_proj_len < 1e-10 {
+    /// Whether `tri` can join the mesh without overlapping it: no undirected
+    /// edge already has two triangles and no directed edge is used twice
+    /// (which would put two triangles on the same side of an edge).
+    fn can_add(&self, tri: [usize; 3]) -> bool {
+        (0..3).all(|e| {
+            let (a, b) = (tri[e], tri[(e + 1) % 3]);
+            !self.directed.contains(&(a, b))
+                && *self.edge_count.get(&edge_key(a, b)).unwrap_or(&0) < 2
+        })
+    }
+
+    fn add_face(&mut self, tri: [usize; 3]) {
+        for e in 0..3 {
+            let (a, b) = (tri[e], tri[(e + 1) % 3]);
+            self.directed.insert((a, b));
+            *self.edge_count.entry(edge_key(a, b)).or_insert(0) += 1;
+        }
+        for &v in &tri {
+            self.used[v] = true;
+        }
+        self.faces.push(tri);
+    }
+
+    /// Roll the ball over the directed edge `a -> b` and return the first point
+    /// it touches, with the new ball centre: the candidate reached by the
+    /// smallest rotation about the edge (Bernardini et al. 1999).
+    fn pivot(&self, edge: &FrontEdge) -> Option<(usize, Point3<f64>)> {
+        let pa = self.points[edge.a];
+        let pb = self.points[edge.b];
+        let mid = Point3::from((pa.coords + pb.coords) * 0.5);
+        let axis = (pb - pa).try_normalize(0.0)?;
+        let project = |c: &Point3<f64>| {
+            let v = c - mid;
+            v - axis * v.dot(&axis)
+        };
+        let u = project(&edge.ball_center);
+
+        let mut best: Option<(f64, usize, Point3<f64>)> = None;
+        for c in self.neighbors(&mid, 2.0 * self.radius) {
+            if c == edge.a || c == edge.b || c == edge.opposite {
                 continue;
             }
-
-            // Pivot angle: angle from old_center_proj to new_center_proj
-            // around the edge axis, measured in the positive rotation direction.
-            let cos_angle = old_center_proj.dot(&new_center_proj) / (proj_len * new_proj_len);
-            let sin_angle =
-                old_center_proj.cross(&new_center_proj).dot(&edge_axis) / (proj_len * new_proj_len);
-            let mut angle = sin_angle.atan2(cos_angle);
-
-            // We want the angle in (0, 2*PI] — the smallest positive pivot.
-            if angle <= 1e-6 {
-                angle += std::f32::consts::TAU;
+            // The new triangle crosses the shared edge as b -> a.
+            let tri = [edge.b, edge.a, c];
+            let Some(center) = self.valid_ball(tri) else {
+                continue;
+            };
+            let v = project(&center);
+            // Rotation about +axis carries the old ball over the edge to the
+            // outside of its triangle.
+            let mut angle = u.cross(&v).dot(&axis).atan2(u.dot(&v));
+            if angle < -1e-6 {
+                angle += std::f64::consts::TAU;
             }
-
-            if angle < best_angle {
-                best_angle = angle;
-                best_candidate = Some((idx, new_center));
+            let angle = angle.max(0.0);
+            if best.as_ref().is_none_or(|b| angle < b.0) {
+                best = Some((angle, c, center));
             }
         }
+        best.map(|(_, c, center)| (c, center))
     }
 
-    best_candidate
-}
+    fn expand(&mut self, seed: [usize; 3], center: Point3<f64>) {
+        let mut front: VecDeque<FrontEdge> = (0..3)
+            .map(|e| FrontEdge {
+                a: seed[e],
+                b: seed[(e + 1) % 3],
+                opposite: seed[(e + 2) % 3],
+                ball_center: center,
+            })
+            .collect();
 
-fn expand_front(
-    seed: [usize; 3],
-    cloud: &PointCloud,
-    spatial_index: &SpatialIndex,
-    ball_radius: f32,
-    edge_count: &mut HashMap<(usize, usize), u8>,
-    mesh_faces: &mut Vec<[usize; 3]>,
-    used_in_mesh: &mut HashSet<usize>,
-) {
-    // Compute ball centre for the seed triangle
-    let seed_center = match find_ball_center(
-        &cloud.points[seed[0]],
-        &cloud.points[seed[1]],
-        &cloud.points[seed[2]],
-        ball_radius,
-    ) {
-        Some(c) => c,
-        None => return,
-    };
-
-    // Initialise the front with the three directed edges of the seed triangle.
-    // For triangle (a, b, c), the three directed edges are:
-    //   (a->b, opposite=c), (b->c, opposite=a), (c->a, opposite=b)
-    let mut front: VecDeque<FrontEdge> = VecDeque::new();
-    front.push_back(FrontEdge {
-        a: seed[0],
-        b: seed[1],
-        opposite: seed[2],
-        ball_center: seed_center,
-    });
-    front.push_back(FrontEdge {
-        a: seed[1],
-        b: seed[2],
-        opposite: seed[0],
-        ball_center: seed_center,
-    });
-    front.push_back(FrontEdge {
-        a: seed[2],
-        b: seed[0],
-        opposite: seed[1],
-        ball_center: seed_center,
-    });
-
-    // Safety limit to avoid infinite loops on degenerate inputs.
-    let max_iterations = cloud.points.len() * 3;
-    let mut iterations = 0;
-
-    while let Some(edge) = front.pop_front() {
-        iterations += 1;
-        if iterations > max_iterations {
-            break;
-        }
-
-        // If the edge is already complete (used twice), skip it.
-        let ek = edge_key(edge.a, edge.b);
-        if *edge_count.get(&ek).unwrap_or(&0) >= 2 {
-            continue;
-        }
-
-        // Pivot the ball around this edge to find the next point.
-        if let Some((c, new_center)) =
-            pivot_ball(&edge, cloud, spatial_index, ball_radius, edge_count)
-        {
-            let face = [edge.a, edge.b, c];
-
-            if try_add_triangle(face, edge_count, mesh_faces) {
-                used_in_mesh.insert(c);
-
-                // Add the two new edges to the front.
-                // New edge (b -> c): opposite is a
-                let ek_bc = edge_key(edge.b, c);
-                if *edge_count.get(&ek_bc).unwrap_or(&0) < 2 {
+        while let Some(edge) = front.pop_front() {
+            if *self.edge_count.get(&edge_key(edge.a, edge.b)).unwrap_or(&0) >= 2 {
+                continue;
+            }
+            let Some((c, new_center)) = self.pivot(&edge) else {
+                continue; // a boundary edge
+            };
+            let tri = [edge.b, edge.a, c];
+            if !self.can_add(tri) {
+                continue;
+            }
+            self.add_face(tri);
+            for (a, b, opposite) in [(edge.a, c, edge.b), (c, edge.b, edge.a)] {
+                if *self.edge_count.get(&edge_key(a, b)).unwrap_or(&0) < 2 {
                     front.push_back(FrontEdge {
-                        a: edge.b,
-                        b: c,
-                        opposite: edge.a,
-                        ball_center: new_center,
-                    });
-                }
-
-                // New edge (c -> a): opposite is b
-                let ek_ca = edge_key(c, edge.a);
-                if *edge_count.get(&ek_ca).unwrap_or(&0) < 2 {
-                    front.push_back(FrontEdge {
-                        a: c,
-                        b: edge.a,
-                        opposite: edge.b,
+                        a,
+                        b,
+                        opposite,
                         ball_center: new_center,
                     });
                 }

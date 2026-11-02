@@ -1875,6 +1875,7 @@ name = "cv-features"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "criterion",
  "cv-calib3d",
  "cv-core",
  "cv-hal",
@@ -1894,6 +1895,7 @@ name = "cv-geometry2d"
 version = "0.1.0"
 dependencies = [
  "geo",
+ "i_overlay",
  "robust",
 ]
 

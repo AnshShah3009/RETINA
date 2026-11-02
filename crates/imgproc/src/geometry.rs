@@ -33,10 +33,41 @@ fn get_pixel_bilinear_with_border(img: &GrayImage, x: f32, y: f32, border: Borde
     v0 * (1.0 - fy) + v1 * fy
 }
 
-fn get_pixel_nearest_with_border(img: &GrayImage, x: f32, y: f32, border: BorderMode) -> f32 {
-    let xi = x.round() as isize;
-    let yi = y.round() as isize;
-    sample_pixel(img, xi, yi, border)
+/// How `INTER_NEAREST` turns a source coordinate into a pixel index. OpenCV
+/// is not consistent between its own warps, so each entry point names its
+/// rule:
+///
+/// * `warpAffine` computes `(X0 + adelta) >> AB_BITS` with a `+0.5` round
+///   delta, i.e. `floor(x + 0.5)`: halves round up, `-0.5` goes to 0;
+/// * `warpPerspective` and `remap` use `saturate_cast<int>` / `cvRound`, which
+///   rounds halves to even: `0.5 -> 0`, `1.5 -> 2`, `2.5 -> 2`.
+///
+/// `f32::round` (halves away from zero) matched neither: `2.5 -> 3` against
+/// cv2's 2 in `remap`/`warpPerspective`, and `-0.5 -> -1` (a border pixel)
+/// against cv2's 0 in `warpAffine`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NearestRule {
+    HalfUp,
+    HalfEven,
+}
+
+impl NearestRule {
+    fn index(self, v: f32) -> isize {
+        match self {
+            NearestRule::HalfUp => (v + 0.5).floor() as isize,
+            NearestRule::HalfEven => v.round_ties_even() as isize,
+        }
+    }
+}
+
+fn get_pixel_nearest_with_border(
+    img: &GrayImage,
+    x: f32,
+    y: f32,
+    border: BorderMode,
+    rule: NearestRule,
+) -> f32 {
+    sample_pixel(img, rule.index(x), rule.index(y), border)
 }
 
 fn get_pixel_cubic_with_border(img: &GrayImage, x: f32, y: f32, border: BorderMode) -> f32 {
@@ -175,9 +206,10 @@ fn interpolate_sample(
     y: f32,
     interpolation: Interpolation,
     border: BorderMode,
+    nearest: NearestRule,
 ) -> f32 {
     match interpolation {
-        Interpolation::Nearest => get_pixel_nearest_with_border(src, x, y, border),
+        Interpolation::Nearest => get_pixel_nearest_with_border(src, x, y, border, nearest),
         Interpolation::Linear => get_pixel_bilinear_with_border(src, x, y, border),
         Interpolation::Cubic => get_pixel_cubic_with_border(src, x, y, border),
         Interpolation::Lanczos => get_pixel_lanczos_with_border(src, x, y, border),
@@ -238,6 +270,29 @@ pub fn warp_perspective_ex_ctx(
     border: BorderMode,
     group: &RuntimeRunner,
 ) -> GrayImage {
+    warp_forward_matrix(
+        src,
+        matrix,
+        width,
+        height,
+        interpolation,
+        border,
+        group,
+        NearestRule::HalfEven,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn warp_forward_matrix(
+    src: &GrayImage,
+    matrix: &Matrix3<f32>,
+    width: u32,
+    height: u32,
+    interpolation: Interpolation,
+    border: BorderMode,
+    group: &RuntimeRunner,
+    nearest: NearestRule,
+) -> GrayImage {
     // Both public warp entry points take an OpenCV-style forward (src -> dst)
     // transform. The sampling below is an inverse map (dst -> src), so invert
     // the caller's matrix once here. `warp_affine_ex_ctx` delegates to this
@@ -273,7 +328,8 @@ pub fn warp_perspective_ex_ctx(
             for x in 0..width {
                 let pt = Point2::new(x as f32, y as f32);
                 let src_pt = transform_point(&inv, &pt);
-                let val = interpolate_sample(src, src_pt.x, src_pt.y, interpolation, border);
+                let val =
+                    interpolate_sample(src, src_pt.x, src_pt.y, interpolation, border, nearest);
                 row[x as usize] = val.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });
@@ -449,8 +505,17 @@ pub fn warp_affine_ex_ctx(
         return result;
     }
 
-    // `warp_perspective_ex_ctx` inverts the forward matrix itself.
-    warp_perspective_ex_ctx(src, &matrix, width, height, interpolation, border, group)
+    // `warp_forward_matrix` inverts the forward matrix itself.
+    warp_forward_matrix(
+        src,
+        &matrix,
+        width,
+        height,
+        interpolation,
+        border,
+        group,
+        NearestRule::HalfUp,
+    )
 }
 
 pub fn remap_ex(
@@ -526,7 +591,8 @@ pub fn remap_ex_ctx(
                 let idx = (y * width + x) as usize;
                 let sx = map_x[idx];
                 let sy = map_y[idx];
-                let val = interpolate_sample(src, sx, sy, interpolation, border);
+                let val =
+                    interpolate_sample(src, sx, sy, interpolation, border, NearestRule::HalfEven);
                 row[x as usize] = val.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });
@@ -638,7 +704,8 @@ pub fn remap(
                 let idx = (y * width + x) as usize;
                 let sx = map_x[idx];
                 let sy = map_y[idx];
-                let val = interpolate_sample(src, sx, sy, interpolation, border);
+                let val =
+                    interpolate_sample(src, sx, sy, interpolation, border, NearestRule::HalfEven);
                 row[x as usize] = val.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });

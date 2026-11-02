@@ -95,41 +95,47 @@ impl Sift {
         ctx: &ComputeDevice,
         image: &Tensor<u8, S>,
     ) -> crate::Result<Vec<Vec<Tensor<f32, cv_core::storage::CpuStorage<f32>>>>> {
-        let mut pyramid = Vec::with_capacity(self.n_octaves);
-        let mut current_base = convert_to_f32_cpu(ctx, image)?;
+        let mut pyramid: Vec<Vec<Tensor<f32, cv_core::storage::CpuStorage<f32>>>> =
+            Vec::with_capacity(self.n_octaves);
+        let input = convert_to_f32_cpu(ctx, image)?;
+        let blur = |t: &Tensor<f32, cv_core::storage::CpuStorage<f32>>, sigma: f32| {
+            ctx.gaussian_blur(t, sigma, gaussian_ksize(sigma))
+                .map_err(|e| Error::AlgorithmError(format!("Gaussian blur failed: {}", e)))
+        };
+
+        // OpenCV assumes the input already carries SIFT_INIT_SIGMA = 0.5 of
+        // blur and adds only the difference to reach `sigma`.
+        let s0 = self.sigma;
+        let k = 2.0f32.powf(1.0 / self.n_layers as f32);
+        let base_sigma = (s0 * s0 - SIFT_INIT_SIGMA * SIFT_INIT_SIGMA)
+            .max(0.01)
+            .sqrt();
 
         for octave in 0..self.n_octaves {
             let mut layers = Vec::with_capacity(self.n_layers + 3);
 
-            let mut sig = self.sigma;
-            let base_layer = ctx
-                .gaussian_blur(&current_base, sig, 7)
-                .map_err(|e| Error::AlgorithmError(format!("Gaussian blur failed: {}", e)))?;
+            // Octave 0 starts from the input; every later octave starts from
+            // layer `n_layers` of the previous one (blur 2*sigma), decimated
+            // by 2 - which is blur `sigma` in the new pixel units, so no
+            // further blur is added.
+            let base_layer = if octave == 0 {
+                blur(&input, base_sigma)?
+            } else {
+                decimate_2x(&pyramid[octave - 1][self.n_layers])?
+            };
             layers.push(base_layer);
 
-            let k = 2.0f32.powf(1.0 / self.n_layers as f32);
-            for _ in 1..(self.n_layers + 3) {
+            for i in 1..(self.n_layers + 3) {
                 let prev = layers
                     .last()
                     .ok_or_else(|| Error::AlgorithmError("Layer stack is empty".into()))?;
-                let sig_prev = sig;
-                sig *= k;
-                let sig_total = (sig * sig - sig_prev * sig_prev).sqrt();
-
-                let blurred = ctx
-                    .gaussian_blur(prev, sig_total, 7)
-                    .map_err(|e| Error::AlgorithmError(format!("Gaussian blur failed: {}", e)))?;
+                let sig_prev = s0 * k.powi(i as i32 - 1);
+                let sig_total = sig_prev * k;
+                let sig_inc = (sig_total * sig_total - sig_prev * sig_prev).sqrt();
+                let blurred = blur(prev, sig_inc)?;
                 layers.push(blurred);
             }
             pyramid.push(layers);
-
-            if octave < self.n_octaves - 1 {
-                let to_sample = &pyramid[octave][self.n_layers];
-                let (h, w) = to_sample.shape.hw();
-                current_base = ctx
-                    .resize(to_sample, (w / 2, h / 2))
-                    .map_err(|e| Error::AlgorithmError(format!("Resize failed: {}", e)))?;
-            }
         }
         Ok(pyramid)
     }
@@ -594,6 +600,39 @@ impl Sift {
             ))),
         }
     }
+}
+
+/// Blur already present in the input image, as OpenCV's `SIFT_INIT_SIGMA`.
+const SIFT_INIT_SIGMA: f32 = 0.5;
+
+/// `cv::GaussianBlur`'s kernel size for a float image and `ksize = 0`:
+/// `cvRound(sigma * 4 * 2 + 1) | 1`, i.e. +-4 sigma.
+///
+/// The scale space used a fixed 7 taps, which is +-1 sigma at the top of an
+/// octave; normalised, that truncated kernel blurs far less than `sigma`.
+fn gaussian_ksize(sigma: f32) -> usize {
+    ((sigma * 8.0 + 1.0).round_ties_even() as usize) | 1
+}
+
+/// `resize(src, Size(w / 2, h / 2), 0, 0, INTER_NEAREST)`: keep every second
+/// pixel, starting at (0, 0). A bilinear resize averages each 2x2 block,
+/// which is extra blur the next octave does not account for.
+fn decimate_2x(
+    src: &Tensor<f32, cv_core::storage::CpuStorage<f32>>,
+) -> crate::Result<Tensor<f32, cv_core::storage::CpuStorage<f32>>> {
+    let (h, w) = src.shape.hw();
+    let data = src
+        .storage
+        .as_slice()
+        .ok_or_else(|| Error::AlgorithmError("Scale-space layer not on CPU".into()))?;
+    let (nh, nw) = (h / 2, w / 2);
+    let mut out = Vec::with_capacity(nh * nw);
+    for y in 0..nh {
+        let row = &data[2 * y * w..];
+        out.extend((0..nw).map(|x| row[2 * x]));
+    }
+    Tensor::from_vec(out, cv_core::TensorShape::new(1, nh, nw))
+        .map_err(|e| Error::AlgorithmError(format!("Failed to create octave base: {}", e)))
 }
 
 fn refine_point(

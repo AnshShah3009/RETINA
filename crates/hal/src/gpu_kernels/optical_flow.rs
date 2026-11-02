@@ -721,25 +721,31 @@ pub fn tvl1_optical_flow(
 
     let warp_pipeline =
         ctx.create_compute_pipeline(include_str!("../../shaders/tvl1_warp.wgsl"), "main");
-    let primal_pipeline =
-        ctx.create_compute_pipeline(include_str!("../../shaders/tvl1_primal.wgsl"), "main");
-    let dual_pipeline =
-        ctx.create_compute_pipeline(include_str!("../../shaders/tvl1_dual.wgsl"), "main");
+    let primal_dual_pipeline =
+        ctx.create_compute_pipeline(include_str!("../../shaders/tvl1_primal_dual.wgsl"), "main");
     let median_pipeline =
         ctx.create_compute_pipeline(include_str!("../../shaders/tvl1_median.wgsl"), "main");
 
-    let mut flow: Option<(wgpu::Buffer, u32, u32)> = None;
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("TVL1"),
+        });
+    // The previous (coarser) scale's final state and its size.
+    let mut coarse: Option<(wgpu::Buffer, u32, u32)> = None;
     for (i0, i1) in pyramid.iter().rev() {
         let (sh, sw) = i0.shape.hw();
         let (sw, sh) = (sw as u32, sh as u32);
         let n = (sw * sh) as usize;
 
-        // Two flow buffers: the median filter reads one and writes the other.
-        let flows = [
-            flow_storage(ctx, "TVL1 Flow A", 2 * n),
-            flow_storage(ctx, "TVL1 Flow B", 2 * n),
+        // Two states, (u1, u2, p11, p12, p21, p22) planar (see
+        // tvl1_primal_dual.wgsl): every inner iteration and every median
+        // filter reads one and writes the other. New buffers are zeroed, which
+        // is the zero initial flow and dual variables.
+        let states = [
+            flow_storage(ctx, "TVL1 State A", 6 * n),
+            flow_storage(ctx, "TVL1 State B", 6 * n),
         ];
-        let dual = flow_storage(ctx, "TVL1 Dual (p11, p12, p21, p22)", 4 * n);
         let warp = flow_storage(ctx, "TVL1 Warp (I1wx, I1wy, grad, rho_c)", 4 * n);
         let params = flow_uniform(
             ctx,
@@ -756,9 +762,10 @@ pub fn tvl1_optical_flow(
             },
         );
 
-        let bgs: Vec<[wgpu::BindGroup; 4]> = (0..2)
+        // [warp, primal-dual, median], reading state `c`.
+        let bgs: Vec<[wgpu::BindGroup; 3]> = (0..2)
             .map(|c| {
-                let (cur, other) = (&flows[c], &flows[1 - c]);
+                let (cur, other) = (&states[c], &states[1 - c]);
                 [
                     flow_bind_group(
                         ctx,
@@ -774,25 +781,27 @@ pub fn tvl1_optical_flow(
                     ),
                     flow_bind_group(
                         ctx,
-                        &primal_pipeline,
-                        "TVL1 Primal",
-                        &[&warp, &dual, cur, &params],
+                        &primal_dual_pipeline,
+                        "TVL1 Primal-Dual",
+                        &[&warp, cur, other, &params],
                     ),
-                    flow_bind_group(ctx, &dual_pipeline, "TVL1 Dual", &[cur, &dual, &params]),
                     flow_bind_group(ctx, &median_pipeline, "TVL1 Median", &[cur, other, &params]),
                 ]
             })
             .collect();
 
-        let mut encoder = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("TVL1 Scale"),
-            });
         // The coarsest scale starts from zero flow; finer ones from the
-        // coarser estimate, scaled to this scale.
-        if let Some((coarse, cw, ch)) = &flow {
-            encode_flow_upsample(ctx, &mut encoder, coarse, (*cw, *ch), &flows[0], (sw, sh));
+        // coarser estimate, scaled to this scale. The upsample reads and
+        // writes only the flow planes, which come first in a state.
+        if let Some((prev_state, cw, ch)) = &coarse {
+            encode_flow_upsample(
+                ctx,
+                &mut encoder,
+                prev_state,
+                (*cw, *ch),
+                &states[0],
+                (sw, sh),
+            );
         }
         let mut cur = 0usize;
         {
@@ -804,29 +813,39 @@ pub fn tvl1_optical_flow(
                 for _ in 0..config.num_outer_iters {
                     if median_radius > 0 {
                         pass.set_pipeline(&median_pipeline);
-                        pass.set_bind_group(0, &bgs[cur][3], &[]);
+                        pass.set_bind_group(0, &bgs[cur][2], &[]);
                         flow_dispatch(&mut pass, sw, sh);
                         cur = 1 - cur;
                     }
+                    pass.set_pipeline(&primal_dual_pipeline);
                     for _ in 0..config.num_inner_iters {
-                        pass.set_pipeline(&primal_pipeline);
                         pass.set_bind_group(0, &bgs[cur][1], &[]);
                         flow_dispatch(&mut pass, sw, sh);
-                        pass.set_pipeline(&dual_pipeline);
-                        pass.set_bind_group(0, &bgs[cur][2], &[]);
-                        flow_dispatch(&mut pass, sw, sh);
+                        cur = 1 - cur;
                     }
                 }
             }
         }
-        ctx.submit(encoder);
-        let [a, b] = flows;
-        flow = Some((if cur == 0 { a } else { b }, sw, sh));
+        let [a, b] = states;
+        coarse = Some((if cur == 0 { a } else { b }, sw, sh));
     }
 
-    let (buf, _, _) = flow.ok_or_else(|| crate::Error::RuntimeError("No flow computed".into()))?;
+    let (state, _, _) =
+        coarse.ok_or_else(|| crate::Error::RuntimeError("No flow computed".into()))?;
+    // The flow is the first two planes of the final state.
+    let flow_bytes = (2 * w * h * std::mem::size_of::<f32>()) as u64;
+    let flow = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("TVL1 Flow"),
+        size: flow_bytes,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_buffer_to_buffer(&state, 0, &flow, 0, flow_bytes);
+    ctx.submit(encoder);
     Ok(Tensor {
-        storage: GpuStorage::from_buffer(Arc::new(buf), 2 * w * h),
+        storage: GpuStorage::from_buffer(Arc::new(flow), 2 * w * h),
         shape: cv_core::TensorShape::new(2, h, w),
         dtype: prev.dtype,
         _phantom: std::marker::PhantomData,

@@ -229,6 +229,21 @@ pub fn calibrate_robot_world_hand_eye(
         return None;
     }
 
+    // The same non-finite guard as `calibrate_hand_eye`, for the same reason:
+    // `solve_ax_xb` ends in `symmetric_eigen`, which does not return on NaN.
+    // Without it one NaN rotation entry hung this call (no return in 20 s),
+    // and an infinite translation came back as `Some` calibration.
+    for m in r_world2cam.iter().chain(r_base2gripper.iter()) {
+        if !m.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+    }
+    for v in t_world2cam.iter().chain(t_base2gripper.iter()) {
+        if !v.iter().all(|c| c.is_finite()) {
+            return None;
+        }
+    }
+
     // Pairwise elimination of X from A_i X = Z B_i gives an AX=XB problem for Z:
     //   (A_j A_i⁻¹) Z = Z (B_j B_i⁻¹)
     let mut rel_a_rot = Vec::new();

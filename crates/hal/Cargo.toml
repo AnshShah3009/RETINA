@@ -60,6 +60,10 @@ name = "gpu_transfer"
 harness = false
 
 [[bench]]
+name = "gpu_ops"
+harness = false
+
+[[bench]]
 name = "cubecl_kernels"
 harness = false
 required-features = ["cubecl"]

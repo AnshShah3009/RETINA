@@ -184,27 +184,10 @@ pub fn equalize_histogram_in_pool(src: &GrayImage, pool: Option<&ThreadPool>) ->
                 },
             );
 
-        // Compute CDF (cumulative distribution function) - Serial is fast enough for 256 elements
-        let mut cdf = [0u32; 256];
-        cdf[0] = hist[0];
-        for i in 1..256 {
-            cdf[i] = cdf[i - 1] + hist[i];
-        }
-
-        let cdf_min = cdf.iter().find(|&&x| x > 0).copied().unwrap_or(0);
-        let total = raw.len() as u32;
-
-        // Build LUT
-        let mut lut = [0u8; 256];
-        if total > cdf_min {
-            let denom = (total - cdf_min) as f32;
-            for i in 0..256 {
-                lut[i] = ((cdf[i].saturating_sub(cdf_min)) as f32 / denom * 255.0).round() as u8;
-            }
-        } else {
-            // Edge case: all pixels are same or image is empty
+        let Some(lut) = crate::histogram::equalize_hist_lut(&hist, raw.len() as u64) else {
+            // Single-valued image: cv2.equalizeHist leaves it unchanged.
             return src.clone();
-        }
+        };
 
         // Apply LUT in parallel
         let mut output = src.clone();

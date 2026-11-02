@@ -16,7 +16,13 @@ pub fn laplacian_smooth(mesh: &mut TriangleMesh, iterations: usize, lambda: f32)
     let num_vertices = mesh.vertices.len();
 
     for _ in 0..iterations {
-        // Build adjacency list
+        // Build adjacency list: each neighbour once. An interior edge belongs to
+        // two triangles, so pushing per face listed most neighbours twice and
+        // boundary neighbours once, and the "average" became a weighted one -
+        // measured on an open grid, the corner (0, 0) with neighbours (1, 0),
+        // (1, 1), (0, 1) moved to (0.375, 0.375) at lambda 0.5 instead of the
+        // uniform average's (0.333, 0.333), which `gpu::mesh::laplacian_smooth`
+        // (unique neighbours) returns for the same mesh.
         let mut neighbors: Vec<Vec<usize>> = vec![Vec::new(); num_vertices];
         for face in &mesh.faces {
             for i in 0..3 {
@@ -25,6 +31,10 @@ pub fn laplacian_smooth(mesh: &mut TriangleMesh, iterations: usize, lambda: f32)
                 neighbors[v0].push(v1);
                 neighbors[v1].push(v0);
             }
+        }
+        for list in &mut neighbors {
+            list.sort_unstable();
+            list.dedup();
         }
 
         // Compute new positions
@@ -68,26 +78,33 @@ pub fn taubin_smooth(mesh: &mut TriangleMesh, iterations: usize, lambda: f32, mu
 
 /// Edge collapse simplification: Reduce triangle count
 /// target_ratio: 0.0 to 1.0 (fraction of faces to keep)
+///
+/// Edges are collapsed shortest first (to their midpoint) until the mesh has
+/// `floor(faces * target_ratio)` faces; a collapse that would remove more faces
+/// than are left to remove is skipped in favour of a later one.
 pub fn simplify_edge_collapse(mesh: &mut TriangleMesh, target_ratio: f32) {
     let target_faces = (mesh.faces.len() as f32 * target_ratio.clamp(0.0, 1.0)) as usize;
     if target_faces >= mesh.faces.len() {
         return;
     }
 
-    let num_faces_to_remove = mesh.faces.len() - target_faces;
-
-    // Build edge set
-    let mut edges: HashSet<(usize, usize)> = HashSet::new();
+    // Build edge set, shortest first. The edges used to be taken in `HashSet`
+    // iteration order - neither "short edges first" nor reproducible from one
+    // run to the next.
+    let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
     for face in &mesh.faces {
         for i in 0..3 {
             let v0 = face[i].min(face[(i + 1) % 3]);
             let v1 = face[i].max(face[(i + 1) % 3]);
-            edges.insert((v0, v1));
+            if v0 != v1 {
+                edge_set.insert((v0, v1));
+            }
         }
     }
+    let mut edges: Vec<(usize, usize)> = edge_set.into_iter().collect();
+    let len_sq = |e: &(usize, usize)| (mesh.vertices[e.0] - mesh.vertices[e.1]).norm_squared();
+    edges.sort_by(|a, b| len_sq(a).total_cmp(&len_sq(b)).then(a.cmp(b)));
 
-    // Simple approach: Collapse short edges
-    let mut collapsed = 0;
     let mut vertex_remap: HashMap<usize, usize> =
         (0..mesh.vertices.len()).map(|i| (i, i)).collect();
 
@@ -102,8 +119,32 @@ pub fn simplify_edge_collapse(mesh: &mut TriangleMesh, target_ratio: f32) {
         v
     };
 
+    // Faces still standing, and the faces around each surviving vertex.
+    //
+    // The stop test used to compare the number of *edges* collapsed with the
+    // number of *faces* to remove. An interior collapse removes two faces, so
+    // the mesh overshot: measured on an 18-face grid, `target_ratio = 0.5`
+    // left 3 faces instead of 9.
+    let mut alive = vec![true; mesh.faces.len()];
+    let mut alive_count = mesh.faces.iter().filter(|f| !is_degenerate(f)).count();
+    for (fi, f) in mesh.faces.iter().enumerate() {
+        if is_degenerate(f) {
+            alive[fi] = false;
+        }
+    }
+    let mut incident: Vec<Vec<usize>> = vec![Vec::new(); mesh.vertices.len()];
+    for (fi, f) in mesh.faces.iter().enumerate() {
+        if alive[fi] {
+            for &v in f {
+                if !incident[v].contains(&fi) {
+                    incident[v].push(fi);
+                }
+            }
+        }
+    }
+
     for (v0, v1) in edges {
-        if collapsed >= num_faces_to_remove {
+        if alive_count <= target_faces {
             break;
         }
 
@@ -114,12 +155,37 @@ pub fn simplify_edge_collapse(mesh: &mut TriangleMesh, target_ratio: f32) {
             continue;
         }
 
-        // Collapse: move v1 to midpoint
+        // The faces this collapse destroys: those around `rv1` that also
+        // contain `rv0`.
+        let doomed: Vec<usize> = incident[rv1]
+            .iter()
+            .copied()
+            .filter(|&fi| {
+                alive[fi]
+                    && mesh.faces[fi]
+                        .iter()
+                        .any(|&v| resolve(&vertex_remap, v) == rv0)
+            })
+            .collect();
+        if alive_count - doomed.len() < target_faces {
+            continue;
+        }
+
+        // Collapse: move rv0 to the midpoint and merge rv1 into it.
         let midpoint = (mesh.vertices[rv0] + mesh.vertices[rv1].coords) * 0.5;
         mesh.vertices[rv0] = midpoint;
         vertex_remap.insert(rv1, rv0);
 
-        collapsed += 1;
+        for fi in doomed {
+            alive[fi] = false;
+            alive_count -= 1;
+        }
+        let moved = std::mem::take(&mut incident[rv1]);
+        for fi in moved {
+            if alive[fi] && !incident[rv0].contains(&fi) {
+                incident[rv0].push(fi);
+            }
+        }
     }
 
     // Remap faces and remove degenerate
@@ -132,13 +198,17 @@ pub fn simplify_edge_collapse(mesh: &mut TriangleMesh, target_ratio: f32) {
         ];
 
         // Keep only non-degenerate faces
-        if new_face[0] != new_face[1] && new_face[1] != new_face[2] && new_face[2] != new_face[0] {
+        if !is_degenerate(&new_face) {
             new_faces.push(new_face);
         }
     }
 
     mesh.faces = new_faces;
     mesh.compute_vertex_normals();
+}
+
+fn is_degenerate(f: &[usize; 3]) -> bool {
+    f[0] == f[1] || f[1] == f[2] || f[2] == f[0]
 }
 
 /// Vertex clustering simplification using uniform grid
@@ -281,18 +351,41 @@ pub fn loop_subdivision(mesh: &mut TriangleMesh) {
     // Update existing vertices using precomputed neighbors
     let mut smoothed_vertices = new_vertices.clone();
 
+    // A vertex on the boundary is moved along the boundary only: Loop's
+    // boundary mask is `3/4 v + 1/8 (b0 + b1)` over its two neighbours across
+    // boundary edges (edges with a single triangle), which is also what Open3D's
+    // `subdivide_loop` does. The interior mask, applied to a boundary vertex,
+    // pulls it off the boundary curve towards the interior: measured on an open
+    // 4x4 height-field grid, the vertex at (1, 0) on the straight y = 0 border
+    // went to (1.094, 0.188) instead of staying on y = 0 at (1.0, 0.0), and
+    // the corner (0, 0) went to (0.375, 0.375) instead of (0.125, 0.125).
+    let is_boundary_edge = |a: usize, b: usize| -> bool {
+        edge_opposites
+            .get(&(a.min(b), a.max(b)))
+            .is_some_and(|opp| opp.len() == 1)
+    };
     for i in 0..num_vertices {
         let neighbors = &vertex_neighbors[i];
-        if !neighbors.is_empty() {
+        if neighbors.is_empty() {
+            continue;
+        }
+        let boundary: Vec<usize> = neighbors
+            .iter()
+            .copied()
+            .filter(|&j| is_boundary_edge(i, j))
+            .collect();
+        let (beta, ring): (f32, Vec<usize>) = if boundary.len() >= 2 {
+            (1.0 / 8.0, boundary)
+        } else {
             let n = neighbors.len() as f32;
             let beta = if n > 3.0 { 3.0 / (8.0 * n) } else { 3.0 / 16.0 };
-
-            let mut new_pos = new_vertices[i].coords * (1.0 - n * beta);
-            for &neighbor in neighbors {
-                new_pos += new_vertices[neighbor].coords * beta;
-            }
-            smoothed_vertices[i] = Point3::from(new_pos);
+            (beta, neighbors.iter().copied().collect())
+        };
+        let mut new_pos = mesh.vertices[i].coords * (1.0 - ring.len() as f32 * beta);
+        for &neighbor in &ring {
+            new_pos += mesh.vertices[neighbor].coords * beta;
         }
+        smoothed_vertices[i] = Point3::from(new_pos);
     }
 
     // Create new faces (each triangle becomes 4)

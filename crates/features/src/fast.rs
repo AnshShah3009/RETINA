@@ -276,10 +276,15 @@ fn sliding_max9(diffs: &[i32; 16], state: &[u8; 16], want: u8) -> i32 {
 }
 
 /// Non-maximum suppression for FAST keypoints
+///
+/// Greedy: candidates are visited strongest first (stable on ties) and one is
+/// kept unless a keypoint already kept lies closer than 5 pixels.
 pub fn non_max_suppression(keypoints: KeyPoints, image: &GrayImage, threshold: u8) -> KeyPoints {
+    // Each score depends only on its own keypoint, so scoring in parallel and
+    // collecting in order gives exactly the serial list.
     let mut scored_kps: Vec<(KeyPoint, f64)> = keypoints
         .keypoints
-        .into_iter()
+        .into_par_iter()
         .map(|kp| {
             let score = corner_score(image, kp.x as i32, kp.y as i32, threshold);
             (kp, score)
@@ -291,28 +296,130 @@ pub fn non_max_suppression(keypoints: KeyPoints, image: &GrayImage, threshold: u
     // equal scores keep a deterministic order.
     scored_kps.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    let mut suppressed: Vec<KeyPoint> = Vec::new();
-    let min_distance = 5.0; // Minimum distance between keypoints
-
-    for (kp, _) in scored_kps {
-        // Check if this keypoint is far enough from all kept keypoints
-        let mut keep = true;
-        for kept_kp in &suppressed {
-            let dx = kp.x - kept_kp.x;
-            let dy = kp.y - kept_kp.y;
-            let dist_sq = dx * dx + dy * dy;
-            if dist_sq < min_distance * min_distance {
-                keep = false;
-                break;
+    let suppressed = match KeptGrid::new(&scored_kps) {
+        // The grid only narrows which kept keypoints are compared against; the
+        // comparison is the same `nms_too_close` test, so the kept list is
+        // identical to the all-pairs scan below. Comparing every kept keypoint
+        // was quadratic: 24k candidates on a 1080p frame took ~85 ms.
+        Some(mut grid) => {
+            let mut kept: Vec<KeyPoint> = Vec::new();
+            for (kp, _) in scored_kps {
+                if !grid.any_close(&kp, &kept) {
+                    grid.insert(&kp, kept.len());
+                    kept.push(kp);
+                }
             }
+            kept
         }
-        if keep {
-            suppressed.push(kp);
+        // Non-finite or far-flung coordinates: compare against every kept
+        // keypoint.
+        None => {
+            let mut kept: Vec<KeyPoint> = Vec::new();
+            for (kp, _) in scored_kps {
+                if !kept.iter().any(|kept_kp| nms_too_close(&kp, kept_kp)) {
+                    kept.push(kp);
+                }
+            }
+            kept
         }
-    }
+    };
 
     KeyPoints {
         keypoints: suppressed,
+    }
+}
+
+/// The suppression test: closer than 5 pixels (squared distance below 25).
+#[inline]
+fn nms_too_close(kp: &KeyPoint, kept_kp: &KeyPoint) -> bool {
+    let min_distance = 5.0; // Minimum distance between keypoints
+    let dx = kp.x - kept_kp.x;
+    let dy = kp.y - kept_kp.y;
+    dx * dx + dy * dy < min_distance * min_distance
+}
+
+/// Bucket grid over the candidates' bounding box for [`non_max_suppression`].
+///
+/// Cells are 8 pixels on a side, wider than the 5-pixel suppression radius, so
+/// a kept keypoint within that radius of a candidate is always in the
+/// candidate's cell or one of its eight neighbours, with three pixels of slack
+/// for floating-point rounding. Each cell is a singly linked list of indices
+/// into the kept list (`head` per cell, `next` per kept keypoint).
+struct KeptGrid {
+    min_x: f64,
+    min_y: f64,
+    cols: usize,
+    rows: usize,
+    head: Vec<u32>,
+    next: Vec<u32>,
+}
+
+impl KeptGrid {
+    const CELL: f64 = 8.0;
+    /// Upper bound on cells, so a sparse spread of far-apart points falls back
+    /// to the all-pairs scan instead of allocating a huge grid.
+    const MAX_CELLS: f64 = 16.0 * 1024.0 * 1024.0;
+
+    fn new(candidates: &[(KeyPoint, f64)]) -> Option<Self> {
+        if candidates.is_empty() || candidates.len() >= u32::MAX as usize {
+            return None;
+        }
+        let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
+        let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for (kp, _) in candidates {
+            if !kp.x.is_finite() || !kp.y.is_finite() {
+                return None;
+            }
+            min_x = min_x.min(kp.x);
+            min_y = min_y.min(kp.y);
+            max_x = max_x.max(kp.x);
+            max_y = max_y.max(kp.y);
+        }
+        let cols = ((max_x - min_x) / Self::CELL).floor() + 1.0;
+        let rows = ((max_y - min_y) / Self::CELL).floor() + 1.0;
+        // Also rejects a NaN product from an overflowing span.
+        if !(cols * rows <= Self::MAX_CELLS) {
+            return None;
+        }
+        let (cols, rows) = (cols as usize, rows as usize);
+        Some(Self {
+            min_x,
+            min_y,
+            cols,
+            rows,
+            head: vec![u32::MAX; cols * rows],
+            next: Vec::new(),
+        })
+    }
+
+    fn cell_of(&self, kp: &KeyPoint) -> (usize, usize) {
+        let cx = ((kp.x - self.min_x) / Self::CELL) as usize;
+        let cy = ((kp.y - self.min_y) / Self::CELL) as usize;
+        (cx.min(self.cols - 1), cy.min(self.rows - 1))
+    }
+
+    /// Whether any kept keypoint in the 3x3 cell neighbourhood is too close.
+    fn any_close(&self, kp: &KeyPoint, kept: &[KeyPoint]) -> bool {
+        let (cx, cy) = self.cell_of(kp);
+        for ny in cy.saturating_sub(1)..=(cy + 1).min(self.rows - 1) {
+            for nx in cx.saturating_sub(1)..=(cx + 1).min(self.cols - 1) {
+                let mut i = self.head[ny * self.cols + nx];
+                while i != u32::MAX {
+                    if nms_too_close(kp, &kept[i as usize]) {
+                        return true;
+                    }
+                    i = self.next[i as usize];
+                }
+            }
+        }
+        false
+    }
+
+    fn insert(&mut self, kp: &KeyPoint, index: usize) {
+        let (cx, cy) = self.cell_of(kp);
+        let cell = cy * self.cols + cx;
+        self.next.push(self.head[cell]);
+        self.head[cell] = index as u32;
     }
 }
 
@@ -682,6 +789,89 @@ mod tests {
                 .iter()
                 .all(|kp| kp.x.is_finite() && kp.y.is_finite()),
             "surviving keypoints must be finite"
+        );
+    }
+
+    /// The all-pairs greedy suppression the grid version replaced.
+    fn reference_nms(keypoints: KeyPoints, image: &GrayImage, threshold: u8) -> Vec<KeyPoint> {
+        let mut scored: Vec<(KeyPoint, f64)> = keypoints
+            .keypoints
+            .into_iter()
+            .map(|kp| {
+                let s = corner_score(image, kp.x as i32, kp.y as i32, threshold);
+                (kp, s)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let mut kept: Vec<KeyPoint> = Vec::new();
+        for (kp, _) in scored {
+            let close = kept.iter().any(|k| {
+                let dx = kp.x - k.x;
+                let dy = kp.y - k.y;
+                dx * dx + dy * dy < 25.0
+            });
+            if !close {
+                kept.push(kp);
+            }
+        }
+        kept
+    }
+
+    fn same_points(a: &[KeyPoint], b: &[KeyPoint]) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(p, q)| p.x.to_bits() == q.x.to_bits() && p.y.to_bits() == q.y.to_bits())
+    }
+
+    /// The bucketed suppression keeps exactly the keypoints, in exactly the
+    /// order, that comparing against every kept keypoint does: on real FAST
+    /// output, on fractional coordinates sitting right at the 5-pixel radius,
+    /// and on input with a non-finite coordinate (all-pairs fallback).
+    #[test]
+    fn non_max_suppression_matches_all_pairs_scan() {
+        let (w, h) = (160u32, 120u32);
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let img = GrayImage::from_fn(w, h, |x, y| {
+            Luma([(((x / 7) * 37 + (y / 5) * 91) % 251) as u8 ^ (next() % 9) as u8])
+        });
+        let fast = fast_detect(&img, 10, usize::MAX);
+        assert!(fast.len() > 100, "test image must give many candidates");
+        let expect = reference_nms(fast.clone(), &img, 10);
+        let got = non_max_suppression(fast, &img, 10);
+        assert!(same_points(&got.keypoints, &expect));
+
+        let mut pts = Vec::new();
+        for i in 0..2000 {
+            let x = (next() % 1600) as f64 / 10.0;
+            let y = (next() % 1200) as f64 / 10.0;
+            pts.push(KeyPoint::new(x, y));
+            // A partner exactly on, just inside and just outside the radius.
+            let d = [5.0, 4.999_999_999, 5.000_000_001][i % 3];
+            pts.push(KeyPoint::new(x + d, y));
+            pts.push(KeyPoint::new(x, y - d));
+        }
+        let kps = KeyPoints { keypoints: pts };
+        let expect = reference_nms(kps.clone(), &img, 10);
+        let got = non_max_suppression(kps.clone(), &img, 10);
+        assert!(same_points(&got.keypoints, &expect));
+
+        let mut with_nan = kps;
+        with_nan.keypoints.push(KeyPoint::new(f64::NAN, 3.0));
+        let expect = reference_nms(with_nan.clone(), &img, 10);
+        let got = non_max_suppression(with_nan, &img, 10);
+        assert_eq!(got.keypoints.len(), expect.len());
+        assert!(
+            got.keypoints
+                .iter()
+                .zip(&expect)
+                .all(|(p, q)| p.x.to_bits() == q.x.to_bits() && p.y.to_bits() == q.y.to_bits())
         );
     }
 }

@@ -62,8 +62,13 @@ pub fn match_template_ctx(
     let out_w = image.width() - templ.width() + 1;
     let out_h = image.height() - templ.height() + 1;
 
-    // Check for GPU acceleration
-    if let Ok(ComputeDevice::Gpu(gpu)) = group.device()
+    // The GPU shader computes SqDiff and Ccorr only; for the other four
+    // methods it writes 0.0 to every output and still returns Ok, so routing
+    // them to the GPU silently produced an all-zero score map.
+    if matches!(
+        method,
+        TemplateMatchMethod::SqDiff | TemplateMatchMethod::Ccorr
+    ) && let Ok(ComputeDevice::Gpu(gpu)) = group.device()
         && let Ok(res) = match_template_gpu(gpu, image, templ, method)
     {
         return res;
@@ -73,68 +78,54 @@ pub fn match_template_ctx(
 
     let tw = templ.width() as usize;
     let th = templ.height() as usize;
+    let iw = image.width() as usize;
+    let i_raw = image.as_raw();
     let t_raw = templ.as_raw();
 
-    let t_mean = mean_u8(t_raw);
-    let t_sq_sum = sum_sq_u8(t_raw);
-    let t_var_sum = t_raw
-        .iter()
-        .map(|&v| {
-            let d = v as f32 - t_mean;
-            d * d
-        })
-        .sum::<f32>();
+    // Every window sum is a sum of integers, so it is accumulated exactly in
+    // u64 and only the normalisation is floating point (f64), as OpenCV does
+    // with its CV_64F integral images.
+    let n = (tw * th) as f64;
+    let t_sum: u64 = t_raw.iter().map(|&v| v as u64).sum();
+    let t_sum2: u64 = t_raw.iter().map(|&v| (v as u64) * (v as u64)).sum();
+    let t_mean = t_sum as f64 / n;
+    // sum((T - mean(T))^2), the CCOEFF template norm squared.
+    let t_var_sum = (t_sum2 as f64 - t_sum as f64 * t_mean).max(0.0);
+
+    // `cv::matchTemplate`: a constant template has no correlation
+    // coefficient, and OpenCV defines the TM_CCOEFF_NORMED result as 1.
+    if method == TemplateMatchMethod::CcoeffNormed && t_var_sum / n < f64::EPSILON {
+        return MatchResult {
+            data: vec![1.0; (out_w * out_h) as usize],
+            width: out_w,
+            height: out_h,
+        };
+    }
+    let t_norm = match method {
+        TemplateMatchMethod::CcoeffNormed => t_var_sum.sqrt(),
+        _ => (t_sum2 as f64).sqrt(),
+    };
 
     group.run(|| {
         out.par_chunks_mut(out_w as usize)
             .enumerate()
             .for_each(|(y, row)| {
-                for x in 0..out_w as usize {
-                    let mut sum_i = 0.0f32;
-                    let mut sum_i_sq = 0.0f32;
-                    let mut cross = 0.0f32;
+                for (x, o) in row.iter_mut().enumerate() {
+                    let mut sum_i = 0u64;
+                    let mut sum_i_sq = 0u64;
+                    let mut cross = 0u64;
 
                     for j in 0..th {
-                        let src_row = (y + j) as u32;
-                        for i in 0..tw {
-                            let src_col = (x + i) as u32;
-                            let iv = image.get_pixel(src_col, src_row)[0] as f32;
-                            let tv = t_raw[j * tw + i] as f32;
+                        let src = &i_raw[(y + j) * iw + x..][..tw];
+                        let tpl = &t_raw[j * tw..][..tw];
+                        for (&iv, &tv) in src.iter().zip(tpl) {
+                            let (iv, tv) = (iv as u64, tv as u64);
                             sum_i += iv;
                             sum_i_sq += iv * iv;
                             cross += iv * tv;
                         }
                     }
-
-                    let n = (tw * th) as f32;
-                    let i_mean = sum_i / n;
-
-                    row[x] = match method {
-                        TemplateMatchMethod::SqDiff => {
-                            // ||I - T||^2 = ||I||^2 + ||T||^2 - 2 * <I, T>
-                            sum_i_sq + t_sq_sum - 2.0 * cross
-                        }
-                        TemplateMatchMethod::SqDiffNormed => {
-                            let sqdiff = sum_i_sq + t_sq_sum - 2.0 * cross;
-                            let denom = (sum_i_sq * t_sq_sum).sqrt();
-                            if denom > 1e-12 { sqdiff / denom } else { 0.0 }
-                        }
-                        TemplateMatchMethod::Ccorr => cross,
-                        TemplateMatchMethod::CcorrNormed => {
-                            let denom = (sum_i_sq * t_sq_sum).sqrt();
-                            if denom > 1e-12 { cross / denom } else { 0.0 }
-                        }
-                        TemplateMatchMethod::Ccoeff => {
-                            // sum((I - meanI) * (T - meanT)) = <I,T> - N*meanI*meanT
-                            cross - n * i_mean * t_mean
-                        }
-                        TemplateMatchMethod::CcoeffNormed => {
-                            let coeff = cross - n * i_mean * t_mean;
-                            let i_var = sum_i_sq - n * i_mean * i_mean;
-                            let denom = (i_var * t_var_sum).sqrt();
-                            if denom > 1e-12 { coeff / denom } else { 0.0 }
-                        }
-                    };
+                    *o = score(method, sum_i, sum_i_sq, cross, n, t_mean, t_sum2, t_norm) as f32;
                 }
             });
     });
@@ -143,6 +134,68 @@ pub fn match_template_ctx(
         data: out,
         width: out_w,
         height: out_h,
+    }
+}
+
+/// One output value of `cv::matchTemplate` (`common_matchTemplate` in
+/// OpenCV's templmatch.cpp), from the window's exact sums.
+///
+/// The normed methods divide by `t = sqrt(window energy) * |T|` only while the
+/// quotient is in range: `|num| < t` divides, `|num| < 1.125 t` saturates to
+/// +-1, and anything larger (including `t == 0`) is 0 - or 1 for
+/// TM_SQDIFF_NORMED, the "no match" end of its scale. A window with no
+/// energy (all black for SQDIFF/CCORR, flat for CCOEFF) therefore scores 1
+/// under TM_SQDIFF_NORMED; dividing by a zero denominator used to return 0,
+/// i.e. a black window was reported as a perfect match, and unclamped
+/// quotients reached 600+ where OpenCV returns at most 1.
+#[allow(clippy::too_many_arguments)]
+fn score(
+    method: TemplateMatchMethod,
+    sum_i: u64,
+    sum_i_sq: u64,
+    cross: u64,
+    n: f64,
+    t_mean: f64,
+    t_sum2: u64,
+    t_norm: f64,
+) -> f64 {
+    let wnd_sum2 = sum_i_sq as f64;
+    let mut wnd_mean2 = 0.0;
+    let mut num = cross as f64;
+    match method {
+        TemplateMatchMethod::Ccorr => return num,
+        TemplateMatchMethod::Ccoeff | TemplateMatchMethod::CcoeffNormed => {
+            let s = sum_i as f64;
+            wnd_mean2 = s * s / n;
+            num -= s * t_mean;
+            if method == TemplateMatchMethod::Ccoeff {
+                return num;
+            }
+        }
+        TemplateMatchMethod::SqDiff | TemplateMatchMethod::SqDiffNormed => {
+            // Exact in integers; the subtraction cannot go negative.
+            num = (sum_i_sq + t_sum2) as f64 - 2.0 * num;
+            if method == TemplateMatchMethod::SqDiff {
+                return num;
+            }
+        }
+        TemplateMatchMethod::CcorrNormed => {}
+    }
+
+    let diff2 = (wnd_sum2 - wnd_mean2).max(0.0);
+    let t = if diff2 <= (10.0 * f32::EPSILON as f64 * wnd_sum2).min(0.5) {
+        0.0 // flat window: avoid dividing rounding noise
+    } else {
+        diff2.sqrt() * t_norm
+    };
+    if num.abs() < t {
+        num / t
+    } else if num.abs() < t * 1.125 {
+        num.signum()
+    } else if method == TemplateMatchMethod::SqDiffNormed {
+        1.0
+    } else {
+        0.0
     }
 }
 
@@ -215,20 +268,6 @@ pub fn min_max_loc(result: &MatchResult) -> ((u32, u32, f32), (u32, u32, f32)) {
     }
 
     ((min_xy.0, min_xy.1, min_val), (max_xy.0, max_xy.1, max_val))
-}
-
-fn mean_u8(values: &[u8]) -> f32 {
-    values.iter().map(|&v| v as f32).sum::<f32>() / values.len() as f32
-}
-
-fn sum_sq_u8(values: &[u8]) -> f32 {
-    values
-        .iter()
-        .map(|&v| {
-            let f = v as f32;
-            f * f
-        })
-        .sum()
 }
 
 #[cfg(test)]

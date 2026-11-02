@@ -165,29 +165,41 @@ pub fn solve_pnp_dlt(
         );
         let h = h_norm * t_src_m;
 
-        // Malis/Vargas decomposition: H ≈ [r1 r2 t].
+        // Decompose. The homography maps in-plane coordinates
+        // `(a, b) = ((X - c)·u, (X - c)·v)` to the normalised image, and a
+        // world point on the plane is `X = c + a·u + b·v`, so
+        //
+        //     x ~ R·X + t = [R·u  R·v  R·c + t] · (a, b, 1)ᵀ,
+        //
+        // i.e. `H ~ λ⁻¹ [R·u  R·v  R·c + t]`. The columns of `H` are therefore
+        // the rotation expressed in the *plane* basis `B = [u v n]`, and the
+        // third column is the camera-frame position of the centroid, not `t`.
+        // Reading `[h1 h2 h1×h2]` as `R` and `h3` as `t` - what this used to
+        // do - is right only when `B = I` and `c = 0`. Measured on a 5×5 board
+        // whose origin is a corner: 225-577 px of reprojection error and a
+        // translation 0.86 off at 2 m depth.
         let h1 = h.column(0);
         let h2 = h.column(1);
         let h3 = h.column(2);
         let norm1 = h1.norm();
-        if norm1 < 1e-12 {
+        let norm2 = h2.norm();
+        if norm1 < 1e-12 || norm2 < 1e-12 {
             return Err(cv_core::Error::AlgorithmError(
                 "Degenerate homography columns in solve_pnp_dlt".to_string(),
             ));
         }
-        let mut lambda = 1.0 / norm1;
-        let mut r1 = lambda * h1;
-        let mut r2 = lambda * h2;
-        let mut r3 = r1.cross(&r2);
-        let mut rr = Matrix3::from_columns(&[r1, r2, r3]);
-        if rr.determinant() < 0.0 {
+        // Scale from both rotation columns, sign from cheirality: the centroid
+        // `R·c + t = λ·h3` must lie in front of the camera. `det([r1 r2 r1×r2])`
+        // is `|r1×r2|² >= 0` whatever the sign of λ, so it cannot decide this.
+        let mut lambda = 2.0 / (norm1 + norm2);
+        if h3[2] * lambda < 0.0 {
             lambda = -lambda;
-            r1 = lambda * h1;
-            r2 = lambda * h2;
-            r3 = r1.cross(&r2);
-            rr = Matrix3::from_columns(&[r1, r2, r3]);
         }
-        // Orthonormalize (removes noise-induced drift from pure rotation).
+        let r1 = lambda * h1;
+        let r2 = lambda * h2;
+        let r3 = r1.cross(&r2);
+        let rr = Matrix3::from_columns(&[r1, r2, r3]);
+        // Nearest rotation (removes noise-induced drift).
         let rr_svd = rr.svd(true, true);
         let ru = rr_svd.u.ok_or_else(|| {
             cv_core::Error::AlgorithmError("SVD failed in pose extraction".to_string())
@@ -195,52 +207,21 @@ pub fn solve_pnp_dlt(
         let rv = rr_svd.v_t.ok_or_else(|| {
             cv_core::Error::AlgorithmError("SVD failed in pose extraction".to_string())
         })?;
-        let mut rot = ru * rv;
-        if rot.determinant() < 0.0 {
-            // Flip the least-significant direction and redo.
-            let u_fixed = {
-                let mut u2 = ru;
-                for c in 0..3 {
-                    u2[(c, 2)] = -u2[(c, 2)];
-                }
-                u2
-            };
-            rot = u_fixed * rv;
-        }
-        let trans = lambda * h3;
-
-        // The in-plane PCA basis sign is arbitrary; each sign combination
-        // yields a different impostor pose (a 180° rotation about some axis)
-        // that leaves depths unchanged and defeats cheirality checks.
-        // Disambiguate by direct normalized-coordinate reprojection error
-        // over all four det(+1) sign-flip variants.
-        let mut best_rot = rot;
-        let mut best_err = f64::INFINITY;
-        let signs: [[f64; 3]; 4] = [
-            [1.0, 1.0, 1.0],
-            [1.0, -1.0, -1.0],
-            [-1.0, 1.0, -1.0],
-            [-1.0, -1.0, 1.0],
-        ];
-        for sg in signs {
-            let d = Matrix3::new(sg[0], 0.0, 0.0, 0.0, sg[1], 0.0, 0.0, 0.0, sg[2]);
-            let cand = rot * d;
-            let mut acc = 0.0;
-            for (obj, &(xn, yn)) in object_points.iter().zip(norm_image.iter()) {
-                let pc = cand * obj.coords + trans;
-                if !pc[2].is_finite() || pc[2].abs() < 1e-12 {
-                    acc = f64::INFINITY;
-                    break;
-                }
-                acc += (pc[0] / pc[2] - xn).powi(2) + (pc[1] / pc[2] - yn).powi(2);
+        let mut rot_plane = ru * rv;
+        if rot_plane.determinant() < 0.0 {
+            let mut u2 = ru;
+            for c in 0..3 {
+                u2[(c, 2)] = -u2[(c, 2)];
             }
-            if acc < best_err {
-                best_err = acc;
-                best_rot = cand;
-            }
+            rot_plane = u2 * rv;
         }
+        // `rot_plane = R·B` with `B = [u v n]` a proper rotation (v = n × u),
+        // so `R = rot_plane·Bᵀ`.
+        let basis = Matrix3::from_columns(&[u_axis.into_owned(), v_axis, n_axis.into_owned()]);
+        let rot = rot_plane * basis.transpose();
+        let trans = lambda * h3 - rot * centroid;
 
-        Pose::new(best_rot, trans)
+        Pose::new(rot, trans)
     } else {
         // ---- General DLT with Hartley normalization of object points ----
         let mean = centroid;
@@ -1004,6 +985,22 @@ impl PnpSolver {
                 "At least 4 points required for EPnP".into(),
             ));
         }
+        if image_points.len() != n {
+            return Err(cv_core::Error::InvalidInput(
+                "EPnP needs one image point per object point".into(),
+            ));
+        }
+        // The two SVDs below do not return on non-finite input; one NaN pixel
+        // hung this call. Same guard as `solve_pnp_dlt`.
+        if object_points
+            .iter()
+            .any(|p| !p.iter().all(|v| v.is_finite()))
+            || image_points.iter().flatten().any(|v| !v.is_finite())
+        {
+            return Err(cv_core::Error::InvalidInput(
+                "EPnP correspondences must be finite".into(),
+            ));
+        }
 
         // 1. Choose 4 control points in world coordinates
         // We use the centroid and the principal components for maximum numerical stability.
@@ -1058,6 +1055,12 @@ impl PnpSolver {
             let pt_norm = model.unproject(&pt_img, 1.0);
             let u = pt_norm.x;
             let v = pt_norm.y;
+            // Non-finite intrinsics in `model` reach the SVD this way.
+            if !u.is_finite() || !v.is_finite() {
+                return Err(cv_core::Error::InvalidInput(
+                    "EPnP: an image point does not unproject to a finite ray".into(),
+                ));
+            }
 
             let a = &alphas[i];
 

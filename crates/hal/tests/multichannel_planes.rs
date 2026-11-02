@@ -632,3 +632,37 @@ fn sift_extrema_single_channel_still_works() {
         );
     }
 }
+
+/// A sample a hair outside the source edge is the edge pixel, on both
+/// backends. With an exact `[0, w - 1]` bounds test the outcome depended on the
+/// last ulp of the mapped coordinate: macOS CI (Metal, fused multiply-add) got
+/// -7.45e-9 for `-0.05 * 10 + 0.5` and wrote 0 where the CPU, rounding step by
+/// step, got 0.0 and sampled the pixel. A translation of -1e-6 puts every
+/// column of the first destination column just outside the source.
+#[test]
+fn warp_samples_an_edge_coordinate_off_by_an_ulp() {
+    let cpu = CpuBackend::new().unwrap();
+    let img = image();
+    let m = [[1.0f32, 0.0, -1e-6], [0.0, 1.0, -1e-6], [0.0, 0.0, 1.0]];
+    let out = cpu.warp(&img, &m, (W, H), WarpType::Affine).unwrap();
+    let (o, i) = (data(&out), data(&img));
+    for c in 0..C {
+        let p = c * H * W;
+        assert_eq!(
+            o[p], i[p],
+            "plane {c}: the (0, 0) sample at -1e-6 px fell outside"
+        );
+    }
+    if let Some(g) = gpu() {
+        let go = g
+            .warp(&img.to_gpu_ctx(g).unwrap(), &m, (W, H), WarpType::Affine)
+            .unwrap();
+        let go = down(g, &go);
+        for (k, (a, b)) in data(&go).iter().zip(o).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-3 * b.abs().max(1.0),
+                "GPU sample {k}: {a} vs CPU {b}"
+            );
+        }
+    }
+}

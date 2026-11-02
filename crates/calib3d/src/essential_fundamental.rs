@@ -128,6 +128,18 @@ pub fn find_essential_mat_ransac(
     threshold_px: f64,
     max_iters: usize,
 ) -> Result<(Matrix3<f64>, Vec<bool>)> {
+    // `zip` below stops at the shorter list, so mismatched inputs used to be
+    // estimated on a silently truncated prefix and return a mask shorter than
+    // `pts1`: 60 against 30 points gave `Ok` with a 30-entry mask. OpenCV
+    // rejects the call.
+    if pts1.len() != pts2.len() {
+        return Err(cv_core::Error::InvalidInput(format!(
+            "{}: pts1 has {} points but pts2 has {}",
+            "find_essential_mat_ransac",
+            pts1.len(),
+            pts2.len()
+        )));
+    }
     let (n1, n2) = normalize_with_intrinsics(pts1, pts2, intrinsics);
     let data: Vec<(Point2<f64>, Point2<f64>)> = n1.into_iter().zip(n2).collect();
 
@@ -157,6 +169,15 @@ pub fn find_fundamental_mat_ransac(
     threshold_px: f64,
     max_iters: usize,
 ) -> Result<(Matrix3<f64>, Vec<bool>)> {
+    // Same truncation hazard as `find_essential_mat_ransac`.
+    if pts1.len() != pts2.len() {
+        return Err(cv_core::Error::InvalidInput(format!(
+            "{}: pts1 has {} points but pts2 has {}",
+            "find_fundamental_mat_ransac",
+            pts1.len(),
+            pts2.len()
+        )));
+    }
     let data: Vec<(Point2<f64>, Point2<f64>)> =
         pts1.iter().cloned().zip(pts2.iter().cloned()).collect();
 

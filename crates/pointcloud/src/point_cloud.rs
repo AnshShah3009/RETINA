@@ -412,9 +412,15 @@ pub fn compute_normals_from_depth(
         .collect()
 }
 
-/// Remove statistical outliers.
-/// Compute mean distance to `k` neighbors for each point.
-/// Points with mean distance > global_mean + std_ratio * std_dev are removed.
+/// Remove statistical outliers (Open3D's `remove_statistical_outlier`).
+///
+/// For each point, the mean distance to its `k` nearest points **including
+/// itself** (Open3D's `KNN(k)` returns the query point first, at distance 0,
+/// and averages over all `k`). A point is kept when its mean is below
+/// `global_mean + std_ratio * std_dev`, with `std_dev` the sample standard
+/// deviation (`n - 1`) of the per-point means. A point whose mean is exactly 0
+/// (all of its neighbours coincide with it) is kept; Open3D drops it, as a side
+/// effect of using "mean > 0" as its validity flag.
 ///
 /// A point with a non-finite coordinate has no distance to measure, so it is
 /// never an inlier and is left out of the mean and standard deviation.
@@ -447,29 +453,22 @@ pub fn remove_statistical_outliers(
                 return f32::NAN;
             }
             let query_point = [p.x, p.y, p.z];
-            // nearest_neighbor_iter returns k+1 including itself (dist 0).
-            // take(k+1) gives nearest neighbors.
-            let neighbors: Vec<&PointWrapper> = tree
-                .nearest_neighbor_iter(query_point)
-                .take(k + 1)
-                .collect();
-
-            // Sum distances to k neighbors (skip itself)
-            let mut sum_dist = 0.0;
-            let mut count = 0;
-            for (idx, n) in neighbors.iter().enumerate() {
-                if idx == 0 {
-                    continue;
-                } // skip self
-                sum_dist += n.distance_2(&query_point).sqrt();
-                count += 1;
+            // The neighbourhood includes the point itself: the first hit is
+            // the query (or a duplicate of it) at distance 0. This used to
+            // skip that hit and average over `k` *other* points, with a
+            // population standard deviation and an inclusive threshold - the
+            // same parameters then kept a different set from Open3D (measured
+            // on 500 spread points: (5, 0.5) kept 358 where Open3D keeps 364).
+            let neighbors: Vec<&PointWrapper> =
+                tree.nearest_neighbor_iter(query_point).take(k).collect();
+            if neighbors.is_empty() {
+                return f32::NAN;
             }
-
-            if count > 0 {
-                sum_dist / count as f32
-            } else {
-                0.0
-            }
+            let sum_dist: f32 = neighbors
+                .iter()
+                .map(|n| n.distance_2(&query_point).sqrt())
+                .sum();
+            sum_dist / neighbors.len() as f32
         })
         .collect();
 
@@ -480,19 +479,16 @@ pub fn remove_statistical_outliers(
         .filter(|d| d.is_finite())
         .map(|&d| d as f64)
         .collect();
-    let mean_dist = cv_math::mean(&measured).unwrap_or(0.0) as f32;
-    // std dev
+    let mean_dist = cv_math::mean(&measured).unwrap_or(0.0);
+    // Sample standard deviation, as Open3D.
     let variance = measured
         .iter()
-        .map(|&d| {
-            let diff = d as f32 - mean_dist;
-            diff * diff
-        })
-        .sum::<f32>()
-        / measured.len().max(1) as f32;
+        .map(|&d| (d - mean_dist) * (d - mean_dist))
+        .sum::<f64>()
+        / measured.len().saturating_sub(1).max(1) as f64;
     let std_dev = variance.sqrt();
 
-    let threshold = mean_dist + std_ratio as f32 * std_dev;
+    let threshold = mean_dist + std_ratio * std_dev;
 
     let mut inliers: Vec<usize> = Vec::new();
     let mut new_points = Vec::new();
@@ -508,7 +504,9 @@ pub fn remove_statistical_outliers(
     };
 
     for (i, &dist) in distances.iter().enumerate() {
-        if dist <= threshold {
+        // Strict, as Open3D; a point with no spread at all (mean 0) is kept.
+        // NaN (no position) fails both tests and is dropped.
+        if (dist as f64) < threshold || dist == 0.0 {
             inliers.push(i);
             new_points.push(pc.points[i]);
             if let Some(c) = &pc.colors
@@ -536,6 +534,8 @@ pub fn remove_statistical_outliers(
 
 /// Remove radius outliers.
 /// Points with fewer than `min_points` neighbors within `radius` are removed.
+/// A neighbour is another point (the point itself is not counted), as in
+/// Open3D's `remove_radius_outlier(nb_points, radius)`.
 ///
 /// A negative radius contains no point at all, so every point is an outlier;
 /// `locate_within_distance` takes a *squared* radius, which used to turn
@@ -561,14 +561,23 @@ pub fn remove_radius_outliers(
     // empty set for it rather than panicking).
     let r2 = if radius < 0.0 { -1.0 } else { radius * radius };
 
+    // A neighbour is another point: the point itself is not counted. Counting
+    // it (as this used to) made every threshold one too lenient, so with
+    // `min_points = 1` an isolated point with no neighbour at all was kept -
+    // measured on 500 spread points at radius 0.2: all 500 kept, where Open3D's
+    // `remove_radius_outlier(1, 0.2)` keeps 131. Duplicates of a point are
+    // distinct points and do count.
     let inlier_mask: Vec<bool> = pc
         .points
         .par_iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
             let query_point = [p.x, p.y, p.z];
             // locate_within_distance uses squared distance
-            let count = tree.locate_within_distance(query_point, r2).count();
-            // count includes self.
+            let count = tree
+                .locate_within_distance(query_point, r2)
+                .filter(|w| w.0 != i)
+                .count();
             count >= min_points
         })
         .collect();

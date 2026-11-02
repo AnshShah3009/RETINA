@@ -27,30 +27,40 @@ pub fn compute_cdf(hist: &[u32; 256]) -> [u32; 256] {
     cdf
 }
 
+/// `cv::equalizeHist`'s LUT for a histogram of `total` pixels, or `None` for
+/// a single-valued image (which OpenCV returns unchanged).
+///
+/// `lut[v] = saturate_cast<uchar>(sum * scale)` where `sum` is the count of
+/// pixels in `(first, v]`, `first` is the lowest occupied level and
+/// `scale = 255.f / (total - hist[first])` in f32; `saturate_cast` rounds
+/// half to even. Dividing first and rounding half away from zero, as both
+/// copies here used to, put every `.5` entry one level above cv2.
+pub(crate) fn equalize_hist_lut(hist: &[u32; 256], total: u64) -> Option<[u8; 256]> {
+    let first = hist.iter().position(|&c| c > 0)?;
+    if hist[first] as u64 == total {
+        return None;
+    }
+    let scale = 255.0f32 / (total - hist[first] as u64) as f32;
+    let mut lut = [0u8; 256];
+    let mut sum = 0u64;
+    for (v, l) in lut.iter_mut().enumerate().skip(first + 1) {
+        sum += hist[v] as u64;
+        *l = (sum as f32 * scale).round_ties_even().clamp(0.0, 255.0) as u8;
+    }
+    Some(lut)
+}
+
+/// `cv2.equalizeHist`.
 #[allow(clippy::needless_range_loop)]
 pub fn histogram_equalization(image: &GrayImage) -> GrayImage {
     if image.width() == 0 || image.height() == 0 {
         return image.clone();
     }
     let hist = compute_histogram(image);
-    let cdf = compute_cdf(&hist);
-
-    let cdf_min = cdf.iter().find(|&&x| x > 0).copied().unwrap_or(0);
-    let total = image.width() * image.height();
-
-    let mut lut = [0u8; 256];
-    if total > cdf_min {
-        for i in 0..256 {
-            let val = ((cdf[i].saturating_sub(cdf_min)) as f32 / (total - cdf_min) as f32 * 255.0)
-                .round() as u8;
-            lut[i] = val;
-        }
-    } else {
-        // If total == cdf_min (e.g. constant image), identity mapping
-        for i in 0..256 {
-            lut[i] = i as u8;
-        }
-    }
+    let total = image.width() as u64 * image.height() as u64;
+    let Some(lut) = equalize_hist_lut(&hist, total) else {
+        return image.clone();
+    };
 
     let mut output = GrayImage::new(image.width(), image.height());
     let src_raw = image.as_raw();
