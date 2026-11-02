@@ -120,20 +120,23 @@ pub fn compute_fpfh_features(cloud: &PointCloud, radius: f32) -> Result<Vec<FPFH
         result
     };
 
+    // Open3D's `ComputeFPFHFeature`, in f64 as there.
+    let points64: Vec<Vector3<f64>> = points.iter().map(|p| p.coords.cast::<f64>()).collect();
+    let normals64: Vec<Vector3<f64>> = normals.iter().map(|v| v.cast::<f64>()).collect();
+    let neighborhoods: Vec<Vec<usize>> = (0..n).map(|i| radius_search(&points[i], i)).collect();
+
     // --- Step 1: Compute SPFH for every point ---
-    let all_spfh: Vec<[f32; 33]> = (0..n)
-        .map(|i| {
-            let neighbors = radius_search(&points[i], i);
-            compute_spfh(&points[i], &normals[i], &neighbors, points, &normals)
-        })
+    let all_spfh: Vec<[f64; 33]> = (0..n)
+        .map(|i| compute_spfh(i, &neighborhoods[i], &points64, &normals64))
         .collect();
 
     // --- Step 2: Weight SPFHs to produce FPFH ---
     let fpfh_features: Vec<FPFHFeature> = (0..n)
         .map(|i| {
-            let neighbors = radius_search(&points[i], i);
-            let histogram = weight_spfh(&points[i], &all_spfh[i], &neighbors, points, &all_spfh);
-            FPFHFeature { histogram }
+            let fpfh = weight_spfh(i, &neighborhoods[i], &points64, &all_spfh);
+            FPFHFeature {
+                histogram: fpfh.map(|v| v as f32),
+            }
         })
         .collect();
 
@@ -255,125 +258,109 @@ fn estimate_normals_pca(points: &[Point3<f32>], radius: f32) -> (Vec<Vector3<f32
     (normals, unsolved)
 }
 
-/// Compute Simple Point Feature Histogram for a single point.
+/// Open3D's `ComputePairFeatures` (after PCL's `computePairFeatures`): the
+/// Darboux-frame angles `(theta, alpha, phi)` of the pair `(p1, n1)`,
+/// `(p2, n2)`, or zeros for coincident points or a degenerate frame (which
+/// Open3D still bins).
 ///
-/// Implements the SPFH computation from Rusu (ICRA 2009) using the Darboux
-/// frame to compute three angular features (alpha, phi, theta) for each
-/// pair (source_point, neighbor), then bins them into an 11-bin histogram
-/// per feature (33 bins total).
+/// The source of the frame is whichever point's normal makes the smaller angle
+/// with the line joining them, so the features of a pair do not depend on
+/// which point is the query; `v = d x n_source`, as PCL and Open3D.
+fn pair_features(
+    p1: &Vector3<f64>,
+    n1: &Vector3<f64>,
+    p2: &Vector3<f64>,
+    n2: &Vector3<f64>,
+) -> [f64; 3] {
+    let mut dp = p2 - p1;
+    let dist = dp.norm();
+    if dist == 0.0 {
+        return [0.0; 3];
+    }
+    let angle1 = n1.dot(&dp) / dist;
+    let angle2 = n2.dot(&dp) / dist;
+    let (src, tgt, phi) = if angle1.abs().acos() > angle2.abs().acos() {
+        dp = -dp;
+        (n2, n1, -angle2)
+    } else {
+        (n1, n2, angle1)
+    };
+    let v = dp.cross(src);
+    let v_norm = v.norm();
+    if v_norm == 0.0 {
+        return [0.0; 3];
+    }
+    let v = v / v_norm;
+    let w = src.cross(&v);
+    let alpha = v.dot(tgt);
+    let theta = w.dot(tgt).atan2(src.dot(tgt));
+    [theta, alpha, phi]
+}
+
+/// Bin of `value` in 11 equal bins over `[lo, hi]`, clamped.
+fn bin11(value: f64, lo: f64, hi: f64) -> usize {
+    ((11.0 * (value - lo) / (hi - lo)).floor() as i64).clamp(0, 10) as usize
+}
+
+/// Simplified Point Feature Histogram of point `i` (Open3D's
+/// `ComputeSPFHFeature`): bins 0-10 theta over `[-pi, pi]`, 11-21 alpha and
+/// 22-32 phi over `[-1, 1]`; each neighbour adds `100 / k` to one bin of each,
+/// so each sub-histogram sums to 100.
+///
+/// This used to differ from Open3D in every respect that shows in the
+/// numbers: the bins were ordered (alpha, phi, theta), the frame was
+/// `v = n x d` (mirroring alpha and theta), there was no source/target swap
+/// (so a pair's features depended on which point was asked), and each
+/// sub-histogram summed to 1.
 fn compute_spfh(
-    point: &Point3<f32>,
-    normal: &Vector3<f32>,
+    i: usize,
     neighbors: &[usize],
-    points: &[Point3<f32>],
-    normals: &[Vector3<f32>],
-) -> [f32; 33] {
-    let mut histogram = [0.0f32; 33];
-    let mut count = 0u32;
-
-    for &neighbor_idx in neighbors {
-        if neighbor_idx >= points.len() {
-            continue;
-        }
-
-        let neighbor = &points[neighbor_idx];
-        let d = neighbor - point;
-        let dist = d.norm();
-
-        if dist < 1e-6 {
-            continue;
-        }
-
-        let n_target = &normals[neighbor_idx];
-
-        // Darboux frame (Rusu ICRA 2009):
-        //   u = n_source
-        //   v = u x (p_target - p_source) / ||p_target - p_source||
-        //   w = u x v
-        let u = *normal;
-        let v_raw = u.cross(&d);
-        let v_norm = v_raw.norm();
-        if v_norm < 1e-6 {
-            continue;
-        }
-        let v = v_raw / v_norm;
-        let w = u.cross(&v);
-
-        // Angular features:
-        //   alpha = v . n_target
-        //   phi   = u . d / ||d||
-        //   theta = atan2(w . n_target, u . n_target)
-        let alpha = v.dot(n_target);
-        let phi = u.dot(&d) / dist;
-        let theta = (w.dot(n_target)).atan2(u.dot(n_target));
-
-        // Bin into 11 bins per feature
-        // alpha in [-1, 1], phi in [-1, 1], theta in [-PI, PI]
-        let alpha_bin = ((alpha + 1.0) * 5.5).floor().clamp(0.0, 10.0) as usize;
-        let phi_bin = ((phi + 1.0) * 5.5).floor().clamp(0.0, 10.0) as usize;
-        let theta_bin = ((theta + std::f32::consts::PI) * (11.0 / (2.0 * std::f32::consts::PI)))
-            .floor()
-            .clamp(0.0, 10.0) as usize;
-
-        histogram[alpha_bin] += 1.0;
-        histogram[11 + phi_bin] += 1.0;
-        histogram[22 + theta_bin] += 1.0;
-        count += 1;
+    points: &[Vector3<f64>],
+    normals: &[Vector3<f64>],
+) -> [f64; 33] {
+    let mut histogram = [0.0f64; 33];
+    if neighbors.is_empty() {
+        return histogram;
     }
-
-    // Normalize by count (each bin becomes a fraction)
-    if count > 0 {
-        let inv_k = 1.0 / count as f32;
-        for h in &mut histogram {
-            *h *= inv_k;
-        }
+    let increment = 100.0 / neighbors.len() as f64;
+    for &j in neighbors {
+        let [theta, alpha, phi] = pair_features(&points[i], &normals[i], &points[j], &normals[j]);
+        histogram[bin11(theta, -std::f64::consts::PI, std::f64::consts::PI)] += increment;
+        histogram[11 + bin11(alpha, -1.0, 1.0)] += increment;
+        histogram[22 + bin11(phi, -1.0, 1.0)] += increment;
     }
-
     histogram
 }
 
-/// Weight SPFH with neighbors to produce FPFH (Rusu ICRA 2009).
+/// Fast Point Feature Histogram of point `i` (Open3D's `ComputeFPFHFeature`):
+/// the neighbours' SPFHs weighted by the inverse *squared* distance, each
+/// sub-histogram of that sum scaled to 100, plus the point's own SPFH.
 ///
-/// FPFH(p) = SPFH(p) + (1/k) * sum_{i=1}^{k} (1/||p - p_i||) * SPFH(p_i)
-///
-/// where k is the number of neighbors and p_i are the neighbor points.
+/// It used `1 / (k |d|)` weights and scaled the whole 33-bin sum to 100.
 fn weight_spfh(
-    point: &Point3<f32>,
-    own_spfh: &[f32; 33],
+    i: usize,
     neighbors: &[usize],
-    points: &[Point3<f32>],
-    all_spfh: &[[f32; 33]],
-) -> [f32; 33] {
-    let mut fpfh = *own_spfh;
-
-    let k = neighbors.len();
-    if k == 0 {
-        return fpfh;
-    }
-
-    let inv_k = 1.0 / k as f32;
-
-    for &neighbor_idx in neighbors {
-        let dist = (points[neighbor_idx] - point).norm();
-        if dist < 1e-6 {
+    points: &[Vector3<f64>],
+    all_spfh: &[[f64; 33]],
+) -> [f64; 33] {
+    let mut fpfh = [0.0f64; 33];
+    let mut sums = [0.0f64; 3];
+    for &j in neighbors {
+        let dist_sq = (points[j] - points[i]).norm_squared();
+        if dist_sq == 0.0 {
             continue;
         }
-
-        let w = inv_k / dist;
-        let neighbor_spfh = &all_spfh[neighbor_idx];
         for bin in 0..33 {
-            fpfh[bin] += neighbor_spfh[bin] * w;
+            let value = all_spfh[j][bin] / dist_sq;
+            sums[bin / 11] += value;
+            fpfh[bin] += value;
         }
     }
-
-    // Normalize to sum to 100 (standard FPFH convention)
-    let sum: f32 = fpfh.iter().sum();
-    if sum > 1e-6 {
-        let scale = 100.0 / sum;
-        for h in &mut fpfh {
-            *h *= scale;
+    for bin in 0..33 {
+        if sums[bin / 11] != 0.0 {
+            fpfh[bin] *= 100.0 / sums[bin / 11];
         }
+        fpfh[bin] += all_spfh[i][bin];
     }
-
     fpfh
 }
