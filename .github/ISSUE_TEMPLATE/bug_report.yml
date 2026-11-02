@@ -1,0 +1,79 @@
+name: Bug report
+description: A wrong result, crash, panic or hang.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. A minimal reproduction is the most useful thing you can give.
+        If the result differs from OpenCV / Open3D / SciPy rather than being plainly wrong,
+        use the **Parity discrepancy** form instead. Security problems go to SECURITY.md, not here.
+  - type: input
+    id: crate
+    attributes:
+      label: Crate and function
+      description: e.g. `cv-imgproc::gaussian_blur`, `cv-io::read_ply`
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The wrong output, panic message or hang. Paste exact error text.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: And why — a reference value, a property that should hold, the docs.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Self-contained Rust code (or a small input file) that shows the problem.
+      render: rust
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - CPU
+        - GPU (wgpu)
+        - CubeCL
+        - MLX
+        - Not applicable / not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: RETINA version or commit
+      description: Output of `git rev-parse --short HEAD`, or the crate version.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, `rustc --version`, enabled features, and GPU model + driver if a GPU is involved.
+      placeholder: |
+        OS: Ubuntu 24.04
+        rustc 1.95.0
+        features: half-precision
+        GPU: RTX 4070, Vulkan, driver 560
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I can reproduce this on the latest `master`.

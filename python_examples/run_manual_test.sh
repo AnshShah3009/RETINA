@@ -1,6 +1,6 @@
 #!/bin/bash
-source .venv/bin/activate
-cd python_examples
+source "$(dirname "$0")/../.venv/bin/activate"
+cd "$(dirname "$0")"
 python3 manual_proc_a.py &
 PID_A=$!
 sleep 2 # let A start and hold memory

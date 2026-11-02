@@ -1,83 +1,146 @@
-# Retina
+# RETINA
 
-[![Build and Test](https://github.com/AnshShah3009/rust-cv-native/actions/workflows/build.yml/badge.svg)](https://github.com/AnshShah3009/rust-cv-native/actions/workflows/build.yml)
+[![Build and Test](https://github.com/AnshShah3009/RETINA/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/AnshShah3009/RETINA/actions/workflows/build.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 
-A comprehensive native Rust computer vision library with full in-house implementations (no external C/C++ dependencies), GPU acceleration using wgpu/WebGPU, and Python bindings with PyO3.
+**A native Rust computer-vision workspace with CPU and GPU backends, built to
+match OpenCV, Open3D, SciPy and Matplotlib — and to prove it.**
 
-## Features
+RETINA covers image processing, features, calibration, 3-D point clouds and
+meshes, registration, SfM/SLAM, localization, signal processing, plotting and
+I/O, in about 30 crates. The default build has no C or C++ dependencies. GPU
+kernels run through [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12) and are tested
+against the CPU implementation, many of them bit for bit.
 
-- **Core** - Basic types, camera models, frame conventions, tensors, robust estimation, error handling
-- **Imgproc** - Image processing (filters, morphology, color conversion, thresholding, histogram, template matching)
-- **Features** - Feature detection and descriptors (ORB, Harris, FAST, BRIEF, HOG, SIFT, GFTT)
-- **Stereo** - Stereo vision, disparity matching, depth estimation, triangulation
-- **Calib3d** - Camera calibration, pose estimation, chessboard detection, distortion correction
-- **3D** - Point clouds, ICP registration, triangulation, mesh reconstruction (Poisson, BPA, Alpha Shapes)
-- **SFM** - Structure from Motion, triangulation, bundle adjustment
-- **SLAM** - ISAM2 incremental optimization, keyframe management, Kalman filtering
-- **Registration** - ICP, global registration, SE(3) transforms, robust matching
-- **Rendering** - Gaussian splatting, mesh processing, visualization
-- **Plot** - 2D/3D visualization (cv-plot)
-- **Video** - MOG2 background subtraction, Kalman filtering, optical flow, tracking
-- **Videoio** - Video capture (FFmpeg-next), platform-specific backends
-- **Optimize** - Factor graphs, sparse solvers, ISAM2, nonlinear optimization
-- **DNN** - Deep neural network inference (ORT integration)
-- **ObjDetect** - Object detection utilities
-- **IO** - File I/O for various formats
-- **Point-Cloud** - Point cloud processing
-- **Scientific** - Scientific computing utilities
-- **Runtime** - Async runtime utilities
-- **Viewer** - 3D visualization
+What sets it apart is how results are checked:
 
-## Architecture
+- **Reference parity.** Functions that mirror OpenCV, Open3D, SciPy or Matplotlib
+  are tested against values those libraries produced, stored in the tests so CI
+  needs no Python. Known differences are written down in
+  [docs/PARITY.md](docs/PARITY.md).
+- **Every fix is proven.** Each bug fix lands with a test that failed before it;
+  [docs/bug-log.md](docs/bug-log.md) records the defect, how it was found and the
+  evidence.
+- **Measured claims only.** Every number in the docs comes with the command that
+  measured it ([docs/evaluation.md](docs/evaluation.md)).
+- **Over 3,000 tests**, zero compiler warnings enforced in CI, and
+  `#![forbid(unsafe_code)]` in 27 of 30 crates.
 
-```
-rust-cv-native/
-├── crates/core/         # Core types, camera models, frame conventions, tensors
-├── crates/hal/          # Hardware abstraction layer (CPU/GPU)
-├── crates/math/         # Math primitives and special functions
-├── crates/geometry2d/   # 2D geometry primitives
-├── crates/imgproc/      # Image processing
-├── crates/features/     # Feature detection and matching
-├── crates/photo/        # Computational photography
-├── crates/video/        # Video processing (MOG2, optical flow)
-├── crates/videoio/      # Video I/O (FFmpeg backend)
-├── crates/calib3d/      # Camera calibration and pose estimation
-├── crates/3d/           # Point clouds, triangulation, mesh reconstruction
-├── crates/registration/ # ICP, global registration
-├── crates/pointcloud/   # Point cloud processing
-├── crates/sfm/          # Structure from Motion
-├── crates/slam/         # SLAM with ISAM2
-├── crates/optimize/     # Optimization (ISAM2, sparse solvers)
-├── crates/rendering/    # 3D rendering (Gaussian splatting)
-├── crates/plot/         # Plotting and visualization
-├── crates/viewer/       # 3D visualization
-├── crates/signal_proc/  # Signal processing
-├── crates/scientific/   # Scientific computing
-├── crates/dnn/          # Deep neural network inference
-├── crates/io/           # File I/O
-├── crates/runtime/      # Async runtime and orchestration
-├── crates/distributed/  # Cross-process shared-memory / VRAM coordination
-├── crates/eval/         # Trajectory, reconstruction and retrieval metrics
-├── crates/localization/ # Visual localization pipeline (retrieval → PnP)
-├── crates/cli/          # cv-bench command-line evaluation tool
-├── crates/python/       # Python bindings (PyO3)
-└── crates/examples/     # Usage examples
+> RETINA is pre-1.0. APIs still change between minor versions; the
+> [changelog](CHANGELOG.md) lists breaking changes.
+
+## Quick start
+
+Add the crates you need (they are not on crates.io yet, so use git):
+
+```toml
+[dependencies]
+cv-imgproc = { git = "https://github.com/AnshShah3009/RETINA" }
+cv-features = { git = "https://github.com/AnshShah3009/RETINA" }
+image = "0.25"
 ```
 
-## Visual localization
+Detect and match ORB features between two images:
 
-`cv-localization` turns the primitives into the question users actually ask —
-given a query image, where was it taken? A `Database` of landmarks and
-database images is queried by retrieval (`cv-features` vocabulary, BoW inverted
-index and LSH), ratio-test matched, lifted to 2D-3D correspondences and solved
-with PnP + RANSAC, returning a pose with its inlier count, candidate list and
-reprojection RMSE. It returns `None` rather than a confident wrong pose.
+```rust,no_run
+use cv_features::matcher::{MatchType, Matcher};
+use cv_features::orb_detect_and_compute;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let a = image::open("left.png")?.to_luma8();
+    let b = image::open("right.png")?.to_luma8();
+
+    let a = cv_imgproc::gaussian_blur(&a, 1.0);
+    let b = cv_imgproc::gaussian_blur(&b, 1.0);
+
+    let (_keypoints_a, descriptors_a) = orb_detect_and_compute(&a, 1000);
+    let (_keypoints_b, descriptors_b) = orb_detect_and_compute(&b, 1000);
+
+    let matches = Matcher::new(MatchType::BruteForceHamming)
+        .with_cross_check()
+        .match_descriptors(&descriptors_a, &descriptors_b);
+    println!("{} matches", matches.matches.len());
+    Ok(())
+}
+```
+
+Run the examples in the repository:
 
 ```bash
+cargo run -p cv-examples --example plot_demo          # line, scatter and 3-D plots
 cargo run -p cv-localization --example synthetic_localization --features synthetic
 ```
 
-```rust
+### Python
+
+Bindings are built with [maturin](https://www.maturin.rs) from the repository
+root:
+
+```bash
+pip install maturin
+maturin develop --release
+python -c "import cv_native"
+```
+
+## Crates
+
+| Area | Crate | What it provides |
+| --- | --- | --- |
+| Foundations | `cv-core` | Tensors (planar CHW), camera models, keypoints, errors |
+| | `cv-hal` | CPU, GPU (wgpu), MLX and CubeCL backends behind `ComputeContext` |
+| | `cv-runtime` | Scheduling, resource groups, device selection |
+| | `cv-math`, `cv-geometry2d`, `cv-scientific` | Math primitives, 2-D geometry, scientific utilities |
+| Images | `cv-imgproc` | Filters, morphology, colour, thresholds, histograms, warps, contours, template matching |
+| | `cv-features` | FAST, ORB, SIFT, AKAZE, BRIEF, HOG, Harris, GFTT, ArUco/ChArUco/AprilTag, matchers, RANSAC/USAC |
+| | `cv-photo` | Bilateral filtering, HDR, denoising, inpainting |
+| | `cv-video` | Background subtraction, optical flow, Kalman filtering, tracking |
+| | `cv-dnn` | ONNX inference via `tract` with OpenCV-style pre-processing |
+| Geometry | `cv-calib3d` | Calibration, PnP, epipolar geometry, stereo rectification, chessboards |
+| | `cv-3d` | Point clouds, normals, TSDF, meshing (Poisson, ball pivoting, alpha shapes) |
+| | `cv-pointcloud` | Lightweight point-cloud algorithms |
+| | `cv-registration` | ICP variants, FPFH, global registration |
+| | `cv-sfm`, `cv-slam` | Structure from motion, bundle adjustment, SLAM with ISAM2 |
+| | `cv-localization` | Retrieval + 2-D/3-D matching + PnP localization |
+| | `cv-optimize` | Factor graphs, sparse solvers, ISAM2, Levenberg–Marquardt, `curve_fit` |
+| Signals | `cv-signal` | Filters, FFT and resampling, SciPy-style |
+| I/O and tools | `cv-io` | PLY, PCD, OBJ, STL, LAS (feature), glTF (feature), datasets (EuRoC, TUM, KITTI, COLMAP) |
+| | `cv-videoio` | Video capture (FFmpeg, V4L2) |
+| | `cv-plot`, `cv-viewer`, `cv-rendering` | Plotting, a 3-D viewer, Gaussian splatting |
+| | `cv-eval`, `cv-cli` | Trajectory, reconstruction and retrieval metrics; the `cv-bench` CLI |
+| | `cv-distributed` | Cross-process shared-memory and VRAM coordination |
+| | `cv-python` | Python bindings (PyO3) |
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) shows how they depend on each other,
+how the backends fit together, and where new code belongs.
+
+### Feature flags
+
+| Feature | Crate | Enables |
+| --- | --- | --- |
+| `half-precision` | `cv-core`, `cv-hal` | `f16` / `bf16` tensors and GPU kernels |
+| `cubecl` | `cv-hal` | CubeCL kernels |
+| `mlx` | `cv-hal` | Apple MLX backend |
+| `las`, `gltf` | `cv-io` | LAS/LAZ and glTF formats |
+| `ffmpeg` | `cv-videoio` | FFmpeg capture (needs FFmpeg libraries) |
+
+## GPU support
+
+The GPU backend uses wgpu and runs wherever wgpu does: Vulkan (Linux, Windows),
+Metal (macOS) and DX12 (Windows). GPU tests run when an adapter is present and
+skip cleanly when it is not; CI runs them on a macOS (Metal) runner. Kernels are
+held to the CPU implementation, and integer division in every shader is audited
+for zero divisors ([docs/wgsl_int_div_audit.md](docs/wgsl_int_div_audit.md)).
+
+## Visual localization
+
+`cv-localization` answers "given a query image, where was it taken?" A `Database`
+of landmarks and images is queried by retrieval (vocabulary, bag-of-words inverted
+index, LSH), ratio-test matched, lifted to 2-D/3-D correspondences and solved with
+PnP + RANSAC. It returns a pose with its inlier count, candidates and reprojection
+RMSE — or `None` rather than a confident wrong pose.
+
+```rust,ignore
 let mut db = Database::new(Some(vocabulary));
 db.add_image(database_image_from_colmap(&image, &id_map));
 db.add_landmark(Landmark { position, descriptors });
@@ -89,167 +152,66 @@ if let Some(result) = localizer.localize(&query_keypoints, &query_descriptors, &
 }
 ```
 
-The pipeline is verified on a deterministic synthetic scene (clean queries
-localize to machine precision, noise degrades gracefully, non-overlapping
-queries return `None`). No real-dataset result is published, because none has
-been measured — see [docs/localization.md](docs/localization.md).
+It is verified on a deterministic synthetic scene; no real-dataset localization
+result is published because none has been measured. See
+[docs/localization.md](docs/localization.md).
 
-## Performance
+## Evaluation and benchmarks
 
-Measured on 24 cores with an RTX 5070 Ti; see [docs/performance.md](docs/performance.md)
-for the commands and the full tables.
+The workspace ships the measurement layer used for its own claims:
 
-| | before | after |
-| --- | ---: | ---: |
-| localization query, end to end | ~1650 ms | **441 ms** |
-| ORB detection, per frame | 40.4 ms | **26.4 ms** |
-| one bundle-adjustment solve (9 cameras, 1,002 points) | 35,000 ms | **286 ms** |
-
-`fast_detect` and ORB descriptor extraction were single-threaded and are now
-parallel and order-preserving; the bundle-adjustment Jacobian is analytic and its
-normal equations stay sparse.
-
-ORB is deliberately **not** on the GPU: after parallelising the CPU path a
-single-level scan is 0.79 ms while the irreducible upload cost is 0.08 ms, so a
-GPU kernel has a 10x-too-small budget to beat. The pipelines use no GPU at all;
-the candidates worth profiling next are PnP RANSAC and descriptor matching.
-
-## Status against visloc-rs
-
-Measured on the same dataset family (ETH3D), plus TUM RGB-D. Full numbers in
-[docs/performance.md](docs/performance.md).
-
-| | RETINA | visloc-rs |
-| --- | --- | --- |
-| registration, TUM fr1_xyz (45 views) | 45/45 — **100%** | 9,996/10,008 — 99.88% |
-| camera-centre RMSE, fr1_xyz | **1.30 cm** | 3.50 cm (Electro) |
-| registration, TUM fr1_desk (40 views) | 23/40 — 57.5% | — |
-| registration, ETH3D electro (5 views) | 3/5 — 60% | — |
-| loop closure | yes, gated + re-optimised | yes |
-| tests | **1,512** | 2,553 |
-| views per evaluation | 20–45 | 1,200–10,008 |
-| `unsafe impl` | **0** (26 crates forbid) | 0 (9 of 11 forbid) |
-
-**Not parity, and the gap is stated plainly.** fr1_xyz registers every view and
-beats their centre RMSE by 2.7x, but fr1_desk reaches only 57.5%, and every
-comparison is on tens of views against
-their thousands, so it is not like-for-like. Our *accuracy* is better (1.39 cm vs
-3.50 cm centre RMSE), but at 20–45 views that is the easier regime.
-
-What is genuinely ahead: crate breadth (~30 vs 10, covering imgproc, photo, dnn,
-video, rendering, plot, viewer, point clouds, many IO formats, Python bindings), a
-wgpu CPU/GPU HAL with cross-device parity proven on a discrete and an integrated
-GPU, a whole evaluation and benchmark layer, and a defect log
-([docs/bug-log.md](docs/bug-log.md)) recording what was wrong and how it was found.
-
-Loop closure is implemented, gated on geometric consistency, and re-optimises
-after every fusion. It is what turned fr1_xyz from 97.8% to 45/45 while *also*
-improving centre RMSE to 1.30 cm — see `docs/performance.md` for the sweep.
-
-What is behind: no many-view evaluation, and a smaller pipeline surface — they
-have localization, tracking, mapping, SLAM and VI-SLAM pipelines; we have one
-mapper and one localizer.
-
-Two sequences expose the current limit, and both trace to the same measured
-cause rather than to a defect in the mapper. On ETH3D electro a 5-view chain
-registers 60% while a 12-view chain registers 25%, because the capture's block
-standard deviation rises from 1.98 to 5.37 along the sequence and the dim end
-yields 9–10 matches per pair where the bright end yields 152. On TUM fr1_desk,
-block std 2.7 throughout, registration stops at 57.5% for the same reason: ORB
-descriptors are not discriminative enough at low texture. Every threshold, window,
-ratio, resolution and seed has been swept for both and each is at or near its
-best, so closing this needs a descriptor- or association-side change, not
-tuning. The full evidence is in `docs/performance.md`.
-
-## Documentation
-
-- [docs/evaluation.md](docs/evaluation.md) — metrics, dataset formats, CLI, and the
-  rule that nothing is published unless it was measured with the command shown.
-- [docs/performance.md](docs/performance.md) — every timing and accuracy number,
-  with the sweeps behind each default.
-- [docs/localization.md](docs/localization.md) — the localization pipeline, its
-  proven bounds, and what is not claimed.
-- [docs/bug-log.md](docs/bug-log.md) — every defect fixed, how it was found, and
-  the measurement that confirmed the fix.
-
-## Evaluation and benchmarking
-
-The library ships the measurement layer for localization/SfM/SLAM work, so
-results can be produced and re-checked rather than quoted:
-
-- **`cv-eval`** — trajectory metrics (ATE with SE(3)/Sim(3) alignment, RPE,
-  camera-centre RMSE, path length), reconstruction metrics (registration rate,
-  reprojection RMSE, RMSE/extent, Chamfer distance, F-score) and retrieval
-  metrics (recall@k, precision@k, mAP).
-- **`cv-io::datasets`** — loaders for EuRoC/ASL, TUM RGB-D, KITTI odometry and
-  COLMAP text models, including TUM's timestamp association.
-- **`cv-bench`** — a CLI over both.
+- **`cv-eval`** — ATE (SE(3)/Sim(3) alignment), RPE, camera-centre RMSE,
+  registration rate, reprojection RMSE, Chamfer distance, F-score, recall@k, mAP.
+- **`cv-io::datasets`** — EuRoC/ASL, TUM RGB-D, KITTI odometry, COLMAP text models.
+- **`cv-bench`** — a CLI over both:
 
 ```bash
-# trajectory error against ground truth, with alignment
 cargo run -p cv-cli --bin cv-bench -- trajectory \
   --estimate estimate.txt --ground-truth groundtruth.txt --format tum --align sim3
-
-# reconstruction quality from a COLMAP text model
-cargo run -p cv-cli --bin cv-bench -- model \
-  --images sparse/0/images.txt --points3d sparse/0/points3D.txt
-
-# place-recognition quality
-cargo run -p cv-cli --bin cv-bench -- retrieval --predictions ranked.txt --ground-truth relevant.txt --k 10
 ```
 
-This repository publishes **no benchmark numbers it has not measured, with the
-command that produced them**. See [docs/evaluation.md](docs/evaluation.md) for the
-metric definitions, dataset formats and the reproducibility rules.
+Measured results — timings, mapping accuracy on TUM RGB-D and ETH3D, and the
+comparison with visloc-rs — are in [docs/performance.md](docs/performance.md) and
+[docs/VS_REFERENCE_COMPARISON.md](docs/VS_REFERENCE_COMPARISON.md), each with the
+command that produced it.
 
-## Installation
+## Building and testing
 
-### Rust
+Requirements: Rust **1.95+** (stable). Optional: a GPU, FFmpeg (for
+`cv-videoio --features ffmpeg`), Python 3.10+ (bindings, and regenerating
+reference values).
 
 ```bash
 cargo build --workspace
+scripts/check.sh          # what CI checks: fmt, no warnings, clippy, tests
+scripts/check.sh full     # plus doctests, feature builds, examples, benches
 ```
 
-### Python
+Use `cargo test --workspace --no-fail-fast`: plain `cargo test` stops at the first
+failing test binary.
 
-```bash
-cd python
-pip install maturin
-maturin develop
-```
+## Contributing
 
-## Testing
+Contributions are welcome — bug reports, parity discrepancies, fixes,
+optimisations, docs and reviews. Start with [CONTRIBUTING.md](CONTRIBUTING.md): it
+covers setup, what a pull request needs, and step-by-step recipes for fixing a
+bug, matching a reference library, speeding something up, and adding GPU kernels.
+Issue forms ask for what a maintainer needs to reproduce a problem.
 
-**1,400+ tests** across all crates, including:
-- cv-core: geometry, robust estimation, tensor operations, error handling
-- cv-features: Harris, FAST, BRIEF, GFTT, HOG, ORB
-- cv-stereo: stereo matching, triangulation
-- cv-calib3d: camera calibration, pose estimation
-- cv-sfm: triangulation, bundle adjustment
-- cv-3d: mesh reconstruction (Poisson, BPA, Alpha Shapes), ICP
-- cv-optimize: ISAM2, factor graphs
-- cv-registration: SE(3) transforms, robust matching
-- cv-video: background subtraction, optical flow
-- cv-imgproc: filters, morphology, color conversion
-- cv-eval: trajectory/reconstruction/retrieval metrics against analytic cases
-- cv-io: dataset loaders, including malformed-input handling
-
-GPU tests execute when a graphics adapter is available and skip cleanly when it
-is not — on a machine with a GPU they are the only coverage the shaders get, since
-hosted CI runners have no adapter.
-
-```bash
-cargo test --workspace
-```
-
-## Requirements
-
-- Rust 1.70+
-- Python 3.10+ (for Python bindings)
-- FFmpeg (for video I/O)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security policy](SECURITY.md) — report vulnerabilities privately
+- [Governance](GOVERNANCE.md) — maintainers, decisions, releases
+- [Documentation index](docs/README.md)
 
 ## License
 
-MIT
+Licensed under either of
 
-See `docs/VIEWER.md` for the viewer: what works, what does not, and where to resume.
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
