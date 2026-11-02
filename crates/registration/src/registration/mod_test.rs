@@ -164,13 +164,15 @@ mod tests {
     fn test_geman_mcclure_loss_weight() {
         let loss = RobustLoss::GemanMcClure { mu: 1.0 };
 
-        // At r near 0, weight should be high
+        // Near r = 0 the weight approaches 1, continuously (it used to be the
+        // unscaled rho'/r, which is 2 there, while `weight` returns 1 below
+        // 1e-6).
         let w_small = loss.weight(0.1);
-        assert!(w_small > 1.0);
+        assert!(w_small < 1.0 && w_small > 0.98);
 
-        // At r=1 (equal to mu), weight should be 0.5
+        // At r=1 (equal to mu), weight = (mu / (mu + r^2))^2 = 0.25
         let w1 = loss.weight(1.0);
-        assert!((w1 - 0.5).abs() < 1e-6);
+        assert!((w1 - 0.25).abs() < 1e-6);
 
         // Weight should decrease with residual
         let w2 = loss.weight(2.0);

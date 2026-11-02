@@ -54,8 +54,17 @@ impl RobustLoss {
         }
     }
 
-    /// Compute weight for reweighted least squares
-    /// weight = ρ'(r) / r (or 1 if r ≈ 0)
+    /// Compute weight for iteratively reweighted least squares:
+    /// `w(r) = ρ'(r) / (r ρ''(0))`, i.e. `ρ'(r) / r` scaled so that a zero
+    /// residual has weight 1 (`ρ''(0)` is 2 for Geman-McClure, Welsch and TLS,
+    /// 1 for Huber, Cauchy and Tukey). Scaling every weight by the same
+    /// constant does not change a weighted least-squares solution.
+    ///
+    /// Residuals below 1e-6 get weight 1, the limit of every formula here, so
+    /// the weight is continuous. Geman-McClure used to return the unscaled
+    /// `ρ'(r) / r = 2μ² / (μ + r²)²`, which jumped from 1 below 1e-6 to 2
+    /// just above; it is now `(μ / (μ + r²))²`, the GNC weight of Yang et al.
+    /// (2020) for this loss.
     pub fn weight(&self, residual: f32) -> f32 {
         let r = residual.abs();
         if r < 1e-6 {
@@ -64,8 +73,8 @@ impl RobustLoss {
 
         match self {
             RobustLoss::GemanMcClure { mu } => {
-                let r2 = r * r;
-                (2.0 * mu * mu) / ((mu + r2) * (mu + r2))
+                let s = mu / (mu + r * r);
+                s * s
             }
             RobustLoss::Welsch { mu } => (-r * r / mu).exp(),
             RobustLoss::Huber { mu } => {
