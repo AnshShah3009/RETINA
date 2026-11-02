@@ -454,11 +454,70 @@ pub fn min_area_rect(contour: &Contour) -> RotatedRect {
     best_rect
 }
 
-/// Find contours in a binary `CpuTensor` using simplified Suzuki-Abe border following.
+/// Which contours [`find_contours_with`] returns and how they are linked
+/// (OpenCV's `RETR_*` modes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContourRetrieval {
+    /// Only the outermost borders (`RETR_EXTERNAL`).
+    External,
+    /// Every border, outer and hole, with no nesting (`RETR_LIST`).
+    List,
+    /// Every border in a two-level hierarchy: outer borders at the top, the
+    /// holes of each component as its children (`RETR_CCOMP`).
+    CComp,
+    /// Every border in the full nesting tree (`RETR_TREE`).
+    Tree,
+}
+
+/// How [`find_contours_with`] stores each border (OpenCV's `CHAIN_APPROX_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContourApproximation {
+    /// Every border pixel (`CHAIN_APPROX_NONE`).
+    None,
+    /// Only the end points of horizontal, vertical and diagonal runs
+    /// (`CHAIN_APPROX_SIMPLE`).
+    Simple,
+}
+
+/// One entry of the contour hierarchy, OpenCV's layout:
+/// `[next, previous, first_child, parent]`, indices into the contour list,
+/// `-1` where there is none.
+pub type ContourHierarchy = [i32; 4];
+
+/// Every border of the foreground of a single-channel `binary` tensor, as
+/// OpenCV's `findContours(image, RETR_LIST, CHAIN_APPROX_NONE)`: outer
+/// borders and hole borders alike, every border pixel in order, contours in
+/// OpenCV's order. Pixels greater than zero are foreground.
 ///
-/// Input must be a single-channel tensor. Non-zero values are foreground.
-/// Returns a list of `ContourWithHierarchy` structs, each with an `is_hole` flag.
+/// See [`find_contours_with`] for the other retrieval modes, the simple chain
+/// approximation and the hierarchy.
 pub fn find_contours<T>(binary: &CpuTensor<T>) -> crate::Result<Vec<ContourWithHierarchy>>
+where
+    T: Clone + Copy + Default + PartialEq + std::fmt::Debug + Into<f64> + 'static,
+{
+    find_contours_with(binary, ContourRetrieval::List, ContourApproximation::None)
+        .map(|(contours, _)| contours)
+}
+
+/// OpenCV 4.13's `findContours(image, mode, method)` on a single-channel
+/// tensor: Suzuki-Abe border following, returning the contours and their
+/// hierarchy (one [`ContourHierarchy`] entry per contour) in exactly OpenCV's
+/// order, with the same start point and direction for every border.
+///
+/// Pixels greater than zero are foreground (OpenCV thresholds the image at
+/// zero). Pixels on the image edge are traced like any other: the image is
+/// treated as surrounded by background. An outer border runs
+/// counter-clockwise on screen from its top-left pixel; a hole border runs
+/// clockwise from the pixel left of its top-left background pixel. With
+/// [`ContourRetrieval::List`] and [`ContourRetrieval::External`] every
+/// contour is at the top level, in the reverse of the order the raster scan
+/// met them; with `CComp` and `Tree` the list is the tree in pre-order,
+/// siblings again latest first.
+pub fn find_contours_with<T>(
+    binary: &CpuTensor<T>,
+    mode: ContourRetrieval,
+    method: ContourApproximation,
+) -> crate::Result<(Vec<ContourWithHierarchy>, Vec<ContourHierarchy>)>
 where
     T: Clone + Copy + Default + PartialEq + std::fmt::Debug + Into<f64> + 'static,
 {
@@ -467,165 +526,482 @@ where
             "Input must be a single-channel image".into(),
         ));
     }
-
-    let h = binary.shape.height as i32;
-    let w = binary.shape.width as i32;
+    let (h, w) = (binary.shape.height, binary.shape.width);
     let src = binary.as_slice()?;
+    if w == 0 || h == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let (contours, hierarchy) = suzuki::find(src, w, h, mode, method, |v| {
+        let v: f64 = v.into();
+        v > 0.0
+    });
+    let contours = contours
+        .into_iter()
+        .map(|(points, is_hole)| ContourWithHierarchy {
+            points: points
+                .into_iter()
+                .map(|(x, y)| (x as u32, y as u32))
+                .collect(),
+            is_hole,
+        })
+        .collect();
+    Ok((contours, hierarchy))
+}
 
-    // Build a working copy as i32: 0 = background, 1 = foreground (unvisited)
-    let total = (h * w) as usize;
-    let mut img = vec![0i32; total];
-    for i in 0..total {
-        let v: f64 = src[i].into();
-        if v != 0.0 {
-            img[i] = 1;
+/// Port of OpenCV 4.13's `contours_new.cpp` (8-bit image path).
+mod suzuki {
+    use super::{ContourApproximation, ContourHierarchy, ContourRetrieval};
+
+    /// Chain-code steps (OpenCV's `chainCodeDeltas`): 0 east, then
+    /// counter-clockwise on screen (`y` down).
+    const DELTAS: [(i32, i32); 8] = [
+        (1, 0),
+        (1, -1),
+        (0, -1),
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ];
+    /// Label flag of a pixel whose east neighbour is background.
+    const RIGHT: u8 = 0x80;
+    /// Label of every border pixel in the modes without a hierarchy.
+    const NEW: i8 = 2;
+    const LVAL: i8 = 0x7f;
+
+    struct Node {
+        parent: i32,
+        first_child: i32,
+        prev: i32,
+        next: i32,
+        ctable_next: i32,
+        is_hole: bool,
+        /// Bounding box `(x, y, width, height)` in padded coordinates.
+        brect: (i32, i32, i32, i32),
+        /// Start pixel in padded coordinates.
+        origin: (i32, i32),
+        points: Vec<(i32, i32)>,
+    }
+
+    impl Node {
+        fn new(is_hole: bool) -> Self {
+            Node {
+                parent: -1,
+                first_child: -1,
+                prev: -1,
+                next: -1,
+                ctable_next: -1,
+                is_hole,
+                brect: (0, 0, 0, 0),
+                origin: (0, 0),
+                points: Vec::new(),
+            }
         }
     }
 
-    let mut contours = Vec::new();
-    let mut nbd: i32 = 1; // current border sequential number
+    struct Scanner {
+        /// The image with a one-pixel background frame: 0 background,
+        /// 1 unvisited foreground, otherwise a border label (bit 7 set:
+        /// the "right" flag).
+        img: Vec<i8>,
+        step: i32,
+        width: i32,
+        height: i32,
+        pt: (i32, i32),
+        lnbd: (i32, i32),
+        nbd: i8,
+        mode: ContourRetrieval,
+        direct: bool,
+        nodes: Vec<Node>,
+        ctable: [i32; 128],
+    }
 
-    // Suzuki-Abe simplified: scan row by row
-    for y in 0..h {
-        let mut lnbd: i32 = 1; // last encountered non-zero border
-        for x in 0..w {
-            let idx = (y * w + x) as usize;
-            let fxy = img[idx];
+    fn delta(s: i32, step: i32) -> isize {
+        let (dx, dy) = DELTAS[(s & 7) as usize];
+        (dx + dy * step) as isize
+    }
 
-            // Determine border type.
-            // Hole borders may only START on UNLABELED foreground (fxy == 1):
-            // after an outer border is traced its pixels carry nbd >= 2, and
-            // every row's rightmost such pixel would otherwise re-trigger a
-            // full "hole" re-trace of that same outer boundary, emitting ~H
-            // phantom hole contours per solid rectangle.
-            let is_outer = fxy == 1 && (x == 0 || img[idx - 1] == 0);
-            let is_hole = fxy == 1 && (x == w - 1 || img[idx + 1] == 0);
+    fn set_right(img: &mut [i8], i: isize, nbd: i8) {
+        img[i as usize] = (nbd as u8 | RIGHT) as i8;
+    }
 
-            if !is_outer && !is_hole {
-                if fxy != 0 && fxy != 1 {
-                    lnbd = fxy.unsigned_abs() as i32;
-                }
-                continue;
-            }
+    impl Scanner {
+        fn at(&self, i: isize) -> i8 {
+            self.img[i as usize]
+        }
 
-            let (border_is_hole, start_dir) = if is_outer {
-                nbd += 1;
-                (false, 0usize) // start search from W (left)
-            } else if is_hole && fxy > 0 {
-                nbd += 1;
-                (true, 4usize) // start search from E (right)
-            } else {
-                if fxy != 0 && fxy != 1 {
-                    lnbd = fxy.unsigned_abs() as i32;
-                }
-                continue;
-            };
+        fn idx(&self, (x, y): (i32, i32)) -> isize {
+            (y * self.step + x) as isize
+        }
 
-            // Trace contour using Moore boundary tracing
+        fn is_simple(&self) -> bool {
+            matches!(
+                self.mode,
+                ContourRetrieval::External | ContourRetrieval::List
+            )
+        }
+
+        /// `icvFetchContourEx`: follow the border starting at `start`,
+        /// labelling it with `nbd`, and return its points (image
+        /// coordinates, starting at `origin`) and its bounding box.
+        fn fetch(
+            &mut self,
+            start: (i32, i32),
+            nbd: i8,
+            is_hole: bool,
+            origin: (i32, i32),
+        ) -> (Vec<(i32, i32)>, (i32, i32, i32, i32)) {
+            let step = self.step;
+            let i0 = self.idx(start);
+            let mut pt = origin;
             let mut points = Vec::new();
-            let mut cx = x;
-            let mut cy = y;
+            // (min x, min y, max x, max y) until the end.
+            let mut rect = (pt.0, pt.1, pt.0, pt.1);
 
-            // Find first neighbor
-            let mut dir = start_dir;
-            let mut found_first = false;
-            for step in 0..8 {
-                let d = (dir + step) % 8;
-                let nx = cx + DIRS_8[d].0;
-                let ny = cy + DIRS_8[d].1;
-                if in_bounds(nx, ny, w, h) && img[(ny * w + nx) as usize] != 0 {
-                    dir = d;
-                    found_first = true;
+            let mut s_end: i32 = if is_hole { 0 } else { 4 };
+            let mut s = s_end;
+            let mut i1;
+            loop {
+                s = (s - 1) & 7;
+                i1 = i0 + delta(s, step);
+                if self.at(i1) != 0 || s == s_end {
                     break;
                 }
             }
 
-            if !found_first {
-                // Isolated pixel
-                img[idx] = -nbd;
-                points.push((x as u32, y as u32));
-                contours.push(ContourWithHierarchy {
-                    points,
-                    is_hole: border_is_hole,
-                });
-                lnbd = nbd;
-                continue;
+            if s == s_end {
+                set_right(&mut self.img, i0, nbd);
+                points.push(pt);
+            } else {
+                let mut i3 = i0;
+                let mut i4;
+                let mut prev_s = s ^ 4;
+                loop {
+                    s_end = s;
+                    s = s.min(15);
+                    loop {
+                        s += 1;
+                        i4 = i3 + delta(s, step);
+                        if self.at(i4) != 0 || s >= 15 {
+                            break;
+                        }
+                    }
+                    s &= 7;
+
+                    if ((s - 1) as u32) < s_end as u32 {
+                        set_right(&mut self.img, i3, nbd);
+                    } else if self.at(i3) == 1 {
+                        self.img[i3 as usize] = nbd;
+                    }
+
+                    if s != prev_s || self.direct {
+                        points.push(pt);
+                    }
+                    if s != prev_s {
+                        if pt.0 < rect.0 {
+                            rect.0 = pt.0;
+                        } else if pt.0 > rect.2 {
+                            rect.2 = pt.0;
+                        }
+                        if pt.1 < rect.1 {
+                            rect.1 = pt.1;
+                        } else if pt.1 > rect.3 {
+                            rect.3 = pt.1;
+                        }
+                    }
+                    prev_s = s;
+                    pt.0 += DELTAS[s as usize].0;
+                    pt.1 += DELTAS[s as usize].1;
+
+                    if i4 == i0 && i3 == i1 {
+                        break;
+                    }
+                    i3 = i4;
+                    s = (s + 4) & 7;
+                }
             }
+            let brect = (rect.0, rect.1, rect.2 - rect.0 + 1, rect.3 - rect.1 + 1);
+            (points, brect)
+        }
 
-            // Follow the border
-            let start_x = cx;
-            let start_y = cy;
-            let start_dir_val = dir;
-            let max_iter = (total * 8).max(64);
-            let mut first_step = true;
-
-            for _ in 0..max_iter {
-                points.push((cx as u32, cy as u32));
-
-                // Search for next boundary pixel clockwise from (dir+4+2)%8
-                let search_start = (dir + 6) % 8; // start from direction opposite to where we came, +1 CW
-                let mut next_found = false;
-                let mut next_dir = 0;
-                let mut nx = 0i32;
-                let mut ny = 0i32;
-
-                for step in 0..8 {
-                    let d = (search_start + step) % 8;
-                    let tx = cx + DIRS_8[d].0;
-                    let ty = cy + DIRS_8[d].1;
-                    if in_bounds(tx, ty, w, h) && img[(ty * w + tx) as usize] != 0 {
-                        next_dir = d;
-                        nx = tx;
-                        ny = ty;
-                        next_found = true;
+        /// `icvTraceContour`: whether following the border that starts at
+        /// `start` reaches `end` as the last border met by the raster scan.
+        fn trace(&self, start: (i32, i32), end: (i32, i32), is_hole: bool) -> bool {
+            let step = self.step;
+            let stop = self.idx(end);
+            let i0 = self.idx(start);
+            let s_end: i32 = if is_hole { 0 } else { 4 };
+            let mut s = s_end;
+            let mut i1;
+            loop {
+                s = (s - 1) & 7;
+                i1 = i0 + delta(s, step);
+                if self.at(i1) != 0 || s == s_end {
+                    break;
+                }
+            }
+            let mut i3 = i0;
+            if s == s_end {
+                return i3 == stop;
+            }
+            loop {
+                s = s.min(15);
+                let mut i4;
+                loop {
+                    s += 1;
+                    i4 = i3 + delta(s, step);
+                    if self.at(i4) != 0 || s >= 15 {
                         break;
                     }
                 }
-
-                if !next_found {
-                    break;
+                if i3 == stop {
+                    if (self.at(i3) as u8 & RIGHT) == 0 {
+                        return true;
+                    }
+                    let mut t = s;
+                    loop {
+                        t = (t - 1) & 7;
+                        if self.at(i3 + delta(t, step)) != 0 {
+                            break;
+                        }
+                        if t == 0 {
+                            return true;
+                        }
+                    }
                 }
-
-                // Mark pixel
-                let cidx = (cy * w + cx) as usize;
-                if img[cidx] == 1 {
-                    img[cidx] = nbd;
-                } else if img[cidx] > 1 {
-                    // already part of another border, mark negatively if on edge
+                if i4 == i0 && i3 == i1 {
+                    return false;
                 }
+                i3 = i4;
+                s = (s + 4) & 7;
+            }
+        }
 
-                cx = nx;
-                cy = ny;
-                dir = next_dir;
+        fn add_child(&mut self, parent: i32, child: i32) {
+            let first = self.nodes[parent as usize].first_child;
+            if first != -1 {
+                self.nodes[first as usize].prev = child;
+                self.nodes[child as usize].next = first;
+            }
+            self.nodes[parent as usize].first_child = child;
+            let c = &mut self.nodes[child as usize];
+            c.parent = parent;
+            c.prev = -1;
+        }
 
-                if !first_step && cx == start_x && cy == start_y {
-                    break;
+        fn make_contour(&mut self, nbd: &mut i8, is_hole: bool, x: i32, y: i32) -> i32 {
+            let start = (x - i32::from(is_hole), y);
+            // The padding frame shifts image coordinates by one.
+            let origin = (start.0 - 1, start.1 - 1);
+            let id = self.nodes.len() as i32;
+            let mut node = Node::new(is_hole);
+            if self.is_simple() {
+                let (points, brect) = self.fetch(start, NEW, is_hole, origin);
+                node.points = points;
+                node.brect = brect;
+            } else {
+                let lval = *nbd;
+                *nbd = nbd.wrapping_add(1) & LVAL;
+                if *nbd == 0 {
+                    *nbd = 3;
                 }
-                first_step = false;
+                let (points, brect) = self.fetch(start, lval, is_hole, origin);
+                node.points = points;
+                node.brect = (brect.0 + 1, brect.1 + 1, brect.2, brect.3);
+                node.ctable_next = self.ctable[lval as usize];
+                self.ctable[lval as usize] = id;
+            }
+            node.origin = start;
+            self.nodes.push(node);
+            id
+        }
+
+        fn find_first_bounding_contour(&self, last_pos: (i32, i32), y: i32, lval: i32) -> i32 {
+            let end = (last_pos.0, y);
+            let mut res = -1;
+            let mut cur = self.ctable[lval as usize];
+            while cur != -1 {
+                let node = &self.nodes[cur as usize];
+                let (bx, by, bw, bh) = node.brect;
+                if last_pos.0 - bx < bw && last_pos.1 - by < bh {
+                    if res != -1 {
+                        let r = &self.nodes[res as usize];
+                        if self.trace(r.origin, end, r.is_hole) {
+                            break;
+                        }
+                    }
+                    res = cur;
+                }
+                cur = node.ctable_next;
+            }
+            res
+        }
+
+        fn contour_scan(
+            &mut self,
+            prev: i32,
+            p: i32,
+            last_pos: &mut (i32, i32),
+            x: i32,
+            y: i32,
+        ) -> bool {
+            let mut is_hole = false;
+            if !(prev == 0 && p == 1) {
+                if p != 0 || prev < 1 {
+                    return false;
+                }
+                if prev & !1 != 0 {
+                    last_pos.0 = x - 1;
+                }
+                is_hole = true;
+            }
+            if self.mode == ContourRetrieval::External
+                && (is_hole || self.at(self.idx(*last_pos)) > 0)
+            {
+                return false;
             }
 
-            // Remove duplicate if last == first
-            if points.len() > 1 && points.first() == points.last() {
-                points.pop();
+            let main_parent = if self.is_simple()
+                || (!is_hole && self.mode == ContourRetrieval::CComp)
+                || last_pos.0 <= 0
+            {
+                0
+            } else {
+                let lval = i32::from(self.at(self.idx(*last_pos)) & LVAL);
+                let mut parent = self.find_first_bounding_contour(*last_pos, y, lval);
+                if parent < 0 {
+                    // Unreachable for a consistent labelling (OpenCV would
+                    // index out of range); attach to the root instead.
+                    parent = 0;
+                }
+                let node = &self.nodes[parent as usize];
+                if node.is_hole == is_hole {
+                    parent = node.parent.max(0);
+                }
+                parent
+            };
+
+            last_pos.0 = x - i32::from(is_hole);
+            let mut nbd = self.nbd;
+            let id = self.make_contour(&mut nbd, is_hole, x, y);
+            self.add_child(main_parent, id);
+            self.pt = (x + 1, y);
+            self.nbd = nbd;
+            true
+        }
+
+        fn find_next(&mut self) -> bool {
+            let (mut x, mut y) = self.pt;
+            let mut last_pos = self.lnbd;
+            let mut prev = i32::from(self.at(self.idx((x - 1, y))));
+            while y < self.height {
+                let mut p;
+                while x < self.width {
+                    loop {
+                        p = i32::from(self.at(self.idx((x, y))));
+                        if p != prev {
+                            break;
+                        }
+                        x += 1;
+                        if x >= self.width {
+                            break;
+                        }
+                    }
+                    if x >= self.width {
+                        break;
+                    }
+                    if self.contour_scan(prev, p, &mut last_pos, x, y) {
+                        self.lnbd = last_pos;
+                        return true;
+                    }
+                    prev = p;
+                    if prev & !1 != 0 {
+                        last_pos.0 = x;
+                    }
+                    x += 1;
+                }
+                last_pos = (0, y + 1);
+                x = 1;
+                prev = 0;
+                y += 1;
             }
-
-            // Deduplicate consecutive identical points
-            points.dedup();
-
-            if !points.is_empty() {
-                contours.push(ContourWithHierarchy {
-                    points,
-                    is_hole: border_is_hole,
-                });
-            }
-
-            let _ = start_dir_val; // suppress warning
-            let _ = lnbd;
-            lnbd = nbd;
+            false
         }
     }
 
-    Ok(contours)
+    type Contours = Vec<(Vec<(i32, i32)>, bool)>;
+
+    /// Contours of the `w` x `h` image `src` (row-major), foreground where
+    /// `fg` holds, and their hierarchy.
+    pub(super) fn find<T: Copy>(
+        src: &[T],
+        w: usize,
+        h: usize,
+        mode: ContourRetrieval,
+        method: ContourApproximation,
+        fg: impl Fn(T) -> bool,
+    ) -> (Contours, Vec<ContourHierarchy>) {
+        let (pw, ph) = (w + 2, h + 2);
+        let mut img = vec![0i8; pw * ph];
+        for y in 0..h {
+            for x in 0..w {
+                img[(y + 1) * pw + x + 1] = i8::from(fg(src[y * w + x]));
+            }
+        }
+        let mut root = Node::new(true);
+        root.brect = (0, 0, pw as i32, ph as i32);
+        let mut sc = Scanner {
+            img,
+            step: pw as i32,
+            width: pw as i32 - 1,
+            height: ph as i32 - 1,
+            pt: (1, 1),
+            lnbd: (0, 1),
+            nbd: 2,
+            mode,
+            direct: method == ContourApproximation::None,
+            nodes: vec![root],
+            ctable: [-1; 128],
+        };
+        while sc.find_next() {}
+
+        // `contourTreeToResults`: pre-order, siblings in list order.
+        let mut order = Vec::with_capacity(sc.nodes.len() - 1);
+        let mut stack = vec![0i32];
+        while let Some(idx) = stack.pop() {
+            if idx != 0 {
+                order.push(idx);
+            }
+            let mut children = Vec::new();
+            let mut c = sc.nodes[idx as usize].first_child;
+            while c != -1 {
+                children.push(c);
+                c = sc.nodes[c as usize].next;
+            }
+            stack.extend(children.into_iter().rev());
+        }
+        let mut mapping = vec![-1i32; sc.nodes.len()];
+        for (i, &idx) in order.iter().enumerate() {
+            mapping[idx as usize] = i as i32;
+        }
+        let map = |i: i32| if i < 0 { -1 } else { mapping[i as usize] };
+        let hierarchy = order
+            .iter()
+            .map(|&idx| {
+                let n = &sc.nodes[idx as usize];
+                [map(n.next), map(n.prev), map(n.first_child), map(n.parent)]
+            })
+            .collect();
+        let contours = order
+            .iter()
+            .map(|&idx| {
+                let n = &mut sc.nodes[idx as usize];
+                (std::mem::take(&mut n.points), n.is_hole)
+            })
+            .collect();
+        (contours, hierarchy)
+    }
 }
 
 /// Connected components labeling with component statistics.
