@@ -703,3 +703,84 @@ pub enum TemplateMatchMethod {
     Ccoeff,
     CcoeffNormed,
 }
+
+/// `InvalidInput` unless `shape` has exactly one channel.
+///
+/// For operations that are single-channel by definition, or whose OpenCV
+/// counterpart requires one channel (or combines the channels in a way other
+/// than one plane at a time, which is not implemented): every backend checks
+/// this first, so a colour image gets the same error everywhere instead of
+/// having its first plane processed under the input's channel count.
+pub(crate) fn require_single_channel(op: &str, shape: &cv_core::TensorShape) -> Result<()> {
+    if shape.channels == 1 {
+        Ok(())
+    } else {
+        Err(crate::Error::InvalidInput(format!(
+            "{op} expects a single-channel image, got {} channels ({shape:?})",
+            shape.channels
+        )))
+    }
+}
+
+/// `mog2_update`'s parameters against its frame and buffers, the same on
+/// every backend. `Ok(false)` means there is nothing to update (an empty
+/// frame); `Ok(true)` that the update may index `frame`, `model` and `mask`
+/// as `params` lays them out.
+///
+/// `cv::BackgroundSubtractorMOG2` takes the frame size from the frame; here
+/// the caller passes it in `params` (the GPU kernel reads it from there), so
+/// it must be the frame's: a zero or mismatched width used to panic on the
+/// CPU (`chunk_size must not be zero`, or an out-of-range index) and to read
+/// and write the GPU buffers out of bounds. The model needs a mixture per
+/// pixel (`n_mixtures`, or `max_components` in adaptive mode) and room for
+/// `width * height` pixel blocks; the frame one channel, as the model holds
+/// one mean per mixture.
+pub(crate) fn validate_mog2<T: Float>(
+    frame: &cv_core::TensorShape,
+    model_len: usize,
+    mask_len: usize,
+    params: &Mog2Params<T>,
+) -> Result<bool> {
+    let adaptive = params.adaptive_k != 0;
+    let stride = if adaptive {
+        if params.max_components == 0 {
+            return Err(crate::Error::InvalidInput(
+                "mog2_update: adaptive mode needs max_components >= 1".into(),
+            ));
+        }
+        params.max_components as usize * 3 + 1
+    } else {
+        if params.n_mixtures == 0 {
+            return Err(crate::Error::InvalidInput(
+                "mog2_update: n_mixtures must be at least 1".into(),
+            ));
+        }
+        params.n_mixtures as usize * 3
+    };
+    if frame.len() == 0 {
+        return Ok(false);
+    }
+    require_single_channel("mog2_update", frame)?;
+    let (h, w) = frame.hw();
+    if params.width as usize != w || params.height as usize != h {
+        return Err(crate::Error::InvalidInput(format!(
+            "mog2_update: params are for a {}x{} frame, the frame is {w}x{h}",
+            params.width, params.height
+        )));
+    }
+    let pixels = w * h;
+    let need = pixels
+        .checked_mul(stride)
+        .ok_or_else(|| crate::Error::InvalidInput("mog2_update: model size overflows".into()))?;
+    if model_len < need {
+        return Err(crate::Error::InvalidInput(format!(
+            "mog2_update: the model has {model_len} values, {w}x{h} pixels of {stride} need {need}"
+        )));
+    }
+    if mask_len < pixels {
+        return Err(crate::Error::InvalidInput(format!(
+            "mog2_update: the mask has {mask_len} values for {pixels} pixels"
+        )));
+    }
+    Ok(true)
+}

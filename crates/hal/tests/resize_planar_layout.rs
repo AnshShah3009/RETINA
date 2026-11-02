@@ -342,9 +342,9 @@ fn gpu_resize_then_gaussian_blur_is_per_plane() {
 // ------------------------------------------------------------ empty sizes
 
 /// A zero target is an empty tensor of the target shape; an empty source
-/// with a non-empty target is zeros of the target shape. `cv_imgproc::resize`
-/// does the same for an empty image. The CPU used to panic on both
-/// (`par_chunks_mut(0)`, and indexing an empty source).
+/// with a non-empty target is `InvalidInput` (`cv::resize` asserts
+/// `!ssize.empty()`; it used to be zeros of the target shape). The CPU used
+/// to panic on both (`par_chunks_mut(0)`, and indexing an empty source).
 #[test]
 fn empty_sizes_do_not_panic_and_agree() {
     let cpu = cpu();
@@ -365,6 +365,24 @@ fn empty_sizes_do_not_panic_and_agree() {
         let want_shape = TensorShape::new(c, nh, nw);
         let want = vec![0.0f32; want_shape.len()];
         let what = format!("({c},{h},{w}) -> {nw}x{nh}");
+
+        if want_shape.len() > 0 && c * h * w == 0 {
+            let e = cpu.resize(&input, (nw, nh)).unwrap_err();
+            assert!(
+                matches!(e, cv_hal::Error::InvalidInput(_)),
+                "CPU {what}: {e:?}"
+            );
+            let Some(g) = g else { continue };
+            let on_gpu = input.to_gpu_ctx(g).unwrap();
+            for interp in [Interpolation::Linear, Interpolation::Lanczos] {
+                let e = g.resize_with(&on_gpu, (nw, nh), interp).unwrap_err();
+                assert!(
+                    matches!(e, cv_hal::Error::InvalidInput(_)),
+                    "GPU {interp:?} {what}: {e:?}"
+                );
+            }
+            continue;
+        }
 
         let out = cpu.resize(&input, (nw, nh)).unwrap();
         assert_eq!(out.shape, want_shape, "CPU {what}");

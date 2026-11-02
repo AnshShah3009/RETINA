@@ -2399,6 +2399,14 @@ impl ComputeContext for GpuContext {
         mask: &mut Tensor<u32, S2>,
         params: &crate::context::Mog2Params<T>,
     ) -> crate::Result<()> {
+        // The CPU backend's checks: the kernel indexes the buffers by
+        // `params`, so a width, height or mixture count that does not fit
+        // them read and wrote out of bounds. No pixels: nothing to update.
+        let model_len = model.shape.len().min(model.storage.len());
+        let mask_len = mask.shape.len().min(mask.storage.len());
+        if !crate::context::validate_mog2(&frame.shape, model_len, mask_len, params)? {
+            return Ok(());
+        }
         use crate::storage::GpuStorage;
         use std::any::TypeId;
         use std::marker::PhantomData;

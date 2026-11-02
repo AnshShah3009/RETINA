@@ -3732,8 +3732,9 @@ impl ComputeContext for CpuBackend {
     ///
     /// A zero target size (or zero channels) returns an empty tensor of the
     /// target shape. An empty source with a non-empty target has nothing to
-    /// sample and returns zeros of the target shape, as `cv_imgproc::resize`
-    /// does for an empty image.
+    /// sample and is `InvalidInput`, as `cv::resize` asserts `!ssize.empty()`
+    /// and as `warp` does for the same case; it used to return zeros of the
+    /// target shape.
     fn resize<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
         input: &Tensor<T, S>,
@@ -3754,6 +3755,15 @@ impl ComputeContext for CpuBackend {
             return Err(crate::Error::InvalidInput(
                 "Resize input storage is smaller than its shape".into(),
             ));
+        }
+        if out_len == 0 {
+            return zeros_tensor(out_shape, input.dtype);
+        }
+        if input.shape.len() == 0 {
+            return Err(crate::Error::InvalidInput(format!(
+                "resize: the source {:?} is empty and the target {nw}x{nh} is not",
+                input.shape
+            )));
         }
 
         let mut output_storage = S::new(out_len, T::ZERO).map_err(crate::Error::MemoryError)?;
@@ -5057,8 +5067,11 @@ impl ComputeContext for CpuBackend {
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Mask not on CPU".into()))?;
 
-        // No pixels: nothing to update or classify, as on the GPU.
-        if frame.shape.len() == 0 {
+        // Parameters against the frame and buffers, as on the GPU. No
+        // pixels: nothing to update or classify.
+        let model_len = model.shape.len().min(model_data.len());
+        let mask_len = mask.shape.len().min(mask_data.len());
+        if !crate::context::validate_mog2(&frame.shape, model_len, mask_len, params)? {
             return Ok(());
         }
 

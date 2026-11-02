@@ -18,6 +18,16 @@ pub fn nms_boxes(
     iou_threshold: f32,
 ) -> Result<Vec<usize>> {
     let num_boxes = input.shape.height;
+    // The CPU backend's layout check, first as there: a row is
+    // `(x1, y1, x2, y2, score)`. Without it a `(N, 4)` set was read as
+    // `(N, 5)` - the score of box 0 taken from box 1's x1 - and the readback
+    // of `N * 5` floats overran the buffer (a wgpu panic).
+    if input.shape.width != 5 {
+        return Err(crate::Error::InvalidInput(format!(
+            "NMS Boxes expects (N, 5) tensor, got {:?}",
+            input.shape
+        )));
+    }
     // No boxes - also a set with rows but no channels, whose zero-size buffer
     // cannot be bound: none kept, as on the CPU.
     if num_boxes == 0 || input.shape.len() == 0 {

@@ -38,14 +38,15 @@
 //!   with no keypoints, `tsdf_extract_mesh`.
 //! * **Unchanged state / neutral value** - `tsdf_integrate` of an empty depth
 //!   image leaves the volume as it was; `mog2_update` of an empty frame is a
-//!   no-op; `dense_icp_step` and `icp_accumulate` return a zero system;
+//!   no-op (after its mixture count is checked); `dense_icp_step` and `icp_accumulate` return a zero system;
 //!   `akaze_contrast_k` returns OpenCV's 0.03 fallback; `tsdf_raycast` of an
 //!   empty volume returns zeros (every ray misses).
 //! * **`InvalidInput`** - the output is not empty but there is nothing to
 //!   compute it from, which OpenCV also rejects: `convolve_2d` with an empty
 //!   kernel (`!_kernel.empty()`); `match_template` with an empty image or
 //!   template; `warp` of an empty source to any size (`src.cols > 0 &&
-//!   src.rows > 0`); `remap` / `undistort` of an empty image to a non-empty
+//!   src.rows > 0`); `resize` of an empty source to a non-empty size
+//!   (`!ssize.empty()`); `remap` / `undistort` of an empty image to a non-empty
 //!   output; `compute_sift_descriptors` of keypoints on an empty image;
 //!   `pyramid_down` of a zero width or height (`!_src.empty()`; a plane with
 //!   no channels halves to an empty `(0, h/2, w/2)`); `find_chessboard_corners`;
@@ -57,9 +58,12 @@
 //!   the input's channel count: 16 zeros as `(0, 4, 4)`).
 //! * **OpenCV's default** - `morphology` with an empty structuring element
 //!   uses a 3x3 rectangle, as `cv::erode` / `cv::dilate` do for `noArray()`.
-//! * **`resize`** of an empty source to a non-empty size returns zeros of the
-//!   target size, the rule `cv_imgproc::resize` follows; it is not this
-//!   test's to change, only to hold the backends to.
+//!
+//! `resize` of an empty source to a non-empty size used to return zeros of
+//! the target size on both backends; it is now `InvalidInput`, as `warp` is.
+//! `cv_imgproc::resize` (an image in, an image out, no `Result`) still returns
+//! a black image of the target size for an empty source, as its
+//! `warp_affine` does, and never reaches the HAL with one.
 
 use cv_core::storage::Storage;
 use cv_core::{CpuTensor, KeyPoint, KeyPoints, Tensor, TensorShape};
