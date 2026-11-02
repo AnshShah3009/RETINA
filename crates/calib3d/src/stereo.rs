@@ -305,6 +305,23 @@ pub fn stereo_rectify_matrices(
     left_extrinsics: &Pose,
     right_extrinsics: &Pose,
 ) -> Result<StereoRectifyMatrices> {
+    // A non-finite input has no rectification; without this check a NaN
+    // baseline passed the `norm() <= 1e-12` test (NaN compares false) and
+    // came back as `Ok` with every matrix NaN.
+    let finite_k = |k: &CameraIntrinsics| [k.fx, k.fy, k.cx, k.cy].iter().all(|v| v.is_finite());
+    let finite_pose = |p: &Pose| {
+        p.translation.iter().all(|v| v.is_finite())
+            && p.rotation_matrix().iter().all(|v| v.is_finite())
+    };
+    if !finite_k(left_intrinsics)
+        || !finite_k(right_intrinsics)
+        || !finite_pose(left_extrinsics)
+        || !finite_pose(right_extrinsics)
+    {
+        return Err(cv_core::Error::InvalidInput(
+            "stereo_rectify_matrices: intrinsics and extrinsics must be finite".to_string(),
+        ));
+    }
     let r_left = left_extrinsics.rotation_matrix();
     let r_right = right_extrinsics.rotation_matrix();
 

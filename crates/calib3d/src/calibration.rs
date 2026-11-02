@@ -393,6 +393,36 @@ pub fn refine_camera_calibration_iterative_with_options(
         ));
     }
 
+    // A non-finite starting point or observation makes every residual NaN;
+    // no step can then lower the cost, so the loop used to stall and hand
+    // the input back as `Ok` (measured: `fx = NaN` in, `Ok(fx = NaN)` out).
+    let k0 = &initial.intrinsics;
+    let d0 = &initial.distortion;
+    let finite_start = [
+        k0.fx, k0.fy, k0.cx, k0.cy, d0.k1, d0.k2, d0.p1, d0.p2, d0.k3,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+        && initial.extrinsics.iter().all(|e| {
+            e.translation.iter().all(|v| v.is_finite())
+                && e.rotation_matrix().iter().all(|v| v.is_finite())
+        });
+    let finite_points = object_points
+        .iter()
+        .flatten()
+        .all(|p| p.coords.iter().all(|v| v.is_finite()))
+        && image_points
+            .iter()
+            .flatten()
+            .all(|p| p.x.is_finite() && p.y.is_finite());
+    if !finite_start || !finite_points {
+        return Err(cv_core::Error::InvalidInput(
+            "refine_camera_calibration_iterative: the initial calibration and the points \
+             must be finite"
+                .to_string(),
+        ));
+    }
+
     let n_views = initial.extrinsics.len();
     let total_pts: usize = object_points.iter().map(|v| v.len()).sum();
     if total_pts == 0 {

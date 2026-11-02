@@ -985,6 +985,22 @@ impl PnpSolver {
                 "At least 4 points required for EPnP".into(),
             ));
         }
+        if image_points.len() != n {
+            return Err(cv_core::Error::InvalidInput(
+                "EPnP needs one image point per object point".into(),
+            ));
+        }
+        // The two SVDs below do not return on non-finite input; one NaN pixel
+        // hung this call. Same guard as `solve_pnp_dlt`.
+        if object_points
+            .iter()
+            .any(|p| !p.iter().all(|v| v.is_finite()))
+            || image_points.iter().flatten().any(|v| !v.is_finite())
+        {
+            return Err(cv_core::Error::InvalidInput(
+                "EPnP correspondences must be finite".into(),
+            ));
+        }
 
         // 1. Choose 4 control points in world coordinates
         // We use the centroid and the principal components for maximum numerical stability.
@@ -1039,6 +1055,12 @@ impl PnpSolver {
             let pt_norm = model.unproject(&pt_img, 1.0);
             let u = pt_norm.x;
             let v = pt_norm.y;
+            // Non-finite intrinsics in `model` reach the SVD this way.
+            if !u.is_finite() || !v.is_finite() {
+                return Err(cv_core::Error::InvalidInput(
+                    "EPnP: an image point does not unproject to a finite ray".into(),
+                ));
+            }
 
             let a = &alphas[i];
 

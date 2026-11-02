@@ -397,6 +397,18 @@ impl Triangulator {
         pt1: &[f64; 2],
         pt2: &[f64; 2],
     ) -> crate::Result<Vector3<f64>> {
+        // `SVD::new` below does not return on non-finite input (its
+        // convergence test is a comparison, and every comparison against NaN
+        // is false): one NaN coordinate - or a NaN pose handed to
+        // `triangulate_points` - hung this call. Same guard as the free
+        // `triangulate_points` above.
+        if pt1.iter().chain(pt2.iter()).any(|v| !v.is_finite())
+            || p1.iter().chain(p2.iter()).any(|v| !v.is_finite())
+        {
+            return Err(cv_core::Error::InvalidInput(
+                "triangulate_linear: non-finite observation or projection matrix".into(),
+            ));
+        }
         let mut a = Matrix4::zeros();
 
         // Observation 1: u1 = (P1_1 * X) / (P1_3 * X), v1 = (P1_2 * X) / (P1_3 * X)
