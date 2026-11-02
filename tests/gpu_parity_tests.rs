@@ -587,6 +587,10 @@ fn every_shader_compiles() {
             include_str!("../crates/hal/shaders/farneback_poly_expand.wgsl"),
         ),
         (
+            "farneback_poly_setup",
+            include_str!("../crates/hal/shaders/farneback_poly_setup.wgsl"),
+        ),
+        (
             "farneback_update_matrices",
             include_str!("../crates/hal/shaders/farneback_update_matrices.wgsl"),
         ),
@@ -1548,7 +1552,11 @@ fn shader_storage_element_types_match_their_hosts() {
         ("warp.wgsl", &[(0, "f32"), (1, "f32")]),
         // Dense optical flow (`gpu_kernels/optical_flow.rs`): f32 frames,
         // planar f32 flow / matrix / dual planes, f32 poly coefficients.
-        ("farneback_poly_expand.wgsl", &[(0, "f32"), (1, "f32")]),
+        (
+            "farneback_poly_expand.wgsl",
+            &[(0, "f32"), (1, "f32"), (3, "f32")],
+        ),
+        ("farneback_poly_setup.wgsl", &[(0, "f32")]),
         (
             "farneback_update_matrices.wgsl",
             &[(0, "f32"), (1, "f32"), (2, "f32"), (3, "f32")],

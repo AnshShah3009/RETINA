@@ -839,9 +839,10 @@ fn the_whole_shader_corpus_is_covered() {
         // optical flow gained farneback_update_matrices.wgsl and the four
         // tvl1_*.wgsl shaders that replaced its inline TV-L1 kernels; 105
         // since tvl1_primal.wgsl and tvl1_dual.wgsl were fused into
-        // tvl1_primal_dual.wgsl.
-        105,
-        "expected 105 .wgsl files across shaders/ and src/gpu_kernels/"
+        // tvl1_primal_dual.wgsl; 106 with farneback_poly_setup.wgsl, the
+        // image-independent half of the polynomial expansion.
+        106,
+        "expected 106 .wgsl files across shaders/ and src/gpu_kernels/"
     );
     let kernels = files
         .iter()

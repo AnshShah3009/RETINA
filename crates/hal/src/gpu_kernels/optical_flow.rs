@@ -190,7 +190,7 @@ pub fn lucas_kanade(
 // tensor by its shape read garbage.
 // ---------------------------------------------------------------------------
 
-/// Uniform of `farneback_poly_expand.wgsl`. Only `width`, `height`, `stride`,
+/// Uniform of `farneback_poly_expand.wgsl` and `farneback_poly_setup.wgsl`. Only `width`, `height`, `stride`,
 /// `poly_n` (byte 20) and `poly_sigma` (byte 24) are read; the other fields
 /// keep the layout the shader was written against.
 #[repr(C)]
@@ -205,6 +205,11 @@ struct FarnebackParams {
     poly_sigma: f32,
     num_iters: u32,
 }
+
+/// Length in f32 of the buffer `farneback_poly_setup.wgsl` writes:
+/// 6 + 3 * 36 entries of the recorded elimination, then the 1-D Gaussian of
+/// up to `2 * 64 + 1` taps.
+const POLY_SETUP_LEN: usize = 6 + 3 * 36 + (2 * 64 + 1);
 
 /// Uniform of `farneback_update_matrices.wgsl` and `farneback_update_flow.wgsl`.
 #[repr(C)]
@@ -428,6 +433,10 @@ pub fn farneback(
         top = k;
     }
 
+    let setup_pipeline = ctx.create_compute_pipeline(
+        include_str!("../../shaders/farneback_poly_setup.wgsl"),
+        "main",
+    );
     let poly_pipeline = ctx.create_compute_pipeline(
         include_str!("../../shaders/farneback_poly_expand.wgsl"),
         "main",
@@ -446,6 +455,32 @@ pub fn farneback(
         FlowBlurMode::Box => 0.0,
         FlowBlurMode::Gaussian => 0.3 * half_window as f32,
     };
+
+    // The image-independent part of the polynomial expansion (weights and the
+    // elimination of the shared Gram matrix) depends only on poly_n and
+    // poly_sigma, so it is computed once for every level. Layout in
+    // farneback_poly_setup.wgsl.
+    let poly_setup = flow_storage(ctx, "Farneback Poly Setup", POLY_SETUP_LEN);
+    let setup_params = flow_uniform(
+        ctx,
+        "Farneback Poly Setup Params",
+        &FarnebackParams {
+            width: 0,
+            height: 0,
+            stride: 0,
+            flow_stride: 0,
+            window_size,
+            poly_n,
+            poly_sigma,
+            num_iters,
+        },
+    );
+    let setup_bg = flow_bind_group(
+        ctx,
+        &setup_pipeline,
+        "Farneback Poly Setup",
+        &[&poly_setup, &setup_params],
+    );
 
     let mut flow: Option<(wgpu::Buffer, u32, u32)> = None;
     for k in (0..=top).rev() {
@@ -489,13 +524,23 @@ pub fn farneback(
             ctx,
             &poly_pipeline,
             "Farneback Poly1",
-            &[level_prev.storage.buffer(), &poly1, &poly_params],
+            &[
+                level_prev.storage.buffer(),
+                &poly1,
+                &poly_params,
+                &poly_setup,
+            ],
         );
         let poly2_bg = flow_bind_group(
             ctx,
             &poly_pipeline,
             "Farneback Poly2",
-            &[level_next.storage.buffer(), &poly2, &poly_params],
+            &[
+                level_next.storage.buffer(),
+                &poly2,
+                &poly_params,
+                &poly_setup,
+            ],
         );
         let mats_bg = flow_bind_group(
             ctx,
@@ -522,6 +567,11 @@ pub fn farneback(
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            if flow.is_none() {
+                pass.set_pipeline(&setup_pipeline);
+                pass.set_bind_group(0, &setup_bg, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
             pass.set_pipeline(&poly_pipeline);
             pass.set_bind_group(0, &poly1_bg, &[]);
             flow_dispatch(&mut pass, lw, lh);

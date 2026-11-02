@@ -77,12 +77,12 @@ remaining B source, `spatial.rs`, is not reachable through `dispatch`.
 
 ## Summary
 
-78 integer divisions or modulos, spread over 29 of the 114 sources that naga
-accepts (62 table rows):
+80 integer divisions or modulos, spread over 30 of the 115 sources that naga
+accepts (64 table rows):
 
 | class | sites | rows | before this audit |
 | --- | ---: | ---: | --- |
-| A, nonzero constant | 43 | 29 | 55 |
+| A, nonzero constant | 45 | 31 | 55 |
 | B, host-guaranteed | 2 | 2 | 4 (`feature_collection_f32.wgsl` moved to S) |
 | S, shader-proven | 33 | 31 | 8 |
 | C, needs a guard | 0 | 0 | 20 |
@@ -132,6 +132,8 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
 | `crates/hal/shaders/convolve_2d.wgsl` | `%` | `i32(params.height)` | 1 | S | Wrap branch, `h >= 1` (guard added) |
 | `crates/hal/shaders/convolve_2d.wgsl` | `%` | `i32(params.width)` | 1 | S | Wrap branch, `w >= 1` (guard added) |
 | `crates/hal/shaders/convolve_2d.wgsl` | `/` | `2` | 2 | A | literal (kernel centre) |
+| `crates/hal/shaders/farneback_poly_setup.wgsl` | `%` | `6u` | 1 | A | literal (Gram matrix column) |
+| `crates/hal/shaders/farneback_poly_setup.wgsl` | `/` | `6u` | 1 | A | literal (Gram matrix row) |
 | `crates/hal/shaders/fast.wgsl` | `%` | `4u` | 1 | A | literal |
 | `crates/hal/shaders/fast.wgsl` | `/` | `16u` | 1 | A | literal |
 | `crates/hal/shaders/fast.wgsl` | `/` | `4u` | 2 | A | literal |

@@ -15,6 +15,8 @@
 // a poly_n-wide window (half-size poly_n / 2) and dropped the samples outside
 // the image, which disagreed with OpenCV everywhere, most near the border.
 // A constant image has f equal to that constant and a = b = c = 0.
+// Everything that does not depend on the image (the weights and the
+// elimination of the Gram matrix) comes from `farneback_poly_setup.wgsl`.
 //
 // Output: six coefficients per pixel, [f, d, e, a, b, c] at 6 * idx. This is a
 // scratch buffer private to `gpu_kernels::optical_flow::farneback`.
@@ -30,74 +32,55 @@ struct PolyExpandParams {
     num_iters: u32,
 }
 
-fn gaussian_weight(x: f32, sigma: f32) -> f32 {
-    let two_sigma_sq = 2.0 * sigma * sigma;
-    if (two_sigma_sq <= 0.0) {
-        return 1.0;
-    }
-    let w = exp(-(x * x) / two_sigma_sq);
-    if (w == w) {
-        return w;
-    }
-    return 1.0;
-}
+// Image-independent data from `farneback_poly_setup.wgsl` (layout there): the
+// 1-D Gaussian weights and a record of the elimination of the shared Gram
+// matrix. A pixel accumulates only its right-hand side b and replays on it the
+// row swaps and updates the full solve made, then back-substitutes, which
+// gives the same bits as solving the whole system per pixel did.
+const PIV: u32 = 0u;
+const FAC: u32 = 6u;
+const USE: u32 = 42u;
+const UPPER: u32 = 78u;
+const GAUSS: u32 = 114u;
 
 @group(0) @binding(0) var<storage, read> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 @group(0) @binding(2) var<uniform> params: PolyExpandParams;
+@group(0) @binding(3) var<storage, read> setup: array<f32>;
 
-fn solve6(a_in: array<f32, 36>, b_in: array<f32, 6>) -> array<f32, 6> {
-    var a = a_in;
+fn solve6(b_in: array<f32, 6>) -> array<f32, 6> {
     var b = b_in;
     for (var col = 0; col < 6; col++) {
-        var max_row = col;
-        var max_val = abs(a[col * 6 + col]);
-        for (var row = col + 1; row < 6; row++) {
-            let v = abs(a[row * 6 + col]);
-            if (v > max_val) {
-                max_val = v;
-                max_row = row;
-            }
-        }
-        if (max_val < 1e-12) {
-            for (var row = 0; row < 6; row++) {
-                a[row * 6 + col] = 0.0;
-            }
+        let max_row = i32(bitcast<u32>(setup[PIV + u32(col)]));
+        if (max_row >= 6) {
             continue;
         }
         if (max_row != col) {
-            for (var j = 0; j < 6; j++) {
-                let tmp = a[col * 6 + j];
-                a[col * 6 + j] = a[max_row * 6 + j];
-                a[max_row * 6 + j] = tmp;
-            }
             let tb = b[col];
             b[col] = b[max_row];
             b[max_row] = tb;
         }
-        let pivot = a[col * 6 + col];
         for (var row = col + 1; row < 6; row++) {
-            let factor = a[row * 6 + col] / pivot;
-            if (abs(factor) < 1e-15) {
+            let k = u32(col * 6 + row);
+            if (setup[USE + k] == 0.0) {
                 continue;
             }
-            for (var j = col; j < 6; j++) {
-                a[row * 6 + j] = a[row * 6 + j] - factor * a[col * 6 + j];
-            }
+            let factor = setup[FAC + k];
             b[row] = b[row] - factor * b[col];
         }
     }
     var x: array<f32, 6>;
     for (var i = 5; i >= 0; i--) {
-        if (abs(a[i * 6 + i]) < 1e-12) {
+        let aii = setup[UPPER + u32(i * 6 + i)];
+        if (abs(aii) < 1e-12) {
             x[i] = 0.0;
             continue;
         }
         var sum = b[i];
         for (var j = i + 1; j < 6; j++) {
-            sum = sum - a[i * 6 + j] * x[j];
+            sum = sum - setup[UPPER + u32(i * 6 + j)] * x[j];
         }
-        let xi = sum / a[i * 6 + i];
+        let xi = sum / aii;
         x[i] = select(0.0, xi, xi == xi);
     }
     return x;
@@ -117,28 +100,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let last_x = i32(params.src_w) - 1;
     let last_y = i32(params.src_h) - 1;
 
-    var ata: array<f32, 36>;
     var atb: array<f32, 6>;
 
     for (var dy = -half; dy <= half; dy++) {
+        let sy = clamp(i32(y) + dy, 0, last_y);
+        let row = u32(sy) * params.stride;
+        let wy = setup[GAUSS + u32(dy + half)];
         for (var dx = -half; dx <= half; dx++) {
             let sx = clamp(i32(x) + dx, 0, last_x);
-            let sy = clamp(i32(y) + dy, 0, last_y);
-            let val = input[u32(sy) * params.stride + u32(sx)];
+            let val = input[row + u32(sx)];
             let xf = f32(dx);
             let yf = f32(dy);
-            let w = gaussian_weight(xf, params.sigma) * gaussian_weight(yf, params.sigma);
+            let w = setup[GAUSS + u32(dx + half)] * wy;
             let basis = array<f32, 6>(1.0, xf, yf, xf * xf, xf * yf, yf * yf);
             for (var i = 0; i < 6; i++) {
-                for (var j = 0; j < 6; j++) {
-                    ata[i * 6 + j] = ata[i * 6 + j] + basis[i] * basis[j] * w;
-                }
                 atb[i] = atb[i] + basis[i] * val * w;
             }
         }
     }
 
-    let sol = solve6(ata, atb);
+    let sol = solve6(atb);
     // [f, d, e, a, b, c] = [1, x, y, x², xy, y²]
     output[idx * 6u + 0u] = sol[0];
     output[idx * 6u + 1u] = sol[1];
