@@ -582,6 +582,38 @@ fn every_shader_compiles() {
             "undistort",
             include_str!("../crates/hal/shaders/undistort.wgsl"),
         ),
+        (
+            "farneback_poly_expand",
+            include_str!("../crates/hal/shaders/farneback_poly_expand.wgsl"),
+        ),
+        (
+            "farneback_update_matrices",
+            include_str!("../crates/hal/shaders/farneback_update_matrices.wgsl"),
+        ),
+        (
+            "farneback_update_flow",
+            include_str!("../crates/hal/shaders/farneback_update_flow.wgsl"),
+        ),
+        (
+            "flow_upsample",
+            include_str!("../crates/hal/shaders/flow_upsample.wgsl"),
+        ),
+        (
+            "tvl1_warp",
+            include_str!("../crates/hal/shaders/tvl1_warp.wgsl"),
+        ),
+        (
+            "tvl1_primal",
+            include_str!("../crates/hal/shaders/tvl1_primal.wgsl"),
+        ),
+        (
+            "tvl1_dual",
+            include_str!("../crates/hal/shaders/tvl1_dual.wgsl"),
+        ),
+        (
+            "tvl1_median",
+            include_str!("../crates/hal/shaders/tvl1_median.wgsl"),
+        ),
     ];
 
     // A shader can be rejected by naga's parser without a device, so check the
@@ -1518,6 +1550,22 @@ fn shader_storage_element_types_match_their_hosts() {
         ("stereo_match.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("subtract.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("warp.wgsl", &[(0, "f32"), (1, "f32")]),
+        // Dense optical flow (`gpu_kernels/optical_flow.rs`): f32 frames,
+        // planar f32 flow / matrix / dual planes, f32 poly coefficients.
+        ("farneback_poly_expand.wgsl", &[(0, "f32"), (1, "f32")]),
+        (
+            "farneback_update_matrices.wgsl",
+            &[(0, "f32"), (1, "f32"), (2, "f32"), (3, "f32")],
+        ),
+        ("farneback_update_flow.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("flow_upsample.wgsl", &[(0, "f32"), (1, "f32")]),
+        (
+            "tvl1_warp.wgsl",
+            &[(0, "f32"), (1, "f32"), (2, "f32"), (3, "f32")],
+        ),
+        ("tvl1_primal.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
+        ("tvl1_dual.wgsl", &[(0, "f32"), (1, "f32")]),
+        ("tvl1_median.wgsl", &[(0, "f32"), (1, "f32")]),
     ];
 
     let mut failures: Vec<String> = Vec::new();

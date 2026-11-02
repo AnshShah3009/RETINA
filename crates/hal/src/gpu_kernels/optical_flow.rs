@@ -175,6 +175,24 @@ pub fn lucas_kanade(
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// Dense optical flow (Farneback, TV-L1)
+//
+// Both return a `Tensor` of shape (2, h, w) in the workspace's planar CHW
+// layout: plane 0 (`[0, h * w)`) is the horizontal flow u, plane 1
+// (`[h * w, 2 * h * w)`) the vertical flow v, with OpenCV's sign convention
+// prev(x, y) ≈ next(x + u, y + v). Every shader in the pipeline (poly-expand
+// aside, whose scratch buffer is private) reads and writes flow planar, so
+// `Tensor::index` on the result is correct without a transpose.
+//
+// Before this layout was made planar, the Farneback shaders stored (u, v)
+// interleaved per pixel under the same (2, h, w) shape, so anyone indexing the
+// tensor by its shape read garbage.
+// ---------------------------------------------------------------------------
+
+/// Uniform of `farneback_poly_expand.wgsl`. Only `width`, `height`, `stride`,
+/// `poly_n` (byte 20) and `poly_sigma` (byte 24) are read; the other fields
+/// keep the layout the shader was written against.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct FarnebackParams {
@@ -182,20 +200,181 @@ struct FarnebackParams {
     height: u32,
     stride: u32,
     flow_stride: u32,
-    /// Averaging window of the flow update. The poly-expand shader skips it
-    /// so `poly_n` stays at byte 20 and `poly_sigma` at byte 24.
     window_size: u32,
     poly_n: u32,
     poly_sigma: f32,
     num_iters: u32,
 }
 
+/// Uniform of `farneback_update_matrices.wgsl` and `farneback_update_flow.wgsl`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct FarnebackFlowParams {
+    width: u32,
+    height: u32,
+    /// The averaging window is `2 * half_window + 1` pixels wide.
+    half_window: u32,
+    /// `<= 0`: box window. Otherwise the Gaussian window's standard deviation.
+    win_sigma: f32,
+}
+
+/// Window used to average the Farneback normal equations, as OpenCV's
+/// `OPTFLOW_FARNEBACK_GAUSSIAN` flag selects.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FlowBlurMode {
+    /// Box window (OpenCV's default, flags = 0).
     Box,
+    /// Gaussian window with sigma `0.3 * (window_size / 2)`
+    /// (`OPTFLOW_FARNEBACK_GAUSSIAN`).
     Gaussian,
 }
 
+/// OpenCV stops building the Farneback pyramid before a level gets narrower
+/// than this.
+const FARNEBACK_MIN_LEVEL_SIZE: f64 = 32.0;
+
+fn flow_dispatch(pass: &mut wgpu::ComputePass<'_>, w: u32, h: u32) {
+    pass.dispatch_workgroups(w.div_ceil(16), h.div_ceil(16), 1);
+}
+
+/// Bind group with `buffers` at bindings `0..n`.
+fn flow_bind_group(
+    ctx: &GpuContext,
+    pipeline: &wgpu::ComputePipeline,
+    label: &str,
+    buffers: &[&wgpu::Buffer],
+) -> wgpu::BindGroup {
+    let entries: Vec<wgpu::BindGroupEntry<'_>> = buffers
+        .iter()
+        .enumerate()
+        .map(|(i, b)| wgpu::BindGroupEntry {
+            binding: i as u32,
+            resource: b.as_entire_binding(),
+        })
+        .collect();
+    ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &entries,
+    })
+}
+
+fn flow_storage(ctx: &GpuContext, label: &str, len: usize) -> wgpu::Buffer {
+    // wgpu zero-initialises every new buffer, which the zero initial flow and
+    // the zero initial TV-L1 dual variables rely on.
+    ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: (len * std::mem::size_of::<f32>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    })
+}
+
+fn flow_uniform<P: bytemuck::Pod>(ctx: &GpuContext, label: &str, params: &P) -> wgpu::Buffer {
+    ctx.device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::bytes_of(params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
+}
+
+/// Common checks for the dense-flow entry points: one channel, equal non-empty
+/// sizes, storage that holds the whole image.
+fn check_flow_frames(
+    name: &str,
+    prev: &Tensor<f32, GpuStorage<f32>>,
+    next: &Tensor<f32, GpuStorage<f32>>,
+) -> Result<(usize, usize)> {
+    let (h, w) = prev.shape.hw();
+    if prev.shape.channels != 1 || next.shape.channels != 1 {
+        return Err(crate::Error::InvalidInput(format!(
+            "{name}: frames must have one channel, got {} and {}",
+            prev.shape.channels, next.shape.channels
+        )));
+    }
+    if next.shape.hw() != (h, w) {
+        return Err(crate::Error::InvalidInput(format!(
+            "{name}: prev is {w}x{h} but next is {}x{}",
+            next.shape.width, next.shape.height
+        )));
+    }
+    if w == 0 || h == 0 {
+        return Err(crate::Error::InvalidInput(format!(
+            "{name}: empty frame ({w}x{h})"
+        )));
+    }
+    if w > u32::MAX as usize / 16 || h > u32::MAX as usize / 16 {
+        return Err(crate::Error::InvalidInput(format!(
+            "{name}: frame {w}x{h} is too large"
+        )));
+    }
+    let need = (w * h * std::mem::size_of::<f32>()) as u64;
+    if prev.storage.buffer().size() < need || next.storage.buffer().size() < need {
+        return Err(crate::Error::InvalidInput(format!(
+            "{name}: frame storage is smaller than {w}x{h} f32"
+        )));
+    }
+    Ok((h, w))
+}
+
+/// Encode `flow_upsample.wgsl`: planar `src` (`src_w x src_h`) to planar `dst`
+/// (`dst_w x dst_h`), flow values scaled by the size ratio per axis.
+fn encode_flow_upsample(
+    ctx: &GpuContext,
+    encoder: &mut wgpu::CommandEncoder,
+    src: &wgpu::Buffer,
+    (src_w, src_h): (u32, u32),
+    dst: &wgpu::Buffer,
+    (dst_w, dst_h): (u32, u32),
+) {
+    let pipeline =
+        ctx.create_compute_pipeline(include_str!("../../shaders/flow_upsample.wgsl"), "main");
+    let params = flow_uniform(
+        ctx,
+        "Flow Upsample Params",
+        &crate::gpu_kernels::resize::ResizeParams {
+            src_w,
+            src_h,
+            dst_w,
+            dst_h,
+            channels: 2,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        },
+    );
+    let bg = flow_bind_group(ctx, &pipeline, "Flow Upsample", &[src, dst, &params]);
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+    pass.set_pipeline(&pipeline);
+    pass.set_bind_group(0, &bg, &[]);
+    flow_dispatch(&mut pass, dst_w, dst_h);
+}
+
+/// Dense optical flow by Farnebäck's polynomial expansion, following OpenCV's
+/// `calcOpticalFlowFarneback` (`optflowgf.cpp`).
+///
+/// * `num_levels`: pyramid levels including the full-resolution frame
+///   (1 = no pyramid). As in OpenCV, no level narrower than 32 pixels is
+///   built, so fewer may be used.
+/// * `pyr_scale`: size ratio between consecutive levels, in `(0, 1)`. Level
+///   `k` is the frame blurred with sigma `(1 / s - 1) / 2` and resized to
+///   `round(size * s)`, `s = pyr_scale^k`.
+/// * `window_size`: averaging window (OpenCV `winsize`).
+/// * `num_iters`: iterations per level.
+/// * `poly_n`: half-size of the polynomial-expansion neighbourhood, as OpenCV
+///   uses it (the fit spans `2 * poly_n + 1` pixels); typically 5 or 7.
+/// * `poly_sigma`: Gaussian of the expansion; typically 1.1 or 1.2 for
+///   `poly_n = 5`, 1.5 for 7.
+/// * `blur_mode`: box (OpenCV's default) or Gaussian window.
+///
+/// Intensities are taken on OpenCV's 0-255 scale: the solve's `+ 1e-3`
+/// regulariser is OpenCV's and assumes it. Frames in `[0, 1]` should be
+/// multiplied by 255 first.
+///
+/// Returns flow of shape `(2, h, w)`, planar: plane 0 is u (x), plane 1 is v
+/// (y), with `prev(x, y) ≈ next(x + u, y + v)`.
+#[allow(clippy::too_many_arguments)]
 pub fn farneback(
     ctx: &GpuContext,
     prev: &Tensor<f32, GpuStorage<f32>>,
@@ -206,304 +385,244 @@ pub fn farneback(
     num_iters: u32,
     poly_n: u32,
     poly_sigma: f32,
-    _blur_mode: FlowBlurMode,
+    blur_mode: FlowBlurMode,
 ) -> Result<Tensor<f32, GpuStorage<f32>>> {
-    let mut prev_pyr = Vec::new();
-    let mut next_pyr = Vec::new();
-    let mut current_prev = prev.clone();
-    let mut current_next = next.clone();
-
-    // CPU Farneback scales each coarser level by `pyramid_scale` (truncating),
-    // rather than always calling a fixed half-resolution pyramid.
-    for level in 0..num_levels {
-        prev_pyr.push(current_prev.clone());
-        next_pyr.push(current_next.clone());
-
-        if level < num_levels - 1 {
-            let (h, w) = current_prev.shape.hw();
-            let nw = ((w as f32) * pyr_scale) as u32;
-            let nh = ((h as f32) * pyr_scale) as u32;
-            let nw = nw.max(1);
-            let nh = nh.max(1);
-            current_prev = crate::gpu_kernels::resize::resize(ctx, &current_prev, nw, nh)?;
-            current_next = crate::gpu_kernels::resize::resize(ctx, &current_next, nw, nh)?;
-        }
+    let (h, w) = check_flow_frames("farneback", prev, next)?;
+    if num_levels == 0 {
+        return Err(crate::Error::InvalidInput(
+            "farneback: num_levels must be at least 1".into(),
+        ));
+    }
+    if !(pyr_scale.is_finite() && pyr_scale > 0.0 && pyr_scale < 1.0) {
+        return Err(crate::Error::InvalidInput(format!(
+            "farneback: pyr_scale must be in (0, 1), got {pyr_scale}"
+        )));
+    }
+    if window_size == 0 || num_iters == 0 || poly_n == 0 {
+        return Err(crate::Error::InvalidInput(format!(
+            "farneback: window_size ({window_size}), num_iters ({num_iters}) and \
+             poly_n ({poly_n}) must be at least 1"
+        )));
+    }
+    if window_size > 513 || poly_n > 64 {
+        return Err(crate::Error::InvalidInput(format!(
+            "farneback: window_size {window_size} (max 513) or poly_n {poly_n} (max 64) too large"
+        )));
+    }
+    if !(poly_sigma.is_finite() && poly_sigma > 0.0) {
+        return Err(crate::Error::InvalidInput(format!(
+            "farneback: poly_sigma must be finite and > 0, got {poly_sigma}"
+        )));
     }
 
-    let mut flow: Option<Tensor<f32, GpuStorage<f32>>> = None;
-
-    for level in (0..num_levels as usize).rev() {
-        let level_w = prev_pyr[level].shape.width as u32;
-        let level_h = prev_pyr[level].shape.height as u32;
-        let level_stride = level_w;
-
-        let flow_len = (level_w * level_h * 2) as usize;
-        // Must start at zero: a singular update (`det == 0`) writes the buffer
-        // back unchanged, so an uninitialised allocation would be returned as
-        // the flow. wgpu zero-initialises every new buffer, so this needs no
-        // mapping and no host-side fill (it used to map the whole buffer and
-        // write `flow_len * 4` zero bytes through a staging copy).
-        let flow_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Farneback Flow"),
-            size: (flow_len * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-
-        if let Some(prev_flow) = flow {
-            let flow_w = prev_flow.shape.width as u32;
-            let flow_h = prev_flow.shape.height as u32;
-            let _scale_x = level_w as f32 / flow_w as f32;
-            let _scale_y = level_h as f32 / flow_h as f32;
-
-            let up_shader = include_str!("../../shaders/flow_upsample.wgsl");
-            let up_pipeline = ctx.create_compute_pipeline(up_shader, "main");
-
-            let up_params = crate::gpu_kernels::resize::ResizeParams {
-                src_w: flow_w,
-                src_h: flow_h,
-                dst_w: level_w,
-                dst_h: level_h,
-                channels: 2,
-                _pad0: 0,
-                _pad1: 0,
-                _pad2: 0,
-            };
-
-            let up_params_buf = ctx
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Flow Up Params"),
-                    contents: bytemuck::bytes_of(&up_params),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-
-            let up_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Flow Up Bind Group"),
-                layout: &up_pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: prev_flow.storage.buffer().as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: flow_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: up_params_buf.as_entire_binding(),
-                    },
-                ],
-            });
-
-            let mut up_enc = ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Flow Upsample"),
-                });
-            {
-                let mut pass = up_enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-                pass.set_pipeline(&up_pipeline);
-                pass.set_bind_group(0, &up_bind_group, &[]);
-                pass.dispatch_workgroups(level_w.div_ceil(16), level_h.div_ceil(16), 1);
-            }
-            ctx.submit(up_enc);
-        }
-
-        let poly_len = (level_w * level_h * 6) as usize;
-
-        let poly1_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Poly1"),
-            size: (poly_len * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let poly2_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Poly2"),
-            size: (poly_len * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let poly_params = FarnebackParams {
-            width: level_w,
-            height: level_h,
-            stride: level_stride,
-            flow_stride: level_w * 2,
-            window_size,
-            poly_n,
-            poly_sigma,
-            num_iters,
-        };
-
-        let poly_params_buf = ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Poly Params"),
-                contents: bytemuck::bytes_of(&poly_params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        let poly_expand_shader = include_str!("../../shaders/farneback_poly_expand.wgsl");
-        let poly_expand_pipeline = ctx.create_compute_pipeline(poly_expand_shader, "main");
-
-        let prev_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Poly1 Bind Group"),
-            layout: &poly_expand_pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: prev_pyr[level].storage.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: poly1_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: poly_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut poly_enc = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Poly Expand"),
-            });
+    // OpenCV: count the levels that stay at least 32 pixels on each side.
+    let mut top = 0u32;
+    let mut scale = 1.0f64;
+    for k in 1..num_levels {
+        scale *= pyr_scale as f64;
+        if (w as f64) * scale < FARNEBACK_MIN_LEVEL_SIZE
+            || (h as f64) * scale < FARNEBACK_MIN_LEVEL_SIZE
         {
-            let mut pass = poly_enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(&poly_expand_pipeline);
-            pass.set_bind_group(0, &prev_bind_group, &[]);
-            pass.dispatch_workgroups(level_w.div_ceil(16), level_h.div_ceil(16), 1);
+            break;
         }
-        ctx.submit(poly_enc);
-
-        let next_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Poly2 Bind Group"),
-            layout: &poly_expand_pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: next_pyr[level].storage.buffer().as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: poly2_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: poly_params_buf.as_entire_binding(),
-                },
-            ],
-        });
-
-        let mut poly_enc2 = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Poly Expand 2"),
-            });
-        {
-            let mut pass = poly_enc2.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(&poly_expand_pipeline);
-            pass.set_bind_group(0, &next_bind_group, &[]);
-            pass.dispatch_workgroups(level_w.div_ceil(16), level_h.div_ceil(16), 1);
-        }
-        ctx.submit(poly_enc2);
-
-        let flow_update_shader = include_str!("../../shaders/farneback_update_flow.wgsl");
-        let flow_update_pipeline = ctx.create_compute_pipeline(flow_update_shader, "main");
-
-        let flow_params = FarnebackParams {
-            width: level_w,
-            height: level_h,
-            stride: level_stride,
-            flow_stride: level_w * 2,
-            window_size,
-            poly_n,
-            poly_sigma,
-            num_iters,
-        };
-
-        let flow_params_buf = ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Flow Update Params"),
-                contents: bytemuck::bytes_of(&flow_params),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-
-        for _iter in 0..num_iters {
-            let flow_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Flow Update Bind Group"),
-                layout: &flow_update_pipeline.get_bind_group_layout(0),
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: poly1_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: poly2_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: flow_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: flow_params_buf.as_entire_binding(),
-                    },
-                ],
-            });
-
-            let mut flow_enc = ctx
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Flow Update"),
-                });
-            {
-                let mut pass = flow_enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-                pass.set_pipeline(&flow_update_pipeline);
-                pass.set_bind_group(0, &flow_bind_group, &[]);
-                pass.dispatch_workgroups(level_w.div_ceil(16), level_h.div_ceil(16), 1);
-            }
-            ctx.submit(flow_enc);
-        }
-
-        flow = Some(Tensor {
-            storage: GpuStorage::from_buffer(Arc::new(flow_buffer), flow_len),
-            shape: cv_core::TensorShape::new(2, level_h as usize, level_w as usize),
-            dtype: prev.dtype,
-            _phantom: std::marker::PhantomData,
-        });
+        top = k;
     }
 
-    flow.ok_or_else(|| crate::Error::RuntimeError("No flow computed".into()))
+    let poly_pipeline = ctx.create_compute_pipeline(
+        include_str!("../../shaders/farneback_poly_expand.wgsl"),
+        "main",
+    );
+    let mats_pipeline = ctx.create_compute_pipeline(
+        include_str!("../../shaders/farneback_update_matrices.wgsl"),
+        "main",
+    );
+    let solve_pipeline = ctx.create_compute_pipeline(
+        include_str!("../../shaders/farneback_update_flow.wgsl"),
+        "main",
+    );
+
+    let half_window = window_size / 2;
+    let win_sigma = match blur_mode {
+        FlowBlurMode::Box => 0.0,
+        FlowBlurMode::Gaussian => 0.3 * half_window as f32,
+    };
+
+    let mut flow: Option<(wgpu::Buffer, u32, u32)> = None;
+    for k in (0..=top).rev() {
+        let scale = (pyr_scale as f64).powi(k as i32);
+        let lw = (((w as f64) * scale).round() as u32).max(1);
+        let lh = (((h as f64) * scale).round() as u32).max(1);
+        let level_prev = farneback_level(ctx, prev, scale, lw, lh)?;
+        let level_next = farneback_level(ctx, next, scale, lw, lh)?;
+
+        let n = (lw * lh) as usize;
+        let flow_buf = flow_storage(ctx, "Farneback Flow", 2 * n);
+        let poly1 = flow_storage(ctx, "Farneback Poly1", 6 * n);
+        let poly2 = flow_storage(ctx, "Farneback Poly2", 6 * n);
+        let mats = flow_storage(ctx, "Farneback Matrices", 5 * n);
+
+        let poly_params = flow_uniform(
+            ctx,
+            "Farneback Poly Params",
+            &FarnebackParams {
+                width: lw,
+                height: lh,
+                stride: lw,
+                flow_stride: lw,
+                window_size,
+                poly_n,
+                poly_sigma,
+                num_iters,
+            },
+        );
+        let flow_params = flow_uniform(
+            ctx,
+            "Farneback Flow Params",
+            &FarnebackFlowParams {
+                width: lw,
+                height: lh,
+                half_window,
+                win_sigma,
+            },
+        );
+        let poly1_bg = flow_bind_group(
+            ctx,
+            &poly_pipeline,
+            "Farneback Poly1",
+            &[level_prev.storage.buffer(), &poly1, &poly_params],
+        );
+        let poly2_bg = flow_bind_group(
+            ctx,
+            &poly_pipeline,
+            "Farneback Poly2",
+            &[level_next.storage.buffer(), &poly2, &poly_params],
+        );
+        let mats_bg = flow_bind_group(
+            ctx,
+            &mats_pipeline,
+            "Farneback Matrices",
+            &[&poly1, &poly2, &flow_buf, &mats, &flow_params],
+        );
+        let solve_bg = flow_bind_group(
+            ctx,
+            &solve_pipeline,
+            "Farneback Solve",
+            &[&mats, &flow_buf, &flow_params],
+        );
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Farneback Level"),
+            });
+        // The coarsest level starts from zero flow (the buffer is zeroed);
+        // finer ones from the coarser estimate, scaled to this level.
+        if let Some((coarse, cw, ch)) = &flow {
+            encode_flow_upsample(ctx, &mut encoder, coarse, (*cw, *ch), &flow_buf, (lw, lh));
+        }
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            pass.set_pipeline(&poly_pipeline);
+            pass.set_bind_group(0, &poly1_bg, &[]);
+            flow_dispatch(&mut pass, lw, lh);
+            pass.set_bind_group(0, &poly2_bg, &[]);
+            flow_dispatch(&mut pass, lw, lh);
+            for _ in 0..num_iters {
+                pass.set_pipeline(&mats_pipeline);
+                pass.set_bind_group(0, &mats_bg, &[]);
+                flow_dispatch(&mut pass, lw, lh);
+                pass.set_pipeline(&solve_pipeline);
+                pass.set_bind_group(0, &solve_bg, &[]);
+                flow_dispatch(&mut pass, lw, lh);
+            }
+        }
+        ctx.submit(encoder);
+        flow = Some((flow_buf, lw, lh));
+    }
+
+    let (buf, _, _) = flow.ok_or_else(|| crate::Error::RuntimeError("No flow computed".into()))?;
+    Ok(Tensor {
+        storage: GpuStorage::from_buffer(Arc::new(buf), 2 * w * h),
+        shape: cv_core::TensorShape::new(2, h, w),
+        dtype: prev.dtype,
+        _phantom: std::marker::PhantomData,
+    })
 }
 
+/// One Farneback pyramid level as OpenCV builds it: the full-resolution frame
+/// blurred with sigma `(1 / scale - 1) / 2` (kernel `max(round(5 sigma) | 1, 3)`,
+/// and at `scale = 1` OpenCV's 3x3 default sigma of 0.8), then resized.
+fn farneback_level(
+    ctx: &GpuContext,
+    frame: &Tensor<f32, GpuStorage<f32>>,
+    scale: f64,
+    lw: u32,
+    lh: u32,
+) -> Result<Tensor<f32, GpuStorage<f32>>> {
+    let sigma = (1.0 / scale - 1.0) * 0.5;
+    let ksize = (((sigma * 5.0).round() as usize) | 1).max(3);
+    // cv::GaussianBlur with sigma 0 derives it from the kernel size.
+    let sigma = if sigma > 0.0 {
+        sigma
+    } else {
+        0.3 * ((ksize as f64 - 1.0) * 0.5 - 1.0) + 0.8
+    };
+    let blurred = crate::gpu_kernels::convolve::gaussian_blur_with_border(
+        ctx,
+        frame,
+        sigma as f32,
+        ksize,
+        crate::context::BorderMode::Reflect101,
+    )?;
+    let (h, w) = frame.shape.hw();
+    if (lw as usize, lh as usize) == (w, h) {
+        Ok(blurred)
+    } else {
+        crate::gpu_kernels::resize::resize(ctx, &blurred, lw, lh)
+    }
+}
+
+/// Uniform shared by every TV-L1 shader (`tvl1_*.wgsl`).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct Tvl1Params {
     width: u32,
     height: u32,
-    tau: f32,
-    lambda: f32,
+    /// lambda * theta.
+    l_t: f32,
     theta: f32,
-    num_warps: u32,
-    num_outer_iters: u32,
-    num_inner_iters: u32,
+    /// tau / theta.
+    taut: f32,
+    median_radius: u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
+/// Parameters of [`tvl1_optical_flow`]; names and defaults follow OpenCV's
+/// `DualTVL1OpticalFlow`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tvl1Config {
+    /// Time step of the dual update (OpenCV `tau`). Stable for `tau <= 0.25`.
     pub tau: f32,
+    /// Weight of the data term (OpenCV `lambda`), for 0-255 intensities.
     pub lambda: f32,
+    /// Coupling between the flow and its auxiliary variable (OpenCV `theta`).
     pub theta: f32,
+    /// Pyramid scales (OpenCV `nscales`). No scale narrower than 16 pixels is
+    /// built, as in OpenCV.
+    pub num_scales: u32,
+    /// Size ratio between consecutive scales, in `(0, 1)` (OpenCV `scaleStep`).
+    pub scale_step: f32,
+    /// Warps (re-linearisations) per scale (OpenCV `warps`).
     pub num_warps: u32,
+    /// Outer iterations per warp; each starts with the median filter
+    /// (OpenCV `outerIterations`).
     pub num_outer_iters: u32,
+    /// Primal-dual iterations per outer iteration (OpenCV `innerIterations`).
     pub num_inner_iters: u32,
+    /// Median filter size applied to the flow every outer iteration: 0 or 1
+    /// (off), 3 or 5 (OpenCV `medianFiltering`).
+    pub median_filtering: u32,
 }
 
 impl Default for Tvl1Config {
@@ -512,660 +631,206 @@ impl Default for Tvl1Config {
             tau: 0.25,
             lambda: 0.15,
             theta: 0.3,
+            num_scales: 5,
+            scale_step: 0.8,
             num_warps: 5,
-            num_outer_iters: 30,
-            num_inner_iters: 1,
+            num_outer_iters: 10,
+            num_inner_iters: 30,
+            median_filtering: 5,
         }
     }
 }
 
-fn centered_gradient_kernel() -> &'static str {
-    r#"
-struct Params {
-    width: u32,
-    height: u32,
-}
+/// OpenCV stops building the TV-L1 pyramid before a scale narrower than this.
+const TVL1_MIN_SCALE_SIZE: usize = 16;
 
-@group(0) @binding(0) var<storage, read> input_img: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output_dx: array<f32>;
-@group(0) @binding(2) var<storage, read_write> output_dy: array<f32>;
-@group(0) @binding(3) var<uniform> params: Params;
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
-    
-    if (x >= params.width || y >= params.height) {
-        return;
-    }
-    
-    let idx = y * params.width + x;
-    
-    // WGSL select(f, t, cond) returns t when cond is true. The replicate
-    // neighbour is x-1 when x > 0, else 0; and x+1 unless x is the last column.
-    // Swapping the arms indexed u32::MAX at x = 0 and width at the last column,
-    // and the interior of [0, 1, 2, 3] came back as 1.5 instead of 1.
-    let x_prev = select(0u, x - 1u, x > 0u);
-    let y_prev = select(0u, y - 1u, y > 0u);
-    let x_next = select(x + 1u, params.width - 1u, x >= params.width - 1u);
-    let y_next = select(y + 1u, params.height - 1u, y >= params.height - 1u);
-    
-    let idx_prev_x = y * params.width + x_prev;
-    let idx_next_x = y * params.width + x_next;
-    let idx_prev_y = y_prev * params.width + x;
-    let idx_next_y = y_next * params.width + x;
-    
-    let dx = (input_img[idx_next_x] - input_img[idx_prev_x]) * 0.5;
-    let dy = (input_img[idx_next_y] - input_img[idx_prev_y]) * 0.5;
-    
-    // output_dx / output_dy alias the same packed (dx, dy) buffer, so write
-    // the y component into the second plane.
-    let num_pixels = params.width * params.height;
-    output_dx[idx] = dx;
-    output_dy[num_pixels + idx] = dy;
-}
-"#
-}
-
-fn tvl1_warp_kernel() -> &'static str {
-    r#"
-struct Params {
-    width: u32,
-    height: u32,
-}
-
-@group(0) @binding(0) var<storage, read> input_img: array<f32>;
-@group(0) @binding(1) var<storage, read> input_flow_x: array<f32>;
-@group(0) @binding(2) var<storage, read> input_flow_y: array<f32>;
-@group(0) @binding(3) var<storage, read_write> output_warped: array<f32>;
-@group(0) @binding(4) var<uniform> params: Params;
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
-    
-    if (x >= params.width || y >= params.height) {
-        return;
-    }
-    
-    let idx = y * params.width + x;
-    let num_pixels = params.width * params.height;
-    
-    // input_flow_x / input_flow_y alias the same packed (u1, u2) buffer,
-    // so the y component lives in the second plane.
-    let flow_x = input_flow_x[idx];
-    let flow_y = input_flow_y[num_pixels + idx];
-    
-    let src_x = f32(x) - flow_x;
-    let src_y = f32(y) - flow_y;
-    
-    let clamped_x = clamp(src_x, 0.0, f32(params.width) - 1.001);
-    let clamped_y = clamp(src_y, 0.0, f32(params.height) - 1.001);
-    
-    let x0 = i32(clamped_x);
-    let y0 = i32(clamped_y);
-    let x1 = min(x0 + 1, i32(params.width) - 1);
-    let y1 = min(y0 + 1, i32(params.height) - 1);
-    
-    let fx = clamped_x - f32(x0);
-    let fy = clamped_y - f32(y0);
-    
-    let idx00 = y0 * i32(params.width) + x0;
-    let idx10 = y0 * i32(params.width) + x1;
-    let idx01 = y1 * i32(params.width) + x0;
-    let idx11 = y1 * i32(params.width) + x1;
-    
-    let v00 = input_img[idx00];
-    let v10 = input_img[idx10];
-    let v01 = input_img[idx01];
-    let v11 = input_img[idx11];
-    
-    let warped = (v00 * (1.0 - fx) * (1.0 - fy) + 
-                  v10 * fx * (1.0 - fy) + 
-                  v01 * (1.0 - fx) * fy + 
-                  v11 * fx * fy);
-    
-    output_warped[idx] = warped;
-}
-"#
-}
-
-fn tvl1_estimate_u_kernel() -> &'static str {
-    r#"
-struct Params {
-    width: u32,
-    height: u32,
-}
-
-@group(0) @binding(0) var<storage, read> input_img: array<f32>;
-@group(0) @binding(1) var<storage, read> input_I1w: array<f32>;
-@group(0) @binding(2) var<storage, read> input_grad: array<f32>;
-@group(0) @binding(3) var<storage, read_write> input_output_u: array<f32>;
-@group(0) @binding(4) var<uniform> params: Params;
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
-    
-    if (x >= params.width || y >= params.height) {
-        return;
-    }
-    
-    let idx = y * params.width + x;
-    let num_pixels = params.width * params.height;
-    
-    let I0 = input_img[idx];
-    let I1w = input_I1w[idx];
-    let grad_x = input_grad[idx];
-    let grad_y = input_grad[num_pixels + idx];
-    let u1 = input_output_u[idx];
-    let u2 = input_output_u[num_pixels + idx];
-    
-    let grad_I1_sq = grad_x * grad_x + grad_y * grad_y;
-    let rho_c = I1w - grad_x * u1 - grad_y * u2 - I0;
-    
-    let new_u1 = u1 + grad_x * rho_c / (1.0 + grad_I1_sq);
-    let new_u2 = u2 + grad_y * rho_c / (1.0 + grad_I1_sq);
-    
-    input_output_u[idx] = new_u1;
-    input_output_u[num_pixels + idx] = new_u2;
-}
-"#
-}
-
-fn estimate_dual_kernel() -> &'static str {
-    r#"
-struct Params {
-    width: u32,
-    height: u32,
-    tau: f32,
-    lambda_theta: f32,
-}
-
-@group(0) @binding(0) var<storage, read> inputs: array<f32>;
-@group(0) @binding(1) var<storage, read_write> outputs: array<f32>;
-@group(0) @binding(2) var<uniform> params: Params;
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
-    
-    if (x >= params.width || y >= params.height) {
-        return;
-    }
-    
-    let idx = y * params.width + x;
-    let num_pixels = params.width * params.height;
-    
-    let u1 = inputs[idx];
-    let u2 = inputs[num_pixels + idx];
-    let v1 = inputs[2u * num_pixels + idx];
-    let v2 = inputs[3u * num_pixels + idx];
-    let grad = inputs[4u * num_pixels + idx];
-    let rho = inputs[5u * num_pixels + idx];
-    
-    let px = min(x + 1u, params.width - 1u);
-    let py = min(y + 1u, params.height - 1u);
-    
-    let du1dx = inputs[y * params.width + px] - u1;
-    let du2dy = inputs[num_pixels + py * params.width + x] - u2;
-    
-    let l_t = params.lambda_theta;
-    
-    var rho_prime = 0.0;
-    if (grad > 1e-6) {
-        rho_prime = -rho / grad;
-    }
-    
-    var d1 = 0.0;
-    var d2 = 0.0;
-    if (rho < -l_t * grad) {
-        d1 = -l_t * v1;
-        d2 = -l_t * v2;
-    } else if (rho > l_t * grad) {
-        d1 = l_t * v1;
-        d2 = l_t * v2;
-    } else if (grad > 1e-6) {
-        d1 = rho_prime * v1;
-        d2 = rho_prime * v2;
-    }
-    
-    let new_p1 = v1 + d1;
-    let new_p2 = v2 + d2;
-    
-    let norm = sqrt(new_p1 * new_p1 + new_p2 * new_p2);
-    // Divide by the norm when it is large (project onto the tau ball). When
-    // the norm is ~0, keep the step at tau so the update stays bounded.
-    let shrink = select(params.tau, params.tau / norm, norm > 1e-6);
-    
-    let final_p1 = new_p1 * shrink;
-    let final_p2 = new_p2 * shrink;
-    
-    outputs[idx] = final_p1;
-    outputs[num_pixels + idx] = final_p2;
-}
-"#
-}
-
-fn divergence_kernel() -> &'static str {
-    r#"
-struct Params {
-    width: u32,
-    height: u32,
-}
-
-@group(0) @binding(0) var<storage, read> input_p1: array<f32>;
-@group(0) @binding(1) var<storage, read> input_p2: array<f32>;
-@group(0) @binding(2) var<storage, read_write> output_div: array<f32>;
-@group(0) @binding(3) var<uniform> params: Params;
-
-@compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let x = global_id.x;
-    let y = global_id.y;
-    
-    if (x >= params.width || y >= params.height) {
-        return;
-    }
-    
-    let idx = y * params.width + x;
-    
-    var div = 0.0;
-    
-    let mx = select(x - 1u, 0u, x == 0u);
-    let my = select(y - 1u, 0u, y == 0u);
-    
-    let num_pixels = params.width * params.height;
-    
-    // input_p1 / input_p2 alias the same packed (p1, p2) buffer, so the p2
-    // plane starts at num_pixels.
-    let p1x = input_p1[idx];
-    let p2y = input_p2[num_pixels + idx];
-    
-    if (x > 0u) {
-        let p1x_prev = input_p1[y * params.width + mx];
-        div = div + p1x - p1x_prev;
-    } else {
-        div = div + p1x;
-    }
-    
-    if (y > 0u) {
-        let p2y_prev = input_p2[num_pixels + my * params.width + x];
-        div = div + p2y - p2y_prev;
-    } else {
-        div = div + p2y;
-    }
-    
-    output_div[idx] = div;
-}
-"#
-}
-
+/// Dense optical flow by the duality-based TV-L1 method (Zach, Pock, Bischof
+/// 2007; Sánchez, Meinhardt-Llopis, Facciolo 2013), following OpenCV's
+/// `DualTVL1OpticalFlow` (`tvl1flow.cpp`) with `gamma = 0`.
+///
+/// Coarse to fine over `num_scales` scales; at each, `num_warps` times: warp
+/// `next` by the flow (bicubic) and linearise, then `num_outer_iters` x
+/// (median filter, `num_inner_iters` x (thresholding + primal step, dual
+/// step)). Differences from OpenCV: every iteration runs (OpenCV may stop a
+/// warp early once the mean squared update is below `epsilon²`; reading that
+/// back would stall the GPU every iteration), and the warp replicates the
+/// border where OpenCV's `remap` reads zeros.
+///
+/// Intensities are used as given; `lambda` is calibrated for 0-255. OpenCV
+/// multiplies floating-point frames by 255 before this, so frames in `[0, 1]`
+/// need `lambda * 255` (or rescaling) to match.
+///
+/// Returns flow of shape `(2, h, w)`, planar: plane 0 is u (x), plane 1 is v
+/// (y), with `prev(x, y) ≈ next(x + u, y + v)`.
 pub fn tvl1_optical_flow(
     ctx: &GpuContext,
     prev: &Tensor<f32, GpuStorage<f32>>,
     next: &Tensor<f32, GpuStorage<f32>>,
     config: Tvl1Config,
 ) -> Result<Tensor<f32, GpuStorage<f32>>> {
-    let (height, width) = prev.shape.hw();
-    let num_pixels = width * height;
-
-    if num_pixels == 0 {
-        return Err(crate::Error::InvalidInput("Empty input image".into()));
+    let (h, w) = check_flow_frames("tvl1_optical_flow", prev, next)?;
+    let positive = |v: f32| v.is_finite() && v > 0.0;
+    if !(positive(config.tau) && positive(config.lambda) && positive(config.theta)) {
+        return Err(crate::Error::InvalidInput(format!(
+            "tvl1_optical_flow: tau ({}), lambda ({}) and theta ({}) must be finite and > 0",
+            config.tau, config.lambda, config.theta
+        )));
     }
-
-    let byte_size = (num_pixels * std::mem::size_of::<f32>()) as u64;
-    let buffer_usage =
-        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
-
-    let prev_buffer = prev.storage.buffer();
-    let next_buffer = next.storage.buffer();
-
-    let flow_byte_size = byte_size * 2;
-    let flow_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("TVL1 Flow (packed u1,u2)"),
-        size: flow_byte_size,
-        usage: buffer_usage,
-        mapped_at_creation: false,
-    });
-
-    let grad_byte_size = byte_size * 2;
-    let grad_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("TVL1 Gradient (packed dx,dy)"),
-        size: grad_byte_size,
-        usage: buffer_usage,
-        mapped_at_creation: false,
-    });
-
-    let i1w_a = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("TVL1 I1w A"),
-        size: byte_size,
-        usage: buffer_usage,
-        mapped_at_creation: false,
-    });
-    let i1w_b = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("TVL1 I1w B"),
-        size: byte_size,
-        usage: buffer_usage,
-        mapped_at_creation: false,
-    });
-
-    let dual_byte_size = byte_size * 6;
-    let dual_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("TVL1 Dual (packed p1,p2,v1,v2,grad,rho)"),
-        size: dual_byte_size,
-        usage: buffer_usage,
-        mapped_at_creation: false,
-    });
-
-    let div_byte_size = byte_size * 2;
-    let div_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("TVL1 Divergence (packed)"),
-        size: div_byte_size,
-        usage: buffer_usage,
-        mapped_at_creation: false,
-    });
-
-    #[repr(C)]
-    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-    struct GradientParams {
-        width: u32,
-        height: u32,
+    if !(config.scale_step.is_finite() && config.scale_step > 0.0 && config.scale_step < 1.0) {
+        return Err(crate::Error::InvalidInput(format!(
+            "tvl1_optical_flow: scale_step must be in (0, 1), got {}",
+            config.scale_step
+        )));
     }
-
-    #[repr(C)]
-    #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-    struct DualParams {
-        width: u32,
-        height: u32,
-        tau: f32,
-        lambda_theta: f32,
+    if config.num_scales == 0
+        || config.num_warps == 0
+        || config.num_outer_iters == 0
+        || config.num_inner_iters == 0
+    {
+        return Err(crate::Error::InvalidInput(
+            "tvl1_optical_flow: num_scales, num_warps, num_outer_iters and \
+             num_inner_iters must be at least 1"
+                .into(),
+        ));
     }
-
-    let grad_params = GradientParams {
-        width: width as u32,
-        height: height as u32,
-    };
-    let grad_params_buf = ctx
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Gradient Params"),
-            contents: bytemuck::bytes_of(&grad_params),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-
-    let dual_params = DualParams {
-        width: width as u32,
-        height: height as u32,
-        tau: config.tau,
-        lambda_theta: config.theta / config.tau,
-    };
-    let dual_params_buf = ctx
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Dual Params"),
-            contents: bytemuck::bytes_of(&dual_params),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-
-    let gradient_pipeline = ctx.create_compute_pipeline(centered_gradient_kernel(), "main");
-    let warp_pipeline = ctx.create_compute_pipeline(tvl1_warp_kernel(), "main");
-    let estimate_u_pipeline = ctx.create_compute_pipeline(tvl1_estimate_u_kernel(), "main");
-    let divergence_pipeline = ctx.create_compute_pipeline(divergence_kernel(), "main");
-    let dual_pipeline = ctx.create_compute_pipeline(estimate_dual_kernel(), "main");
-
-    let dispatch_w = (width as u32).div_ceil(16);
-    let dispatch_h = (height as u32).div_ceil(16);
-
-    let next_src = Arc::new(next_buffer.clone());
-    let prev_src = Arc::new(prev_buffer.clone());
-
-    let mut warp_read = i1w_a.clone();
-    let mut warp_write = i1w_b.clone();
-
-    for _outer_iter in 0..config.num_outer_iters {
-        for _warp_iter in 0..config.num_warps {
-            let warp_src = if _warp_iter == 0 && _outer_iter == 0 {
-                next_src.as_ref()
-            } else {
-                &warp_read
-            };
-
-            {
-                let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Warp BG"),
-                    layout: &warp_pipeline.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: warp_src.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: flow_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: flow_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: warp_write.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: grad_params_buf.as_entire_binding(),
-                        },
-                    ],
-                });
-
-                let mut enc = ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("TVL1 Warp"),
-                    });
-                {
-                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-                    pass.set_pipeline(&warp_pipeline);
-                    pass.set_bind_group(0, &bind_group, &[]);
-                    pass.dispatch_workgroups(dispatch_w, dispatch_h, 1);
-                }
-                ctx.submit(enc);
-            }
-
-            {
-                let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Gradient BG"),
-                    layout: &gradient_pipeline.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: warp_write.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: grad_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: grad_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: grad_params_buf.as_entire_binding(),
-                        },
-                    ],
-                });
-
-                let mut enc = ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("TVL1 Gradient"),
-                    });
-                {
-                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-                    pass.set_pipeline(&gradient_pipeline);
-                    pass.set_bind_group(0, &bind_group, &[]);
-                    pass.dispatch_workgroups(dispatch_w, dispatch_h, 1);
-                }
-                ctx.submit(enc);
-            }
-
-            std::mem::swap(&mut warp_read, &mut warp_write);
+    let median_radius = match config.median_filtering {
+        0 | 1 => 0,
+        3 => 1,
+        5 => 2,
+        m => {
+            return Err(crate::Error::InvalidInput(format!(
+                "tvl1_optical_flow: median_filtering must be 0, 1, 3 or 5, got {m}"
+            )));
         }
+    };
 
-        for _inner_iter in 0..config.num_inner_iters {
-            {
-                let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Divergence BG"),
-                    layout: &divergence_pipeline.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: dual_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: dual_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: div_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: grad_params_buf.as_entire_binding(),
-                        },
-                    ],
-                });
+    // OpenCV: chained INTER_LINEAR resizes, stopping before a scale under 16.
+    let mut pyramid = vec![(prev.clone(), next.clone())];
+    for _ in 1..config.num_scales {
+        let (p, q) = pyramid.last().unwrap();
+        let (ph, pw) = p.shape.hw();
+        let sw = ((pw as f64) * config.scale_step as f64).round() as usize;
+        let sh = ((ph as f64) * config.scale_step as f64).round() as usize;
+        if sw < TVL1_MIN_SCALE_SIZE || sh < TVL1_MIN_SCALE_SIZE {
+            break;
+        }
+        let p = crate::gpu_kernels::resize::resize(ctx, p, sw as u32, sh as u32)?;
+        let q = crate::gpu_kernels::resize::resize(ctx, q, sw as u32, sh as u32)?;
+        pyramid.push((p, q));
+    }
 
-                let mut enc = ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("TVL1 Divergence"),
-                    });
-                {
-                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-                    pass.set_pipeline(&divergence_pipeline);
-                    pass.set_bind_group(0, &bind_group, &[]);
-                    pass.dispatch_workgroups(dispatch_w, dispatch_h, 1);
+    let warp_pipeline =
+        ctx.create_compute_pipeline(include_str!("../../shaders/tvl1_warp.wgsl"), "main");
+    let primal_pipeline =
+        ctx.create_compute_pipeline(include_str!("../../shaders/tvl1_primal.wgsl"), "main");
+    let dual_pipeline =
+        ctx.create_compute_pipeline(include_str!("../../shaders/tvl1_dual.wgsl"), "main");
+    let median_pipeline =
+        ctx.create_compute_pipeline(include_str!("../../shaders/tvl1_median.wgsl"), "main");
+
+    let mut flow: Option<(wgpu::Buffer, u32, u32)> = None;
+    for (i0, i1) in pyramid.iter().rev() {
+        let (sh, sw) = i0.shape.hw();
+        let (sw, sh) = (sw as u32, sh as u32);
+        let n = (sw * sh) as usize;
+
+        // Two flow buffers: the median filter reads one and writes the other.
+        let flows = [
+            flow_storage(ctx, "TVL1 Flow A", 2 * n),
+            flow_storage(ctx, "TVL1 Flow B", 2 * n),
+        ];
+        let dual = flow_storage(ctx, "TVL1 Dual (p11, p12, p21, p22)", 4 * n);
+        let warp = flow_storage(ctx, "TVL1 Warp (I1wx, I1wy, grad, rho_c)", 4 * n);
+        let params = flow_uniform(
+            ctx,
+            "TVL1 Params",
+            &Tvl1Params {
+                width: sw,
+                height: sh,
+                l_t: config.lambda * config.theta,
+                theta: config.theta,
+                taut: config.tau / config.theta,
+                median_radius,
+                _pad0: 0,
+                _pad1: 0,
+            },
+        );
+
+        let bgs: Vec<[wgpu::BindGroup; 4]> = (0..2)
+            .map(|c| {
+                let (cur, other) = (&flows[c], &flows[1 - c]);
+                [
+                    flow_bind_group(
+                        ctx,
+                        &warp_pipeline,
+                        "TVL1 Warp",
+                        &[
+                            i0.storage.buffer(),
+                            i1.storage.buffer(),
+                            cur,
+                            &warp,
+                            &params,
+                        ],
+                    ),
+                    flow_bind_group(
+                        ctx,
+                        &primal_pipeline,
+                        "TVL1 Primal",
+                        &[&warp, &dual, cur, &params],
+                    ),
+                    flow_bind_group(ctx, &dual_pipeline, "TVL1 Dual", &[cur, &dual, &params]),
+                    flow_bind_group(ctx, &median_pipeline, "TVL1 Median", &[cur, other, &params]),
+                ]
+            })
+            .collect();
+
+        let mut encoder = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("TVL1 Scale"),
+            });
+        // The coarsest scale starts from zero flow; finer ones from the
+        // coarser estimate, scaled to this scale.
+        if let Some((coarse, cw, ch)) = &flow {
+            encode_flow_upsample(ctx, &mut encoder, coarse, (*cw, *ch), &flows[0], (sw, sh));
+        }
+        let mut cur = 0usize;
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+            for _ in 0..config.num_warps {
+                pass.set_pipeline(&warp_pipeline);
+                pass.set_bind_group(0, &bgs[cur][0], &[]);
+                flow_dispatch(&mut pass, sw, sh);
+                for _ in 0..config.num_outer_iters {
+                    if median_radius > 0 {
+                        pass.set_pipeline(&median_pipeline);
+                        pass.set_bind_group(0, &bgs[cur][3], &[]);
+                        flow_dispatch(&mut pass, sw, sh);
+                        cur = 1 - cur;
+                    }
+                    for _ in 0..config.num_inner_iters {
+                        pass.set_pipeline(&primal_pipeline);
+                        pass.set_bind_group(0, &bgs[cur][1], &[]);
+                        flow_dispatch(&mut pass, sw, sh);
+                        pass.set_pipeline(&dual_pipeline);
+                        pass.set_bind_group(0, &bgs[cur][2], &[]);
+                        flow_dispatch(&mut pass, sw, sh);
+                    }
                 }
-                ctx.submit(enc);
-            }
-
-            {
-                let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Estimate U BG"),
-                    layout: &estimate_u_pipeline.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: prev_src.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: warp_read.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: grad_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: flow_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: grad_params_buf.as_entire_binding(),
-                        },
-                    ],
-                });
-
-                let mut enc = ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("TVL1 Estimate U"),
-                    });
-                {
-                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-                    pass.set_pipeline(&estimate_u_pipeline);
-                    pass.set_bind_group(0, &bind_group, &[]);
-                    pass.dispatch_workgroups(dispatch_w, dispatch_h, 1);
-                }
-                ctx.submit(enc);
-            }
-
-            {
-                let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Dual BG"),
-                    layout: &dual_pipeline.get_bind_group_layout(0),
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: flow_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: dual_buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: dual_params_buf.as_entire_binding(),
-                        },
-                    ],
-                });
-
-                let mut enc = ctx
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("TVL1 Dual"),
-                    });
-                {
-                    let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-                    pass.set_pipeline(&dual_pipeline);
-                    pass.set_bind_group(0, &bind_group, &[]);
-                    pass.dispatch_workgroups(dispatch_w, dispatch_h, 1);
-                }
-                ctx.submit(enc);
             }
         }
+        ctx.submit(encoder);
+        let [a, b] = flows;
+        flow = Some((if cur == 0 { a } else { b }, sw, sh));
     }
 
+    let (buf, _, _) = flow.ok_or_else(|| crate::Error::RuntimeError("No flow computed".into()))?;
     Ok(Tensor {
-        storage: GpuStorage::from_buffer(Arc::new(flow_buffer), num_pixels * 2),
-        shape: cv_core::TensorShape::new(2, height, width),
+        storage: GpuStorage::from_buffer(Arc::new(buf), 2 * w * h),
+        shape: cv_core::TensorShape::new(2, h, w),
         dtype: prev.dtype,
         _phantom: std::marker::PhantomData,
     })
-}
-
-/// Replicate-border index for a centered difference.
-///
-/// `select(miss, hit, cond)` is WGSL's `select`: the second value is taken
-/// when `cond` is true. The previous kernel had the arms reversed.
-#[cfg(test)]
-pub(crate) fn centered_neighbor(x: u32, limit: u32, next: bool) -> u32 {
-    if limit == 0 {
-        return 0;
-    }
-    if next {
-        if x >= limit - 1 { limit - 1 } else { x + 1 }
-    } else if x > 0 {
-        x - 1
-    } else {
-        0
-    }
-}
-
-/// TV-L1 dual step scale. Divide when the norm is large; keep `tau` (bounded,
-/// no division) when the norm is ~0.
-#[cfg(test)]
-pub(crate) fn tvl1_shrink(tau: f32, norm: f32) -> f32 {
-    if norm > 1e-6 { tau / norm } else { tau }
 }
 
 #[cfg(test)]
@@ -1179,7 +844,8 @@ fn poly_gauss(x: f32, sigma: f32) -> f32 {
 }
 
 /// Weighted least-squares quadratic at one pixel. Same fit as
-/// `farneback_poly_expand.wgsl`: basis `[1, x, y, x², xy, y²]`.
+/// `farneback_poly_expand.wgsl`: basis `[1, x, y, x², xy, y²]` over the
+/// `(2 poly_n + 1)²` window, border pixels replicated.
 #[cfg(test)]
 pub(crate) fn farneback_poly_pixel(
     img: &[f32],
@@ -1190,16 +856,13 @@ pub(crate) fn farneback_poly_pixel(
     poly_n: usize,
     sigma: f32,
 ) -> [f32; 6] {
-    let half = (poly_n / 2) as i32;
+    let half = poly_n as i32;
     let mut a = [0.0f32; 36];
     let mut b = [0.0f32; 6];
     for dy in -half..=half {
         for dx in -half..=half {
-            let px = x as i32 + dx;
-            let py = y as i32 + dy;
-            if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 {
-                continue;
-            }
+            let px = (x as i32 + dx).clamp(0, w as i32 - 1);
+            let py = (y as i32 + dy).clamp(0, h as i32 - 1);
             let val = img[py as usize * w + px as usize];
             let xf = dx as f32;
             let yf = dy as f32;
@@ -1316,28 +979,5 @@ mod flow_fix_tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn replicate_centered_difference_of_a_ramp() {
-        let img = [0.0f32, 1.0, 2.0, 3.0];
-        let w = 4u32;
-        let mut dx = [0.0f32; 4];
-        for x in 0..w {
-            let prev = centered_neighbor(x, w, false);
-            let next = centered_neighbor(x, w, true);
-            assert!(prev < w && next < w, "border indexed outside the row");
-            dx[x as usize] = (img[next as usize] - img[prev as usize]) * 0.5;
-        }
-        assert!((dx[1] - 1.0).abs() < 1e-6, "x=1 is {}, want 1", dx[1]);
-        assert!((dx[2] - 1.0).abs() < 1e-6, "x=2 is {}, want 1", dx[2]);
-        assert!(dx.iter().all(|v| v.is_finite()));
-    }
-
-    #[test]
-    fn tvl1_shrink_divides_only_when_the_norm_is_large() {
-        assert!((tvl1_shrink(0.25, 2.0) - 0.125).abs() < 1e-6);
-        let tiny = tvl1_shrink(0.25, 1e-8);
-        assert!(tiny.is_finite() && (tiny - 0.25).abs() < 1e-6);
     }
 }

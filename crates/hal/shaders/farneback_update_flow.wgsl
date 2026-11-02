@@ -1,124 +1,88 @@
-// Flow update for Farneback. Uniform layout is `FarnebackParams`
-// (see farneback_poly_expand.wgsl). `window_size` is the averaging window
-// the CPU Farneback uses around each pixel; the Gaussian uses `poly_sigma`.
+// Farneback: average the normal-equation terms over the window and solve.
+// Port of OpenCV's FarnebackUpdateFlow_Blur / _GaussianBlur
+// (modules/video/src/optflowgf.cpp).
+//
+// `mats` holds the five planes written by farneback_update_matrices.wgsl
+// (AᵀA entries G11, G12, G22 and AᵀdB entries h1, h2). Each is averaged over a
+// (2 half_window + 1)² window with replicated borders: a box (win_sigma <= 0,
+// OpenCV's default) or a normalised Gaussian of standard deviation win_sigma
+// (OPTFLOW_FARNEBACK_GAUSSIAN, which uses 0.3 * half_window). Then
+//   flow = G⁻¹ h,   1 / det(G) regularised with OpenCV's + 1e-3,
+// which assumes 0-255 intensities as OpenCV's 8-bit path does.
+//
+// The flow is the total displacement (the matrices already contain the
+// current estimate), so this pass only writes it. It never reads `flow`, so
+// overwriting it in place is race-free.
+//
+// Flow is planar: u at [i], v at [width * height + i].
 
-struct FlowUpdateParams {
-    src_w: u32,
-    src_h: u32,
-    stride: u32,
-    flow_stride: u32,
-    window_size: u32,
-    poly_n: u32,
-    sigma: f32,
-    num_iters: u32,
+struct FlowParams {
+    width: u32,
+    height: u32,
+    half_window: u32,
+    win_sigma: f32,
 }
 
-@group(0) @binding(0) var<storage, read> poly1: array<f32>;
-@group(0) @binding(1) var<storage, read> poly2: array<f32>;
-@group(0) @binding(2) var<storage, read_write> flow: array<f32>;
-@group(0) @binding(3) var<uniform> params: FlowUpdateParams;
+@group(0) @binding(0) var<storage, read> mats: array<f32>;
+@group(0) @binding(1) var<storage, read_write> flow: array<f32>;
+@group(0) @binding(2) var<uniform> params: FlowParams;
 
-fn gaussian_weight(x: f32, sigma: f32) -> f32 {
-    let two_sigma_sq = 2.0 * sigma * sigma;
-    if (two_sigma_sq <= 0.0) {
+fn window_weight(d: i32) -> f32 {
+    if (params.win_sigma <= 0.0) {
         return 1.0;
     }
-    let w = exp(-(x * x) / two_sigma_sq);
-    if (w == w) {
-        return w;
-    }
-    return 1.0;
+    let df = f32(d);
+    return exp(-(df * df) / (2.0 * params.win_sigma * params.win_sigma));
 }
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
+    let w = params.width;
+    let h = params.height;
 
-    if (x >= params.src_w || y >= params.src_h) {
+    if (x >= w || y >= h) {
         return;
     }
 
-    let flow_idx = y * params.flow_stride + x * 2u;
-    var u = flow[flow_idx + 0u];
-    var v = flow[flow_idx + 1u];
+    let n = w * h;
+    let half = i32(min(params.half_window, 256u));
+    let last_x = i32(w) - 1;
+    let last_y = i32(h) - 1;
 
-    let half = i32(max(params.window_size, 1u)) / 2;
-    var g11_acc = 0.0;
-    var g12_acc = 0.0;
-    var g22_acc = 0.0;
-    var b1_acc = 0.0;
-    var b2_acc = 0.0;
-    var w_acc = 0.0;
+    var g11 = 0.0;
+    var g12 = 0.0;
+    var g22 = 0.0;
+    var h1 = 0.0;
+    var h2 = 0.0;
+    var wsum = 0.0;
 
-    for (var wy = -half; wy <= half; wy++) {
-        for (var wx = -half; wx <= half; wx++) {
-            let xx = i32(x) + wx;
-            let yy = i32(y) + wy;
-            if (xx < 0 || yy < 0 || xx >= i32(params.src_w) || yy >= i32(params.src_h)) {
-                continue;
-            }
-            let wgt = gaussian_weight(f32(wx), params.sigma) * gaussian_weight(f32(wy), params.sigma);
-            let pidx = u32(yy) * params.stride + u32(xx);
-            let fidx = u32(yy) * params.flow_stride + u32(xx) * 2u;
-            let uu = flow[fidx + 0u];
-            let vv = flow[fidx + 1u];
-
-            let d1 = poly1[pidx * 6u + 1u];
-            let e1 = poly1[pidx * 6u + 2u];
-            let a1 = poly1[pidx * 6u + 3u];
-            let b1 = poly1[pidx * 6u + 4u];
-            let c1 = poly1[pidx * 6u + 5u];
-
-            let px = f32(xx) + uu;
-            let py = f32(yy) + vv;
-            let x0 = i32(floor(px));
-            let y0 = i32(floor(py));
-            let fx = px - f32(x0);
-            let fy = py - f32(y0);
-            let sx0 = clamp(x0, 0, i32(params.src_w) - 1);
-            let sy0 = clamp(y0, 0, i32(params.src_h) - 1);
-            let sx1 = clamp(x0 + 1, 0, i32(params.src_w) - 1);
-            let sy1 = clamp(y0 + 1, 0, i32(params.src_h) - 1);
-            let i00 = u32(sy0) * params.stride + u32(sx0);
-            let i10 = u32(sy0) * params.stride + u32(sx1);
-            let i01 = u32(sy1) * params.stride + u32(sx0);
-            let i11 = u32(sy1) * params.stride + u32(sx1);
-
-            let a2 = mix(mix(poly2[i00 * 6u + 3u], poly2[i10 * 6u + 3u], fx),
-                         mix(poly2[i01 * 6u + 3u], poly2[i11 * 6u + 3u], fx), fy);
-            let b2 = mix(mix(poly2[i00 * 6u + 4u], poly2[i10 * 6u + 4u], fx),
-                         mix(poly2[i01 * 6u + 4u], poly2[i11 * 6u + 4u], fx), fy);
-            let c2 = mix(mix(poly2[i00 * 6u + 5u], poly2[i10 * 6u + 5u], fx),
-                         mix(poly2[i01 * 6u + 5u], poly2[i11 * 6u + 5u], fx), fy);
-            let d2 = mix(mix(poly2[i00 * 6u + 1u], poly2[i10 * 6u + 1u], fx),
-                         mix(poly2[i01 * 6u + 1u], poly2[i11 * 6u + 1u], fx), fy);
-            let e2 = mix(mix(poly2[i00 * 6u + 2u], poly2[i10 * 6u + 2u], fx),
-                         mix(poly2[i01 * 6u + 2u], poly2[i11 * 6u + 2u], fx), fy);
-
-            let g11 = a1 + a2;
-            let g12 = b1 + b2;
-            let g22 = c1 + c2;
-            let rhs1 = -d1 + (a2 * uu + b2 * vv + d2);
-            let rhs2 = -e1 + (b2 * uu + c2 * vv + e2);
-
-            g11_acc = g11_acc + wgt * g11;
-            g12_acc = g12_acc + wgt * g12;
-            g22_acc = g22_acc + wgt * g22;
-            b1_acc = b1_acc + wgt * rhs1;
-            b2_acc = b2_acc + wgt * rhs2;
-            w_acc = w_acc + wgt;
+    for (var dy = -half; dy <= half; dy++) {
+        let yy = u32(clamp(i32(y) + dy, 0, last_y));
+        let wy = window_weight(dy);
+        for (var dx = -half; dx <= half; dx++) {
+            let xx = u32(clamp(i32(x) + dx, 0, last_x));
+            let wgt = wy * window_weight(dx);
+            let j = yy * w + xx;
+            g11 = g11 + wgt * mats[j];
+            g12 = g12 + wgt * mats[n + j];
+            g22 = g22 + wgt * mats[2u * n + j];
+            h1 = h1 + wgt * mats[3u * n + j];
+            h2 = h2 + wgt * mats[4u * n + j];
+            wsum = wsum + wgt;
         }
     }
 
-    if (w_acc > 0.0) {
-        let det = g11_acc * g22_acc - g12_acc * g12_acc;
-        if (abs(det) > 0.0001) {
-            u = u + (g22_acc * b1_acc - g12_acc * b2_acc) / det;
-            v = v + (g11_acc * b2_acc - g12_acc * b1_acc) / det;
-        }
-    }
+    let s = 1.0 / wsum;
+    g11 = g11 * s;
+    g12 = g12 * s;
+    g22 = g22 * s;
+    h1 = h1 * s;
+    h2 = h2 * s;
 
-    flow[flow_idx + 0u] = u;
-    flow[flow_idx + 1u] = v;
+    let idet = 1.0 / (g11 * g22 - g12 * g12 + 1e-3);
+    let i = y * w + x;
+    flow[i] = (g22 * h1 - g12 * h2) * idet;
+    flow[n + i] = (g11 * h2 - g12 * h1) * idet;
 }

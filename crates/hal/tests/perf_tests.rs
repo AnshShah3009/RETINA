@@ -494,6 +494,21 @@ mod tvl1_perf {
     use super::*;
     use cv_hal::gpu_kernels::optical_flow::Tvl1Config;
     use cv_hal::gpu_kernels::optical_flow::tvl1_optical_flow;
+    use cv_hal::tensor_ext::TensorToCpu;
+
+    /// Runs TV-L1 and reads the flow back, so the time includes the GPU work
+    /// rather than only encoding it. The flow is planar `(2, h, w)`.
+    fn tvl1_to_cpu(
+        ctx: &GpuContext,
+        prev: &GpuTensor<f32>,
+        next: &GpuTensor<f32>,
+        config: Tvl1Config,
+    ) -> Tensor<f32, CpuStorage<f32>> {
+        let flow = tvl1_optical_flow(ctx, prev, next, config).unwrap();
+        let (h, w) = prev.shape.hw();
+        assert_eq!(flow.shape, TensorShape::new(2, h, w));
+        flow.to_cpu_ctx(ctx).unwrap()
+    }
 
     fn copy_image_to_gpu(ctx: &GpuContext, data: &[f32], w: usize, h: usize) -> GpuTensor<f32> {
         let byte_size = std::mem::size_of_val(data) as u64;
@@ -531,7 +546,7 @@ mod tvl1_perf {
 
         println!("\n=== GPU TVL1 256x256 ===");
         time_fn("gpu_tvl1_256x256", || {
-            tvl1_optical_flow(&ctx, &frame1_gpu, &frame2_gpu, config).unwrap()
+            tvl1_to_cpu(&ctx, &frame1_gpu, &frame2_gpu, config)
         });
     }
 
@@ -546,15 +561,15 @@ mod tvl1_perf {
         let frame1_gpu = copy_image_to_gpu(&ctx, frame1.as_slice().unwrap(), 512, 512);
         let frame2_gpu = copy_image_to_gpu(&ctx, frame2.as_slice().unwrap(), 512, 512);
 
+        // A third of OpenCV's primal-dual iterations per outer iteration.
         let config = Tvl1Config {
-            num_outer_iters: 10,
-            num_warps: 5,
+            num_inner_iters: 10,
             ..Default::default()
         };
 
-        println!("\n=== GPU TVL1 512x512 ===");
+        println!("\n=== GPU TVL1 512x512 (10 inner iterations) ===");
         time_fn("gpu_tvl1_512x512", || {
-            tvl1_optical_flow(&ctx, &frame1_gpu, &frame2_gpu, config).unwrap()
+            tvl1_to_cpu(&ctx, &frame1_gpu, &frame2_gpu, config)
         });
     }
 
@@ -571,9 +586,9 @@ mod tvl1_perf {
 
         let config = Tvl1Config::default();
 
-        println!("\n=== GPU TVL1 512x512 (full iter) ===");
+        println!("\n=== GPU TVL1 512x512 (OpenCV defaults) ===");
         time_fn("gpu_tvl1_512x512_full", || {
-            tvl1_optical_flow(&ctx, &frame1_gpu, &frame2_gpu, config).unwrap()
+            tvl1_to_cpu(&ctx, &frame1_gpu, &frame2_gpu, config)
         });
     }
 }

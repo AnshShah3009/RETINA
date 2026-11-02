@@ -7,9 +7,17 @@
 // Reading poly_n from byte 12 took `flow_stride` (16 on an 8-pixel level)
 // and reading sigma from byte 16 took a zero, so the Gaussian was NaN.
 //
-// Each pixel is the weighted least-squares fit of
-// I ≈ f + d x + e y + a x² + b xy + c y² on the poly_n window.
+// Each pixel is the Gaussian-weighted least-squares fit of
+// I ≈ f + d x + e y + a x² + b xy + c y² on the (2 poly_n + 1)² window, as in
+// OpenCV's FarnebackPolyExp: `poly_n` is the half-size of the neighbourhood
+// (OpenCV loops x over -n..=n), and samples past the image edge replicate the
+// border pixel, so every pixel solves the same Gram matrix. The old shader used
+// a poly_n-wide window (half-size poly_n / 2) and dropped the samples outside
+// the image, which disagreed with OpenCV everywhere, most near the border.
 // A constant image has f equal to that constant and a = b = c = 0.
+//
+// Output: six coefficients per pixel, [f, d, e, a, b, c] at 6 * idx. This is a
+// scratch buffer private to `gpu_kernels::optical_flow::farneback`.
 
 struct PolyExpandParams {
     src_w: u32,
@@ -105,19 +113,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     }
 
     let idx = y * params.stride + x;
-    let n = max(params.poly_n, 1u);
-    let half = i32(n) / 2;
+    let half = i32(min(params.poly_n, 64u));
+    let last_x = i32(params.src_w) - 1;
+    let last_y = i32(params.src_h) - 1;
 
     var ata: array<f32, 36>;
     var atb: array<f32, 6>;
 
     for (var dy = -half; dy <= half; dy++) {
         for (var dx = -half; dx <= half; dx++) {
-            let sx = i32(x) + dx;
-            let sy = i32(y) + dy;
-            if (sx < 0 || sy < 0 || sx >= i32(params.src_w) || sy >= i32(params.src_h)) {
-                continue;
-            }
+            let sx = clamp(i32(x) + dx, 0, last_x);
+            let sy = clamp(i32(y) + dy, 0, last_y);
             let val = input[u32(sy) * params.stride + u32(sx)];
             let xf = f32(dx);
             let yf = f32(dy);
