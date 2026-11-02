@@ -1,8 +1,8 @@
-// Optimized Lanczos-4 Resize Kernel
-// Key optimizations:
-// 1. Workgroup size 32x32 for better parallelism
-// 2. Precompute Lanczos weights once per workgroup tile
-// 3. Reduced trigonometry calls
+// Lanczos-4 resize of a planar CHW f32 tensor.
+//
+// Element (ch, y, x) of a `TensorShape::new(c, h, w)` tensor is at
+// `ch * h * w + y * w + x`. Each plane is an independent image; the channel is
+// `global_id.z` (the host dispatches `channels` workgroups in z).
 
 struct Params {
     src_w: u32,
@@ -36,55 +36,52 @@ fn lanczos_weight(x: f32) -> f32 {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x_dst = global_id.x;
     let y_dst = global_id.y;
-    
-    if (x_dst >= params.dst_w || y_dst >= params.dst_h) {
+    let ch = global_id.z;
+
+    // The host never dispatches an empty source; the clamps below would wrap.
+    if (x_dst >= params.dst_w || y_dst >= params.dst_h || ch >= params.channels
+        || params.src_w == 0u || params.src_h == 0u) {
         return;
     }
 
-    let src_width_f = f32(params.src_w) - 1.0;
-    let src_height_f = f32(params.src_h) - 1.0;
-    let dst_width_f = max(f32(params.dst_w) - 1.0, 1.0);
-    let dst_height_f = max(f32(params.dst_h) - 1.0, 1.0);
+    // Half-pixel mapping, `(x + 0.5) * w / nw - 0.5`: OpenCV's
+    // INTER_LANCZOS4, cv_imgproc::resize and the bilinear shader. This used
+    // align-corners `x * (w - 1) / (nw - 1)`, which shifts every output pixel
+    // by up to half a source pixel against all of them.
+    let src_x_f = (f32(x_dst) + 0.5) * f32(params.src_w) / f32(params.dst_w) - 0.5;
+    let src_y_f = (f32(y_dst) + 0.5) * f32(params.src_h) / f32(params.dst_h) - 0.5;
 
-    let src_x_f = f32(x_dst) * src_width_f / dst_width_f;
-    let src_y_f = f32(y_dst) * src_height_f / dst_height_f;
-    
     let kernel_radius = 4;
-    
+
     let x0 = i32(floor(src_x_f)) - kernel_radius + 1;
     let y0 = i32(floor(src_y_f)) - kernel_radius + 1;
-    
+
     let dx0 = f32(x0) - src_x_f;
     let dy0 = f32(y0) - src_y_f;
-    
-    for (var ch = 0u; ch < params.channels; ch = ch + 1u) {
-        var sum = 0.0;
-        var weight_sum = 0.0;
-        
-        for (var j = 0; j < 8; j = j + 1) {
-            let dy = dy0 + f32(j);
-            let wy = lanczos_weight(dy);
-            
-            for (var i = 0; i < 8; i = i + 1) {
-                let dx = dx0 + f32(i);
-                let wx = lanczos_weight(dx);
-                
-                let weight = wx * wy;
-                
-                let src_x_clamped = clamp(x0 + i32(i), 0, i32(params.src_w) - 1);
-                let src_y_clamped = clamp(y0 + i32(j), 0, i32(params.src_h) - 1);
-                
-                let idx = u32(src_y_clamped) * params.src_w + u32(src_x_clamped);
-                let sample_idx = (idx * params.channels + ch);
-                
-                sum = sum + input_data[sample_idx] * weight;
-                weight_sum = weight_sum + weight;
-            }
+
+    let src_plane = ch * params.src_h * params.src_w;
+    var sum = 0.0;
+    var weight_sum = 0.0;
+
+    for (var j = 0; j < 8; j = j + 1) {
+        let dy = dy0 + f32(j);
+        let wy = lanczos_weight(dy);
+
+        for (var i = 0; i < 8; i = i + 1) {
+            let dx = dx0 + f32(i);
+            let wx = lanczos_weight(dx);
+
+            let weight = wx * wy;
+
+            let src_x_clamped = clamp(x0 + i32(i), 0, i32(params.src_w) - 1);
+            let src_y_clamped = clamp(y0 + i32(j), 0, i32(params.src_h) - 1);
+
+            let idx = src_plane + u32(src_y_clamped) * params.src_w + u32(src_x_clamped);
+            sum = sum + input_data[idx] * weight;
+            weight_sum = weight_sum + weight;
         }
-        
-        let val = sum / weight_sum;
-        
-        let dst_idx = (y_dst * params.dst_w + x_dst) * params.channels + ch;
-        output_data[dst_idx] = val;
     }
+
+    let dst_plane = ch * params.dst_h * params.dst_w;
+    output_data[dst_plane + y_dst * params.dst_w + x_dst] = sum / weight_sum;
 }

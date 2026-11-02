@@ -293,6 +293,55 @@ fn probe_bilateral_zero_sigma() {
     }
 }
 
+/// GPU Lanczos-4 against `cv_imgproc::resize` Lanczos, which matches
+/// `cv2.resize(INTER_LANCZOS4)` to +-1 LSB. The GPU shader used align-corners
+/// mapping, `x * (w - 1) / (nw - 1)`, so downscales and upscales were shifted by
+/// up to half a source pixel; half-pixel mapping brings it to rounding.
+#[test]
+fn probe_lanczos_matches_imgproc() {
+    use cv_hal::context::Interpolation;
+    let Some(g) = gpu() else { return };
+    for (sw, sh, dw, dh) in [
+        (48u32, 40u32, 31u32, 23u32),
+        (37, 29, 64, 50),
+        (64, 64, 32, 32),
+    ] {
+        let px: Vec<u8> = (0..sw * sh)
+            .map(|i| {
+                let (x, y) = (i % sw, i / sw);
+                (((x * 7 + y * 13) % 97) as f32 * 2.3 + (x as f32 * 0.4).sin() * 20.0 + 30.0) as u8
+            })
+            .collect();
+        let img = image::GrayImage::from_raw(sw, sh, px.clone()).unwrap();
+        let want = cv_imgproc::resize(&img, dw, dh, cv_imgproc::Interpolation::Lanczos);
+        let t = mk(
+            px.iter().map(|&v| v as f32).collect(),
+            1,
+            sh as usize,
+            sw as usize,
+        );
+        let got = g
+            .resize_with(
+                &t.to_gpu_ctx(g).unwrap(),
+                (dw as usize, dh as usize),
+                Interpolation::Lanczos,
+            )
+            .unwrap()
+            .to_cpu()
+            .unwrap();
+        let got = got.storage.as_slice().unwrap();
+        let worst = got
+            .iter()
+            .zip(want.as_raw())
+            .map(|(&a, &b)| (a.round().clamp(0.0, 255.0) - b as f32).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst <= 1.0,
+            "{sw}x{sh} -> {dw}x{dh}: max |GPU - imgproc| = {worst}"
+        );
+    }
+}
+
 #[test]
 fn probe_gaussian_blur_multichannel() {
     let Some(g) = gpu() else { return };
@@ -465,7 +514,7 @@ fn every_shader_compiles() {
         ("canny", include_str!("../crates/hal/shaders/canny.wgsl")),
         ("warp", include_str!("../crates/hal/shaders/warp.wgsl")),
         // The 16-bit shaders that need no device feature. The `enable f16`
-        // ones (`threshold_f16.wgsl`, `resize_f16.wgsl`) are absent: they
+        // one (`threshold_f16.wgsl`) is absent: it
         // compile only on a device created with `SHADER_F16`, which this
         // helper does not check. `gpu_threshold_f16.rs` and
         // `gpu_half_kernels.rs` in cv-hal run the reachable ones for real.
@@ -495,10 +544,12 @@ fn every_shader_compiles() {
             "threshold_f16_packed",
             include_str!("../crates/hal/shaders/threshold_f16_packed.wgsl"),
         ),
-        // No caller: `resize` returns NotSupported for 16-bit types.
+        // f16 and bf16 resize (bilinear and Lanczos-4 entry points),
+        // replacing `resize_f16.wgsl` (positions in f16, needed SHADER_F16)
+        // and `resize_bf16.wgsl` (one value per word), which had no caller.
         (
-            "resize_bf16",
-            include_str!("../crates/hal/shaders/resize_bf16.wgsl"),
+            "resize_packed16",
+            include_str!("../crates/hal/shaders/resize_packed16.wgsl"),
         ),
         (
             "threshold_bf16",
@@ -1462,7 +1513,8 @@ fn shader_storage_element_types_match_their_hosts() {
         ("fast_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("fast_nms_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("color_cvt_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
-        ("resize_bf16.wgsl", &[(0, "u32"), (1, "u32")]),
+        // Binding 3 is the `Tap` struct table (a layout view, not asserted).
+        ("resize_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("stereo_match.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("subtract.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("warp.wgsl", &[(0, "f32"), (1, "f32")]),

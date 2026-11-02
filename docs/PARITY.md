@@ -200,8 +200,14 @@ use, and interchangeability with OpenCV is worth more here than align-corners'
 endpoint-inverse property.
 
 Landed consistently across **all** implementations: `imgproc`'s cubic/lanczos
-resampler and RGB linear, `hal`'s CPU resize, and the five WGSL resize shaders
-(u8, f16, bf16, f32, f32-multichannel). `crates/imgproc/tests/resize_sampling_convention.rs`
+resampler and RGB linear, `hal`'s CPU resize, and the WGSL bilinear resize
+shaders (u8; f32, which since the planar-CHW fix also serves multichannel
+tensors; and `resize_packed16.wgsl` for f16 and bf16, which takes the CPU's
+taps from the host), and the GPU Lanczos-4 shaders (`lanczos4.wgsl` and the
+Lanczos entry of `resize_packed16.wgsl`), which used align-corners until
+`probe_lanczos_matches_imgproc` measured them 90 grey levels off `imgproc`'s
+Lanczos; they now agree to +-1.
+`crates/imgproc/tests/resize_sampling_convention.rs`
 pins the impulse response at **64 = 255/4** — OpenCV's value — and would have
 caught either convention being changed alone. The GPU path remains guarded only
 by code reading (no adapter test), so the "all backends move together"

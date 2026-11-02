@@ -3588,6 +3588,12 @@ impl ComputeContext for CpuBackend {
         }
     }
 
+    /// Bilinear resize of a planar CHW tensor; see `cpu::bilinear`.
+    ///
+    /// A zero target size (or zero channels) returns an empty tensor of the
+    /// target shape. An empty source with a non-empty target has nothing to
+    /// sample and returns zeros of the target shape, as `cv_imgproc::resize`
+    /// does for an empty image.
     fn resize<T: Float + 'static, S: Storage<T> + cv_core::StorageFactory<T> + 'static>(
         &self,
         input: &Tensor<T, S>,
@@ -3600,94 +3606,25 @@ impl ComputeContext for CpuBackend {
         let (h, w) = input.shape.hw();
         let c = input.shape.channels;
         let (nw, nh) = new_shape;
+        let out_shape = TensorShape::new(c, nh, nw);
+        let out_len = out_shape
+            .checked_len()
+            .ok_or_else(|| crate::Error::InvalidInput("Resize target size overflows".into()))?;
+        if src.len() < input.shape.len() {
+            return Err(crate::Error::InvalidInput(
+                "Resize input storage is smaller than its shape".into(),
+            ));
+        }
 
-        let mut output_storage = S::new(nw * nh * c, T::ZERO).map_err(crate::Error::MemoryError)?;
+        let mut output_storage = S::new(out_len, T::ZERO).map_err(crate::Error::MemoryError)?;
         let dst = output_storage
             .as_mut_slice()
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
-
-        let src_width_f = T::from_f32(w as f32);
-        let src_height_f = T::from_f32(h as f32);
-        let dst_width_f = T::from_f32(nw.max(1) as f32);
-        let dst_height_f = T::from_f32(nh.max(1) as f32);
-
-        dst.par_chunks_mut(nw * c)
-            .enumerate()
-            .for_each(|(y, row_out)| {
-                for x in 0..nw {
-                    // Half-pixel mapping (OpenCV `resize` semantics): output
-                    // pixel x samples `(x + 0.5) * w / nw - 0.5`. Positions
-                    // below 0 clamp to the edge; the upper-bound index clamp is
-                    // in integer space so f32 rounding cannot OOB.
-                    let fx = {
-                        let v = (T::from_f32(x as f32) + T::from_f32(0.5)) * src_width_f
-                            / dst_width_f
-                            - T::from_f32(0.5);
-                        if v < T::ZERO {
-                            T::ZERO
-                        } else {
-                            v
-                        }
-                    };
-                    let fy = {
-                        let v = (T::from_f32(y as f32) + T::from_f32(0.5)) * src_height_f
-                            / dst_height_f
-                            - T::from_f32(0.5);
-                        if v < T::ZERO {
-                            T::ZERO
-                        } else {
-                            v
-                        }
-                    };
-
-                    let x0 = (fx.to_f32() as usize).min(w.saturating_sub(1));
-                    let y0 = (fy.to_f32() as usize).min(h.saturating_sub(1));
-                    let x1 = (x0 + 1).min(w.saturating_sub(1));
-                    let y1 = (y0 + 1).min(h.saturating_sub(1));
-
-                    let dx = if x0 == x1 {
-                        T::ZERO
-                    } else {
-                        let d = fx - T::from_f32(x0 as f32);
-                        if d < T::ZERO {
-                            T::ZERO
-                        } else if d > T::ONE {
-                            T::ONE
-                        } else {
-                            d
-                        }
-                    };
-                    let dy = if y0 == y1 {
-                        T::ZERO
-                    } else {
-                        let d = fy - T::from_f32(y0 as f32);
-                        if d < T::ZERO {
-                            T::ZERO
-                        } else if d > T::ONE {
-                            T::ONE
-                        } else {
-                            d
-                        }
-                    };
-
-                    for ch in 0..c {
-                        let v00 = src[(y0 * w + x0) * c + ch];
-                        let v10 = src[(y0 * w + x1) * c + ch];
-                        let v01 = src[(y1 * w + x0) * c + ch];
-                        let v11 = src[(y1 * w + x1) * c + ch];
-
-                        let v0 = v00 * (T::ONE - dx) + v10 * dx;
-                        let v1 = v01 * (T::ONE - dx) + v11 * dx;
-                        let v = v0 * (T::ONE - dy) + v1 * dy;
-
-                        row_out[x * c + ch] = v;
-                    }
-                }
-            });
+        crate::cpu::bilinear::resize_bilinear_planar(src, dst, c, (h, w), (nh, nw));
 
         Ok(Tensor {
             storage: output_storage,
-            shape: TensorShape::new(c, nh, nw),
+            shape: out_shape,
             dtype: input.dtype,
             _phantom: std::marker::PhantomData,
         })
