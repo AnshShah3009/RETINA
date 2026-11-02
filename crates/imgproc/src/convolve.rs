@@ -214,8 +214,14 @@ fn map_coord(coord: isize, len: usize, mode: BorderMode) -> Option<usize> {
     }
 }
 
+/// 2-D correlation with `kernel` (OpenCV's `filter2D`), padding with
+/// OpenCV's default border, [`BorderMode::Reflect101`].
+///
+/// This used to pad with `Replicate`, so every pixel within the kernel radius
+/// of an edge differed from `cv2.filter2D`. Use [`convolve_with_border`] for
+/// any other border.
 pub fn convolve(image: &GrayImage, kernel: &Kernel) -> GrayImage {
-    convolve_with_border(image, kernel, BorderMode::Replicate)
+    convolve_with_border(image, kernel, BorderMode::Reflect101)
 }
 
 pub fn convolve_with_border(image: &GrayImage, kernel: &Kernel, border: BorderMode) -> GrayImage {
@@ -625,11 +631,22 @@ fn gaussian_blur_with_border_into_ctx_into(
     separable_convolve_into_ctx(image, out, &kernel_1d, &kernel_1d, border, group);
 }
 
+/// Gaussian blur with OpenCV's default border, [`BorderMode::Reflect101`]
+/// (it used to be `Replicate`). Use [`gaussian_blur_with_border`] for any
+/// other border.
 pub fn gaussian_blur(image: &GrayImage, sigma: f32) -> GrayImage {
-    gaussian_blur_with_border(image, sigma, BorderMode::Replicate)
+    gaussian_blur_with_border(image, sigma, BorderMode::Reflect101)
 }
 
+/// Normalised `size x size` box filter (`cv2.blur`) with OpenCV's default
+/// border, [`BorderMode::Reflect101`] (it used to be `Replicate`). Use
+/// [`box_blur_with_border`] for any other border.
 pub fn box_blur(image: &GrayImage, size: usize) -> GrayImage {
+    box_blur_with_border(image, size, BorderMode::Reflect101)
+}
+
+/// [`box_blur`] with an explicit border.
+pub fn box_blur_with_border(image: &GrayImage, size: usize, border: BorderMode) -> GrayImage {
     let runner = cv_runtime::best_runner()
         .map(|(r, _)| r)
         .unwrap_or_else(|_| {
@@ -638,22 +655,33 @@ pub fn box_blur(image: &GrayImage, size: usize) -> GrayImage {
                 .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
                 .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
         });
-    box_blur_ctx(image, size, &runner)
+    box_blur_with_border_ctx(image, size, border, &runner)
 }
 
-/// `box_blur` on an explicit runner.
-///
-/// GPU runners take the generic `convolve_2d` shader, exactly as before. The
-/// CPU path returns the same bytes as
-/// `convolve_with_border_into_ctx(image, out, &box_kernel(size), Replicate, _)`
-/// (the dense O(size^2)-per-pixel loop) but runs in O(1) per pixel: see
-/// [`box_blur_cpu_into`].
+/// `box_blur` on an explicit runner, with OpenCV's default border
+/// ([`BorderMode::Reflect101`]).
 pub fn box_blur_ctx(image: &GrayImage, size: usize, group: &RuntimeRunner) -> GrayImage {
+    box_blur_with_border_ctx(image, size, BorderMode::Reflect101, group)
+}
+
+/// `box_blur_with_border` on an explicit runner.
+///
+/// GPU runners take the generic `convolve_2d` shader. The CPU path returns
+/// the same bytes as
+/// `convolve_with_border_into_ctx(image, out, &box_kernel(size), border, _)`
+/// (the dense O(size^2)-per-pixel loop) but runs in O(1) per pixel: see
+/// [`box_blur_cpu_with_border_into`].
+pub fn box_blur_with_border_ctx(
+    image: &GrayImage,
+    size: usize,
+    border: BorderMode,
+    group: &RuntimeRunner,
+) -> GrayImage {
     if let Ok(ComputeDevice::Gpu(_)) = group.device() {
-        return convolve_ctx(image, &box_kernel(size), BorderMode::Replicate, group);
+        return convolve_ctx(image, &box_kernel(size), border, group);
     }
     let mut out = GrayImage::new(image.width(), image.height());
-    group.run(|| box_blur_cpu_into(image, &mut out, size));
+    group.run(|| box_blur_cpu_with_border_into(image, &mut out, size, border));
     out
 }
 
@@ -667,7 +695,14 @@ const BOX_BLUR_MAX_FAST_SIZE: usize = 1024;
 const BOX_BLUR_REPLAY: u16 = u16::MAX;
 
 /// Replicate-border box filter, byte-identical to the dense convolution with
-/// [`box_kernel`] but O(1) per pixel.
+/// [`box_kernel`] but O(1) per pixel. Kept with its original border; see
+/// [`box_blur_cpu_with_border_into`] for the general form.
+pub fn box_blur_cpu_into(image: &GrayImage, out: &mut GrayImage, size: usize) {
+    box_blur_cpu_with_border_into(image, out, size, BorderMode::Replicate);
+}
+
+/// Box filter with any [`BorderMode`], byte-identical to the dense
+/// convolution with [`box_kernel`] but O(1) per pixel.
 ///
 /// The dense loop computes `round_ties_even(sum_f32(p_i * w))` with
 /// `w = 1 / (size*size) as f32`, accumulating `n = size^2` products in kernel
@@ -680,7 +715,12 @@ const BOX_BLUR_REPLAY: u16 = u16::MAX;
 /// rest - exact ties for even `n`, and the rare near-ties of large kernels -
 /// replay the dense loop for that pixel, so every output byte is the one the
 /// dense loop produced.
-pub fn box_blur_cpu_into(image: &GrayImage, out: &mut GrayImage, size: usize) {
+pub fn box_blur_cpu_with_border_into(
+    image: &GrayImage,
+    out: &mut GrayImage,
+    size: usize,
+    border: BorderMode,
+) {
     let width = image.width() as usize;
     let height = image.height() as usize;
     if out.width() != image.width() || out.height() != image.height() {
@@ -693,34 +733,47 @@ pub fn box_blur_cpu_into(image: &GrayImage, out: &mut GrayImage, size: usize) {
         // size 0: the dense loop sums nothing and writes 0 everywhere; huge
         // kernels: keep the dense loop rather than widen the accumulators.
         let runner = RuntimeRunner::Sync(cv_hal::DeviceId(0));
-        convolve_with_border_into_ctx(
-            image,
-            out,
-            &box_kernel(size),
-            BorderMode::Replicate,
-            &runner,
-        );
+        convolve_with_border_into_ctx(image, out, &box_kernel(size), border, &runner);
         return;
     }
 
     let src = image.as_raw();
     let lo = -((size / 2) as isize);
     let hi = lo + size as isize - 1;
-    let clamp = |c: isize, n: usize| c.clamp(0, n as isize - 1) as usize;
+    // A `Constant` border contributes `v` per out-of-image tap; every other
+    // mode maps the tap back into the image.
+    let constant = match border {
+        BorderMode::Constant(v) => v as u32,
+        _ => 0,
+    };
+    let tap = |row: &[u8], c: isize| -> u32 {
+        match map_coord(c, row.len(), border) {
+            Some(i) => row[i] as u32,
+            None => constant,
+        }
+    };
 
-    // Horizontal window sums, replicate border.
+    // Horizontal window sums.
     let mut hsum = vec![0u32; width * height];
     hsum.par_chunks_mut(width)
         .zip(src.par_chunks(width))
         .for_each(|(hrow, row)| {
-            let mut s: u32 = (lo..=hi).map(|k| row[clamp(k, width)] as u32).sum();
+            let mut s: u32 = (lo..=hi).map(|k| tap(row, k)).sum();
             hrow[0] = s;
             for x in 1..width {
-                s += row[clamp(x as isize + hi, width)] as u32;
-                s -= row[clamp(x as isize - 1 + lo, width)] as u32;
+                s += tap(row, x as isize + hi);
+                s -= tap(row, x as isize - 1 + lo);
                 hrow[x] = s;
             }
         });
+    // Window sum of an out-of-image row under a `Constant` border.
+    let constant_row = vec![constant * size as u32; width];
+    let hrow_at = |r: isize| -> &[u32] {
+        match map_coord(r, height, border) {
+            Some(iy) => &hsum[iy * width..][..width],
+            None => &constant_row,
+        }
+    };
 
     let n = size * size;
     let w = 1.0 / n as f32;
@@ -751,7 +804,7 @@ pub fn box_blur_cpu_into(image: &GrayImage, out: &mut GrayImage, size: usize) {
             let rows = out_band.len() / width;
             let mut col: Vec<u32> = vec![0; width];
             for k in lo..=hi {
-                let r = &hsum[clamp(y0 as isize + k, height) * width..][..width];
+                let r = hrow_at(y0 as isize + k);
                 for (c, &v) in col.iter_mut().zip(r) {
                     *c += v;
                 }
@@ -759,8 +812,8 @@ pub fn box_blur_cpu_into(image: &GrayImage, out: &mut GrayImage, size: usize) {
             for dy in 0..rows {
                 let y = y0 + dy;
                 if dy > 0 {
-                    let add = &hsum[clamp(y as isize + hi, height) * width..][..width];
-                    let sub = &hsum[clamp(y as isize - 1 + lo, height) * width..][..width];
+                    let add = hrow_at(y as isize + hi);
+                    let sub = hrow_at(y as isize - 1 + lo);
                     for ((c, &a), &s) in col.iter_mut().zip(add).zip(sub) {
                         *c = *c + a - s;
                     }
@@ -774,15 +827,15 @@ pub fn box_blur_cpu_into(image: &GrayImage, out: &mut GrayImage, size: usize) {
                     *o = if v != BOX_BLUR_REPLAY {
                         v as u8
                     } else {
-                        box_blur_dense_pixel(src, width, height, x, y, lo, hi, w)
+                        box_blur_dense_pixel(src, width, height, x, y, lo, hi, w, border)
                     };
                 }
             }
         });
 }
 
-/// One pixel of the dense replicate-border box convolution, in the dense
-/// loop's exact accumulation order (rows outer, columns inner).
+/// One pixel of the dense box convolution, in the dense loop's exact
+/// accumulation order (rows outer, columns inner) and border handling.
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn box_blur_dense_pixel(
@@ -794,14 +847,22 @@ fn box_blur_dense_pixel(
     lo: isize,
     hi: isize,
     w: f32,
+    border: BorderMode,
 ) -> u8 {
+    let constant = match border {
+        BorderMode::Constant(v) => v as f32,
+        _ => 0.0,
+    };
     let mut sum = 0.0f32;
     for ky in lo..=hi {
-        let iy = (y as isize + ky).clamp(0, height as isize - 1) as usize;
-        let row = &src[iy * width..(iy + 1) * width];
+        let iy = map_coord(y as isize + ky, height, border);
         for kx in lo..=hi {
-            let ix = (x as isize + kx).clamp(0, width as isize - 1) as usize;
-            sum += row[ix] as f32 * w;
+            let ix = map_coord(x as isize + kx, width, border);
+            let v = match (ix, iy) {
+                (Some(ix), Some(iy)) => src[iy * width + ix] as f32,
+                _ => constant,
+            };
+            sum += v * w;
         }
     }
     sum.round_ties_even().clamp(0.0, 255.0) as u8

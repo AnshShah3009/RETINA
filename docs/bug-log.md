@@ -331,6 +331,24 @@ stored in the tests, so CI needs no OpenCV.
   within `1.2e-6` (OpenCV interpolates its f32 range weight from a table).
   `tests/bilateral_opencv_parity.rs`.
 
+- **`sobel`, `scharr`, `laplacian`, `gaussian_blur`, `box_blur`, `convolve`
+  (and `sharpen`) padded with `Replicate`**; OpenCV's default for every one of
+  them is `BORDER_REFLECT_101`. On a 9x7 texture, before: `cv2.Sobel(img,
+  CV_8U, 1, 0)` differed in 14 pixels (the mirrored first/last column is `0`,
+  replicate gave up to 255), `cv2.blur(img, (3, 3))` in 27, `cv2.filter2D` in
+  26, `cv2.Laplacian` in 9, the sigma-1 Gaussian in 45 (by up to 28). After:
+  Sobel, Scharr, Laplacian, `filter2D` and odd box sizes match exactly, and the
+  Gaussian matches the rounded float reference exactly and the 8-bit one to
+  within OpenCV's fixed-point ±1. The explicit `*_with_border` variants are
+  unchanged; `laplacian_with_border` and `box_blur_with_border` are new, and
+  the O(1) box path now takes any border. No caller outside `cv-imgproc`
+  relied on replicate (ORB's descriptor blur is `BORDER_REFLECT_101` in
+  OpenCV too). `tests/filter_border_default_opencv_parity.rs`.
+  *Not fixed, found on the way:* for an **even** box size OpenCV's 8-bit
+  `ColumnSum<ushort, uchar>` rounds with `(s + d/2 + 1) * divScale >> 16`, so a
+  4x4 mean of `x.4375` comes out `x + 1` (3 of 63 pixels here); and the GPU
+  Gaussian/Sobel paths in `cv-hal` ignore the requested border.
+
 ## OPEN: `erf` is accurate to ~1.5e-7, where SciPy is ~1e-16
 
 Found from a failing `scientific` test, and the diagnosis is not the obvious one.
