@@ -11,8 +11,8 @@ use cv_core::TensorShape;
 use cv_core::storage::CpuStorage;
 use cv_core::tensor::Tensor;
 use cv_features::{
-    Descriptors, FlannMatcher, MatchType, Matcher, Sift, fast_detect, knn_match,
-    non_max_suppression, orb_detect_and_compute,
+    DescriptorExtractor, Descriptors, FlannMatcher, MatchType, Matcher, Orb, Sift, fast_detect,
+    knn_match, non_max_suppression, orb_detect_and_compute,
 };
 use cv_hal::compute::ComputeDevice;
 use cv_hal::cpu::CpuBackend;
@@ -77,6 +77,24 @@ fn bench_orb(c: &mut Criterion) {
     });
     g.bench_function("detect_and_compute_1080p_2000", |b| {
         b.iter(|| orb_detect_and_compute(black_box(&big), 2000))
+    });
+    // The stages of `orb_detect_and_compute` on the 1080p frame, separately.
+    let orb = Orb::new().with_n_features(2000);
+    g.bench_function("stage_detect_1080p_2000", |b| {
+        b.iter(|| orb.detect(black_box(&big)))
+    });
+    let detected = orb.detect(&big);
+    g.bench_function("stage_orientations_1080p_2000", |b| {
+        b.iter(|| {
+            let mut kps = detected.clone();
+            orb.compute_orientations(black_box(&big), &mut kps);
+            kps
+        })
+    });
+    let mut oriented = detected.clone();
+    orb.compute_orientations(&big, &mut oriented);
+    g.bench_function("stage_extract_1080p_2000", |b| {
+        b.iter(|| orb.extract(black_box(&big), &oriented))
     });
     g.finish();
 }
