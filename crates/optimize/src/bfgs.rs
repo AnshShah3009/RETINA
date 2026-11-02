@@ -1,5 +1,6 @@
 //! BFGS quasi-Newton optimization.
 
+use super::lbfgsb::line_search;
 use super::nelder_mead::OptimizeResult;
 
 /// Configuration for the BFGS and L-BFGS-B algorithms.
@@ -23,37 +24,6 @@ impl Default for BfgsConfig {
     }
 }
 
-/// Backtracking line search satisfying the Armijo condition.
-///
-/// Returns the step size `alpha`.
-fn backtracking_line_search(
-    f: &impl Fn(&[f64]) -> f64,
-    x: &[f64],
-    direction: &[f64],
-    grad: &[f64],
-    max_steps: usize,
-) -> f64 {
-    let c = 1e-4;
-    let rho = 0.5;
-    let f0 = f(x);
-    let slope: f64 = grad.iter().zip(direction.iter()).map(|(g, d)| g * d).sum();
-    let mut alpha = 1.0;
-    let n = x.len();
-    let mut x_new = vec![0.0; n];
-
-    for _ in 0..max_steps {
-        for i in 0..n {
-            x_new[i] = x[i] + alpha * direction[i];
-        }
-        let f_new = f(&x_new);
-        if f_new <= f0 + c * alpha * slope {
-            return alpha;
-        }
-        alpha *= rho;
-    }
-    alpha
-}
-
 /// Minimize a scalar function using the BFGS quasi-Newton method.
 ///
 /// # Arguments
@@ -61,6 +31,15 @@ fn backtracking_line_search(
 /// * `grad` - Gradient function returning a vector the same length as `x0`.
 /// * `x0` - Initial guess.
 /// * `config` - Solver configuration.
+///
+/// Each step is found by a backtracking Armijo search with safeguarded
+/// quadratic interpolation (the one `minimize_lbfgsb` uses), and is taken only
+/// if it decreases `f`. When no such step exists along `-H g` (nor, if `H` has
+/// been updated, along `-g`), the solver stops where it is with
+/// `converged = false`, as SciPy's BFGS stops with status 2 ("Desired error
+/// not necessarily achieved due to precision loss"). It used to take the last
+/// halved step regardless, which could go uphill: on `f = 1e9 x^2` from
+/// `x = 1` the first step went to `x = -1906`, `f = 3.6e15`.
 #[allow(clippy::needless_range_loop)]
 pub fn minimize_bfgs(
     f: impl Fn(&[f64]) -> f64,
@@ -76,10 +55,15 @@ pub fn minimize_bfgs(
     let mut fx = f(&x);
 
     // Inverse Hessian approximation (row-major n x n), start with identity
-    let mut h_inv = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        h_inv[i][i] = 1.0;
-    }
+    let identity = |n: usize| {
+        let mut h = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            h[i][i] = 1.0;
+        }
+        h
+    };
+    let mut h_inv = identity(n);
+    let mut h_is_identity = true;
 
     let mut converged = false;
     let mut iters = 0usize;
@@ -94,20 +78,40 @@ pub fn minimize_bfgs(
             break;
         }
 
-        // Search direction: d = -H_inv * g
-        let mut d = vec![0.0; n];
-        for i in 0..n {
-            for j in 0..n {
-                d[i] -= h_inv[i][j] * g[j];
+        // Search direction d = -H_inv g and a step along it that decreases f.
+        // If the quasi-Newton direction yields none, retry once along steepest
+        // descent with H reset; if that fails too, stop.
+        let mut step = None;
+        for attempt in 0..2 {
+            if attempt == 1 {
+                if h_is_identity {
+                    break;
+                }
+                h_inv = identity(n);
+                h_is_identity = true;
+            }
+            let mut d = vec![0.0; n];
+            for i in 0..n {
+                for j in 0..n {
+                    d[i] -= h_inv[i][j] * g[j];
+                }
+            }
+            let slope: f64 = g.iter().zip(&d).map(|(a, b)| a * b).sum();
+            if !(slope < 0.0) {
+                continue;
+            }
+            if let Some((alpha, f_new, x_new)) =
+                line_search(&f, &x, fx, &d, slope, 1.0, config.line_search_max)
+            {
+                step = Some((alpha, d, f_new, x_new));
+                break;
             }
         }
+        let Some((alpha, d, f_new, x_new)) = step else {
+            break;
+        };
 
-        // Line search
-        let alpha = backtracking_line_search(&f, &x, &d, &g, config.line_search_max);
-
-        // Step
         let s: Vec<f64> = (0..n).map(|i| alpha * d[i]).collect();
-        let x_new: Vec<f64> = (0..n).map(|i| x[i] + s[i]).collect();
         let g_new = grad(&x_new);
         let y: Vec<f64> = (0..n).map(|i| g_new[i] - g[i]).collect();
 
@@ -134,11 +138,12 @@ pub fn minimize_bfgs(
                         * ((1.0 + rho_val * yhy) * s[i] * s[j] - hy[i] * s[j] - s[i] * hy[j]);
                 }
             }
+            h_is_identity = false;
         }
 
         x = x_new;
         g = g_new;
-        fx = f(&x);
+        fx = f_new;
     }
 
     OptimizeResult {
