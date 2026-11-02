@@ -35,6 +35,11 @@ struct ImageParams {
 
 fn map_coord(coord: i32, len: u32, mode: u32) -> i32 {
     let n = i32(len);
+    // Divisor guard (docs/wgsl_int_div_audit.md): an empty source axis, or one
+    // too long for i32, has no pixel to fold onto. Returning the border here
+    // keeps every `%` below at n >= 1, so `n`, `2 * n` and (n > 1)
+    // `2 * n - 2` are never 0 or -1.
+    if (n <= 0) { return -1; }
     if (mode == 0u) { // Constant
         if (coord < 0 || coord >= n) { return -1; }
         return coord;
