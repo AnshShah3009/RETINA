@@ -10,4 +10,4 @@ robust = "1.2"
 # Polygon overlay with winding-number fill rules; already in the tree via `geo`
 # (which uses it for its boolean ops). `buffer_polygon` resolves its raw offset
 # rings with the positive fill rule, as GEOS does.
-i_overlay = { version = "4.5", default-features = false }
+i_overlay = { version = "9.1", default-features = false }
