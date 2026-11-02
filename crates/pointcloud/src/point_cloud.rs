@@ -181,6 +181,13 @@ impl rstar::PointDistance for PointWrapper {
 /// Uses PCA/SVD on the covariance matrix of the neighborhood.
 /// Modifies the point cloud in place to add normals.
 ///
+/// The neighbourhood of a point is its `k` nearest points *including the point
+/// itself*, as Open3D's `estimate_normals(KDTreeSearchParamKNN(k))`; fewer than
+/// three give the default `(0, 0, 1)`, as there. (It used to skip the nearest
+/// result and take `k` others, leaving the point out of its own covariance;
+/// see `tests/normals_knn_open3d.rs`.) The sign is the eigensolver's, as in
+/// Open3D.
+///
 /// Points with a non-finite coordinate have no neighbourhood: they are left out
 /// of the search tree and get the default `(0, 0, 1)` normal, the same as a
 /// point with fewer than three neighbours.
@@ -207,11 +214,9 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
                 return default_normal();
             }
             let query_point = [p.x, p.y, p.z];
-            let neighbors: Vec<&PointWrapper> = tree
-                .nearest_neighbor_iter(query_point)
-                .skip(1)
-                .take(k)
-                .collect();
+            // The nearest result is the point itself (or a duplicate of it).
+            let neighbors: Vec<&PointWrapper> =
+                tree.nearest_neighbor_iter(query_point).take(k).collect();
 
             if neighbors.len() < 3 {
                 return default_normal(); // Default up

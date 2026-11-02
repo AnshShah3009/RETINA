@@ -44,7 +44,13 @@ fn brute_statistical(points: &[Point3<f64>], nb: usize, std_ratio: f64) -> Vec<u
 }
 
 fn brute_normals(points: &[Point3<f64>], k: usize) -> Vec<Vector3<f64>> {
-    let k = k.min(points.len() - 1).max(1);
+    // Open3D's rule (see `normals_knn_open3d.rs`): the `k` nearest points
+    // *including the point itself*; fewer than three give (0, 0, 1).
+    let m = k.min(points.len());
+    if m < 3 {
+        return vec![Vector3::z(); points.len()];
+    }
+    let k = m - 1;
     points
         .par_iter()
         .enumerate()
