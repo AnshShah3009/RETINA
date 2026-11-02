@@ -1757,6 +1757,7 @@ name = "cv-3d"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "criterion",
  "cv-core",
  "cv-hal",
  "cv-math",
