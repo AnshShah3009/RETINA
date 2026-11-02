@@ -81,24 +81,47 @@ impl Matcher {
     }
 
     fn brute_force_match(&self, query: &Descriptors, train: &Descriptors) -> Matches {
+        // Distances are evaluated on descriptors packed into flat buffers when
+        // every descriptor has the same length (see `PackedDistance`), which
+        // gives exactly the values `MatchType::distance` would.
+        match PackedDistance::new(&self.match_type, query, train) {
+            Some(PackedDistance::Hamming(p)) => {
+                self.brute_force_match_with(query.len(), train.len(), |q, t| p.distance(q, t))
+            }
+            Some(PackedDistance::L2(p)) => {
+                self.brute_force_match_with(query.len(), train.len(), |q, t| p.distance(q, t))
+            }
+            None => self.brute_force_match_with(query.len(), train.len(), |q, t| {
+                self.match_type
+                    .distance(&query.descriptors[q], &train.descriptors[t])
+            }),
+        }
+    }
+
+    /// Brute-force matching over `n_query` x `n_train` pairs, with
+    /// `distance(query_idx, train_idx)` giving each pair's distance (which is
+    /// symmetric for every [`MatchType`]).
+    fn brute_force_match_with<D>(&self, n_query: usize, n_train: usize, distance: D) -> Matches
+    where
+        D: Fn(usize, usize) -> f32 + Sync,
+    {
         // One reverse pass: the winning query index for each training
         // descriptor. Ties keep the lower index (replace only when the new
         // distance is strictly smaller).
         let reverse_best = if self.cross_check {
-            self.best_query_per_train(query, train)
+            best_query_per_train(n_query, n_train, &distance)
         } else {
             Vec::new()
         };
 
-        let matches: Vec<FeatureMatch> = (0..query.len())
+        let matches: Vec<FeatureMatch> = (0..n_query)
             .into_par_iter()
             .filter_map(|query_idx| {
-                let q_desc = &query.descriptors[query_idx];
                 let mut best_match: Option<(usize, f32)> = None;
                 let mut second_best: Option<f32> = None;
 
-                for (train_idx, t_desc) in train.iter().enumerate() {
-                    let distance = self.match_type.distance(q_desc, t_desc);
+                for train_idx in 0..n_train {
+                    let distance = distance(query_idx, train_idx);
 
                     match best_match {
                         None => {
@@ -165,27 +188,156 @@ impl Matcher {
             mask: None,
         }
     }
+}
 
-    /// Winning query index for every training descriptor.
-    ///
-    /// An empty query set leaves each entry `None`. Equal distances keep the
-    /// lower query index.
-    fn best_query_per_train(&self, query: &Descriptors, train: &Descriptors) -> Vec<Option<usize>> {
-        (0..train.len())
-            .into_par_iter()
-            .map(|train_idx| {
-                let t_desc = &train.descriptors[train_idx];
-                let mut best: Option<(usize, f32)> = None;
-                for (query_idx, q_desc) in query.iter().enumerate() {
-                    let distance = self.match_type.distance(t_desc, q_desc);
-                    match best {
-                        Some((_, best_dist)) if best_dist <= distance => {}
-                        _ => best = Some((query_idx, distance)),
-                    }
+/// Winning query index for every training descriptor.
+///
+/// An empty query set leaves each entry `None`. Equal distances keep the
+/// lower query index.
+fn best_query_per_train<D>(n_query: usize, n_train: usize, distance: &D) -> Vec<Option<usize>>
+where
+    D: Fn(usize, usize) -> f32 + Sync,
+{
+    (0..n_train)
+        .into_par_iter()
+        .map(|train_idx| {
+            let mut best: Option<(usize, f32)> = None;
+            for query_idx in 0..n_query {
+                let distance = distance(query_idx, train_idx);
+                match best {
+                    Some((_, best_dist)) if best_dist <= distance => {}
+                    _ => best = Some((query_idx, distance)),
                 }
-                best.map(|(idx, _)| idx)
+            }
+            best.map(|(idx, _)| idx)
+        })
+        .collect()
+}
+
+/// Query and train descriptors copied into flat, fixed-stride buffers.
+///
+/// Every `Descriptor` owns its own heap allocation, so a brute-force scan over
+/// them chases a pointer per pair and reads bytes one at a time. When all the
+/// descriptors on both sides have the same length the distances can instead be
+/// computed on contiguous rows. Mixed lengths keep the per-descriptor path,
+/// which owns the length-mismatch sentinel.
+enum PackedDistance {
+    Hamming(PackedHamming),
+    L2(PackedL2),
+}
+
+impl PackedDistance {
+    fn new(match_type: &MatchType, query: &Descriptors, train: &Descriptors) -> Option<Self> {
+        let len = query.descriptors.first()?.data.len();
+        let uniform = query
+            .descriptors
+            .iter()
+            .chain(train.descriptors.iter())
+            .all(|d| d.data.len() == len);
+        if !uniform {
+            return None;
+        }
+        match match_type {
+            MatchType::BruteForce | MatchType::BruteForceHamming => {
+                Some(Self::Hamming(PackedHamming::new(len, query, train)))
+            }
+            MatchType::BruteForceL2 => PackedL2::new(len, query, train).map(Self::L2),
+        }
+    }
+}
+
+/// Descriptors as little-endian `u64` words, the last word zero-padded.
+///
+/// The padding bytes are zero on both sides, so they XOR to zero and add
+/// nothing: the popcount of the words is the byte-wise Hamming distance.
+struct PackedHamming {
+    words: usize,
+    query: Vec<u64>,
+    train: Vec<u64>,
+}
+
+impl PackedHamming {
+    fn new(len: usize, query: &Descriptors, train: &Descriptors) -> Self {
+        let words = len.div_ceil(8);
+        let pack = |set: &Descriptors| -> Vec<u64> {
+            let mut out = Vec::with_capacity(set.len() * words);
+            for d in &set.descriptors {
+                for chunk in d.data.chunks(8) {
+                    let mut bytes = [0u8; 8];
+                    bytes[..chunk.len()].copy_from_slice(chunk);
+                    out.push(u64::from_le_bytes(bytes));
+                }
+            }
+            out
+        };
+        Self {
+            words,
+            query: pack(query),
+            train: pack(train),
+        }
+    }
+
+    #[inline]
+    fn distance_u32(&self, query_idx: usize, train_idx: usize) -> u32 {
+        let q = &self.query[query_idx * self.words..(query_idx + 1) * self.words];
+        let t = &self.train[train_idx * self.words..(train_idx + 1) * self.words];
+        q.iter().zip(t).map(|(a, b)| (a ^ b).count_ones()).sum()
+    }
+
+    #[inline]
+    fn distance(&self, query_idx: usize, train_idx: usize) -> f32 {
+        self.distance_u32(query_idx, train_idx) as f32
+    }
+}
+
+/// Descriptor bytes in one flat buffer, for the L2 norm in integer arithmetic.
+struct PackedL2 {
+    len: usize,
+    query: Vec<u8>,
+    train: Vec<u8>,
+}
+
+impl PackedL2 {
+    /// Longest descriptor whose sum of squared byte differences stays below
+    /// 2^24 (`258 * 255^2 = 16_776_450`).
+    ///
+    /// Up to that bound every partial sum `MatchType::distance` accumulates in
+    /// `f32` is an exactly representable integer, so its `f32` sum equals the
+    /// integer sum and the square roots agree bit for bit. Longer descriptors
+    /// (the f32 sum could round) keep the `f32` path.
+    const MAX_EXACT_LEN: usize = 258;
+
+    fn new(len: usize, query: &Descriptors, train: &Descriptors) -> Option<Self> {
+        // An empty descriptor is left to the f32 path, whose empty sum is -0.0.
+        if len == 0 || len > Self::MAX_EXACT_LEN {
+            return None;
+        }
+        let pack = |set: &Descriptors| -> Vec<u8> {
+            set.descriptors
+                .iter()
+                .flat_map(|d| d.data.iter().copied())
+                .collect()
+        };
+        Some(Self {
+            len,
+            query: pack(query),
+            train: pack(train),
+        })
+    }
+
+    #[inline]
+    fn distance(&self, query_idx: usize, train_idx: usize) -> f32 {
+        let q = &self.query[query_idx * self.len..(query_idx + 1) * self.len];
+        let t = &self.train[train_idx * self.len..(train_idx + 1) * self.len];
+        let sum: u32 = q
+            .iter()
+            .zip(t)
+            .map(|(&x, &y)| {
+                let d = x.abs_diff(y) as u32;
+                d * d
             })
-            .collect()
+            .sum();
+        (sum as f32).sqrt()
     }
 }
 
@@ -441,5 +593,73 @@ mod tests {
         assert_eq!(matches.matches.len(), 1);
         assert_eq!(matches.matches[0].query_idx, 0);
         assert_eq!(matches.matches[0].train_idx, 0);
+    }
+
+    fn random_descriptors(n: usize, len: usize, seed: u64) -> Descriptors {
+        let mut state = seed;
+        let mut ds = Descriptors::new();
+        for i in 0..n {
+            let data = (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    // Mix in the extremes so the L2 bound is exercised.
+                    match state % 5 {
+                        0 => 0,
+                        1 => 255,
+                        _ => (state >> 8) as u8,
+                    }
+                })
+                .collect();
+            ds.push(crate::descriptor::Descriptor::new(
+                data,
+                KeyPoint::new(i as f64, 0.0),
+            ));
+        }
+        ds
+    }
+
+    /// The packed kernels give exactly `MatchType::distance` for every pair,
+    /// for lengths that do and do not fill whole words, up to the longest
+    /// descriptor the integer L2 path accepts (all-0 against all-255 there).
+    #[test]
+    fn packed_distances_equal_the_per_descriptor_distance() {
+        for (len, seed) in [(1, 3u64), (32, 5), (61, 7), (128, 11), (258, 13)] {
+            let mut q = random_descriptors(17, len, seed);
+            let mut t = random_descriptors(23, len, seed * 31);
+            q.push(crate::descriptor::Descriptor::new(
+                vec![0; len],
+                KeyPoint::new(0.0, 0.0),
+            ));
+            t.push(crate::descriptor::Descriptor::new(
+                vec![255; len],
+                KeyPoint::new(0.0, 0.0),
+            ));
+            let hamming = PackedHamming::new(len, &q, &t);
+            let l2 = PackedL2::new(len, &q, &t).expect("length within the exact bound");
+            for (qi, qd) in q.descriptors.iter().enumerate() {
+                for (ti, td) in t.descriptors.iter().enumerate() {
+                    let h = MatchType::BruteForceHamming.distance(qd, td);
+                    assert_eq!(hamming.distance(qi, ti).to_bits(), h.to_bits());
+                    let e = MatchType::BruteForceL2.distance(qd, td);
+                    assert_eq!(l2.distance(qi, ti).to_bits(), e.to_bits(), "len {len}");
+                }
+            }
+        }
+        let q = random_descriptors(2, 259, 1);
+        assert!(PackedL2::new(259, &q, &q).is_none());
+    }
+
+    /// Mixed descriptor lengths keep the per-descriptor path and its
+    /// length-mismatch sentinel.
+    #[test]
+    fn mixed_lengths_are_not_packed() {
+        let query = make_descriptors_from_bytes(&[&[0u8; 4]]);
+        let train = make_descriptors_from_bytes(&[&[0u8; 4], &[0u8; 8]]);
+        assert!(PackedDistance::new(&MatchType::BruteForceHamming, &query, &train).is_none());
+        let m = Matcher::new(MatchType::BruteForceHamming).match_descriptors(&query, &train);
+        assert_eq!(m.matches.len(), 1);
+        assert_eq!(m.matches[0].train_idx, 0);
     }
 }
