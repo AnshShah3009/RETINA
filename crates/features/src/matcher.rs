@@ -356,31 +356,68 @@ pub fn match_descriptors(
     matcher.match_descriptors(query, train)
 }
 
+/// Largest `k` for which [`knn_match`] keeps a sorted insertion list rather
+/// than collecting and selecting over every train distance.
+const KNN_INSERTION_MAX_K: usize = 16;
+
 /// K-nearest-neighbour matching: return the `k` closest training descriptors for each query.
+///
+/// Neighbours are ordered by Hamming distance, equal distances by ascending
+/// train index.
 pub fn knn_match(query: &Descriptors, train: &Descriptors, k: usize) -> Vec<Vec<FeatureMatch>> {
-    let mut all_matches: Vec<Vec<FeatureMatch>> = Vec::with_capacity(query.len());
+    let packed = match PackedDistance::new(&MatchType::BruteForceHamming, query, train) {
+        Some(PackedDistance::Hamming(p)) => Some(p),
+        _ => None,
+    };
 
-    for (query_idx, q_desc) in query.iter().enumerate() {
-        let mut distances: Vec<(usize, u32)> = train
-            .iter()
-            .enumerate()
-            .map(|(idx, t_desc)| (idx, q_desc.hamming_distance(t_desc)))
-            .collect();
+    // Queries are independent; the indexed parallel collect keeps query order.
+    (0..query.len())
+        .into_par_iter()
+        .map(|query_idx| {
+            let distance = |train_idx: usize| match &packed {
+                Some(p) => p.distance_u32(query_idx, train_idx),
+                None => {
+                    query.descriptors[query_idx].hamming_distance(&train.descriptors[train_idx])
+                }
+            };
 
-        distances.sort_by_key(|a| a.1);
+            // The first `k` by (distance, train index): the same neighbours in
+            // the same order a stable sort on distance alone gives.
+            let distances: Vec<(u32, usize)> = if k <= KNN_INSERTION_MAX_K {
+                // Small k: keep a sorted list of the best `k` seen so far.
+                // Train indices arrive ascending, so a candidate tying the
+                // current k-th distance sorts after it and is not taken.
+                let mut best: Vec<(u32, usize)> = Vec::with_capacity(k + 1);
+                for train_idx in 0..train.len() {
+                    let d = distance(train_idx);
+                    if best.len() == k && best.last().is_none_or(|&(worst, _)| d >= worst) {
+                        continue;
+                    }
+                    let at = best.partition_point(|&(bd, _)| bd <= d);
+                    best.insert(at, (d, train_idx));
+                    best.truncate(k);
+                }
+                best
+            } else {
+                // Large k: partial selection instead of sorting the whole set.
+                let mut all: Vec<(u32, usize)> =
+                    (0..train.len()).map(|t| (distance(t), t)).collect();
+                if k < all.len() {
+                    all.select_nth_unstable(k - 1);
+                    all.truncate(k);
+                }
+                all.sort_unstable();
+                all
+            };
 
-        let knn: Vec<FeatureMatch> = distances
-            .into_iter()
-            .take(k)
-            .map(|(train_idx, distance)| {
-                FeatureMatch::new(query_idx as i32, train_idx as i32, distance as f32)
-            })
-            .collect();
-
-        all_matches.push(knn);
-    }
-
-    all_matches
+            distances
+                .into_iter()
+                .map(|(distance, train_idx)| {
+                    FeatureMatch::new(query_idx as i32, train_idx as i32, distance as f32)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// Remove all matches with a distance greater than `max_distance`.
@@ -661,5 +698,49 @@ mod tests {
         let m = Matcher::new(MatchType::BruteForceHamming).match_descriptors(&query, &train);
         assert_eq!(m.matches.len(), 1);
         assert_eq!(m.matches[0].train_idx, 0);
+    }
+
+    /// `knn_match` returns what sorting every train descriptor stably by
+    /// Hamming distance and taking the first `k` does - including the order of
+    /// tied distances, which short descriptors make plentiful.
+    #[test]
+    fn knn_match_equals_a_full_stable_sort() {
+        let reference = |q: &Descriptors, t: &Descriptors, k: usize| -> Vec<Vec<(i32, i32, u32)>> {
+            q.iter()
+                .enumerate()
+                .map(|(qi, qd)| {
+                    let mut d: Vec<(usize, u32)> = t
+                        .iter()
+                        .enumerate()
+                        .map(|(ti, td)| (ti, qd.hamming_distance(td)))
+                        .collect();
+                    d.sort_by_key(|a| a.1);
+                    d.into_iter()
+                        .take(k)
+                        .map(|(ti, dist)| (qi as i32, ti as i32, dist))
+                        .collect()
+                })
+                .collect()
+        };
+        let flatten = |r: Vec<Vec<FeatureMatch>>| -> Vec<Vec<(i32, i32, u32)>> {
+            r.into_iter()
+                .map(|v| {
+                    v.into_iter()
+                        .map(|m| (m.query_idx, m.train_idx, m.distance as u32))
+                        .collect()
+                })
+                .collect()
+        };
+        for len in [1usize, 2, 32] {
+            let q = random_descriptors(40, len, 99 + len as u64);
+            let t = random_descriptors(300, len, 7 + len as u64);
+            for k in [0usize, 1, 2, 5, 299, 300, 301] {
+                assert_eq!(flatten(knn_match(&q, &t, k)), reference(&q, &t, k));
+            }
+        }
+        // Mixed lengths take the per-descriptor path with its sentinel.
+        let q = make_descriptors_from_bytes(&[&[0u8; 4], &[1u8; 4]]);
+        let t = make_descriptors_from_bytes(&[&[0u8; 8], &[3u8; 4], &[0u8; 4]]);
+        assert_eq!(flatten(knn_match(&q, &t, 3)), reference(&q, &t, 3));
     }
 }
