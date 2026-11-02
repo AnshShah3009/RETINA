@@ -759,6 +759,14 @@ fn transform_point(matrix: &Matrix3<f32>, pt: &Point2<f32>) -> Point2<f32> {
     }
 }
 
+/// Rotation about `center` by `angle` **radians** (positive is
+/// counter-clockwise on screen, y down) with uniform `scale`, as a 3x3
+/// homogeneous matrix.
+///
+/// The sign convention and layout are OpenCV's `getRotationMatrix2D`, but the
+/// unit is not: OpenCV takes degrees. `get_rotation_matrix(c, a.to_radians(),
+/// s)` equals `cv2.getRotationMatrix2D(c, a, s)` (in f32); use
+/// [`get_rotation_matrix_2d`] for the drop-in degrees form.
 pub fn get_rotation_matrix(center: Point2<f32>, angle: f32, scale: f32) -> Matrix3<f32> {
     let cos_a = angle.cos();
     let sin_a = angle.sin();
@@ -773,6 +781,33 @@ pub fn get_rotation_matrix(center: Point2<f32>, angle: f32, scale: f32) -> Matri
     let ty = beta * center.x + (1.0 - alpha) * center.y;
 
     Matrix3::new(alpha, beta, tx, -beta, alpha, ty, 0.0, 0.0, 1.0)
+}
+
+/// `cv2.getRotationMatrix2D(center, angle, scale)`: rotation about `center` by
+/// `angle_degrees` (positive is counter-clockwise on screen, y down) with
+/// uniform `scale`, as OpenCV's 2x3 `f64` affine matrix
+///
+/// ```text
+/// [  α  β  (1-α)·cx - β·cy ]      α = scale·cos(angle)
+/// [ -β  α  β·cx + (1-α)·cy ]      β = scale·sin(angle)
+/// ```
+///
+/// computed in f64 exactly as OpenCV does (`angle * π / 180`, then `cos`,
+/// `sin`). [`warp_affine`] takes the matrix as `[[f32; 3]; 2]`; narrow each
+/// entry with `as f32`.
+pub fn get_rotation_matrix_2d(
+    center: Point2<f32>,
+    angle_degrees: f64,
+    scale: f64,
+) -> [[f64; 3]; 2] {
+    let angle = angle_degrees * (std::f64::consts::PI / 180.0);
+    let alpha = angle.cos() * scale;
+    let beta = angle.sin() * scale;
+    let (cx, cy) = (center.x as f64, center.y as f64);
+    [
+        [alpha, beta, (1.0 - alpha) * cx - beta * cy],
+        [-beta, alpha, beta * cx + (1.0 - alpha) * cy],
+    ]
 }
 
 pub fn get_translation_matrix(dx: f32, dy: f32) -> Matrix3<f32> {

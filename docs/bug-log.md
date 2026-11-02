@@ -349,6 +349,15 @@ stored in the tests, so CI needs no OpenCV.
   4x4 mean of `x.4375` comes out `x + 1` (3 of 63 pixels here); and the GPU
   Gaussian/Sobel paths in `cv-hal` ignore the requested border.
 
+- **`get_rotation_matrix` takes radians where `cv2.getRotationMatrix2D` takes
+  degrees.** Its sign convention and layout were already OpenCV's (checked on
+  four centre/angle/scale cases: with the angle converted it matches to f32
+  precision), so the existing function keeps its unit and is now documented as
+  radians; passing `30.0` meaning degrees gives a 30-radian rotation
+  (`M[0][0] = 0.154` instead of `0.866`). New `get_rotation_matrix_2d(center,
+  angle_degrees, scale) -> [[f64; 3]; 2]` is the drop-in form, bit-identical to
+  OpenCV 4.13 on all four cases. `tests/rotation_matrix_opencv_parity.rs`.
+
 ## OPEN: `erf` is accurate to ~1.5e-7, where SciPy is ~1e-16
 
 Found from a failing `scientific` test, and the diagnosis is not the obvious one.
