@@ -572,20 +572,6 @@ fn point_on_boundary(p: &Point2D, poly: &Polygon) -> bool {
 
 // ─── Boolean Operations ──────────────────────────────────────────────────────
 
-/// Intersection of infinite lines through (a1,a2) and (b1,b2).
-fn line_intersection(a1: &Point2D, a2: &Point2D, b1: &Point2D, b2: &Point2D) -> Option<Point2D> {
-    let dax = a2.x - a1.x;
-    let day = a2.y - a1.y;
-    let dbx = b2.x - b1.x;
-    let dby = b2.y - b1.y;
-    let denom = dax * dby - day * dbx;
-    if denom.abs() < EPS {
-        return None;
-    }
-    let t = ((b1.x - a1.x) * dby - (b1.y - a1.y) * dbx) / denom;
-    Some(Point2D::new(a1.x + t * dax, a1.y + t * day))
-}
-
 /// Make an open ring (remove trailing closing vertex if present).
 fn open_ring(ring: &[Point2D]) -> Vec<Point2D> {
     if ring.len() >= 2 {
@@ -764,110 +750,171 @@ pub fn convex_hull(points: &[Point2D]) -> Polygon {
     Polygon::new(lower, vec![])
 }
 
-/// Offset (buffer) a polygon outward by `distance`.
+/// Offset (buffer) a polygon by `distance`: outward for a positive distance,
+/// inward for a negative one.
 ///
-/// Each edge is offset outward and arc segments of `segments` pieces are added
-/// at convex corners.
+/// Built as a Minkowski sum (difference, for a negative distance) with a
+/// polygonal disc: the polygon is unioned with a rectangle of width `distance`
+/// on the outer side of every edge, exterior and holes alike, and a round fan
+/// of `segments` pieces per quarter turn (shapely's `quad_segs`, rounded as
+/// GEOS does) at every corner that opens away from the material; a negative
+/// distance subtracts the same pieces built on the inner side. Corners that
+/// close towards the material therefore come out as the exact intersection of
+/// the offset edges, concavities whose offsets overlap are merged, and holes
+/// shrink and close - each of which the previous offset-ring construction got
+/// wrong (it returned a self-intersecting ring and dropped the holes).
+///
+/// A positive buffer of a polygon is always one polygon. A negative buffer can
+/// split into several pieces or vanish; this returns the largest piece (an empty
+/// polygon if nothing remains) - see [`buffer_polygon_parts`] for all of them.
 pub fn buffer_polygon(polygon: &Polygon, distance: f64, segments: usize) -> Polygon {
-    let ring = open_ring(&polygon.exterior);
-    let n = ring.len();
-    if n < 3 {
-        return polygon.clone();
+    let mut parts = buffer_polygon_parts(polygon, distance, segments);
+    if parts.is_empty() {
+        return Polygon::new(vec![], vec![]);
+    }
+    let largest = (0..parts.len())
+        .max_by(|&a, &b| parts[a].area().total_cmp(&parts[b].area()))
+        .unwrap_or(0);
+    parts.swap_remove(largest)
+}
+
+/// [`buffer_polygon`], returning every polygon of the result.
+pub fn buffer_polygon_parts(polygon: &Polygon, distance: f64, segments: usize) -> Vec<Polygon> {
+    use i_overlay::core::fill_rule::FillRule;
+    use i_overlay::core::overlay_rule::OverlayRule;
+    use i_overlay::float::single::SingleFloatOverlay;
+
+    let exterior = dedup_ring(&open_ring(&polygon.exterior));
+    if exterior.len() < 3 || distance == 0.0 || !distance.is_finite() {
+        return vec![polygon.clone()];
     }
 
-    // Ensure CCW
-    let area = ring_signed_area(&ring);
-    let pts: Vec<Point2D> = if area < 0.0 {
-        ring.into_iter().rev().collect()
+    // Material on the left of every ring: exterior counter-clockwise, holes
+    // clockwise. The right-hand normal of each edge then points away from the
+    // material, for the exterior and the holes alike.
+    let mut rings = vec![oriented_ring(exterior, true)];
+    for hole in &polygon.holes {
+        let hole = dedup_ring(&open_ring(hole));
+        if hole.len() >= 3 {
+            rings.push(oriented_ring(hole, false));
+        }
+    }
+
+    let seg = segments.max(1);
+    let mut pieces: Vec<Vec<[f64; 2]>> = Vec::new();
+    let mut add_piece = |piece: Vec<Point2D>| {
+        let piece = oriented_ring(piece, true);
+        if ring_signed_area(&piece) > 0.0 {
+            pieces.push(piece.iter().map(|p| [p.x, p.y]).collect());
+        }
+    };
+    for ring in &rings {
+        let n = ring.len();
+        let normal = |i: usize| -> (f64, f64) {
+            let j = (i + 1) % n;
+            let dx = ring[j].x - ring[i].x;
+            let dy = ring[j].y - ring[i].y;
+            let len = dx.hypot(dy);
+            (dy / len, -dx / len)
+        };
+        for i in 0..n {
+            // The strip swept by edge i: on the outer side for a positive
+            // distance, the inner side for a negative one.
+            let (a, b) = (&ring[i], &ring[(i + 1) % n]);
+            let (nx, ny) = normal(i);
+            add_piece(vec![
+                a.clone(),
+                b.clone(),
+                Point2D::new(b.x + nx * distance, b.y + ny * distance),
+                Point2D::new(a.x + nx * distance, a.y + ny * distance),
+            ]);
+
+            // A round join where the corner opens away from the material.
+            // The turn's sign is exact: comparing the (length^2) cross product
+            // with an absolute `EPS` treated every corner below ~1e-5 as
+            // straight, so a square of side 1e-6 buffered by half its side got
+            // mitred corners - area 3.5 s^2 instead of shapely's 3.784 s^2.
+            let prev = if i == 0 { n - 1 } else { i - 1 };
+            let turn = cross2d(&ring[prev], &ring[i], &ring[(i + 1) % n]);
+            if turn != 0.0 && (turn > 0.0) == (distance > 0.0) {
+                let (nx0, ny0) = normal(prev);
+                let angle0 = ny0.atan2(nx0);
+                let mut da = ny.atan2(nx) - angle0;
+                while da > std::f64::consts::PI {
+                    da -= 2.0 * std::f64::consts::PI;
+                }
+                while da < -std::f64::consts::PI {
+                    da += 2.0 * std::f64::consts::PI;
+                }
+                // GEOS: `round(angle / (pi/2 / quad_segs))` pieces, at least one.
+                let steps = ((da.abs() / std::f64::consts::FRAC_PI_2) * seg as f64 + 0.5)
+                    .floor()
+                    .max(1.0) as usize;
+                let v = &ring[i];
+                let mut fan = vec![v.clone()];
+                for s in 0..=steps {
+                    let a = angle0 + da * (s as f64 / steps as f64);
+                    fan.push(Point2D::new(
+                        v.x + distance * a.cos(),
+                        v.y + distance * a.sin(),
+                    ));
+                }
+                add_piece(fan);
+            }
+        }
+    }
+
+    let subject: Vec<Vec<[f64; 2]>> = rings
+        .iter()
+        .map(|r| r.iter().map(|p| [p.x, p.y]).collect())
+        .collect();
+    let rule = if distance > 0.0 {
+        OverlayRule::Union
     } else {
+        OverlayRule::Difference
+    };
+    let shapes = subject.overlay(&pieces, rule, FillRule::NonZero);
+
+    let to_ring = |contour: &Vec<[f64; 2]>, ccw: bool| -> Vec<Point2D> {
+        let ring: Vec<Point2D> = contour.iter().map(|c| Point2D::new(c[0], c[1])).collect();
+        let mut ring = oriented_ring(ring, ccw);
+        close_ring(&mut ring);
         ring
     };
+    shapes
+        .iter()
+        .filter(|shape| !shape.is_empty())
+        .map(|shape| {
+            Polygon::new(
+                to_ring(&shape[0], true),
+                shape[1..].iter().map(|h| to_ring(h, false)).collect(),
+            )
+        })
+        .collect()
+}
 
-    let n = pts.len();
-    // Compute outward normals for each edge.
-    // For a CCW polygon, the outward (right-hand) normal of edge (dx,dy) is (dy,-dx).
-    let mut normals: Vec<(f64, f64)> = Vec::with_capacity(n);
-    for i in 0..n {
-        let j = (i + 1) % n;
-        let dx = pts[j].x - pts[i].x;
-        let dy = pts[j].y - pts[i].y;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < EPS {
-            normals.push((0.0, 1.0));
-        } else {
-            normals.push((dy / len, -dx / len));
+/// `ring` wound counter-clockwise (`ccw`) or clockwise.
+fn oriented_ring(ring: Vec<Point2D>, ccw: bool) -> Vec<Point2D> {
+    if (ring_signed_area(&ring) > 0.0) == ccw {
+        ring
+    } else {
+        ring.into_iter().rev().collect()
+    }
+}
+
+/// `ring` without consecutive repeated vertices (wrapping around): a
+/// zero-length edge has no direction to offset along.
+fn dedup_ring(ring: &[Point2D]) -> Vec<Point2D> {
+    let mut out: Vec<Point2D> = Vec::with_capacity(ring.len());
+    for p in ring {
+        if out.last() != Some(p) {
+            out.push(p.clone());
         }
     }
-
-    let mut result = Vec::new();
-    let seg = segments.max(1);
-
-    for i in 0..n {
-        let prev_edge = if i == 0 { n - 1 } else { i - 1 };
-        let curr_edge = i;
-        let (nx0, ny0) = normals[prev_edge];
-        let (nx1, ny1) = normals[curr_edge];
-
-        // Turn direction at this vertex
-        let curr_next = (curr_edge + 1) % n;
-        let epx = pts[i].x - pts[prev_edge].x;
-        let epy = pts[i].y - pts[prev_edge].y;
-        let ecx = pts[curr_next].x - pts[i].x;
-        let ecy = pts[curr_next].y - pts[i].y;
-        let turn = epx * ecy - epy * ecx; // positive = left turn = convex for CCW
-
-        if turn > EPS && distance > 0.0 {
-            // Convex corner: insert a rounded arc
-            let angle0 = ny0.atan2(nx0);
-            let angle1 = ny1.atan2(nx1);
-            let mut da = angle1 - angle0;
-            while da > std::f64::consts::PI {
-                da -= 2.0 * std::f64::consts::PI;
-            }
-            while da < -std::f64::consts::PI {
-                da += 2.0 * std::f64::consts::PI;
-            }
-            for s in 0..=seg {
-                let t = s as f64 / seg as f64;
-                let a = angle0 + da * t;
-                result.push(Point2D::new(
-                    pts[i].x + distance * a.cos(),
-                    pts[i].y + distance * a.sin(),
-                ));
-            }
-        } else {
-            // Reflex or straight corner: miter join CLAMPED to
-            // distance * MITER_LIMIT — acute reflex angles previously
-            // produced arbitrarily long spikes.
-            let a1 = Point2D::new(
-                pts[prev_edge].x + nx0 * distance,
-                pts[prev_edge].y + ny0 * distance,
-            );
-            let a2 = Point2D::new(pts[i].x + nx0 * distance, pts[i].y + ny0 * distance);
-            let b1 = Point2D::new(pts[i].x + nx1 * distance, pts[i].y + ny1 * distance);
-            let b2 = Point2D::new(
-                pts[curr_next].x + nx1 * distance,
-                pts[curr_next].y + ny1 * distance,
-            );
-            if let Some(miter) = line_intersection(&a1, &a2, &b1, &b2) {
-                let mx = miter.x - pts[i].x;
-                let my = miter.y - pts[i].y;
-                const MITER_LIMIT: f64 = 2.0;
-                if mx * mx + my * my <= (MITER_LIMIT * distance).powi(2) {
-                    result.push(miter);
-                } else {
-                    result.push(a2);
-                    result.push(b1);
-                }
-            } else {
-                result.push(a2);
-                result.push(b1);
-            }
-        }
+    while out.len() > 1 && out.first() == out.last() {
+        out.pop();
     }
-
-    close_ring(&mut result);
-    Polygon::new(result, vec![])
+    out
 }
 
 /// Douglas-Peucker line simplification.

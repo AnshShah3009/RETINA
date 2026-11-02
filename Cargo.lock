@@ -1894,6 +1894,7 @@ name = "cv-geometry2d"
 version = "0.1.0"
 dependencies = [
  "geo",
+ "i_overlay",
  "robust",
 ]
 
