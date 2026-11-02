@@ -13,7 +13,7 @@
 //! ```
 
 use cv_core::PointCloud;
-use nalgebra::{Point3, Vector3};
+use nalgebra::Point3;
 use std::path::Path;
 
 /// LAS point cloud data with metadata.
@@ -41,7 +41,7 @@ pub struct LasData {
 
 /// Read a LAS or LAZ file.
 pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
-    use las::{Read, Reader};
+    use las::{PointDataBuilder, Reader};
 
     let mut reader = Reader::from_path(path.as_ref())
         .map_err(|e| cv_core::Error::IoError(format!("Failed to open LAS file: {}", e)))?;
@@ -85,58 +85,74 @@ pub fn read_las<P: AsRef<Path>>(path: P) -> cv_core::Result<LasData> {
     let has_classification = true;
     let has_returns = true;
 
-    for point_result in reader.points() {
-        let point = point_result
+    // las 0.10+ reads into a buffered `PointData` instead of a per-point
+    // iterator over the file. Read in bounded batches into one reused buffer
+    // (no per-batch allocation, memory independent of the file's point count);
+    // each batch still yields `Result<Point>`, so the per-record checks below
+    // are unchanged.
+    // Small in unit tests so a round-trip exercises the batch boundary.
+    const BATCH: u64 = if cfg!(test) { 1000 } else { 1 << 20 };
+    let mut batch = PointDataBuilder::new().for_header(reader.header()).build();
+    loop {
+        let n = reader
+            .fill_points(BATCH, &mut batch)
             .map_err(|e| cv_core::Error::IoError(format!("Failed to read LAS point: {}", e)))?;
-
-        points.push(Point3::new(point.x as f32, point.y as f32, point.z as f32));
-
-        if has_intensity {
-            intensities_vec.push(point.intensity as f32 / 65535.0);
+        if n == 0 {
+            break;
         }
+        for point_result in batch.points() {
+            let point = point_result
+                .map_err(|e| cv_core::Error::IoError(format!("Failed to read LAS point: {}", e)))?;
 
-        if has_color {
-            // A record in a colour-carrying format that yields no colour is a
-            // malformed file. Substituting black would fabricate data, and
-            // skipping the push is what desynchronises the vectors, so the
-            // file is rejected instead.
-            let color = point.color.ok_or_else(|| {
-                cv_core::Error::ParseError(format!(
-                    "LAS record {} declares point format {} (which carries RGB) but \
-                     supplies no colour, so colors would desynchronize from points",
-                    points.len() - 1,
-                    format.to_u8().unwrap_or(0xff)
-                ))
-            })?;
-            colors_vec.push(Point3::new(
-                color.red as f32 / 65535.0,
-                color.green as f32 / 65535.0,
-                color.blue as f32 / 65535.0,
-            ));
-        }
+            points.push(Point3::new(point.x as f32, point.y as f32, point.z as f32));
 
-        if has_classification {
-            let class_u8: u8 = point.classification.into();
-            classifications_vec.push(class_u8);
-        }
+            if has_intensity {
+                intensities_vec.push(point.intensity as f32 / 65535.0);
+            }
 
-        if has_returns {
-            return_numbers_vec.push(point.return_number);
-            number_of_returns_vec.push(point.number_of_returns);
-        }
+            if has_color {
+                // A record in a colour-carrying format that yields no colour is a
+                // malformed file. Substituting black would fabricate data, and
+                // skipping the push is what desynchronises the vectors, so the
+                // file is rejected instead.
+                let color = point.color.ok_or_else(|| {
+                    cv_core::Error::ParseError(format!(
+                        "LAS record {} declares point format {} (which carries RGB) but \
+                         supplies no colour, so colors would desynchronize from points",
+                        points.len() - 1,
+                        format.to_u8().unwrap_or(0xff)
+                    ))
+                })?;
+                colors_vec.push(Point3::new(
+                    color.red as f32 / 65535.0,
+                    color.green as f32 / 65535.0,
+                    color.blue as f32 / 65535.0,
+                ));
+            }
 
-        if has_gps {
-            // Same reasoning as colour: a missing GPS time would skip a push
-            // and leave `gps_times` short.
-            let t = point.gps_time.ok_or_else(|| {
-                cv_core::Error::ParseError(format!(
-                    "LAS record {} declares point format {} (which carries GPS time) \
-                     but supplies none, so gps_times would desynchronize from points",
-                    points.len() - 1,
-                    format.to_u8().unwrap_or(0xff)
-                ))
-            })?;
-            gps_times_vec.push(t);
+            if has_classification {
+                let class_u8: u8 = point.classification.into();
+                classifications_vec.push(class_u8);
+            }
+
+            if has_returns {
+                return_numbers_vec.push(point.return_number);
+                number_of_returns_vec.push(point.number_of_returns);
+            }
+
+            if has_gps {
+                // Same reasoning as colour: a missing GPS time would skip a push
+                // and leave `gps_times` short.
+                let t = point.gps_time.ok_or_else(|| {
+                    cv_core::Error::ParseError(format!(
+                        "LAS record {} declares point format {} (which carries GPS time) \
+                         but supplies none, so gps_times would desynchronize from points",
+                        points.len() - 1,
+                        format.to_u8().unwrap_or(0xff)
+                    ))
+                })?;
+                gps_times_vec.push(t);
+            }
         }
     }
 
@@ -278,7 +294,7 @@ fn compute_bounds(points: &[Point3<f32>]) -> (f64, f64, f64, f64, f64, f64) {
 
 /// Write a LAS file (uncompressed).
 pub fn write_las<P: AsRef<Path>>(path: P, data: &LasData) -> cv_core::Result<()> {
-    use las::{Builder, Point, Write, Writer};
+    use las::{Builder, Point, Writer};
 
     let mut builder = Builder::from((1, 4)); // LAS 1.4
     // Pick a point format that actually carries the fields we write. Formats 0
@@ -350,7 +366,7 @@ pub fn write_las<P: AsRef<Path>>(path: P, data: &LasData) -> cv_core::Result<()>
         }
 
         writer
-            .write(point)
+            .write_point(point)
             .map_err(|e| cv_core::Error::IoError(format!("Failed to write LAS point: {}", e)))?;
     }
 
@@ -450,7 +466,7 @@ pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
         opt.as_ref().map(|v| {
             mask.iter()
                 .enumerate()
-                .filter(|(_, &m)| m)
+                .filter(|&(_, &m)| m)
                 .map(|(i, _)| v[i].clone())
                 .collect()
         })
@@ -460,7 +476,7 @@ pub fn filter_by_mask(data: &LasData, mask: &[bool]) -> LasData {
         .points
         .iter()
         .zip(mask.iter())
-        .filter(|(_, &m)| m)
+        .filter(|&(_, &m)| m)
         .map(|(p, _)| *p)
         .collect();
 
@@ -509,6 +525,41 @@ fn empty_las_like() -> LasData {
 #[cfg(all(test, feature = "las"))]
 mod tests {
     use super::*;
+
+    /// A file longer than one read batch (1000 points under `cfg(test)`)
+    /// comes back complete and in order, with every field still index-parallel.
+    #[test]
+    fn read_las_spans_several_batches() {
+        let n = 2500;
+        let points: Vec<Point3<f32>> = (0..n)
+            .map(|i| Point3::new(i as f32 * 0.5, (i % 7) as f32, (i % 13) as f32 * 0.25))
+            .collect();
+        let gps: Vec<f64> = (0..n).map(|i| 1000.0 + i as f64).collect();
+        let data = LasData {
+            points: points.clone(),
+            colors: None,
+            intensities: None,
+            classifications: None,
+            return_numbers: None,
+            number_of_returns: None,
+            gps_times: Some(gps.clone()),
+            bounds: (0.0, (n - 1) as f64 * 0.5, 0.0, 6.0, 0.0, 3.0),
+            num_points: n,
+        };
+        let path =
+            std::env::temp_dir().join(format!("retina_las_batches_{}.las", std::process::id()));
+        write_las(&path, &data).expect("write_las failed");
+        let read = read_las(&path).expect("read_las failed");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(read.points.len(), n);
+        for (a, b) in read.points.iter().zip(&points) {
+            assert!((a - b).norm() < 1e-3, "{a:?} vs {b:?}");
+        }
+        let read_gps = read.gps_times.expect("gps_times missing");
+        assert_eq!(read_gps.len(), n);
+        assert!(read_gps.iter().zip(&gps).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
 
     #[test]
     fn test_write_las_round_trips_gps_time() {
