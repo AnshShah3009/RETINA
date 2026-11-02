@@ -138,5 +138,75 @@ fn bench_misc(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_conv2d, bench_misc);
+/// `(label, h, w, levels)`
+const PYRAMID_SHAPES: [(&str, usize, usize, usize); 3] = [
+    ("1080p_l5", 1080, 1920, 5),
+    ("480p_l4", 480, 640, 4),
+    ("240p_l4", 240, 320, 4),
+];
+
+/// A Gaussian pyramid with per-level gradients (`3 * levels - 2` launches),
+/// three ways, back to back: chaining the allocating free functions, a
+/// [`adv::GaussianPyramidPlan`] launching eagerly into its fixed buffers, and
+/// the same plan replaying a captured graph. Every variant computes the same
+/// bits; the input is uploaded once, outside the loop.
+fn bench_pyramid(c: &mut Criterion) {
+    let client = cubecl::Device::Wgpu(WgpuDevice::default()).client();
+    let adv_ctx = adv::AdvancedContext::new(client.clone());
+
+    let mut group = c.benchmark_group("cubecl_pyramid");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    for (label, h, w, levels) in PYRAMID_SHAPES {
+        let img = data(h * w, 7);
+        let input = up(&client, &img, vec![h, w]);
+        let free_functions = || {
+            let mut level = input.clone();
+            let mut out = Vec::with_capacity(3 * levels);
+            for l in 0..levels {
+                if l > 0 {
+                    let blurred = adv::gaussian_blur(&adv_ctx, &level).unwrap();
+                    level = adv::avg_pool2d(&adv_ctx, &blurred, 1, 2).unwrap();
+                }
+                let (gx, gy) = adv::compute_gradients(&adv_ctx, &level).unwrap();
+                out.extend([level.clone(), gx, gy]);
+            }
+            out
+        };
+        let eager = adv::GaussianPyramidPlan::new(&adv_ctx, h, w, levels).unwrap();
+        eager.upload(&img).unwrap();
+        let mut replay = adv::GaussianPyramidPlan::new(&adv_ctx, h, w, levels).unwrap();
+        replay.upload(&img).unwrap();
+        replay.capture().expect("graph capture");
+
+        let _ = free_functions();
+        eager.execute().unwrap();
+        replay.execute().unwrap();
+        sync(&client);
+
+        group.bench_with_input(BenchmarkId::new("free_functions", label), &(), |b, _| {
+            b.iter(|| {
+                let out = free_functions();
+                sync(&client);
+                black_box(out)
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("plan_eager", label), &(), |b, _| {
+            b.iter(|| {
+                eager.execute().unwrap();
+                sync(eager.client());
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("plan_replay", label), &(), |b, _| {
+            b.iter(|| {
+                replay.execute().unwrap();
+                sync(replay.client());
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_conv2d, bench_misc, bench_pyramid);
 criterion_main!(benches);

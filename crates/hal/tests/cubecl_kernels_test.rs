@@ -1739,6 +1739,111 @@ fn host_launch_config_matches_the_actual_launch_shape() {
     }
 }
 
+// ===========================================================================
+// 12b. Gaussian pyramid plan: fixed buffers, eager and graph-replayed
+// ===========================================================================
+
+/// The pyramid the plan documents, built from the free functions: level
+/// `l + 1` is `avg_pool2d(gaussian_blur(level l), 1, 2)`, plus gradients of
+/// every level. Returns `(levels, grad_x, grad_y)` downloaded.
+type Pyramid = (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<Vec<f32>>);
+fn pyramid_by_free_functions(c: &Client, img: &[f32], h: usize, w: usize, n: usize) -> Pyramid {
+    let ctx = ctx_adv(c);
+    let mut level = up(c, img, vec![h, w]);
+    let (mut levels, mut gxs, mut gys) = (vec![], vec![], vec![]);
+    for l in 0..n {
+        if l > 0 {
+            let blurred = adv::gaussian_blur(&ctx, &level).unwrap();
+            level = adv::avg_pool2d(&ctx, &blurred, 1, 2).unwrap();
+        }
+        let (gx, gy) = adv::compute_gradients(&ctx, &level).unwrap();
+        levels.push(down(c, &level));
+        gxs.push(down(c, &gx));
+        gys.push(down(c, &gy));
+    }
+    (levels, gxs, gys)
+}
+
+fn pyramid_from_plan(plan: &adv::GaussianPyramidPlan) -> Pyramid {
+    let c = plan.client();
+    let (mut levels, mut gxs, mut gys) = (vec![], vec![], vec![]);
+    for l in 0..plan.num_levels() {
+        let (gx, gy) = plan.gradients(l);
+        levels.push(down(c, plan.level(l)));
+        gxs.push(down(c, gx));
+        gys.push(down(c, gy));
+    }
+    (levels, gxs, gys)
+}
+
+#[track_caller]
+fn assert_pyramids_bit_identical(label: &str, got: &Pyramid, want: &Pyramid) {
+    let bits = |v: &Vec<Vec<f32>>| -> Vec<Vec<u32>> {
+        v.iter()
+            .map(|l| l.iter().map(|x| x.to_bits()).collect())
+            .collect()
+    };
+    assert_eq!(bits(&got.0), bits(&want.0), "{label}: levels differ");
+    assert_eq!(bits(&got.1), bits(&want.1), "{label}: grad_x differs");
+    assert_eq!(bits(&got.2), bits(&want.2), "{label}: grad_y differs");
+}
+
+#[test]
+fn pyramid_plan_eager_and_replayed_are_bit_identical_to_the_free_functions() {
+    let c = client();
+    let ctx = ctx_adv(&c);
+    // Odd extents exercise the ceil(n / 2) level sizes: 77x123 -> 39x62 ->
+    // 20x31 -> 10x16.
+    let (h, w, n) = (77usize, 123usize, 4usize);
+    let img_a = data(h * w, 451);
+    let img_b = data(h * w, 452);
+    let want_a = pyramid_by_free_functions(&c, &img_a, h, w, n);
+    let want_b = pyramid_by_free_functions(&c, &img_b, h, w, n);
+
+    let mut plan = adv::GaussianPyramidPlan::new(&ctx, h, w, n).unwrap();
+    assert_eq!(plan.num_levels(), n);
+    assert_eq!(plan.level(3).shape()[..], [10, 16]);
+
+    // Decimation is what the docs say: level 1 is every second pixel of the
+    // blurred input.
+    let blurred = down(
+        &c,
+        &adv::gaussian_blur(&ctx, &up(&c, &img_a, vec![h, w])).unwrap(),
+    );
+    let decimated: Vec<f32> = (0..39)
+        .flat_map(|y| (0..62).map(move |x| (y, x)))
+        .map(|(y, x)| blurred[2 * y * w + 2 * x])
+        .collect();
+    assert_close("decimated level 1", &want_a.0[1], &decimated, 0.0);
+
+    plan.upload(&img_a).unwrap();
+    plan.execute().unwrap();
+    assert_pyramids_bit_identical("eager", &pyramid_from_plan(&plan), &want_a);
+
+    // Capture runs the pipeline once eagerly on the current input.
+    plan.upload(&img_b).unwrap();
+    plan.capture().unwrap();
+    assert!(plan.is_captured());
+    assert_pyramids_bit_identical("capture warm-up", &pyramid_from_plan(&plan), &want_b);
+
+    // Replays pick up inputs written between them, in place.
+    for (label, img, want) in [("replay a", &img_a, &want_a), ("replay b", &img_b, &want_b)] {
+        plan.upload(img).unwrap();
+        plan.execute().unwrap();
+        assert_pyramids_bit_identical(label, &pyramid_from_plan(&plan), want);
+    }
+}
+
+#[test]
+fn pyramid_plan_rejects_malformed_geometry() {
+    let c = client();
+    let ctx = ctx_adv(&c);
+    assert!(adv::GaussianPyramidPlan::new(&ctx, 0, 8, 2).is_err());
+    assert!(adv::GaussianPyramidPlan::new(&ctx, 8, 8, 0).is_err());
+    let plan = adv::GaussianPyramidPlan::new(&ctx, 8, 8, 2).unwrap();
+    assert!(plan.upload(&[0.0; 63]).is_err());
+}
+
 #[test]
 fn upload_download_roundtrip_is_bit_exact() {
     let c = client();
