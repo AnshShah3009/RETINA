@@ -1,8 +1,9 @@
 //! Local bundle adjustment over the newest keyframes.
 //!
-//! Not `cv_sfm::bundle_adjust`: that optimises every camera it is given, with
-//! no way to hold one fixed, so the gauge (and for a monocular map, the scale)
-//! is free and a sliding window drifts with it. Here the newest keyframes and
+//! Not `cv_sfm::bundle_adjust`: that holds only the first camera fixed (its
+//! rigid gauge), leaves the scale free, and optimises every other camera it is
+//! given, so it cannot hold a whole set of out-of-window keyframes fixed as a
+//! sliding window needs. Here the newest keyframes and
 //! the points they observe are optimised, and every other keyframe that sees
 //! those points constrains them with its pose held fixed - the usual local BA.
 //!
