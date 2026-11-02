@@ -18,10 +18,18 @@ struct Params {
 @group(0) @binding(3) var<uniform> params: Params;
 
 // `base` is the first element of the source plane being sampled.
-fn get_pixel_bilinear(base: u32, x: f32, y: f32) -> f32 {
-    if (x < 0.0 || x > f32(params.src_w - 1u) || y < 0.0 || y > f32(params.src_h - 1u)) {
+fn get_pixel_bilinear(base: u32, x_in: f32, y_in: f32) -> f32 {
+    // Within 1/64 px of the edge counts as on it, then clamps: same rule as
+    // the CPU backend, so an ulp of fused-multiply-add difference at an exact
+    // edge coordinate cannot turn a sampled pixel into 0.
+    let eps = 1.0 / 64.0;
+    let xmax = f32(params.src_w - 1u);
+    let ymax = f32(params.src_h - 1u);
+    if (x_in < -eps || x_in > xmax + eps || y_in < -eps || y_in > ymax + eps) {
         return 0.0;
     }
+    let x = clamp(x_in, 0.0, xmax);
+    let y = clamp(y_in, 0.0, ymax);
 
     let x0 = u32(floor(x));
     let y0 = u32(floor(y));

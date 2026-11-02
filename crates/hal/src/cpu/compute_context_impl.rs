@@ -1775,11 +1775,29 @@ impl ComputeContext for CpuBackend {
                     // `x1`/`y1` are then clamped rather than trusted: with `sx`
                     // reaching `w - 1` the naive `x0 + 1` would index one past the
                     // end of the row.
-                    if sx >= T::ZERO
-                        && sx <= T::from_f32((w - 1) as f32)
-                        && sy >= T::ZERO
-                        && sy <= T::from_f32((h - 1) as f32)
-                    {
+                    // A coordinate within 1/64 px of the edge counts as on it (half
+                    // of OpenCV's 1/32 px coordinate quantum) and is clamped. An
+                    // exact `[0, w - 1]` test made the result depend on the last
+                    // ulp: `-0.05 * 10 + 0.5` is 0.0 rounded step by step here but
+                    // -7.45e-9 with a fused multiply-add, which Metal uses, so the
+                    // GPU returned 0 where the CPU sampled the edge pixel.
+                    let eps = T::from_f32(1.0 / 64.0);
+                    let (xmax, ymax) = (T::from_f32((w - 1) as f32), T::from_f32((h - 1) as f32));
+                    if sx >= -eps && sx <= xmax + eps && sy >= -eps && sy <= ymax + eps {
+                        let sx = if sx < T::ZERO {
+                            T::ZERO
+                        } else if sx > xmax {
+                            xmax
+                        } else {
+                            sx
+                        };
+                        let sy = if sy < T::ZERO {
+                            T::ZERO
+                        } else if sy > ymax {
+                            ymax
+                        } else {
+                            sy
+                        };
                         // Bilinear interpolation
                         let x0 = sx.to_f32() as usize;
                         let y0 = sy.to_f32() as usize;
