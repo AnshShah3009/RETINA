@@ -3,6 +3,10 @@
 //! functions below are the previous implementations, transcribed; the tree
 //! versions must select the same neighbours (bit-identical distances), so the
 //! inlier sets are equal and the normals agree to summation-order rounding.
+//!
+//! `brute_statistical` follows Open3D's neighbourhood rule (the point itself
+//! is one of its `nb` nearest), which the filter adopted after this file was
+//! written; see `statistical_outlier_open3d.rs`.
 
 use cv_3d::filters::{estimate_normals_knn, statistical_outlier_removal};
 use nalgebra::{Matrix3, Point3, Vector3};
@@ -14,30 +18,28 @@ fn dist_sq(a: &Point3<f64>, b: &Point3<f64>) -> f64 {
 }
 
 fn brute_statistical(points: &[Point3<f64>], nb: usize, std_ratio: f64) -> Vec<usize> {
-    if points.len() <= nb {
+    // Open3D's rule (see `statistical_outlier_removal`): the `nb` nearest
+    // points *including the point itself*, averaged over all of them; the
+    // sample standard deviation; a strict threshold. Points whose mean is 0
+    // (every neighbour coincides with them) are kept.
+    if points.len() < 2 {
         return (0..points.len()).collect();
     }
-    let k = nb.max(1).min(points.len() - 1);
+    let k = nb.max(1).min(points.len());
     let mean_dists: Vec<f64> = points
         .par_iter()
-        .enumerate()
-        .map(|(i, p)| {
-            let mut d: Vec<f64> = points
-                .iter()
-                .enumerate()
-                .filter(|&(j, _)| j != i)
-                .map(|(_, q)| dist_sq(p, q))
-                .collect();
+        .map(|p| {
+            let mut d: Vec<f64> = points.iter().map(|q| dist_sq(p, q)).collect();
             d.select_nth_unstable_by(k - 1, |a, b| a.partial_cmp(b).unwrap());
             d[..k].iter().map(|v| v.sqrt()).sum::<f64>() / k as f64
         })
         .collect();
     let n = mean_dists.len() as f64;
     let mean = mean_dists.iter().sum::<f64>() / n;
-    let std = (mean_dists.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / n).sqrt();
+    let std = (mean_dists.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
     let thr = mean + std_ratio * std;
     (0..points.len())
-        .filter(|&i| mean_dists[i] <= thr)
+        .filter(|&i| mean_dists[i] < thr || mean_dists[i] == 0.0)
         .collect()
 }
 
@@ -116,7 +118,8 @@ fn kdtree_statistical_filter_keeps_the_same_inliers() {
             assert_eq!(kept.len(), idx.len());
         }
     }
-    // Coincident points: self must be excluded even when it ties at 0.
+    // Coincident points: a duplicate of the query may be returned in its
+    // place; both are at distance 0, so the mean must not change.
     let mut pts = cloud(200, 5, 9);
     for i in 0..30 {
         pts.push(pts[i]);
