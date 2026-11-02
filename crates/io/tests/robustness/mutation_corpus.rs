@@ -38,10 +38,6 @@ impl Case {
             other => panic!("unknown parser {other}"),
         }
     }
-
-    fn run(&self) -> Outcome<Vec<nalgebra::Point3<f32>>> {
-        parse(self.runner(), &self.bytes)
-    }
 }
 
 /// Collected mutation failures, printed at the end so one run reports

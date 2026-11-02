@@ -278,7 +278,8 @@ fn bench_tsdf(c: &mut Criterion) {
                     black_box(&extrinsics),
                     w,
                     h,
-                );
+                )
+                .expect("TSDF integrate");
                 black_box(&vol);
             });
         });

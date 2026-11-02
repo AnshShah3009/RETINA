@@ -40,6 +40,7 @@ mod gradients;
 pub mod akaze;
 /// ArUco marker detection, generation, and pose estimation (tensor-based API)
 pub mod aruco;
+/// OpenCV's predefined ArUco dictionaries as packed bytes
 pub mod aruco_tables;
 /// Optimal assignment / bipartite matching (Hungarian algorithm)
 pub mod assignment;
@@ -101,6 +102,11 @@ pub use ransac::*;
 pub use retrieval::*;
 pub use sift::*;
 pub use usac::*;
+
+// `charuco` and `markers` both define a `CharucoBoard`. The crate-root name is
+// the tensor-API board that `CharucoDetector::new` takes; the image-API board
+// from `create_charuco_board` stays reachable as `markers::CharucoBoard`.
+pub use charuco::CharucoBoard;
 
 pub use cv_core::{Error, KeyPoint, KeyPoints, Result};
 

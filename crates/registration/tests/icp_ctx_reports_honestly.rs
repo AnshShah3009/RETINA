@@ -39,25 +39,6 @@ fn device() -> Option<(GpuContext, ComputeDevice<'static>)> {
     Some((leaked.clone(), ComputeDevice::Gpu(leaked)))
 }
 
-fn ctx(
-    source: &PointCloud,
-    target: &PointCloud,
-    max_dist: f32,
-    iters: usize,
-) -> Option<nalgebra::Matrix4<f32>> {
-    let (_, dev) = device()?;
-    cv_registration::registration_icp_point_to_plane_ctx(
-        source,
-        target,
-        max_dist,
-        &Matrix4::identity(),
-        iters,
-        &dev,
-    )
-    .ok()
-    .map(|r| r.transformation)
-}
-
 /// A non-planar target with outward face normals, so point-to-plane residuals
 /// actually constrain all three translation axes. A single uniform normal (all
 /// +z) cannot observe motion along the perpendicular axes at all, which would

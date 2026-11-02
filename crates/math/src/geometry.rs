@@ -1,7 +1,7 @@
 use cv_core::Rect;
 use geo::algorithm::convex_hull::ConvexHull;
 use geo::algorithm::simplify::Simplify;
-use geo::{Area, BooleanOps, EuclideanDistance, MultiPolygon, Polygon};
+use geo::{Area, BooleanOps, Distance, Euclidean, MultiPolygon, Polygon};
 use ndarray::Array2;
 use rayon::prelude::*;
 use rstar::{AABB, PointDistance, RTree, RTreeObject};
@@ -31,8 +31,8 @@ impl RTreeObject for IndexedPolygon {
 impl PointDistance for IndexedPolygon {
     fn distance_2(&self, point: &[f64; 2]) -> f64 {
         let p = geo::Point::new(point[0], point[1]);
-        // euclidean_distance returns the distance. We need squared distance.
-        let d = self.polygon.euclidean_distance(&p);
+        // rstar wants the squared distance.
+        let d = Euclidean.distance(&self.polygon, &p);
         d * d
     }
 }

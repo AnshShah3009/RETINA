@@ -102,10 +102,15 @@ impl Default for UsacParams {
 /// Result of model estimation with quality metrics
 #[derive(Debug, Clone)]
 pub struct UsacResult<M> {
+    /// Best model found.
     pub model: M,
+    /// Number of inliers of `model`.
     pub inliers: usize,
+    /// Score the caller's scorer gave `model` (higher is better).
     pub score: f64,
+    /// Per-correspondence inlier flags for `model`.
     pub mask: Vec<bool>,
+    /// Hypotheses evaluated before stopping.
     pub iterations: usize,
 }
 

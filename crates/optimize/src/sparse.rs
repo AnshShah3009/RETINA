@@ -544,12 +544,6 @@ mod tests {
         }
     }
 
-    /// An iteration cap is not convergence. Measured on the old code: a 200x200
-    /// Laplacian with `max_iters = 10, tolerance = 1e-10` returned `Ok` with
-    /// `||Ax - b|| = 1.28e2` — twelve orders of magnitude above the tolerance it
-    /// was asked for, and the LM step that consumes it gets a silently wrong
-    /// direction.
-    #[test]
     /// The iterate reached must be available to a caller that can use it.
     ///
     /// `solve` rejecting a non-converged result is correct for a caller that needs
@@ -627,6 +621,11 @@ mod tests {
         );
     }
 
+    /// An iteration cap is not convergence. Measured on the old code: a 200x200
+    /// Laplacian with `max_iters = 10, tolerance = 1e-10` returned `Ok` with
+    /// `||Ax - b|| = 1.28e2` — twelve orders of magnitude above the tolerance it
+    /// was asked for, and the LM step that consumes it gets a silently wrong
+    /// direction.
     #[test]
     fn cg_iteration_cap_is_not_reported_as_a_solution() {
         let a = laplacian(200);

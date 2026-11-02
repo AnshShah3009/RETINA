@@ -20,12 +20,14 @@ pub enum ArucoDictionary {
 }
 
 impl ArucoDictionary {
+    /// Bits per marker side.
     pub fn marker_size(&self) -> usize {
         match self {
             ArucoDictionary::Dict4x4_50 => 4,
         }
     }
 
+    /// Number of distinct markers in the dictionary.
     pub fn dict_size(&self) -> usize {
         match self {
             ArucoDictionary::Dict4x4_50 => 50,

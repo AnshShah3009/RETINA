@@ -801,24 +801,6 @@ mod point_to_plane_no_normals {
         }
     }
 
-    /// A non-coplanar point set, so a 6-DOF transform is actually constrained.
-    ///
-    /// A flat square is degenerate: the normal equations are rank-deficient and
-    /// even a correct implementation cannot resolve motion in every axis. The
-    /// guard under test is about a *missing normal*, not about degeneracy, so the
-    /// control case has to be one that genuinely registers.
-    fn cube_points() -> Vec<[f32; 3]> {
-        let mut v = Vec::new();
-        for &x in &[0.0f32, 0.5, 1.0] {
-            for &y in &[0.0f32, 0.5, 1.0] {
-                for &z in &[0.0f32, 0.5, 1.0] {
-                    v.push([x, y, z]);
-                }
-            }
-        }
-        v
-    }
-
     /// A non-planar target with outward face normals, so point-to-plane
     /// residuals actually constrain translation in all three axes.
     ///

@@ -82,33 +82,33 @@ pub fn gaussian_kernel(sigma: f32, size: usize) -> Kernel {
         }
     }
 
-    /// Normalise, then force the f32 sum to be exactly 1.
+    // Normalise, then force the f32 sum to be exactly 1.
     //
-    /// Dividing by `sum` alone is not enough: the f32 *taps* are accurate to ~6e-9
-    /// (measured, summed in f64), but summing 169 of them in f32 accumulates
-    /// rounding and lands off 1. Measured for a 13-tap sigma-2.0 kernel:
+    // Dividing by `sum` alone is not enough: the f32 *taps* are accurate to ~6e-9
+    // (measured, summed in f64), but summing 169 of them in f32 accumulates
+    // rounding and lands off 1. Measured for a 13-tap sigma-2.0 kernel:
     //
-    /// f64 sum of the f32 taps : 0.999999994139216142   (5.9e-9 - the taps)
-    /// f32 sum of the f32 taps : 1.000000357627868650   (3.6e-7 - the summation)
+    // f64 sum of the f32 taps : 0.999999994139216142   (5.9e-9 - the taps)
+    // f32 sum of the f32 taps : 1.000000357627868650   (3.6e-7 - the summation)
     //
-    /// The consequence is not academic. A **normalised blur of a constant image must
-    /// return that constant**, and at sigma 2.0 this returned `127` where OpenCV
-    /// returns `128` - for **100% of pixels**, because `128 * 0.99999964` truncates to
-    /// `127`. Any detector thresholding a blurred image sees a uniform brightness
-    /// shift. Verified against `cv2.filter2D` on a constant 128 image:
+    // The consequence is not academic. A **normalised blur of a constant image must
+    // return that constant**, and at sigma 2.0 this returned `127` where OpenCV
+    // returns `128` - for **100% of pixels**, because `128 * 0.99999964` truncates to
+    // `127`. Any detector thresholding a blurred image sees a uniform brightness
+    // shift. Verified against `cv2.filter2D` on a constant 128 image:
     //
-    /// cv2  reflect101 / replicate : 128   (kernel sums to exactly 1)
-    /// rust                       : 127   (kernel sums to 0.99999964)
+    // cv2  reflect101 / replicate : 128   (kernel sums to exactly 1)
+    // rust                       : 127   (kernel sums to 0.99999964)
     //
-    /// Correcting the **last** tap costs one subtraction and lands on the smallest
-    /// tap in the kernel, so the filter shape is perturbed negligibly: at sigma 2.0
-    /// / size 13 that is the 4.5e-6 corner, against a peak near 1. Accumulating the
-    /// normalisation in f64 first is *also* not sufficient - measured, the error is
-    /// the same 3.6e-7, because it is the summation of the narrowed taps, not the
-    /// accumulation of the weights, that carries it.
+    // Correcting the **last** tap costs one subtraction and lands on the smallest
+    // tap in the kernel, so the filter shape is perturbed negligibly: at sigma 2.0
+    // / size 13 that is the 4.5e-6 corner, against a peak near 1. Accumulating the
+    // normalisation in f64 first is *also* not sufficient - measured, the error is
+    // the same 3.6e-7, because it is the summation of the narrowed taps, not the
+    // accumulation of the weights, that carries it.
     //
-    /// After this the sum is exactly 1.0 for every sigma and size measured
-    /// (0.75/1.5/2.0/3.0 at size 5, and size 13).
+    // After this the sum is exactly 1.0 for every sigma and size measured
+    // (0.75/1.5/2.0/3.0 at size 5, and size 13).
     let inv = 1.0f32 / sum;
     for v in &mut data {
         *v *= inv;

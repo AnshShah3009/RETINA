@@ -53,14 +53,9 @@ fn check(name: &str, img: &GrayImage, clip: f32, tiles: (u32, u32), expected: &[
 
 #[test]
 fn constant_image_matches_opencv() {
-    let img = GrayImage::from_pixel(64, 64, image::Luma([100]));
-    let out = clahe(&img, 40.0, (8, 8));
     // cv2.createCLAHE(40, (8, 8)).apply(full((64, 64), 100)) == 143 everywhere.
-    assert!(
-        out.pixels().all(|p| p[0] == 143),
-        "got {}",
-        out.get_pixel(0, 0)[0]
-    );
+    let img = GrayImage::from_pixel(64, 64, image::Luma([100]));
+    check("constant_100", &img, 40.0, (8, 8), CONSTANT_100_64X64);
 }
 
 #[test]

@@ -1,7 +1,6 @@
 use cv_core::{CameraIntrinsics, Pose};
 use cv_runtime::orchestrator::{ResourceGroup, scheduler};
-use nalgebra::{DMatrix, DVector, Point2, Point3, Rotation3, UnitQuaternion, Vector3};
-use rayon::prelude::*;
+use nalgebra::{DMatrix, DVector, Point2, Point3, UnitQuaternion, Vector3};
 
 use cv_optimize::sparse::{CgSolver, LinearSolver, SparseMatrix, Triplet};
 
@@ -408,6 +407,9 @@ impl SfMState {
         SparseMatrix::from_triplets(n_res, n_params, &triplets)
     }
 
+    /// Projection of one landmark by one camera under `params`; only the
+    /// finite-difference reference Jacobian uses it.
+    #[cfg(test)]
     fn compute_residuals_for_param_local(
         &self,
         params: &DVector<f64>,
@@ -419,7 +421,7 @@ impl SfMState {
             params[6 * cam_idx + 1],
             params[6 * cam_idx + 2],
         );
-        let rot = Rotation3::new(axis_angle).into_inner();
+        let rot = nalgebra::Rotation3::new(axis_angle).into_inner();
         let trans = Vector3::new(
             params[6 * cam_idx + 3],
             params[6 * cam_idx + 4],
@@ -437,20 +439,6 @@ impl SfMState {
         let pt_cam = rot * lm_pos + trans;
         let proj = self.intrinsics.project(&pt_cam);
         (proj, proj) // Dummy second for signature parity
-    }
-
-    fn compute_residuals_for_param(
-        &self,
-        params_plus: &DVector<f64>,
-        params_minus: &DVector<f64>,
-    ) -> (DVector<f64>, DVector<f64>) {
-        let mut state_plus = self.clone();
-        let mut state_minus = self.clone();
-
-        state_plus.from_parameters(params_plus);
-        state_minus.from_parameters(params_minus);
-
-        (state_plus.residuals(), state_minus.residuals())
     }
 
     fn compute_point_reprojection_error_index(&self, lm: &Landmark) -> f64 {
@@ -1233,7 +1221,7 @@ mod tests {
     /// (including the tests) still reasons about the dense one.
     #[test]
     fn test_sparse_normal_equations_match_dense() {
-        use nalgebra::UnitQuaternion;
+        use nalgebra::{Rotation3, UnitQuaternion};
 
         let intrinsics = create_test_intrinsics();
         let mut state = SfMState::new(intrinsics);
