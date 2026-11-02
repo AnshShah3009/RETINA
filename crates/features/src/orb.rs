@@ -358,35 +358,61 @@ impl Orb {
     /// Uses a circular mask (`dx*dx + dy*dy <= r*r`) to match the GPU shader.
     pub fn compute_orientations(&self, image: &GrayImage, keypoints: &mut KeyPoints) {
         let half_patch = self.patch_size / 2;
-        let r_sq = (half_patch * half_patch) as i64;
+        let r_sq = (half_patch as i64) * (half_patch as i64);
+
+        // Half-width of the circular mask on each patch row: the largest `dx`
+        // with `dx*dx + dy*dy <= r*r`, or -1 when the row is empty. Each row
+        // of the mask is the contiguous run `-u..=u`, so a keypoint's moments
+        // are sums over row slices instead of a bounds-checked pixel lookup
+        // per tap of the full square.
+        let half_widths: Vec<i64> = (-half_patch..=half_patch)
+            .map(|dy| {
+                let dy = dy as i64;
+                (0..=half_patch as i64)
+                    .rev()
+                    .find(|&dx| dx * dx + dy * dy <= r_sq)
+                    .unwrap_or(-1)
+            })
+            .collect();
+
+        let (width, height) = (image.width() as i64, image.height() as i64);
+        let raw = image.as_raw();
 
         keypoints.keypoints.par_iter_mut().for_each(|kp| {
-            let x = kp.x as i32;
-            let y = kp.y as i32;
+            let x = kp.x as i32 as i64;
+            let y = kp.y as i32 as i64;
 
-            let mut m01 = 0.0f64;
-            let mut m10 = 0.0f64;
+            // The moments are integer sums. The f64 accumulation this
+            // replaces added integer-valued products whose partial sums stay
+            // far below 2^53, so every one of its additions was exact and it
+            // produced exactly these integers (and +0.0, never -0.0, for an
+            // empty sum); `atan2` therefore sees the same two values.
+            let mut m01 = 0i64;
+            let mut m10 = 0i64;
 
-            for dy in -half_patch..=half_patch {
-                for dx in -half_patch..=half_patch {
-                    // Circular mask -- matches the GPU orientation kernel
-                    if (dx as i64 * dx as i64 + dy as i64 * dy as i64) > r_sq {
-                        continue;
-                    }
-
-                    let px = x + dx;
-                    let py = y + dy;
-
-                    if px >= 0 && px < image.width() as i32 && py >= 0 && py < image.height() as i32
-                    {
-                        let intensity = image.get_pixel(px as u32, py as u32)[0] as f64;
-                        m10 += intensity * dx as f64;
-                        m01 += intensity * dy as f64;
-                    }
+            for (dy, &u) in (-half_patch as i64..=half_patch as i64).zip(&half_widths) {
+                let py = y + dy;
+                if u < 0 || py < 0 || py >= height {
+                    continue;
                 }
+                // Intersect the mask row `x - u ..= x + u` with the image.
+                let lo = (x - u).max(0);
+                let hi = (x + u).min(width - 1);
+                if lo > hi {
+                    continue;
+                }
+                let row = &raw[(py * width) as usize..][lo as usize..=hi as usize];
+                let mut sum = 0i64;
+                let mut weighted = 0i64;
+                for (px, &v) in (lo..).zip(row) {
+                    sum += v as i64;
+                    weighted += v as i64 * (px - x);
+                }
+                m10 += weighted;
+                m01 += sum * dy;
             }
 
-            let angle = m01.atan2(m10);
+            let angle = (m01 as f64).atan2(m10 as f64);
             kp.angle = angle.to_degrees();
         });
     }
@@ -1847,6 +1873,83 @@ mod tests {
                             assert!(expect.len() > 300, "scene must give many keypoints");
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// `compute_orientations` as it was: a bounds-checked `get_pixel` per tap
+    /// of the square patch, the circular mask tested per tap, moments in f64.
+    fn reference_orientation(image: &GrayImage, kp: &KeyPoint, patch_size: i32) -> f64 {
+        let half_patch = patch_size / 2;
+        let r_sq = (half_patch * half_patch) as i64;
+        let x = kp.x as i32;
+        let y = kp.y as i32;
+        let mut m01 = 0.0f64;
+        let mut m10 = 0.0f64;
+        for dy in -half_patch..=half_patch {
+            for dx in -half_patch..=half_patch {
+                if (dx as i64 * dx as i64 + dy as i64 * dy as i64) > r_sq {
+                    continue;
+                }
+                let px = x + dx;
+                let py = y + dy;
+                if px >= 0 && px < image.width() as i32 && py >= 0 && py < image.height() as i32 {
+                    let intensity = image.get_pixel(px as u32, py as u32)[0] as f64;
+                    m10 += intensity * dx as f64;
+                    m01 += intensity * dy as f64;
+                }
+            }
+        }
+        m01.atan2(m10).to_degrees()
+    }
+
+    #[test]
+    fn orientations_match_the_per_pixel_f64_reference() {
+        let img = shapes_scene(97, 71, 0x0dd_ba11);
+        let saturated = GrayImage::from_fn(40, 33, |x, y| {
+            Luma([if (x + y) % 3 == 0 { 255 } else { 0 }])
+        });
+        let flat = GrayImage::from_pixel(25, 25, Luma([200]));
+        let mut kps = Vec::new();
+        // Every integer position, including the border rows and columns where
+        // the patch is clipped, positions just outside the frame, fractional
+        // positions, and ones far outside (empty patch, angle 0).
+        for y in -20..95 {
+            for x in -20..120 {
+                kps.push(KeyPoint::new(x as f64, y as f64));
+            }
+        }
+        for &(x, y) in &[
+            (10.7, 3.2),
+            (-0.5, 5.9),
+            (96.99, 70.01),
+            (1e6, 4.0),
+            (-1e6, -1e6),
+        ] {
+            kps.push(KeyPoint::new(x, y));
+        }
+        for image in [&img, &saturated, &flat] {
+            for patch_size in [31, 15, 8, 3, 1, 0] {
+                let orb = Orb {
+                    patch_size,
+                    ..orb_with(1.2, 8, 500)
+                };
+                let mut got = KeyPoints {
+                    keypoints: kps.clone(),
+                };
+                orb.compute_orientations(image, &mut got);
+                for (kp, g) in kps.iter().zip(&got.keypoints) {
+                    let expect = reference_orientation(image, kp, patch_size);
+                    assert_eq!(
+                        g.angle.to_bits(),
+                        expect.to_bits(),
+                        "patch {patch_size} at ({}, {}): {} vs {}",
+                        kp.x,
+                        kp.y,
+                        g.angle,
+                        expect
+                    );
                 }
             }
         }
