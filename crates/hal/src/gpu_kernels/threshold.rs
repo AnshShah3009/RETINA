@@ -64,6 +64,12 @@ enum F16Path {
     Packed,
 }
 
+/// Threshold an f32, f16 or bf16 tensor.
+///
+/// f32 runs `threshold_f32.wgsl`, which compares bit patterns rather than
+/// floats, so the result is bit-identical to the CPU backend's for every
+/// input: subnormals (which the device flushes in float comparisons), signed
+/// zero, infinities and NaN. f16 and bf16 are described at their shaders.
 pub fn threshold<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     ctx: &GpuContext,
     input: &GpuTensor<T>,

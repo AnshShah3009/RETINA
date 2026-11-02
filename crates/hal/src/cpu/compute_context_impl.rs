@@ -1312,7 +1312,14 @@ impl ComputeContext for CpuBackend {
                                 ThresholdType::BinaryInv => {
                                     s_v.simd_gt(thresh_v).select(zero_v, max_v)
                                 }
-                                ThresholdType::Trunc => s_v.min(thresh_v),
+                                // `v > t ? t : v`, as the scalar path and
+                                // OpenCV. Not `s_v.min(thresh_v)`: that
+                                // returned the threshold for a NaN input
+                                // where every other path keeps the NaN,
+                                // and broke a -0 / +0 tie by platform
+                                // (x86 `minps` gives the threshold,
+                                // AArch64 `fminnm` gives -0).
+                                ThresholdType::Trunc => s_v.simd_gt(thresh_v).select(thresh_v, s_v),
                                 ThresholdType::ToZero => s_v.simd_gt(thresh_v).select(s_v, zero_v),
                                 ThresholdType::ToZeroInv => s_v.simd_gt(thresh_v).select(zero_v, s_v),
                             };
@@ -1335,7 +1342,15 @@ impl ComputeContext for CpuBackend {
                                             max_f32
                                         }
                                     }
-                                    ThresholdType::Trunc => value.min(thresh_f32),
+                                    // As the SIMD lanes; not `f32::min`, see
+                                    // there.
+                                    ThresholdType::Trunc => {
+                                        if value > thresh_f32 {
+                                            thresh_f32
+                                        } else {
+                                            value
+                                        }
+                                    }
                                     ThresholdType::ToZero => {
                                         if value > thresh_f32 {
                                             value
