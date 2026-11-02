@@ -850,7 +850,9 @@ mod sweep {
         assert!(worst < 1e-3, "subtract diverges: worst {worst}");
     }
 
-    /// Morphology, erode and dilate with a 3x3 kernel.
+    /// Morphology, erode and dilate. The kernel tensor is shaped `(3, 3, 1)`,
+    /// so both backends read its first plane, a 3x1 column `[0, 1, 0]`.
+    /// `crates/hal/tests/gpu_morphology.rs` covers the shapes in depth.
     #[test]
     fn morphology_matches() {
         use cv_hal::context::MorphologyType;
@@ -889,7 +891,7 @@ mod sweep {
                         cs.len()
                     );
                 }
-                Err(e) => println!("  morphology {name}: GPU reports {e}"),
+                Err(e) => panic!("GPU morphology {name} failed: {e}"),
             }
         }
     }
@@ -1421,6 +1423,10 @@ fn shader_storage_element_types_match_their_hosts() {
         ("bilateral_f16.wgsl", &[(0, "f16")]),
         ("fast_f16.wgsl", &[(0, "f16")]),
         ("threshold_f16.wgsl", &[(0, "f16")]),
+        // The SHADER_F16 fallback reads the same f16 tensor as two halves per
+        // word. Like `matching.wgsl`, the packing is the point: the host
+        // dispatches one invocation per word, not per element.
+        ("threshold_f16_packed.wgsl", &[(0, "u32"), (1, "u32")]),
         ("bilateral_bf16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("resize_bf16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("stereo_match.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),

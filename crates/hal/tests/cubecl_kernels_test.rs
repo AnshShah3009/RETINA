@@ -58,11 +58,6 @@ fn ctx_opt(c: &Client) -> opt::OptimizedContext {
 fn up(c: &Client, data: &[f32], shape: Vec<usize>) -> TensorHandle {
     proto::tensor_from_slice(c, data, shape).expect("upload")
 }
-fn up_u32(c: &Client, data: &[u32], shape: Vec<usize>) -> TensorHandle {
-    let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let handle = c.create_from_slice(&bytes);
-    TensorHandle::new_contiguous(shape, handle, proto::u32_storage())
-}
 fn upz(c: &Client, shape: Vec<usize>) -> TensorHandle {
     let bytes: Vec<u8> = vec![0u8; shape.iter().product::<usize>() * 4];
     let handle = c.create_from_slice(&bytes);
@@ -1897,6 +1892,18 @@ fn wrappers_reject_malformed_input() {
     assert!(
         be::conv2d(&ctx_be, &a2, &w, 0, 0).is_err(),
         "conv2d stride 0"
+    );
+    // [1, 3, 4, 4] input against [2, 2, 3, 3] weights: two weight channels
+    // for three input channels.
+    let img3 = up(&c, &data(48, 4), vec![1, 3, 4, 4]);
+    let w2 = up(&c, &data(36, 5), vec![2, 2, 3, 3]);
+    assert!(
+        be::conv2d(&ctx_be, &img3, &w2, 1, 0).is_err(),
+        "conv2d weight/input channel mismatch"
+    );
+    assert!(
+        opt::conv2d(&ctx_opt, &img3, &w2, 1, 0).is_err(),
+        "opt conv2d weight/input channel mismatch"
     );
     assert!(
         opt::conv2d(&ctx_opt, &a2, &w, 1, 0).is_err(),

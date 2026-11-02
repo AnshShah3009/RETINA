@@ -1,10 +1,13 @@
 #![forbid(unsafe_code)]
 //! Benchmark: CubeCL kernels vs WGPU (WGSL shader) kernels vs CPU
 //!
-//! Compares three backend paths for identical operations:
+//! Compares two backend paths for identical operations:
 //!   1. CPU — uses `CpuBackend` via the `ComputeContext` trait
 //!   2. WGPU — calls the low-level gpu_kernel functions that dispatch WGSL compute shaders
-//!   3. CubeCL — (gated behind `cubecl` feature) calls CubeCL-generated kernels
+//!
+//! The CubeCL arms this file once had were written against a `cv_hal::cubecl`
+//! module that never existed and were never compiled. CubeCL kernels are
+//! benchmarked in `crates/hal/benches/cubecl_kernels.rs`.
 //!
 //! Run:
 //!   cargo bench --bench cubecl_vs_wgpu
@@ -114,11 +117,6 @@ fn try_gpu() -> Option<GpuContext> {
     GpuContext::new().ok()
 }
 
-#[cfg(feature = "cubecl")]
-fn try_cubecl() -> Option<cv_hal::cubecl::WgpuClient> {
-    cv_hal::cubecl::get_client()
-}
-
 // ---------------------------------------------------------------------------
 // 1. Threshold
 // ---------------------------------------------------------------------------
@@ -126,8 +124,6 @@ fn try_cubecl() -> Option<cv_hal::cubecl::WgpuClient> {
 fn bench_threshold(c: &mut Criterion) {
     let cpu_backend = CpuBackend::new().unwrap();
     let gpu = try_gpu();
-    #[cfg(feature = "cubecl")]
-    let cubecl_client = try_cubecl();
 
     let mut group = c.benchmark_group("threshold");
     group.measurement_time(Duration::from_secs(5));
@@ -176,32 +172,6 @@ fn bench_threshold(c: &mut Criterion) {
                 });
             });
         }
-
-        #[cfg(feature = "cubecl")]
-        {
-            if let Some(ref client) = cubecl_client {
-                let img_u8: Vec<u8> = cpu_img
-                    .storage
-                    .as_slice()
-                    .unwrap()
-                    .iter()
-                    .map(|&v| v.clamp(0.0, 255.0) as u8)
-                    .collect();
-                // Warmup
-                let _ = cv_hal::cubecl::kernels::image::threshold(client, &img_u8, 128, 255, 0);
-                group.bench_with_input(BenchmarkId::new("cubecl", &label), &(), |b, _| {
-                    b.iter(|| {
-                        black_box(cv_hal::cubecl::kernels::image::threshold(
-                            black_box(client),
-                            black_box(&img_u8),
-                            128,
-                            255,
-                            0,
-                        ))
-                    });
-                });
-            }
-        }
     }
 
     group.finish();
@@ -214,8 +184,6 @@ fn bench_threshold(c: &mut Criterion) {
 fn bench_sobel(c: &mut Criterion) {
     let cpu_backend = CpuBackend::new().unwrap();
     let gpu = try_gpu();
-    #[cfg(feature = "cubecl")]
-    let cubecl_client = try_cubecl();
 
     let mut group = c.benchmark_group("sobel");
     group.measurement_time(Duration::from_secs(5));
@@ -250,31 +218,6 @@ fn bench_sobel(c: &mut Criterion) {
                     black_box(out)
                 });
             });
-        }
-
-        #[cfg(feature = "cubecl")]
-        {
-            if let Some(ref client) = cubecl_client {
-                let img_u8: Vec<u8> = cpu_img
-                    .storage
-                    .as_slice()
-                    .unwrap()
-                    .iter()
-                    .map(|&v| v.clamp(0.0, 255.0) as u8)
-                    .collect();
-                let _ = cv_hal::cubecl::kernels::image::sobel(client, &img_u8, w, h, 1);
-                group.bench_with_input(BenchmarkId::new("cubecl", &label), &(), |b, _| {
-                    b.iter(|| {
-                        black_box(cv_hal::cubecl::kernels::image::sobel(
-                            black_box(client),
-                            black_box(&img_u8),
-                            w,
-                            h,
-                            1,
-                        ))
-                    });
-                });
-            }
         }
     }
 
@@ -330,11 +273,6 @@ fn bench_bilateral(c: &mut Criterion) {
                 });
             });
         }
-
-        #[cfg(feature = "cubecl")]
-        {
-            // No CubeCL bilateral kernel available yet
-        }
     }
 
     group.finish();
@@ -382,11 +320,6 @@ fn bench_resize(c: &mut Criterion) {
                 });
             });
         }
-
-        #[cfg(feature = "cubecl")]
-        {
-            // No CubeCL resize kernel available yet
-        }
     }
 
     group.finish();
@@ -399,8 +332,6 @@ fn bench_resize(c: &mut Criterion) {
 fn bench_convolve_2d(c: &mut Criterion) {
     let cpu_backend = CpuBackend::new().unwrap();
     let gpu = try_gpu();
-    #[cfg(feature = "cubecl")]
-    let cubecl_client = try_cubecl();
 
     let mut group = c.benchmark_group("convolve_2d");
     group.measurement_time(Duration::from_secs(5));
@@ -453,37 +384,6 @@ fn bench_convolve_2d(c: &mut Criterion) {
                 });
             });
         }
-
-        #[cfg(feature = "cubecl")]
-        {
-            if let Some(ref client) = cubecl_client {
-                let img_data: Vec<f32> = cpu_img.storage.as_slice().unwrap().to_vec();
-                let _ = cv_hal::cubecl::kernels::convolve::convolve(
-                    client,
-                    &img_data,
-                    w,
-                    h,
-                    &kernel_data,
-                    3,
-                    3,
-                    1,
-                );
-                group.bench_with_input(BenchmarkId::new("cubecl", &label), &(), |b, _| {
-                    b.iter(|| {
-                        black_box(cv_hal::cubecl::kernels::convolve::convolve(
-                            black_box(client),
-                            black_box(&img_data),
-                            w,
-                            h,
-                            black_box(&kernel_data),
-                            3,
-                            3,
-                            1,
-                        ))
-                    });
-                });
-            }
-        }
     }
 
     group.finish();
@@ -530,11 +430,6 @@ fn bench_nms(c: &mut Criterion) {
                 });
             });
         }
-
-        #[cfg(feature = "cubecl")]
-        {
-            // No CubeCL NMS kernel available yet
-        }
     }
 
     group.finish();
@@ -547,8 +442,6 @@ fn bench_nms(c: &mut Criterion) {
 fn bench_spmv(c: &mut Criterion) {
     let cpu_backend = CpuBackend::new().unwrap();
     let gpu = try_gpu();
-    #[cfg(feature = "cubecl")]
-    let cubecl_client = try_cubecl();
 
     let mut group = c.benchmark_group("spmv");
     group.measurement_time(Duration::from_secs(5));
@@ -597,26 +490,6 @@ fn bench_spmv(c: &mut Criterion) {
                     black_box(out)
                 });
             });
-        }
-
-        #[cfg(feature = "cubecl")]
-        {
-            if let Some(ref client) = cubecl_client {
-                let _ = cv_hal::cubecl::kernels::sparse::spmv(
-                    client, &row_ptr, &col_idx, &vals, &x_data,
-                );
-                group.bench_with_input(BenchmarkId::new("cubecl", &label), &(), |b, _| {
-                    b.iter(|| {
-                        black_box(cv_hal::cubecl::kernels::sparse::spmv(
-                            black_box(client),
-                            black_box(&row_ptr),
-                            black_box(&col_idx),
-                            black_box(&vals),
-                            black_box(&x_data),
-                        ))
-                    });
-                });
-            }
         }
     }
 
@@ -678,11 +551,6 @@ fn bench_brief(c: &mut Criterion) {
                     black_box(out)
                 });
             });
-        }
-
-        #[cfg(feature = "cubecl")]
-        {
-            // No CubeCL BRIEF kernel available yet
         }
     }
 

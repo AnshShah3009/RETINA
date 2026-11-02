@@ -1275,7 +1275,6 @@ mod dlt_planar_tests {
             .collect();
 
         let pose = solve_pnp_dlt(&object_points, &image_points, &intr).unwrap();
-        drop(t_true);
 
         // Reprojection error with the recovered pose must be tiny.
         let r_rec = pose.rotation_matrix();

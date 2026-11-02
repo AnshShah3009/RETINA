@@ -78,13 +78,15 @@ fn stress_test_heavy_load_mixing() {
     if let Some(g_heavy) = s.get_group("heavy-iso").unwrap() {
         for _ in 0..heavy_count {
             let tx = tx.clone();
-            g_heavy.spawn(move || {
-                // Simulate work (busy wait or sleep)
-                std::thread::sleep(Duration::from_millis(2));
-                if let Ok(guard) = tx.lock() {
-                    let _ = guard.send(1);
-                }
-            });
+            g_heavy
+                .spawn(move || {
+                    // Simulate work (busy wait or sleep)
+                    std::thread::sleep(Duration::from_millis(2));
+                    if let Ok(guard) = tx.lock() {
+                        let _ = guard.send(1);
+                    }
+                })
+                .expect("spawn must accept the task");
         }
     }
 
@@ -92,13 +94,15 @@ fn stress_test_heavy_load_mixing() {
     if let Some(g_light) = s.get_group("light-shared").unwrap() {
         for _ in 0..light_count {
             let tx = tx.clone();
-            g_light.spawn(move || {
-                // Trivial work
-                let _ = 1;
-                if let Ok(guard) = tx.lock() {
-                    let _ = guard.send(1);
-                }
-            });
+            g_light
+                .spawn(move || {
+                    // Trivial work
+                    let _ = 1;
+                    if let Ok(guard) = tx.lock() {
+                        let _ = guard.send(1);
+                    }
+                })
+                .expect("spawn must accept the task");
         }
     }
 

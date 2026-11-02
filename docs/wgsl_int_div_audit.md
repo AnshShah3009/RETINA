@@ -39,7 +39,7 @@ with `Device::create_shader_module`.
 
 The corpus is every `.wgsl` file under `crates/hal/shaders`, `crates/hal/src`,
 `crates/calib3d/src` and `crates/features/src`, plus every Rust raw string in
-`crates/hal/src` that contains `@compute`. That comes to 107 files and 13 inline
+`crates/hal/src` that contains `@compute`. That comes to 108 files and 9 inline
 shaders. `crates/viewer` is not included because it holds render shaders only.
 The fused-kernel WGSL generated in `crates/runtime/src/pipeline/fusion.rs` is
 not included either: it is stored as a string and never compiled.
@@ -77,14 +77,14 @@ remaining B source, `spatial.rs`, is not reachable through `dispatch`.
 
 ## Summary
 
-87 integer divisions or modulos, spread over 33 of the 114 sources that naga
-accepts (66 table rows):
+92 integer divisions or modulos, spread over 34 of the 117 sources that naga
+accepts (70 table rows):
 
 | class | sites | rows | before this audit |
 | --- | ---: | ---: | --- |
-| A, nonzero constant | 55 | 36 | 55 |
+| A, nonzero constant | 57 | 37 | 55 |
 | B, host-guaranteed | 2 | 2 | 4 (`feature_collection_f32.wgsl` moved to S) |
-| S, shader-proven | 30 | 28 | 8 |
+| S, shader-proven | 33 | 31 | 8 |
 | C, needs a guard | 0 | 0 | 20 |
 
 ### Guards added
@@ -154,6 +154,10 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
 | `crates/hal/shaders/hough.wgsl` | `/` | `params.width` | 1 | S | as above |
 | `crates/hal/shaders/lbvh_build.wgsl` | `/` | `2` | 3 | A | literal |
 | `crates/hal/shaders/matching.wgsl` | `/` | `4u` | 1 | A | literal |
+| `crates/hal/shaders/morphology.wgsl` | `%` | `params.width` | 1 | S | `main` returns when `width == 0` or `height == 0` before any division (guard added when the shader was rewritten) |
+| `crates/hal/shaders/morphology.wgsl` | `/` | `2u` | 2 | A | literal (kernel anchor) |
+| `crates/hal/shaders/morphology.wgsl` | `/` | `max` | 1 | S | `idx / max(plane_size, 1u)`: at least 1 by construction |
+| `crates/hal/shaders/morphology.wgsl` | `/` | `params.width` | 1 | S | as `% params.width` |
 | `crates/hal/shaders/remap.wgsl` | `%` | `2 * n - 2` | 1 | S | Reflect101 branch runs only for `n != 1`. With `n >= 1` (guard added), `2n - 2 >= 2`. |
 | `crates/hal/shaders/remap.wgsl` | `%` | `2 * n` | 1 | S | Reflect branch, `n >= 1` (guard added), even |
 | `crates/hal/shaders/remap.wgsl` | `%` | `i32(len)` | 1 | S | Wrap branch, `n >= 1` (guard added) |
@@ -185,25 +189,59 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
 
 ## Sources naga rejects
 
-These fail naga validation, so no pipeline can be built from them, and the
-scanner cannot see inside them. The test pins this list. When one starts to
-validate, the test fails until its divisions move into the table above. Their
-integer divisions, read from the text:
+**None.** Every source in the corpus parses and validates, and the test fails
+if one stops: a shader naga rejects can never become a pipeline, and the
+scanner cannot see its divisions. Six used to be rejected and were pinned
+here. Each was fixed or deleted:
 
-| source | error | integer divisions |
+| source | error | outcome |
 | --- | --- | --- |
-| `crates/hal/shaders/morphology.wgsl` | `var val = if (...) { 255u } else { 0u };` is not WGSL | `params.kw / 2u`, `params.kh / 2u`, `(params.width + 3u) / 4u`, all A |
-| `crates/hal/shaders/threshold_f16.wgsl` | `bitcast<f16>(f32)` | none |
-| `crates/hal/src/gpu_kernels/icp.rs#colored_icp_kernel` | passes a runtime-sized array by value | none |
-| `crates/hal/src/gpu_kernels/icp.rs#compute_color_gradients_kernel` | same | `idx % width`, `idx / width`. Would be C: `width` is a raw uniform with no guard. |
-| `crates/hal/src/gpu_kernels/icp.rs#generalized_icp_kernel` | same | none |
-| `crates/hal/src/gpu_kernels/icp.rs#gicp_accumulate_kernel` | atomic op on a non-atomic | none |
+| `crates/hal/shaders/morphology.wgsl` | `var val = if (...) { 255u } else { 0u };` is not WGSL | fixed, tested |
+| `crates/hal/shaders/threshold_f16.wgsl` | `bitcast<f16>(u32)` changes the operand size | fixed, tested |
+| `crates/hal/src/gpu_kernels/icp.rs#colored_icp_kernel` | passes a runtime-sized array by value | deleted |
+| `crates/hal/src/gpu_kernels/icp.rs#compute_color_gradients_kernel` | same | deleted |
+| `crates/hal/src/gpu_kernels/icp.rs#generalized_icp_kernel` | same | deleted |
+| `crates/hal/src/gpu_kernels/icp.rs#gicp_accumulate_kernel` | `atomicAdd` on a non-atomic `f32` | deleted |
 
-`morphology.wgsl` is the shader behind `GpuContext::morphology`
-(`gpu_kernels/morphology.rs`), so the GPU erode/dilate path cannot create its
-pipeline. No test reaches it: the morphology tests all run on the CPU backend.
-`threshold_f16.wgsl` and the four ICP strings are never compiled. `perf_tests`
-only reads the ICP strings.
+`morphology.wgsl` is the shader behind `GpuContext::morphology`, which
+therefore could never create its pipeline, and no test reached it. The shader
+was rewritten to match the CPU backend (replicate border, packed mask read on
+the device, CHW planes, dense output words), and
+`crates/hal/tests/gpu_morphology.rs` compares the two byte for byte. Its
+divisions are in the table above.
+
+`threshold_f16.wgsl` had no caller: `gpu_kernels::threshold` returned
+`NotSupported` for f16, and the device never requested `SHADER_F16`. The
+device now requests the feature when the adapter offers it, the uniform
+carries the threshold and max value as f32 (an exact widening), and
+`threshold` runs this shader when `GpuContext::supports_f16` and
+`threshold_f16_packed.wgsl` otherwise. Neither divides.
+
+The four ICP strings were public `&'static str` accessors with no host: no
+code created a pipeline from them, and `perf_tests` only timed returning the
+string. They were deleted, with the `ColoredICPConfig` and
+`GeneralizedICPConfig` structs that configured nothing, rather than fixed,
+because making them validate would not have made them usable. None computed
+its algorithm:
+
+* `colored_icp_kernel` wrote 21 Gauss-Newton terms per point and then
+  overwrote the first six with `J * r`. It computed the photometric Jacobian
+  and residual and never used them, so it was not colored ICP.
+* `compute_color_gradients_kernel` indexed the point cloud as an image
+  (`idx % width`, with `width` an unguarded uniform) and ignored the normals.
+  Colored ICP needs the colour gradient in each point's tangent plane, fitted
+  from its neighbours.
+* `generalized_icp_kernel` formed `C_t + C_t` where GICP needs
+  `C_t + R C_s Rᵀ`, never inverted it, and emitted products that are not a
+  normal-equation system.
+* `gicp_accumulate_kernel` needs float atomics, which WGSL does not have. It
+  also zeroed its workgroup memory only in global thread 0 and wrote the
+  result only from it, so at most one workgroup could ever count.
+
+Colored ICP (`registration_colored_icp`) and point-to-plane ICP keep their
+CPU implementations, and point-to-plane keeps its working GPU path
+(`icp_correspondences`, `icp_accumulate`, `dense_step`). A GPU colored ICP or
+GICP would be new work, not a repair of these strings.
 
 ## Signed modulo of negative operands
 

@@ -627,7 +627,7 @@ mod tests {
         assert_eq!(zeros, 0, "all pixels should be labelled or boundary");
 
         // The left seed region should dominate left columns, right seed the right columns
-        assert_eq!(m[(5 * w)], 1);
+        assert_eq!(m[5 * w], 1);
         assert_eq!(m[5 * w + 9], 2);
 
         // There should be at least one boundary pixel (-1) somewhere in the middle

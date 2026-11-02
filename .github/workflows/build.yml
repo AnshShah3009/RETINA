@@ -2,7 +2,7 @@ name: Build and Test
 
 on:
   push:
-    branches: [ master, develop ]
+    branches: [ master, develop, research/cubecl ]
     paths:
       - '**/*.rs'
       # Shaders are compiled into the crates with include_str!, and the
@@ -13,7 +13,7 @@ on:
       - '**/Cargo.lock'
       - '.github/workflows/build.yml'
   pull_request:
-    branches: [ master, develop ]
+    branches: [ master, develop, research/cubecl ]
     paths:
       - '**/*.rs'
       # Shaders are compiled into the crates with include_str!, and the
@@ -66,6 +66,20 @@ jobs:
       # Off by default and never built in CI, so the edition-2024 migration
       # left two compile errors in it and the las 0.11 upgrade needed a port.
       run: cargo test -p cv-io --features las
+
+    - name: Check CubeCL feature
+      # The CubeCL kernels, their tests and benches are behind a feature
+      # nothing else builds; this runner has no GPU, so macOS runs the tests.
+      run: cargo check -p cv-hal --features cubecl --all-targets
+
+    - name: No compiler warnings
+      # 66 warnings had piled up, and among them were real defects: two
+      # different CharucoBoard types behind one ambiguous re-export, a test
+      # attribute separated from its test, ignored Results, and bench code
+      # written against a module that never existed.
+      run: |
+        cargo check --workspace --all-targets --message-format short 2>&1 | tee check.log
+        ! grep -E '^[^ ]+:[0-9]+:[0-9]+: warning' check.log
 
     - name: Build examples
       # `cargo build --workspace` does not build examples, so without this
@@ -138,3 +152,8 @@ jobs:
 
     - name: Run tests (MLX backend)
       run: cargo nextest run --workspace --no-fail-fast --features mlx
+
+    - name: Test CubeCL kernels (Metal)
+      # The only CI runner with a GPU, so the only place the CubeCL kernels
+      # (feature `cubecl`) run in CI.
+      run: cargo test -p cv-hal --features cubecl --test cubecl_kernels_test

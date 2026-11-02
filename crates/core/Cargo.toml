@@ -14,7 +14,8 @@ thiserror = { workspace = true }
 rand = { workspace = true }
 num-traits = { version = "0.2", default-features = false }
 bytemuck = { workspace = true, features = ["derive"] }
-half = { version = "2.4", features = ["num-traits", "serde"], optional = true }
+# `bytemuck` makes `f16`/`bf16` `Pod`, which every GPU upload and kernel needs.
+half = { version = "2.4", features = ["num-traits", "serde", "bytemuck"], optional = true }
 
 [features]
 default = ["full-precision"]

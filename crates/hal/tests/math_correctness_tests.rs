@@ -20,8 +20,7 @@ fn load_fixture_f32(path: &str) -> Vec<f32> {
     let path = fixtures_dir().join(path);
     let arr: ndarray::Array2<f32> =
         ndarray_npy::read_npy(&path).unwrap_or_else(|_| panic!("Failed to read {:?}", path));
-    let len = arr.len();
-    arr.into_owned().into_shape(len).unwrap().into_raw_vec()
+    arr.into_iter().collect()
 }
 
 fn max_abs_error(a: &[f32], b: &[f32]) -> f32 {

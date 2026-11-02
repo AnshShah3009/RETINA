@@ -43,14 +43,14 @@ fn a_unit_quaternion_gives_a_proper_rotation() {
         "determinant {} for a unit quaternion",
         r.determinant()
     );
-    let expected = r * Matrix3_from_diag(&g.scale) * Matrix3_from_diag(&g.scale) * r.transpose();
+    let expected = r * matrix3_from_diag(&g.scale) * matrix3_from_diag(&g.scale) * r.transpose();
     let err = (g.covariance() - expected)
         .iter()
         .fold(0.0f32, |m, v| m.max(v.abs()));
     assert!(err < 1e-6, "covariance does not match R S Sᵀ Rᵀ: {err:e}");
 }
 
-fn Matrix3_from_diag(v: &Vector3<f32>) -> nalgebra::Matrix3<f32> {
+fn matrix3_from_diag(v: &Vector3<f32>) -> nalgebra::Matrix3<f32> {
     nalgebra::Matrix3::from_diagonal(v)
 }
 

@@ -11,14 +11,21 @@ use std::collections::HashMap;
 /// ChArUco board combining ArUco markers with chessboard pattern
 #[derive(Clone)]
 pub struct CharucoBoard {
+    /// Number of chessboard squares along X.
     pub squares_x: usize,
+    /// Number of chessboard squares along Y.
     pub squares_y: usize,
+    /// Side of one chessboard square, in world units.
     pub square_length: f64,
+    /// Side of one embedded marker, in world units.
     pub marker_length: f64,
+    /// Dictionary the embedded markers are drawn from.
     pub dictionary: ArucoDictionary,
 }
 
 impl CharucoBoard {
+    /// A board of `squares_x` x `squares_y` squares. Markers sit on the cells
+    /// where `row + col` is odd, with ids assigned row-major (OpenCV layout).
     pub fn new(
         squares_x: usize,
         squares_y: usize,
@@ -63,10 +70,18 @@ impl CharucoBoard {
 /// ChArUco detection parameters
 #[derive(Clone)]
 pub struct CharucoParameters {
+    /// Camera intrinsics. Not used yet: corners are interpolated from marker
+    /// corners in the image, without a homography or undistortion step.
     pub camera_matrix: Option<Matrix3<f64>>,
+    /// Distortion coefficients. Not used yet (see `camera_matrix`).
     pub dist_coeffs: Option<Vec<f64>>,
+    /// How many adjacent marker corners must observe an interior corner
+    /// before it is reported (1 or 2; each interior corner touches at most
+    /// two markers).
     pub min_markers: usize,
+    /// Refine rejected markers against the board layout. Not used yet.
     pub try_refine_markers: bool,
+    /// Check marker consistency against the board. Not used yet.
     pub check_markers: bool,
 }
 
@@ -85,7 +100,9 @@ impl Default for CharucoParameters {
 /// A detected ChArUco chessboard corner
 #[derive(Debug, Clone)]
 pub struct CharucoCorners {
+    /// Image position of each detected interior corner.
     pub corners: Vec<[f32; 2]>,
+    /// Id of each corner, `row * (squares_x - 1) + col`, in ascending order.
     pub ids: Vec<i32>,
 }
 
@@ -97,6 +114,7 @@ pub struct CharucoDetector {
 }
 
 impl CharucoDetector {
+    /// A detector for `board` that finds markers with `detector`.
     pub fn new(board: CharucoBoard, params: CharucoParameters, detector: ArucoDetector) -> Self {
         Self {
             board,
@@ -138,32 +156,37 @@ impl CharucoDetector {
             }
         }
 
-        // Accumulate observations per INTERSECTION (ic, ir), where
-        // ic in 0..=sx-2 indexes intersections by column.
+        // Accumulate observations per interior corner (ic, ir). Interior
+        // corner (ic, ir) is grid point (ic + 1, ir + 1); ic in 0..=sx-2.
+        // Each marker corner sits, inset, next to the grid point of its own
+        // square corner, and the two white squares meeting at an interior
+        // corner face it diagonally, so averaging their two marker corners
+        // cancels the inset. (This used grid point (col, row) as the corner
+        // index itself, which put every corner one square off and dropped
+        // the outer-ring markers that do touch interior corners.)
         let mut corner_data: HashMap<(usize, usize), Vec<[f64; 2]>> = HashMap::new();
 
         for marker in markers {
             let Some(&(col, row)) = cell_of_id.get(&{ marker.id }) else {
                 continue;
             };
-            if col >= sx - 1 || row >= sy - 1 {
-                continue; // marker on outer ring contributes no interior corners
-            }
 
-            // Marker image corners are TL, TR, BR, BL; each maps to the
-            // intersection at its own grid corner:
+            // Marker image corners are TL, TR, BR, BL; grid points:
             //   TL -> (col,     row)
             //   TR -> (col + 1, row)
             //   BR -> (col + 1, row + 1)
             //   BL -> (col,     row + 1)
-            for (ic, ir, pt) in [
+            for (gx, gy, pt) in [
                 (col, row, marker.corners[0]),
                 (col + 1, row, marker.corners[1]),
                 (col + 1, row + 1, marker.corners[2]),
                 (col, row + 1, marker.corners[3]),
             ] {
-                if ic <= sx - 2 && ir <= sy - 2 {
-                    corner_data.entry((ic, ir)).or_default().push([pt.0, pt.1]);
+                if (1..sx).contains(&gx) && (1..sy).contains(&gy) {
+                    corner_data
+                        .entry((gx - 1, gy - 1))
+                        .or_default()
+                        .push([pt.0, pt.1]);
                 }
             }
         }
@@ -172,7 +195,9 @@ impl CharucoDetector {
         let mut ids = Vec::new();
         // Emit row-major over intersections: id = ir*(sx-1) + ic.
         let mut sorted_keys: Vec<(usize, usize)> = corner_data.keys().copied().collect();
-        sorted_keys.sort();
+        // Keys are (col, row); sort by (row, col) so ids come out ascending,
+        // as OpenCV returns them. A plain sort() ordered them column-major.
+        sorted_keys.sort_by_key(|&(ic, ir)| (ir, ic));
         for (ic, ir) in sorted_keys {
             let Some(pts) = corner_data.get(&(ic, ir)) else {
                 continue;
@@ -215,6 +240,62 @@ mod tests {
             assert_eq!(pts[i].x, *x, "corner {} has wrong x", i);
             assert_eq!(pts[i].y, *y, "corner {} has wrong y", i);
             assert_eq!(pts[i].z, 0.0);
+        }
+    }
+
+    /// Markers sit inside the white squares, inset from the square's edges, so
+    /// an interior chessboard corner is the midpoint of the two marker corners
+    /// that face it diagonally. With every marker seen exactly, interpolation
+    /// must put each corner on its grid point, with ids ascending.
+    #[test]
+    fn interpolated_corners_land_on_their_grid_points() {
+        let (sx, sy) = (5usize, 4usize);
+        let (scale, inset) = (100.0, 10.0);
+        let board = CharucoBoard::new(sx, sy, 1.0, 0.8, ArucoDictionary::Dict4x4_50);
+        let params = CharucoParameters {
+            min_markers: 2,
+            ..Default::default()
+        };
+        let detector = CharucoDetector::new(
+            board.clone(),
+            params,
+            ArucoDetector::new(ArucoDictionary::Dict4x4_50),
+        );
+
+        let mut markers = Vec::new();
+        let mut id = 0;
+        for row in 0..sy {
+            for col in 0..sx {
+                if (row + col) % 2 == 1 {
+                    let (x0, y0) = (col as f64 * scale, row as f64 * scale);
+                    let (x1, y1) = (x0 + scale, y0 + scale);
+                    markers.push(DetectedMarker {
+                        id,
+                        corners: [
+                            (x0 + inset, y0 + inset),
+                            (x1 - inset, y0 + inset),
+                            (x1 - inset, y1 - inset),
+                            (x0 + inset, y1 - inset),
+                        ],
+                    });
+                    id += 1;
+                }
+            }
+        }
+
+        let found = detector.interpolate_corners(&markers).unwrap();
+        let expected = board.chessboard_corners();
+        assert_eq!(found.ids.len(), expected.len(), "ids: {:?}", found.ids);
+        for (i, (&id, c)) in found.ids.iter().zip(&found.corners).enumerate() {
+            assert_eq!(id as usize, i, "ids not ascending: {:?}", found.ids);
+            let e = &expected[i];
+            assert!(
+                (c[0] as f64 - e.x * scale).abs() < 1e-3
+                    && (c[1] as f64 - e.y * scale).abs() < 1e-3,
+                "corner {id} at {c:?}, expected ({}, {})",
+                e.x * scale,
+                e.y * scale
+            );
         }
     }
 }
