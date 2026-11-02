@@ -48,9 +48,7 @@ impl Lbd {
         image: &GrayImage,
         segments: &[cv_imgproc::hough::LineSegment],
     ) -> Vec<LineDescriptor> {
-        let (gx, gy) = cv_imgproc::sobel(image);
-        let gx_raw = gx.as_raw();
-        let gy_raw = gy.as_raw();
+        let grad = sobel_l1_magnitude(image);
         let (w, h) = image.dimensions();
 
         let bandwidth = self.params.n_bandwidth.max(1);
@@ -106,10 +104,8 @@ impl Lbd {
                                 let idx_p = y_p as usize * w as usize + x_p as usize;
                                 let idx_n = y_n as usize * w as usize + x_n as usize;
 
-                                let g_p =
-                                    (gx_raw[idx_p] as f32).abs() + (gy_raw[idx_p] as f32).abs();
-                                let g_n =
-                                    (gx_raw[idx_n] as f32).abs() + (gy_raw[idx_n] as f32).abs();
+                                let g_p = grad[idx_p];
+                                let g_n = grad[idx_n];
 
                                 if g_p > g_n {
                                     byte_val |= 1 << bit;
@@ -127,4 +123,39 @@ impl Lbd {
             })
             .collect()
     }
+}
+
+/// `|gx| + |gy|` of the 3x3 Sobel derivatives (BORDER_REPLICATE), from the
+/// signed derivatives.
+///
+/// This used `cv_imgproc::sobel`, whose `u8` outputs saturate every negative
+/// derivative to 0 before the `abs()` here could see it: a bright-to-dark
+/// edge had zero gradient and its descriptor bits were all 0.
+fn sobel_l1_magnitude(image: &GrayImage) -> Vec<f32> {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let raw = image.as_raw();
+    let px = |x: isize, y: isize| -> f32 {
+        let x = x.clamp(0, w as isize - 1) as usize;
+        let y = y.clamp(0, h as isize - 1) as usize;
+        raw[y * w + x] as f32
+    };
+    let mut out = vec![0.0f32; w * h];
+    out.par_chunks_mut(w.max(1))
+        .enumerate()
+        .for_each(|(y, row)| {
+            let y = y as isize;
+            for (x, o) in row.iter_mut().enumerate() {
+                let x = x as isize;
+                let gx = px(x + 1, y - 1) - px(x - 1, y - 1)
+                    + 2.0 * (px(x + 1, y) - px(x - 1, y))
+                    + px(x + 1, y + 1)
+                    - px(x - 1, y + 1);
+                let gy = px(x - 1, y + 1) - px(x - 1, y - 1)
+                    + 2.0 * (px(x, y + 1) - px(x, y - 1))
+                    + px(x + 1, y + 1)
+                    - px(x + 1, y - 1);
+                *o = gx.abs() + gy.abs();
+            }
+        });
+    out
 }
