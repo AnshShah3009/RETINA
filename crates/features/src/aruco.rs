@@ -3,20 +3,38 @@
 //! This module provides a tensor-based API for working with ArUco fiducial markers,
 //! complementing the `image`-crate-based API in [`crate::markers`].
 //!
+//! Dictionaries, generated markers and detection follow OpenCV's
+//! `cv::aruco` (objdetect, OpenCV 4.x): markers drawn here and by OpenCV are
+//! identical, and [`ArucoDetector`] runs the `ArucoDetector::detectMarkers`
+//! pipeline with OpenCV's [`DetectorParameters`].
+//!
 //! # Example
 //!
-//! ```no_run
+//! ```
+//! use cv_core::{CpuTensor, TensorShape};
 //! use cv_features::aruco::*;
 //!
 //! let dict = ArucoDictionary::Dict4x4_50;
-//! let marker_img = draw_marker(dict, 7, 60).unwrap();
-//! let detector = ArucoDetector::new(dict);
-//! let detections = detector.detect_u8(&marker_img).unwrap();
-//! assert!(detections.iter().any(|d| d.id == 7));
+//! let marker = draw_marker(dict, 7, 60).unwrap();
+//! // Detection needs the white quiet zone around the marker.
+//! let mut canvas = vec![255u8; 100 * 100];
+//! for (y, row) in marker.as_slice().unwrap().chunks(60).enumerate() {
+//!     canvas[(y + 20) * 100 + 20..(y + 20) * 100 + 80].copy_from_slice(row);
+//! }
+//! let image = CpuTensor::from_vec(canvas, TensorShape::new(1, 100, 100)).unwrap();
+//! let detections = ArucoDetector::new(dict).detect_u8(&image).unwrap();
+//! assert_eq!(detections.len(), 1);
+//! assert_eq!(detections[0].id, 7);
 //! ```
 
+use cv_calib3d::{corner_subpix, solve_dlt_homography};
 use cv_core::{CpuTensor, Error, Float, Result, TensorShape};
-use std::collections::VecDeque;
+use nalgebra::Point2;
+use rayon::prelude::*;
+
+mod contours;
+#[cfg(test)]
+mod detector_tests;
 
 // ---------------------------------------------------------------------------
 // Dictionary
@@ -81,8 +99,9 @@ impl ArucoDictionary {
 
     /// Get the bit pattern for marker `id`.
     ///
-    /// Returns a `marker_size x marker_size` grid of 0/1 values (row-major),
-    /// or `None` if `id` is out of range.
+    /// Returns the `marker_size x marker_size` payload grid (row-major, border
+    /// excluded) as OpenCV's `Dictionary::getBitsFromByteList`: 1 is a white
+    /// cell, 0 a black one. `None` if `id` is out of range.
     #[allow(clippy::needless_range_loop)]
     pub fn get_marker(&self, id: usize) -> Option<Vec<Vec<u8>>> {
         let codes = dictionary_codes(*self);
@@ -109,7 +128,11 @@ impl ArucoDictionary {
 pub struct DetectedMarker {
     /// Dictionary ID of the detected marker.
     pub id: usize,
-    /// Image-space corner coordinates (top-left, top-right, bottom-right, bottom-left).
+    /// Image-space corners of the marker quadrilateral, starting at the
+    /// marker's own top-left corner and going clockwise (top-left, top-right,
+    /// bottom-right, bottom-left of the marker as drawn by [`draw_marker`]),
+    /// whatever the marker's rotation in the image - OpenCV's corner order.
+    /// Pixel centres are at integer coordinates.
     pub corners: [(f64, f64); 4],
 }
 
@@ -117,55 +140,266 @@ pub struct DetectedMarker {
 /// dictionary marker (one of OpenCV's `rejectedImgPoints`).
 #[derive(Debug, Clone)]
 pub(crate) struct RejectedCandidate {
-    /// Corners in the same order as [`DetectedMarker::corners`].
+    /// Corners, clockwise in the image; corner 0 is the top-left of the
+    /// payload grid in `payload`.
     pub(crate) corners: [(f64, f64); 4],
-    /// Payload bits sampled in image orientation (border excluded).
+    /// Payload bits (border excluded) read with `corners[0]` as the top-left
+    /// cell: bit `y * side + x` is cell `(x, y)`, 1 for white, as
+    /// [`ArucoDictionary::get_marker`].
     pub(crate) payload: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Detector parameters
+// ---------------------------------------------------------------------------
+
+/// Marker corner refinement after identification (OpenCV's
+/// `CornerRefineMethod`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CornerRefineMethod {
+    /// Corners are the vertices of the polygon approximation of the marker's
+    /// contour (`CORNER_REFINE_NONE`, OpenCV's default). Those vertices are
+    /// border pixels of the thresholded marker, so they lie inside the true
+    /// corner: 0.5-0.8 px on average, up to about 1.7 px on blurred,
+    /// tilted markers.
+    #[default]
+    None,
+    /// `cornerSubPix` on each corner (`CORNER_REFINE_SUBPIX`), with a
+    /// half-window of [`DetectorParameters::relative_corner_refinement_win_size`]
+    /// marker cells, at most [`DetectorParameters::corner_refinement_win_size`]
+    /// pixels.
+    Subpix,
+}
+
+/// ArUco detection parameters, OpenCV's `cv::aruco::DetectorParameters`
+/// (the subset the classic, non-AprilTag pipeline uses). The [`Default`]
+/// values are OpenCV's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetectorParameters {
+    /// Smallest adaptive-threshold window, in pixels (`adaptiveThreshWinSizeMin`, 3).
+    pub adaptive_thresh_win_size_min: usize,
+    /// Largest adaptive-threshold window, in pixels (`adaptiveThreshWinSizeMax`, 23).
+    pub adaptive_thresh_win_size_max: usize,
+    /// Step between window sizes (`adaptiveThreshWinSizeStep`, 10): the image
+    /// is thresholded once per window `min, min + step, ..., <= max`. Even
+    /// windows are rounded up to the next odd size.
+    pub adaptive_thresh_win_size_step: usize,
+    /// Constant subtracted from the local mean (`adaptiveThreshConstant`, 7).
+    pub adaptive_thresh_constant: f64,
+    /// Smallest contour perimeter, as a fraction of the larger image side
+    /// (`minMarkerPerimeterRate`, 0.03).
+    pub min_marker_perimeter_rate: f64,
+    /// Largest contour perimeter, as a fraction of the larger image side
+    /// (`maxMarkerPerimeterRate`, 4.0).
+    pub max_marker_perimeter_rate: f64,
+    /// `approxPolyDP` epsilon as a fraction of the contour perimeter
+    /// (`polygonalApproxAccuracyRate`, 0.03).
+    pub polygonal_approx_accuracy_rate: f64,
+    /// Smallest side of a candidate, as a fraction of its contour perimeter
+    /// (`minCornerDistanceRate`, 0.05).
+    pub min_corner_distance_rate: f64,
+    /// Candidates with a corner closer than this to the image border, in
+    /// pixels, are dropped together with their group of near-duplicates
+    /// (`minDistanceToBorder`, 3).
+    pub min_distance_to_border: usize,
+    /// Two candidates whose mean corner distance is below this fraction of
+    /// the smaller one's perimeter are one marker; the larger is kept
+    /// (`minMarkerDistanceRate`, 0.125).
+    pub min_marker_distance_rate: f64,
+    /// Within such a group, a smaller candidate further than this many
+    /// marker cells from the kept one is tried when the kept one does not
+    /// decode (`minGroupDistance`, 0.21).
+    pub min_group_distance: f64,
+    /// Width of the black marker border, in cells (`markerBorderBits`, 1).
+    pub marker_border_bits: usize,
+    /// Pixels per cell of the perspective-removed marker image
+    /// (`perspectiveRemovePixelPerCell`, 4).
+    pub perspective_remove_pixel_per_cell: usize,
+    /// Fraction of each cell's side ignored at its edges when reading the bit
+    /// (`perspectiveRemoveIgnoredMarginPerCell`, 0.13).
+    pub perspective_remove_ignored_margin_per_cell: f64,
+    /// Largest number of white border cells, as a fraction of the payload
+    /// cell count (`maxErroneousBitsInBorderRate`, 0.35).
+    pub max_erroneous_bits_in_border_rate: f64,
+    /// Below this grey-level standard deviation the marker image is taken as
+    /// uniform instead of Otsu-thresholded (`minOtsuStdDev`, 5).
+    pub min_otsu_std_dev: f64,
+    /// Fraction of the dictionary's correction capacity
+    /// (`maxCorrectionBits`) used when identifying markers
+    /// (`errorCorrectionRate`, 0.6).
+    pub error_correction_rate: f64,
+    /// Corner refinement after identification (`cornerRefinementMethod`,
+    /// none).
+    pub corner_refinement_method: CornerRefineMethod,
+    /// Largest `cornerSubPix` half-window, in pixels
+    /// (`cornerRefinementWinSize`, 5).
+    pub corner_refinement_win_size: usize,
+    /// `cornerSubPix` half-window in marker cells
+    /// (`relativeCornerRefinmentWinSize`, 0.3).
+    pub relative_corner_refinement_win_size: f64,
+    /// `cornerSubPix` iteration limit (`cornerRefinementMaxIterations`, 30).
+    pub corner_refinement_max_iterations: usize,
+    /// `cornerSubPix` stopping shift, in pixels
+    /// (`cornerRefinementMinAccuracy`, 0.1).
+    pub corner_refinement_min_accuracy: f64,
+}
+
+impl Default for DetectorParameters {
+    fn default() -> Self {
+        Self {
+            adaptive_thresh_win_size_min: 3,
+            adaptive_thresh_win_size_max: 23,
+            adaptive_thresh_win_size_step: 10,
+            adaptive_thresh_constant: 7.0,
+            min_marker_perimeter_rate: 0.03,
+            max_marker_perimeter_rate: 4.0,
+            polygonal_approx_accuracy_rate: 0.03,
+            min_corner_distance_rate: 0.05,
+            min_distance_to_border: 3,
+            min_marker_distance_rate: 0.125,
+            min_group_distance: 0.21,
+            marker_border_bits: 1,
+            perspective_remove_pixel_per_cell: 4,
+            perspective_remove_ignored_margin_per_cell: 0.13,
+            max_erroneous_bits_in_border_rate: 0.35,
+            min_otsu_std_dev: 5.0,
+            error_correction_rate: 0.6,
+            corner_refinement_method: CornerRefineMethod::None,
+            corner_refinement_win_size: 5,
+            relative_corner_refinement_win_size: 0.3,
+            corner_refinement_max_iterations: 30,
+            corner_refinement_min_accuracy: 0.1,
+        }
+    }
+}
+
+impl DetectorParameters {
+    fn validate(&self) -> Result<()> {
+        let bad = |what: &str| Err(Error::InvalidInput(format!("aruco parameters: {what}")));
+        if self.adaptive_thresh_win_size_min < 3
+            || self.adaptive_thresh_win_size_max < self.adaptive_thresh_win_size_min
+            || self.adaptive_thresh_win_size_step == 0
+        {
+            return bad("adaptive threshold windows need 3 <= min <= max and step > 0");
+        }
+        if !self.adaptive_thresh_constant.is_finite() {
+            return bad("adaptive_thresh_constant must be finite");
+        }
+        if !(self.min_marker_perimeter_rate > 0.0
+            && self.max_marker_perimeter_rate > 0.0
+            && self.min_marker_perimeter_rate <= self.max_marker_perimeter_rate
+            && self.max_marker_perimeter_rate.is_finite())
+        {
+            return bad("marker perimeter rates need 0 < min <= max");
+        }
+        if !(self.polygonal_approx_accuracy_rate > 0.0
+            && self.polygonal_approx_accuracy_rate.is_finite())
+        {
+            return bad("polygonal_approx_accuracy_rate must be positive");
+        }
+        let non_negative = [
+            self.min_corner_distance_rate,
+            self.min_marker_distance_rate,
+            self.min_group_distance,
+            self.max_erroneous_bits_in_border_rate,
+            self.min_otsu_std_dev,
+            self.error_correction_rate,
+            self.relative_corner_refinement_win_size,
+        ];
+        if non_negative.iter().any(|v| !(*v >= 0.0 && v.is_finite())) {
+            return bad("rates must be finite and non-negative");
+        }
+        if self.marker_border_bits == 0 || self.perspective_remove_pixel_per_cell == 0 {
+            return bad("marker_border_bits and perspective_remove_pixel_per_cell must be >= 1");
+        }
+        if !(0.0..0.5).contains(&self.perspective_remove_ignored_margin_per_cell) {
+            return bad("perspective_remove_ignored_margin_per_cell must be in [0, 0.5)");
+        }
+        if self.corner_refinement_method == CornerRefineMethod::Subpix
+            && (self.corner_refinement_win_size == 0
+                || self.corner_refinement_max_iterations == 0
+                || self.corner_refinement_min_accuracy.is_nan()
+                || self.corner_refinement_min_accuracy <= 0.0)
+        {
+            return bad("sub-pixel refinement needs a window, iterations and accuracy > 0");
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Detector
 // ---------------------------------------------------------------------------
 
-/// Configurable ArUco marker detector operating on `CpuTensor` images.
+/// ArUco marker detector operating on `CpuTensor` images, following OpenCV's
+/// `cv::aruco::ArucoDetector::detectMarkers`.
 #[derive(Debug, Clone)]
 pub struct ArucoDetector {
     dictionary: ArucoDictionary,
-    /// Window size for adaptive thresholding (must be odd).
-    pub adaptive_thresh_win_size: usize,
-    /// Constant subtracted during adaptive thresholding.
-    pub adaptive_thresh_constant: f64,
-    /// Minimum perimeter (in pixels) for a candidate quadrilateral.
-    pub min_marker_perimeter: f64,
-    /// Maximum perimeter (in pixels) for a candidate quadrilateral.
-    pub max_marker_perimeter: f64,
-    /// Polygonal approximation accuracy as a fraction of perimeter.
-    pub polygonal_approx_accuracy: f64,
+    /// Detection parameters.
+    pub params: DetectorParameters,
+}
+
+/// A quadrilateral candidate (OpenCV's `MarkerCandidateTree`).
+#[derive(Debug, Clone)]
+struct Candidate {
+    /// Clockwise corners.
+    corners: [(f64, f64); 4],
+    /// Sum of the four side lengths.
+    perimeter: f32,
+    /// Other candidates of the same group, tried when this one fails.
+    close: Vec<[(f64, f64); 4]>,
+    /// Index of the smallest candidate enclosing this one.
+    parent: Option<usize>,
+    /// Height of the subtree of enclosed candidates (0 for a leaf).
+    depth: usize,
 }
 
 impl ArucoDetector {
-    /// Create a new detector for the given dictionary with default parameters.
+    /// A detector for `dictionary` with OpenCV's default parameters.
     pub fn new(dictionary: ArucoDictionary) -> Self {
-        Self {
-            dictionary,
-            adaptive_thresh_win_size: 7,
-            adaptive_thresh_constant: 7.0,
-            min_marker_perimeter: 30.0,
-            max_marker_perimeter: 4000.0,
-            polygonal_approx_accuracy: 0.03,
-        }
+        Self::with_parameters(dictionary, DetectorParameters::default())
+    }
+
+    /// A detector for `dictionary` with the given parameters.
+    pub fn with_parameters(dictionary: ArucoDictionary, params: DetectorParameters) -> Self {
+        Self { dictionary, params }
+    }
+
+    /// The dictionary markers are identified against.
+    pub fn dictionary(&self) -> ArucoDictionary {
+        self.dictionary
     }
 
     /// Detect ArUco markers in a single-channel floating-point grayscale image.
     ///
     /// The image tensor must have shape (1, H, W) with values in [0, 1].
     ///
-    /// # Pipeline
-    /// 1. Adaptive threshold to binarize
-    /// 2. Connected-component candidate extraction
-    /// 3. Filter by perimeter and aspect ratio
-    /// 4. For each candidate: sample grid bits, check border, read payload
-    /// 5. Match against all 4 rotations of each dictionary code
+    /// # Pipeline (OpenCV `detectMarkers`)
+    /// 1. Adaptive mean threshold (inverted) with each window size from
+    ///    `adaptive_thresh_win_size_min` to `..._max`.
+    /// 2. Every contour of every thresholded image (outer and hole borders)
+    ///    is approximated by a polygon; convex quadrilaterals within the
+    ///    perimeter and side-length limits are candidates, with corners
+    ///    ordered clockwise.
+    /// 3. Candidates closer than `min_marker_distance_rate` are grouped; the
+    ///    largest of each group is kept if it is clear of the image border,
+    ///    with the other distinct members as fallbacks.
+    /// 4. Each candidate is perspective-removed onto a grid of cells and
+    ///    Otsu-thresholded; candidates with too many white border cells are
+    ///    rejected.
+    /// 5. The payload is matched against the dictionary in all four
+    ///    rotations, within `max_correction_bits * error_correction_rate`
+    ///    bit errors, and the corners are rotated so that corner 0 is the
+    ///    marker's top-left. Enclosed candidates are identified before the
+    ///    candidates enclosing them.
+    /// 6. Optional corner refinement ([`CornerRefineMethod`]).
+    ///
+    /// On the same image the result (ids, corners, and with
+    /// [`ArucoDetector::detect_with_rejected`] the rejected candidates) is
+    /// OpenCV 4.13's with [`CornerRefineMethod::None`]; `Subpix` uses
+    /// `cv_calib3d::corner_subpix`, which weights its window uniformly, so
+    /// refined corners differ from OpenCV's by a fraction of a pixel.
     pub fn detect<T: Float>(&self, image: &CpuTensor<T>) -> Result<Vec<DetectedMarker>> {
         let (gray, w, h) = tensor_to_gray(image)?;
         self.detect_gray(&gray, w, h)
@@ -185,6 +419,19 @@ impl ArucoDetector {
         self.detect_gray(&gray, w, h)
     }
 
+    /// [`ArucoDetector::detect`] that also returns the corners of the
+    /// candidates which passed the shape filters but were not identified
+    /// (OpenCV's `rejectedImgPoints`), clockwise in the image.
+    #[allow(clippy::type_complexity)]
+    pub fn detect_with_rejected<T: Float>(
+        &self,
+        image: &CpuTensor<T>,
+    ) -> Result<(Vec<DetectedMarker>, Vec<[(f64, f64); 4]>)> {
+        let (gray, w, h) = tensor_to_gray(image)?;
+        let (markers, rejected) = self.detect_gray_with_rejected(&gray, w, h)?;
+        Ok((markers, rejected.into_iter().map(|r| r.corners).collect()))
+    }
+
     /// Internal: run detection on raw grayscale u8 buffer.
     fn detect_gray(&self, gray: &[u8], w: usize, h: usize) -> Result<Vec<DetectedMarker>> {
         Ok(self.detect_gray_with_rejected(gray, w, h)?.0)
@@ -199,65 +446,359 @@ impl ArucoDetector {
         w: usize,
         h: usize,
     ) -> Result<(Vec<DetectedMarker>, Vec<RejectedCandidate>)> {
-        // 1. Adaptive threshold
-        let binary = adaptive_threshold(
-            gray,
-            w,
-            h,
-            self.adaptive_thresh_win_size,
-            self.adaptive_thresh_constant,
-        );
+        let p = &self.params;
+        p.validate()?;
+        if w == 0 || h == 0 || gray.len() != w * h {
+            return Err(Error::InvalidInput(
+                "aruco detect: image buffer size does not match its dimensions".into(),
+            ));
+        }
 
-        // 2-3. Find candidate bounding boxes
-        let candidates = find_candidates(
-            &binary,
-            w,
-            h,
-            self.min_marker_perimeter,
-            self.max_marker_perimeter,
-        );
+        // 1-2. Candidates from every threshold window, in window order.
+        let windows: Vec<usize> = (p.adaptive_thresh_win_size_min..=p.adaptive_thresh_win_size_max)
+            .step_by(p.adaptive_thresh_win_size_step)
+            .collect();
+        let quads: Vec<[(f64, f64); 4]> = windows
+            .par_iter()
+            .map(|&win| {
+                let binary = adaptive_threshold(gray, w, h, win, p.adaptive_thresh_constant);
+                find_marker_quads(&binary, w, h, p)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .map(clockwise)
+            .collect();
 
-        let payload_bits = self.dictionary.marker_size();
-        let border_bits = 1usize;
-        let grid = payload_bits + 2 * border_bits;
+        // 3. One candidate per group of near-duplicates, largest first.
+        let mut candidates = self.filter_too_close(quads, w, h);
+
+        // 4-5. Identify, innermost candidates first (OpenCV's
+        // `identifyCandidates`). Each depth level is identified in full; when
+        // a marker is found its not yet visited ancestors are counted as
+        // visited, and the loop stops once the visit count reaches the
+        // candidate count - which, as in OpenCV, can leave the outermost
+        // levels unidentified once enough ancestors have been counted twice.
         let codes = dictionary_codes(self.dictionary);
+        let max_depth = candidates.iter().map(|c| c.depth).max().unwrap_or(0);
+        let mut by_depth = vec![Vec::new(); max_depth + 1];
+        for (i, c) in candidates.iter().enumerate() {
+            by_depth[c.depth].push(i);
+        }
+        let mut identified: Vec<Option<(usize, usize)>> = vec![None; candidates.len()];
+        let mut visited = vec![false; candidates.len()];
+        let mut counter = 0usize;
+        let mut depth = 0usize;
+        while counter < candidates.len() && depth <= max_depth {
+            // Per candidate: the corners that decoded, the id and rotation.
+            type Found = Option<([(f64, f64); 4], usize, usize)>;
+            let results: Vec<Found> = by_depth[depth]
+                .par_iter()
+                .map(|&i| {
+                    let c = &candidates[i];
+                    std::iter::once(&c.corners)
+                        .chain(&c.close)
+                        .find_map(|corners| {
+                            let (id, rot) = self.identify(gray, w, h, corners, &codes)?;
+                            Some((*corners, id, rot))
+                        })
+                })
+                .collect();
+            for (&i, found) in by_depth[depth].iter().zip(results) {
+                visited[i] = true;
+                if let Some((corners, id, rot)) = found {
+                    candidates[i].corners = corners;
+                    identified[i] = Some((id, rot));
+                    let mut parent = candidates[i].parent;
+                    while let Some(j) = parent {
+                        if !visited[j] {
+                            visited[j] = true;
+                            counter += 1;
+                        }
+                        parent = candidates[j].parent;
+                    }
+                }
+                counter += 1;
+            }
+            depth += 1;
+        }
 
-        // 4-5. Decode each candidate
-        let mut detections = Vec::new();
+        let mut markers = Vec::new();
         let mut rejected = Vec::new();
-        for c in &candidates {
-            // Decode from raw grayscale using a per-candidate threshold
-            // (min..max midpoint of the bounding box): robust to overall
-            // illumination shifts, unlike both a fixed <128 cutoff and the
-            // adaptive map (whose interior cells classify as white when the
-            // window sits entirely inside a black region).
-            let bits = sample_grid_bits(
-                gray,
-                w,
-                c.min_x,
-                c.min_y,
-                c.max_x,
-                c.max_y,
-                grid,
-                Some((c.min_x, c.min_y, c.max_x, c.max_y)),
-            );
-            let corners = [
-                (c.min_x as f64, c.min_y as f64),
-                (c.max_x as f64, c.min_y as f64),
-                (c.max_x as f64, c.max_y as f64),
-                (c.min_x as f64, c.max_y as f64),
-            ];
-            let payload = extract_payload(&bits, payload_bits, border_bits);
-            if border_is_black(&bits, grid) {
-                let (id, _rot, dist) = decode_with_rotations(payload, &codes, payload_bits);
-                if dist == 0 {
-                    detections.push(DetectedMarker { id, corners });
-                    continue;
+        for (c, ident) in candidates.iter().zip(&identified) {
+            match *ident {
+                Some((id, rot)) => {
+                    // OpenCV's `correctCornerPosition`: the marker appears
+                    // turned `rot` quarter turns counter-clockwise, so its
+                    // top-left is image corner `4 - rot`.
+                    let corners = [0, 1, 2, 3].map(|k| c.corners[(k + 4 - rot) % 4]);
+                    markers.push(DetectedMarker { id, corners });
+                }
+                None => {
+                    let bits = self.extract_bits(gray, w, h, &c.corners);
+                    rejected.push(RejectedCandidate {
+                        corners: c.corners,
+                        payload: self.payload(&bits),
+                    });
                 }
             }
-            rejected.push(RejectedCandidate { corners, payload });
         }
-        Ok((detections, rejected))
+
+        // 6. Corner refinement.
+        if p.corner_refinement_method == CornerRefineMethod::Subpix && !markers.is_empty() {
+            self.refine_subpix(gray, w, h, &mut markers)?;
+        }
+        Ok((markers, rejected))
+    }
+
+    /// OpenCV's `filterTooCloseCandidates`: candidates sorted by perimeter,
+    /// largest first, are grouped with every later candidate whose average
+    /// corner distance is below `min_marker_distance_rate` of the later one's
+    /// perimeter. Each group (a lone candidate is a group of one) is
+    /// represented by its largest member, unless that member lies within
+    /// `min_distance_to_border` of the image border, in which case the whole
+    /// group is dropped; members further than `min_group_distance` cells from
+    /// the previously kept one are kept as fallbacks. Then each candidate's
+    /// parent is the smallest selected candidate enclosing it.
+    ///
+    /// Distances and perimeters are computed in `f32`, as OpenCV does.
+    fn filter_too_close(&self, quads: Vec<[(f64, f64); 4]>, w: usize, h: usize) -> Vec<Candidate> {
+        let p = &self.params;
+        let cells = (self.dictionary.marker_size() + 2 * p.marker_border_bits) as f32;
+        let mut all: Vec<Candidate> = quads
+            .into_iter()
+            .map(|corners| Candidate {
+                perimeter: perimeter(&corners),
+                corners,
+                close: Vec::new(),
+                parent: None,
+                depth: 0,
+            })
+            .collect();
+        // Stable, like `std::stable_sort`: equal perimeters keep window order.
+        all.sort_by(|a, b| b.perimeter.total_cmp(&a.perimeter));
+
+        let n = all.len();
+        let mut group_of: Vec<Option<usize>> = vec![None; n];
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut selected = vec![true; n];
+        let distance_rate = p.min_marker_distance_rate as f32;
+        for i in 0..n {
+            for j in i + 1..n {
+                let dist = average_corner_distance(&all[i].corners, &all[j].corners);
+                if dist >= all[j].perimeter * distance_rate {
+                    continue;
+                }
+                selected[i] = false;
+                selected[j] = false;
+                match (group_of[i], group_of[j]) {
+                    (None, None) => {
+                        group_of[i] = Some(groups.len());
+                        group_of[j] = Some(groups.len());
+                        groups.push(vec![i, j]);
+                    }
+                    (Some(g), None) => {
+                        group_of[j] = Some(g);
+                        groups[g].push(j);
+                    }
+                    (None, Some(g)) => {
+                        group_of[i] = Some(g);
+                        groups[g].push(i);
+                    }
+                    // OpenCV does not merge two existing groups.
+                    (Some(_), Some(_)) => {}
+                }
+            }
+            if selected[i] {
+                selected[i] = false;
+                group_of[i] = Some(groups.len());
+                groups.push(vec![i]);
+            }
+        }
+
+        let border = p.min_distance_to_border as f32;
+        let (max_x, max_y) = (w as f32 - 1.0 - border, h as f32 - 1.0 - border);
+        let group_distance = p.min_group_distance as f32;
+        for group in &mut groups {
+            group.sort_unstable();
+            let first = group[0];
+            let near_border = all[first].corners.iter().any(|&(x, y)| {
+                let (x, y) = (x as f32, y as f32);
+                x < border || y < border || x > max_x || y > max_y
+            });
+            if near_border {
+                continue;
+            }
+            selected[first] = true;
+            let mut current = first;
+            for &other in &group[1..] {
+                let dist = average_corner_distance(&all[other].corners, &all[current].corners);
+                let module = all[other].perimeter / (4.0 * cells);
+                if dist > group_distance * module {
+                    current = other;
+                    let corners = all[other].corners;
+                    all[first].close.push(corners);
+                }
+            }
+        }
+        let mut out: Vec<Candidate> = all
+            .into_iter()
+            .zip(selected)
+            .filter_map(|(c, keep)| keep.then_some(c))
+            .collect();
+
+        // Hierarchy: candidates are sorted largest first, so a candidate's
+        // enclosing candidates come before it.
+        for i in (0..out.len()).rev() {
+            for j in (0..i).rev() {
+                if quad_inside_quad(&out[i].corners, &out[j].corners) {
+                    out[i].parent = Some(j);
+                    out[j].depth = out[j].depth.max(out[i].depth + 1);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// OpenCV's `_identifyOneCandidate`: `(id, rotation)` of the marker in
+    /// the candidate, `rotation` counting quarter turns counter-clockwise.
+    fn identify(
+        &self,
+        gray: &[u8],
+        w: usize,
+        h: usize,
+        corners: &[(f64, f64); 4],
+        codes: &[u64],
+    ) -> Option<(usize, usize)> {
+        let p = &self.params;
+        let side = self.dictionary.marker_size();
+        let bits = self.extract_bits(gray, w, h, corners);
+        let max_border_errors =
+            ((side * side) as f64 * p.max_erroneous_bits_in_border_rate) as usize;
+        if border_errors(&bits, side, p.marker_border_bits) > max_border_errors {
+            return None;
+        }
+        let payload = self.payload(&bits);
+        let max_correction =
+            (self.dictionary.max_correction_bits() as f64 * p.error_correction_rate) as u32;
+        identify_payload(payload, codes, side, max_correction)
+    }
+
+    /// OpenCV's `_extractBits`: warp the candidate onto a grid of
+    /// `perspective_remove_pixel_per_cell`-pixel cells (nearest neighbour),
+    /// Otsu-threshold it and read every cell by majority, ignoring the
+    /// cell's margin. Row-major cells, 1 for white.
+    fn extract_bits(&self, gray: &[u8], w: usize, h: usize, corners: &[(f64, f64); 4]) -> Vec<u8> {
+        let p = &self.params;
+        let cells = self.dictionary.marker_size() + 2 * p.marker_border_bits;
+        let cell = p.perspective_remove_pixel_per_cell;
+        let margin = (p.perspective_remove_ignored_margin_per_cell * cell as f64) as usize;
+        let size = cells * cell;
+        let last = (size - 1) as f64;
+        let canonical = [[0.0, 0.0], [last, 0.0], [last, last], [0.0, last]];
+        let image_pts = corners.map(|(x, y)| [x, y]);
+        let mut warped = vec![0u8; size * size];
+        if let Some(hm) = solve_dlt_homography(&canonical, &image_pts) {
+            for v in 0..size {
+                for u in 0..size {
+                    let q = hm * nalgebra::Vector3::new(u as f64, v as f64, 1.0);
+                    if q.z == 0.0 || !q.z.is_finite() {
+                        continue;
+                    }
+                    let x = (q.x / q.z).round_ties_even();
+                    let y = (q.y / q.z).round_ties_even();
+                    if x >= 0.0 && y >= 0.0 && x < w as f64 && y < h as f64 {
+                        warped[v * size + u] = gray[y as usize * w + x as usize];
+                    }
+                }
+            }
+        }
+
+        // Uniform marker image: all cells the same colour.
+        let inner: Vec<f64> = (cell / 2..size - cell / 2)
+            .flat_map(|v| (cell / 2..size - cell / 2).map(move |u| (u, v)))
+            .map(|(u, v)| warped[v * size + u] as f64)
+            .collect();
+        let n = inner.len().max(1) as f64;
+        let mean = inner.iter().sum::<f64>() / n;
+        let std_dev = (inner.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n).sqrt();
+        if std_dev < p.min_otsu_std_dev {
+            return vec![u8::from(mean > 127.0); cells * cells];
+        }
+
+        let Some(img) = image::GrayImage::from_raw(size as u32, size as u32, warped) else {
+            return vec![0; cells * cells];
+        };
+        let (_, binary) = cv_imgproc::threshold_otsu(&img, 255, cv_imgproc::ThresholdType::Binary);
+        let binary = binary.into_raw();
+        let span = cell - 2 * margin;
+        let mut bits = vec![0u8; cells * cells];
+        for y in 0..cells {
+            for x in 0..cells {
+                let mut white = 0usize;
+                for v in y * cell + margin..y * cell + margin + span {
+                    for u in x * cell + margin..x * cell + margin + span {
+                        white += usize::from(binary[v * size + u] != 0);
+                    }
+                }
+                bits[y * cells + x] = u8::from(white > span * span / 2);
+            }
+        }
+        bits
+    }
+
+    /// The payload cells of `bits` (border excluded) as a code.
+    fn payload(&self, bits: &[u8]) -> u64 {
+        let side = self.dictionary.marker_size();
+        let border = self.params.marker_border_bits;
+        let cells = side + 2 * border;
+        let mut code = 0u64;
+        for y in 0..side {
+            for x in 0..side {
+                if bits[(y + border) * cells + x + border] != 0 {
+                    code |= 1u64 << (y * side + x);
+                }
+            }
+        }
+        code
+    }
+
+    /// `CORNER_REFINE_SUBPIX`: `cornerSubPix` in a half-window of
+    /// `relative_corner_refinement_win_size` marker cells, clamped to
+    /// `1..=corner_refinement_win_size` pixels. Like OpenCV, a corner that
+    /// moves further than the window keeps its unrefined position.
+    fn refine_subpix(
+        &self,
+        gray: &[u8],
+        w: usize,
+        h: usize,
+        markers: &mut [DetectedMarker],
+    ) -> Result<()> {
+        let p = &self.params;
+        let Some(img) = image::GrayImage::from_raw(w as u32, h as u32, gray.to_vec()) else {
+            return Ok(());
+        };
+        let cells = (self.dictionary.marker_size() + 2 * p.marker_border_bits) as f64;
+        for m in markers {
+            let module = perimeter(&m.corners) as f64 / (4.0 * cells);
+            let win = ((p.relative_corner_refinement_win_size * module).round() as usize)
+                .clamp(1, p.corner_refinement_win_size);
+            let mut pts = m.corners.map(|(x, y)| Point2::new(x, y));
+            corner_subpix(
+                &img,
+                &mut pts,
+                win,
+                p.corner_refinement_max_iterations,
+                p.corner_refinement_min_accuracy,
+            )?;
+            for (c, q) in m.corners.iter_mut().zip(pts) {
+                if (q.x - c.0).abs() <= win as f64 && (q.y - c.1).abs() <= win as f64 {
+                    *c = (q.x, q.y);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -331,7 +872,9 @@ pub fn estimate_marker_pose(
 /// Draw a marker image for printing.
 ///
 /// Generates a `size x size` single-channel `u8` tensor containing the marker pattern
-/// with a 1-cell black border around the payload bits. The tensor has shape (1, size, size).
+/// with a 1-cell black border around the payload bits, identical to OpenCV's
+/// `generateImageMarker(dictionary, id, size, img, 1)`. The tensor has shape
+/// (1, size, size). The marker has no white margin; detection needs one.
 pub fn draw_marker(dictionary: ArucoDictionary, id: usize, size: usize) -> Result<CpuTensor<u8>> {
     if size < 6 {
         return Err(Error::InvalidInput(
@@ -347,33 +890,22 @@ pub fn draw_marker(dictionary: ArucoDictionary, id: usize, size: usize) -> Resul
         .copied()
         .ok_or_else(|| Error::InvalidInput(format!("marker id {} out of range", id)))?;
 
-    let mut pixels = vec![255u8; size * size];
-
-    for gy in 0..grid {
-        for gx in 0..grid {
-            let is_border = gy < border_bits
-                || gx < border_bits
-                || gy >= grid - border_bits
-                || gx >= grid - border_bits;
-            let is_black = if is_border {
-                true
-            } else {
-                let py = gy - border_bits;
-                let px = gx - border_bits;
-                let bit_idx = py * payload_bits + px;
-                ((code >> bit_idx) & 1) == 1
-            };
-            let val = if is_black { 0u8 } else { 255u8 };
-
-            // Fill the cell region in the output image.
-            let x0 = gx * size / grid;
-            let x1 = (gx + 1) * size / grid;
-            let y0 = gy * size / grid;
-            let y1 = (gy + 1) * size / grid;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    pixels[y * size + x] = val;
-                }
+    // OpenCV's `generateImageMarker`: the cell grid resized to `size` with
+    // nearest-neighbour sampling, pixel `x` showing cell `floor(x * grid / size)`;
+    // payload bit 1 is white.
+    let white = |gx: usize, gy: usize| {
+        let border = |g: usize| g < border_bits || g >= grid - border_bits;
+        if border(gx) || border(gy) {
+            return false;
+        }
+        let bit_idx = (gy - border_bits) * payload_bits + (gx - border_bits);
+        (code >> bit_idx) & 1 == 1
+    };
+    let mut pixels = vec![0u8; size * size];
+    for y in 0..size {
+        for x in 0..size {
+            if white(x * grid / size, y * grid / size) {
+                pixels[y * size + x] = 255;
             }
         }
     }
@@ -458,183 +990,140 @@ fn adaptive_threshold(gray: &[u8], w: usize, h: usize, win: usize, constant: f64
     .into_raw()
 }
 
-/// Bounding-box candidate from connected-component analysis on the binary image.
-#[derive(Clone, Copy)]
-struct Candidate {
-    min_x: usize,
-    min_y: usize,
-    max_x: usize,
-    max_y: usize,
-}
-
-/// Find square-ish dark blobs as marker candidates.
-fn find_candidates(
+/// OpenCV's `_findMarkerContours` on one thresholded image: the contours
+/// whose length is within the perimeter limits and whose polygon
+/// approximation is a convex quadrilateral with no side shorter than
+/// `min_corner_distance_rate` of the contour. (The border distance is checked
+/// later, on the candidate representing each group, as in OpenCV 4.7+.)
+fn find_marker_quads(
     binary: &[u8],
     w: usize,
     h: usize,
-    min_perim: f64,
-    max_perim: f64,
-) -> Vec<Candidate> {
-    let mut visited = vec![false; w * h];
+    p: &DetectorParameters,
+) -> Vec<[(f64, f64); 4]> {
+    let max_side = w.max(h) as f64;
+    let min_perimeter = (p.min_marker_perimeter_rate * max_side) as usize;
+    let max_perimeter = (p.max_marker_perimeter_rate * max_side) as usize;
     let mut out = Vec::new();
-
-    for y0 in 0..h {
-        for x0 in 0..w {
-            let idx0 = y0 * w + x0;
-            if visited[idx0] || binary[idx0] == 0 {
-                continue;
-            }
-            visited[idx0] = true;
-            let mut q = VecDeque::new();
-            q.push_back((x0, y0));
-            let mut count = 0usize;
-            let (mut mnx, mut mny, mut mxx, mut mxy) = (x0, y0, x0, y0);
-
-            while let Some((cx, cy)) = q.pop_front() {
-                count += 1;
-                mnx = mnx.min(cx);
-                mny = mny.min(cy);
-                mxx = mxx.max(cx);
-                mxy = mxy.max(cy);
-                for (dx, dy) in [(-1i32, 0), (1, 0), (0, -1), (0, 1)] {
-                    let nx = cx as i32 + dx;
-                    let ny = cy as i32 + dy;
-                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                        continue;
-                    }
-                    let (nux, nuy) = (nx as usize, ny as usize);
-                    let nidx = nuy * w + nux;
-                    if visited[nidx] || binary[nidx] == 0 {
-                        continue;
-                    }
-                    visited[nidx] = true;
-                    q.push_back((nux, nuy));
-                }
-            }
-
-            let bw = mxx - mnx + 1;
-            let bh = mxy - mny + 1;
-            let perim = 2.0 * (bw + bh) as f64;
-            if perim < min_perim || perim > max_perim {
-                continue;
-            }
-            let ratio = bw as f64 / bh as f64;
-            if !(0.5..=2.0).contains(&ratio) {
-                continue;
-            }
-            let fill = count as f64 / (bw * bh).max(1) as f64;
-            if !(0.15..=0.95).contains(&fill) {
-                continue;
-            }
-            out.push(Candidate {
-                min_x: mnx,
-                min_y: mny,
-                max_x: mxx,
-                max_y: mxy,
-            });
+    for contour in contours::find_contours_list(binary, w, h) {
+        let len = contour.len();
+        if len < min_perimeter || len > max_perimeter {
+            continue;
         }
+        let approx = contours::approx_poly_dp_closed(
+            &contour,
+            len as f64 * p.polygonal_approx_accuracy_rate,
+        );
+        if approx.len() != 4 || !contours::is_convex(&approx) {
+            continue;
+        }
+        let min_side_sq = (0..4)
+            .map(|k| {
+                let (a, b) = (approx[k], approx[(k + 1) % 4]);
+                let (dx, dy) = ((a.0 - b.0) as f64, (a.1 - b.1) as f64);
+                dx * dx + dy * dy
+            })
+            .fold(max_side * max_side, f64::min);
+        let min_corner_distance = len as f64 * p.min_corner_distance_rate;
+        if min_side_sq < min_corner_distance * min_corner_distance {
+            continue;
+        }
+        out.push([0, 1, 2, 3].map(|k| (approx[k].0 as f64, approx[k].1 as f64)));
     }
     out
 }
 
-/// Sample an NxN grid of binary values inside the bounding box.
-fn sample_grid_bits(
-    gray: &[u8],
-    stride: usize,
-    min_x: usize,
-    min_y: usize,
-    max_x: usize,
-    max_y: usize,
-    grid: usize,
-    norm_box: Option<(usize, usize, usize, usize)>,
-) -> Vec<u8> {
-    // Per-candidate normalization threshold: midpoint of the min/max gray
-    // level over the given box (defaults to the sampling box itself).
-    // `stride` is the row length (image WIDTH); the y scan must instead be
-    // clamped to the image HEIGHT, otherwise a box below y == width collapses
-    // to an empty scan and the threshold degrades to a constant.
-    let height = if stride == 0 { 0 } else { gray.len() / stride };
-    let (nx0, ny0, nx1, ny1) = norm_box.unwrap_or((min_x, min_y, max_x, max_y));
-    let mut lo = 255u8;
-    let mut hi = 0u8;
-    for y in ny0..=ny1.min(height.saturating_sub(1)) {
-        for x in nx0..=nx1 {
-            if let Some(&v) = gray.get(y * stride + x) {
-                lo = lo.min(v);
-                hi = hi.max(v);
-            }
-        }
+/// OpenCV's `_reorderCandidatesCorners`: make the corners clockwise in the
+/// image (y down) by swapping corners 1 and 3 if needed.
+fn clockwise(mut c: [(f64, f64); 4]) -> [(f64, f64); 4] {
+    let (dx1, dy1) = (c[1].0 - c[0].0, c[1].1 - c[0].1);
+    let (dx2, dy2) = (c[2].0 - c[0].0, c[2].1 - c[0].1);
+    if dx1 * dy2 - dy1 * dx2 < 0.0 {
+        c.swap(1, 3);
     }
-    let thresh = ((lo as u32 + hi as u32) / 2) as u8;
-    let bw = (max_x - min_x + 1) as f64;
-    let bh = (max_y - min_y + 1) as f64;
-    let mut bits = vec![0u8; grid * grid];
-    for gy in 0..grid {
-        for gx in 0..grid {
-            let x0 = min_x as f64 + gx as f64 * bw / grid as f64;
-            let x1 = min_x as f64 + (gx + 1) as f64 * bw / grid as f64;
-            let y0 = min_y as f64 + gy as f64 * bh / grid as f64;
-            let y1 = min_y as f64 + (gy + 1) as f64 * bh / grid as f64;
-            let (mut black, mut total) = (0usize, 0usize);
-            let sx0 = x0.floor().max(0.0) as usize;
-            let sx1 = x1.ceil() as usize;
-            let sy0 = y0.floor().max(0.0) as usize;
-            let sy1 = y1.ceil() as usize;
-            for y in sy0..sy1 {
-                for x in sx0..sx1 {
-                    total += 1;
-                    if gray.get(y * stride + x).copied().unwrap_or(255) < thresh {
-                        black += 1;
-                    }
-                }
-            }
-            bits[gy * grid + gx] = if black * 2 >= total.max(1) { 1 } else { 0 };
-        }
-    }
-    bits
+    c
 }
 
-/// Check that the outermost ring of grid cells is all black (1).
-fn border_is_black(bits: &[u8], grid: usize) -> bool {
-    for i in 0..grid {
-        if bits[i] == 0 || bits[(grid - 1) * grid + i] == 0 {
-            return false;
-        }
-        if bits[i * grid] == 0 || bits[i * grid + (grid - 1)] == 0 {
-            return false;
-        }
-    }
-    true
+/// Sum of the side lengths, in `f32` like OpenCV's `MarkerCandidateTree`.
+fn perimeter(c: &[(f64, f64); 4]) -> f32 {
+    (0..4)
+        .map(|k| {
+            let (dx, dy) = (c[k].0 - c[(k + 1) % 4].0, c[k].1 - c[(k + 1) % 4].1);
+            (dx as f32 * dx as f32 + dy as f32 * dy as f32).sqrt()
+        })
+        .sum()
 }
 
-/// Extract the inner payload bits as a u64 bitmask.
-fn extract_payload(bits: &[u8], payload_bits: usize, border_bits: usize) -> u64 {
-    let grid = payload_bits + 2 * border_bits;
-    let mut code = 0u64;
-    for y in 0..payload_bits {
-        for x in 0..payload_bits {
-            if bits[(y + border_bits) * grid + (x + border_bits)] != 0 {
-                code |= 1u64 << (y * payload_bits + x);
+/// OpenCV's `getAverageDistance` (in `f32`): root-mean-square corner
+/// distance of two quads, minimised over the four cyclic corner
+/// correspondences.
+fn average_corner_distance(a: &[(f64, f64); 4], b: &[(f64, f64); 4]) -> f32 {
+    (0..4)
+        .map(|shift| {
+            (0..4)
+                .map(|k| {
+                    let (p, q) = (a[(k + shift) % 4], b[k]);
+                    let (dx, dy) = ((p.0 - q.0) as f32, (p.1 - q.1) as f32);
+                    dx * dx + dy * dy
+                })
+                .sum::<f32>()
+                / 4.0
+        })
+        .fold(f32::MAX, f32::min)
+        .sqrt()
+}
+
+/// OpenCV's `checkMarker1InMarker2`: every corner of `inner` lies in (or on)
+/// the clockwise convex quad `outer`.
+fn quad_inside_quad(inner: &[(f64, f64); 4], outer: &[(f64, f64); 4]) -> bool {
+    inner.iter().all(|&(x, y)| {
+        (0..4).all(|k| {
+            let (a, b) = (outer[k], outer[(k + 1) % 4]);
+            (b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0) >= 0.0
+        })
+    })
+}
+
+/// OpenCV's `_getBorderErrors`: white cells in the border ring.
+fn border_errors(bits: &[u8], side: usize, border: usize) -> usize {
+    let cells = side + 2 * border;
+    let mut errors = 0;
+    for y in 0..cells {
+        for x in 0..cells {
+            let in_border = y < border || x < border || y >= cells - border || x >= cells - border;
+            if in_border && bits[y * cells + x] != 0 {
+                errors += 1;
             }
         }
     }
-    code
+    errors
 }
 
-/// Try all 4 rotations and find the best-matching dictionary entry.
-/// Returns `(id, rotation, hamming_distance)`.
-fn decode_with_rotations(code: u64, dict: &[u64], side: usize) -> (usize, usize, u32) {
-    let rots = rotate_variants(code, side);
-    let mut best = (0usize, 0usize, u32::MAX);
-    for (id, &dc) in dict.iter().enumerate() {
-        for (rot, &rc) in rots.iter().enumerate() {
-            let dist = (rc ^ dc).count_ones();
-            if dist < best.2 {
-                best = (id, rot, dist);
-            }
-        }
-    }
-    best
+/// OpenCV's `Dictionary::identify`: the first marker id (in dictionary
+/// order) whose closest rotation is within `max_correction` bits of the
+/// payload, with that rotation as quarter turns counter-clockwise of the
+/// marker in the image.
+fn identify_payload(
+    payload: u64,
+    codes: &[u64],
+    side: usize,
+    max_correction: u32,
+) -> Option<(usize, usize)> {
+    // `rotate_90` turns clockwise: if the payload turned clockwise `r` times
+    // equals the code, the image shows the marker turned counter-clockwise
+    // `r` times, which is OpenCV's rotation `r`.
+    let rotations = rotate_variants(payload, side);
+    codes.iter().enumerate().find_map(|(id, &code)| {
+        let (dist, rot) = rotations
+            .iter()
+            .enumerate()
+            .map(|(r, &rc)| ((rc ^ code).count_ones(), r))
+            .fold(
+                (u32::MAX, 0),
+                |best, cur| if cur.0 < best.0 { cur } else { best },
+            );
+        (dist <= max_correction).then_some((id, rot))
+    })
 }
 
 fn rotate_variants(code: u64, side: usize) -> [u64; 4] {
@@ -660,12 +1149,15 @@ fn rotate_90(code: u64, side: usize) -> u64 {
     out
 }
 
-/// Canonical marker codes from the embedded OpenCV-compatible tables.
+/// Marker codes from the embedded OpenCV tables: bit `y * side + x` is
+/// payload cell `(x, y)`, 1 for white, as OpenCV's `getBitsFromByteList`.
 ///
-/// Previously these were generated by an LCG filtered by density and
-/// rotation-canonicalisation — such codes were NOT byte-compatible with
-/// published cv::aruco markers, so printed markers went undetected and
-/// generated ones were unreadable by other tools.
+/// The tables store each rotation-0 code row-major and MSB-first, with the
+/// bits of a last, partial byte right-aligned (36 bits of a 6x6 marker end in
+/// the low nibble of byte 4). A previous revision read the bits into the code
+/// in reverse (turning every marker by 180 degrees), took the last byte's
+/// bits from the high end, and drew bit 1 as black, so its markers were not
+/// OpenCV's.
 fn dictionary_codes(dict: ArucoDictionary) -> Vec<u64> {
     let side = dict.marker_size();
     let bits = side * side;
@@ -678,14 +1170,15 @@ fn dictionary_codes(dict: ArucoDictionary) -> Vec<u64> {
         _ => (&crate::aruco_tables::DICT_6X6_BYTES, 4 * nb),
     };
 
-    // Rotation-0 bytes of each id; bits MSB-first, row-major.
+    let last_byte_bits = bits - 8 * (nb - 1);
     let mut out = Vec::with_capacity(count);
     for id in 0..count {
         let base = id * stride;
         let mut code = 0u64;
         for b in 0..bits {
             let byte = table[base + b / 8];
-            code = (code << 1) | ((byte >> (7 - (b % 8))) & 1) as u64;
+            let in_byte = if b / 8 == nb - 1 { last_byte_bits } else { 8 };
+            code |= u64::from((byte >> (in_byte - 1 - b % 8)) & 1) << b;
         }
         out.push(code);
     }
@@ -1197,23 +1690,5 @@ mod tests {
             7.0,
         );
         assert_eq!(got, expect.into_raw());
-    }
-
-    #[test]
-    fn sample_grid_bits_clamps_norm_scan_to_height() {
-        // Tall image (width 4, height 20): a normalization box with y >= width
-        // must still be scanned. The old code clamped ny1 to `stride-1` (the
-        // WIDTH), emptying the scan and forcing a constant 127 threshold.
-        let (w, h) = (4usize, 20usize);
-        let mut gray = vec![90u8; w * h];
-        for y in 10..=14 {
-            for x in 0..w {
-                gray[y * w + x] = 100;
-            }
-        }
-        let bits = sample_grid_bits(&gray, w, 0, 10, 3, 14, 4, Some((0, 10, 3, 14)));
-        // Correct scan -> threshold is (100+100)/2 = 100, so every pixel equals
-        // it and no cell is classified black.
-        assert_eq!(bits, vec![0u8; 16]);
     }
 }

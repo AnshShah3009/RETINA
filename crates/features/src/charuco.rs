@@ -333,11 +333,11 @@ impl CharucoDetector {
     /// border filtering, `cornerSubPix` refinement, the `min_markers`
     /// filter and the board check.
     ///
-    /// Marker corners come from [`ArucoDetector`], which reports each
-    /// marker's axis-aligned bounding box in image order (top-left first),
-    /// so the board must appear upright, and under perspective the marker
-    /// corners — and the interpolated corners — are approximate until the
-    /// sub-pixel refinement.
+    /// Marker corners come from [`ArucoDetector`] in each marker's own
+    /// orientation, so the board may appear at any in-plane rotation. Without
+    /// marker corner refinement they are OpenCV's polygon vertices (up to
+    /// about a pixel inside the true corners), so the interpolated corners
+    /// are approximate until the sub-pixel refinement.
     pub fn detect<T: Float>(&self, image: &CpuTensor<T>) -> Result<CharucoCorners> {
         let (gray, w, h) = tensor_to_gray(image)?;
         let (markers, rejected) = self.aruco_detector.detect_gray_with_rejected(&gray, w, h)?;
@@ -894,9 +894,23 @@ mod tests {
         /// Board centred in an 800x600 image, tilted `rx` degrees about the
         /// x axis and `ry` about the y axis, `distance` units away.
         fn tilted(board: &CharucoBoard, rx: f64, ry: f64, distance: f64, dist: Distortion) -> Self {
+            Self::posed(board, rx, ry, 0.0, distance, dist)
+        }
+
+        /// [`Scene::tilted`] with the board first turned `rz` degrees in its
+        /// own plane (clockwise in the image).
+        fn posed(
+            board: &CharucoBoard,
+            rx: f64,
+            ry: f64,
+            rz: f64,
+            distance: f64,
+            dist: Distortion,
+        ) -> Self {
             let k = Matrix3::new(900.0, 0.0, 400.0, 0.0, 900.0, 300.0, 0.0, 0.0, 1.0);
             let r = (Rotation3::from_axis_angle(&Vector3::x_axis(), rx.to_radians())
-                * Rotation3::from_axis_angle(&Vector3::y_axis(), ry.to_radians()))
+                * Rotation3::from_axis_angle(&Vector3::y_axis(), ry.to_radians())
+                * Rotation3::from_axis_angle(&Vector3::z_axis(), rz.to_radians()))
             .into_inner();
             let centre = Vector3::new(
                 board.squares_x as f64 * board.square_length / 2.0,
@@ -1013,7 +1027,7 @@ mod tests {
                 if flip == Some((id, gx - 1, gy - 1)) {
                     bit ^= 1;
                 }
-                if bit == 1 { 0.0 } else { 1.0 }
+                if bit == 1 { 1.0 } else { 0.0 }
             };
             let mut pixels = vec![0.0f32; self.width * self.height];
             for y in 0..self.height {
@@ -1170,18 +1184,27 @@ mod tests {
         );
     }
 
-    /// End to end on rendered boards: every corner is found with its id, and
-    /// `cornerSubPix` brings both interpolation modes onto the true corner
-    /// even though the detector's marker corners are bounding boxes. The
-    /// first view is turned 22 degrees about the vertical axis; in the second
-    /// (8 degrees about the horizontal axis) the ArUco detector also reports
-    /// marker 5 twice and a stray id 17, which the board does not have.
+    /// End to end on rendered boards: every marker is found once with its
+    /// id and no stray ids, and every corner is found with its id, by both
+    /// interpolation modes, from 8 up to 55 degrees of tilt. (Before the
+    /// ArUco detector followed OpenCV it reported bounding boxes, found 6 of
+    /// the 17 markers at (15, -20) degrees and none at (25, -35), and
+    /// reported marker 5 twice plus a stray id 17 at (8, 0).)
     #[test]
     fn detect_finds_every_corner_of_a_tilted_board() {
         let board = test_board();
-        for (rx, ry, expected_markers) in [(0.0, 22.0, 17), (8.0, 0.0, 19)] {
+        for (rx, ry) in [
+            (0.0, 22.0),
+            (8.0, 0.0),
+            (15.0, -20.0),
+            (25.0, -35.0),
+            (40.0, 0.0),
+            (0.0, 55.0),
+            (30.0, 45.0),
+        ] {
             let scene = Scene::tilted(&board, rx, ry, 11.0, Distortion::none());
             let truth = scene.corner_truth(&board);
+            let exact = scene.exact_markers(&board);
             let image = scene.render(&board, None);
 
             let markers = ArucoDetector::new(ArucoDictionary::Dict4x4_50)
@@ -1189,9 +1212,20 @@ mod tests {
                 .unwrap();
             let mut ids: Vec<usize> = markers.iter().map(|m| m.id).collect();
             ids.sort_unstable();
-            ids.dedup();
-            assert!(ids.starts_with(&(0..17).collect::<Vec<_>>()), "ids {ids:?}");
-            assert_eq!(markers.len(), expected_markers, "ids {ids:?}");
+            assert_eq!(ids, (0..17).collect::<Vec<_>>(), "rx {rx} ry {ry}");
+            // Marker corners are the polygon vertices: OpenCV's, within about
+            // a pixel of the true corners, in the marker's own order.
+            let marker_max = markers
+                .iter()
+                .flat_map(|m| {
+                    let e = exact[m.id].corners;
+                    (0..4).map(move |k| (m.corners[k].0 - e[k].0).hypot(m.corners[k].1 - e[k].1))
+                })
+                .fold(0.0, f64::max);
+            assert!(
+                marker_max < 1.6,
+                "rx {rx} ry {ry}: marker corner error {marker_max}"
+            );
 
             let local = detector(&board, CharucoParameters::default());
             let pose = detector(&board, with_camera(&scene, None));
@@ -1216,6 +1250,24 @@ mod tests {
                 );
                 assert!(mean < 0.2 && max < 0.4, "{name}: mean {mean}, max {max}");
             }
+        }
+    }
+
+    /// Marker corners follow each marker's own orientation, so a board turned
+    /// in its plane (and tilted) gives every corner its own id.
+    #[test]
+    fn detect_handles_a_board_turned_in_its_plane() {
+        let board = test_board();
+        for (rx, ry, rz) in [(20.0, 0.0, 90.0), (0.0, 30.0, 180.0), (-25.0, 15.0, 270.0)] {
+            let scene = Scene::posed(&board, rx, ry, rz, 12.0, Distortion::none());
+            let truth = scene.corner_truth(&board);
+            let image = scene.render(&board, None);
+            let found = detector(&board, CharucoParameters::default())
+                .detect(&image)
+                .unwrap();
+            assert_eq!(found.ids, (0..24).collect::<Vec<i32>>(), "rz {rz}");
+            let (mean, max) = corner_errors(&found, &truth);
+            assert!(mean < 0.2 && max < 0.4, "rz {rz}: mean {mean}, max {max}");
         }
     }
 
@@ -1307,11 +1359,20 @@ mod tests {
     }
 
     /// A marker with one damaged payload bit is rejected by the ArUco
-    /// detector; `try_refine_markers` finds the rejected candidate where the
-    /// board says marker 8 belongs and accepts its 1-bit code distance.
+    /// detector (4x4 dictionaries correct no bits at the default
+    /// `error_correction_rate`); `try_refine_markers` finds the rejected
+    /// candidate where the board says marker 8 belongs and accepts its 1-bit
+    /// code distance.
+    ///
+    /// The markers here are half a square wide. With the test board's 3/4
+    /// the white square around the marker is close enough to be grouped with
+    /// it, and the group's rejected candidate is the larger white square,
+    /// which does not match the marker's projected corners; OpenCV 4.13 does
+    /// not recover the marker on that render either.
     #[test]
     fn try_refine_markers_recovers_a_damaged_marker() {
-        let board = test_board();
+        let mut board = test_board();
+        board.marker_length = 0.5;
         let scene = Scene::tilted(&board, 0.0, 10.0, 11.0, Distortion::none());
         let truth = scene.corner_truth(&board);
         let image = scene.render(&board, Some((8, 1, 2)));
