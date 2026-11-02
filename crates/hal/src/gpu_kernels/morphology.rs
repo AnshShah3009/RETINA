@@ -16,9 +16,16 @@ struct MorphParams {
     kw: u32,
     kh: u32,
     typ: u32,
-    iterations: u32,
+    /// Pixels in the whole tensor, every plane.
+    len: u32,
 }
 
+/// Erode, dilate, open or close a u8 image on the GPU.
+///
+/// Bit-identical to the CPU backend: anchor at `(kw / 2, kh / 2)`, replicate
+/// border, every nonzero mask byte a live tap, and each CHW plane processed on
+/// its own (see `shaders/morphology.wgsl`). Both tensors stay on the device;
+/// the mask is bound as packed bytes, not read back.
 pub fn morphology(
     ctx: &GpuContext,
     input: &Tensor<u8, GpuStorage<u8>>,
@@ -26,13 +33,28 @@ pub fn morphology(
     kernel: &Tensor<u8, GpuStorage<u8>>,
     iterations: u32,
 ) -> Result<Tensor<u8, GpuStorage<u8>>> {
-    if iterations == 0 {
+    let len = input.shape.len();
+    if iterations == 0 || len == 0 {
         return Ok(input.clone());
     }
 
-    let len = input.shape.len();
     let (h, w) = input.shape.hw();
     let (kh, kw) = kernel.shape.hw();
+    if kernel.storage.len() < kh * kw {
+        return Err(crate::Error::InvalidInput(format!(
+            "morphology kernel shape is {kh}x{kw} but its storage holds {} bytes",
+            kernel.storage.len()
+        )));
+    }
+    if input.storage.len() < len {
+        return Err(crate::Error::InvalidInput(format!(
+            "morphology input shape needs {len} bytes but its storage holds {}",
+            input.storage.len()
+        )));
+    }
+    let len_u32 = u32::try_from(len).map_err(|_| {
+        crate::Error::InvalidInput(format!("morphology input of {len} pixels exceeds u32"))
+    })?;
     let byte_size = (len.div_ceil(4) * 4) as u64;
 
     // Handle Open/Close
@@ -57,19 +79,21 @@ pub fn morphology(
         None
     };
 
-    // Kernel mask handling
-    let k_data_u8 = kernel.storage.as_slice().ok_or_else(|| {
-        crate::Error::NotSupported("GPU Morphology requires CPU-based kernel mask".into())
-    })?;
-    let k_data_u32: Vec<u32> = k_data_u8.iter().map(|&v| v as u32).collect();
-
-    let k_buf = ctx
-        .device
-        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Morph Kernel Mask"),
-            contents: bytemuck::cast_slice(&k_data_u32),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+    // The mask is bound where it already lives. An empty mask (`kw` or `kh`
+    // 0) is never read, but the binding still needs a nonempty buffer.
+    let empty_mask;
+    let k_buf: &wgpu::Buffer = if kernel.storage.buffer().size() >= 4 {
+        kernel.storage.buffer()
+    } else {
+        empty_mask = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Morph Empty Mask"),
+                contents: &[0u8; 4],
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        &empty_mask
+    };
 
     let params = MorphParams {
         width: w as u32,
@@ -77,7 +101,7 @@ pub fn morphology(
         kw: kw as u32,
         kh: kh as u32,
         typ: if typ == MorphologyType::Erode { 0 } else { 1 },
-        iterations: 1,
+        len: len_u32,
     };
 
     let params_buffer = ctx
@@ -136,9 +160,8 @@ pub fn morphology(
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
-            let wg_x = (w as u32).div_ceil(4).div_ceil(16);
-            let wg_y = (h as u32).div_ceil(16);
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
+            let (x, y, z) = super::dispatch_1d(len_u32.div_ceil(4), 64);
+            pass.dispatch_workgroups(x, y, z);
         }
         ctx.submit(encoder);
 

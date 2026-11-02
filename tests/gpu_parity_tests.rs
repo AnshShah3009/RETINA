@@ -850,7 +850,9 @@ mod sweep {
         assert!(worst < 1e-3, "subtract diverges: worst {worst}");
     }
 
-    /// Morphology, erode and dilate with a 3x3 kernel.
+    /// Morphology, erode and dilate. The kernel tensor is shaped `(3, 3, 1)`,
+    /// so both backends read its first plane, a 3x1 column `[0, 1, 0]`.
+    /// `crates/hal/tests/gpu_morphology.rs` covers the shapes in depth.
     #[test]
     fn morphology_matches() {
         use cv_hal::context::MorphologyType;
@@ -889,7 +891,7 @@ mod sweep {
                         cs.len()
                     );
                 }
-                Err(e) => println!("  morphology {name}: GPU reports {e}"),
+                Err(e) => panic!("GPU morphology {name} failed: {e}"),
             }
         }
     }

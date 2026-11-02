@@ -77,14 +77,14 @@ remaining B source, `spatial.rs`, is not reachable through `dispatch`.
 
 ## Summary
 
-87 integer divisions or modulos, spread over 33 of the 114 sources that naga
-accepts (66 table rows):
+92 integer divisions or modulos, spread over 34 of the 115 sources that naga
+accepts (70 table rows):
 
 | class | sites | rows | before this audit |
 | --- | ---: | ---: | --- |
-| A, nonzero constant | 55 | 36 | 55 |
+| A, nonzero constant | 57 | 37 | 55 |
 | B, host-guaranteed | 2 | 2 | 4 (`feature_collection_f32.wgsl` moved to S) |
-| S, shader-proven | 30 | 28 | 8 |
+| S, shader-proven | 33 | 31 | 8 |
 | C, needs a guard | 0 | 0 | 20 |
 
 ### Guards added
@@ -154,6 +154,10 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
 | `crates/hal/shaders/hough.wgsl` | `/` | `params.width` | 1 | S | as above |
 | `crates/hal/shaders/lbvh_build.wgsl` | `/` | `2` | 3 | A | literal |
 | `crates/hal/shaders/matching.wgsl` | `/` | `4u` | 1 | A | literal |
+| `crates/hal/shaders/morphology.wgsl` | `%` | `params.width` | 1 | S | `main` returns when `width == 0` or `height == 0` before any division (guard added when the shader was rewritten) |
+| `crates/hal/shaders/morphology.wgsl` | `/` | `2u` | 2 | A | literal (kernel anchor) |
+| `crates/hal/shaders/morphology.wgsl` | `/` | `max` | 1 | S | `idx / max(plane_size, 1u)`: at least 1 by construction |
+| `crates/hal/shaders/morphology.wgsl` | `/` | `params.width` | 1 | S | as `% params.width` |
 | `crates/hal/shaders/remap.wgsl` | `%` | `2 * n - 2` | 1 | S | Reflect101 branch runs only for `n != 1`. With `n >= 1` (guard added), `2n - 2 >= 2`. |
 | `crates/hal/shaders/remap.wgsl` | `%` | `2 * n` | 1 | S | Reflect branch, `n >= 1` (guard added), even |
 | `crates/hal/shaders/remap.wgsl` | `%` | `i32(len)` | 1 | S | Wrap branch, `n >= 1` (guard added) |
@@ -192,18 +196,21 @@ integer divisions, read from the text:
 
 | source | error | integer divisions |
 | --- | --- | --- |
-| `crates/hal/shaders/morphology.wgsl` | `var val = if (...) { 255u } else { 0u };` is not WGSL | `params.kw / 2u`, `params.kh / 2u`, `(params.width + 3u) / 4u`, all A |
 | `crates/hal/shaders/threshold_f16.wgsl` | `bitcast<f16>(f32)` | none |
 | `crates/hal/src/gpu_kernels/icp.rs#colored_icp_kernel` | passes a runtime-sized array by value | none |
 | `crates/hal/src/gpu_kernels/icp.rs#compute_color_gradients_kernel` | same | `idx % width`, `idx / width`. Would be C: `width` is a raw uniform with no guard. |
 | `crates/hal/src/gpu_kernels/icp.rs#generalized_icp_kernel` | same | none |
 | `crates/hal/src/gpu_kernels/icp.rs#gicp_accumulate_kernel` | atomic op on a non-atomic | none |
 
-`morphology.wgsl` is the shader behind `GpuContext::morphology`
-(`gpu_kernels/morphology.rs`), so the GPU erode/dilate path cannot create its
-pipeline. No test reaches it: the morphology tests all run on the CPU backend.
 `threshold_f16.wgsl` and the four ICP strings are never compiled. `perf_tests`
 only reads the ICP strings.
+
+`morphology.wgsl` used to be on this list: `var val = if (...) { 255u } else
+{ 0u };` is not WGSL, so `GpuContext::morphology` could never create its
+pipeline, and no test reached it. The shader was rewritten to match the CPU
+backend (replicate border, packed mask read on the device, CHW planes, dense
+output words) and `crates/hal/tests/gpu_morphology.rs` compares the two byte
+for byte. Its divisions are in the table above.
 
 ## Signed modulo of negative operands
 
