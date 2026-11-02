@@ -40,7 +40,8 @@ mod detector_tests;
 // Dictionary
 // ---------------------------------------------------------------------------
 
-/// Predefined ArUco dictionaries.
+/// Predefined ArUco dictionaries: OpenCV's `DICT_4X4_50` .. `DICT_6X6_250`
+/// and its AprilTag dictionaries `DICT_APRILTAG_*`.
 ///
 /// Each variant encodes a marker bit-grid size and a dictionary size (number of
 /// distinct markers).
@@ -64,15 +65,27 @@ pub enum ArucoDictionary {
     Dict6x6_100,
     /// 6x6 grid, 250 markers
     Dict6x6_250,
+    /// AprilTag 16h5 (4x4 grid, 30 markers), OpenCV's `DICT_APRILTAG_16h5`
+    AprilTag16h5,
+    /// AprilTag 25h9 (5x5 grid, 35 markers), OpenCV's `DICT_APRILTAG_25h9`
+    AprilTag25h9,
+    /// AprilTag 36h10 (6x6 grid, 2320 markers), OpenCV's `DICT_APRILTAG_36h10`
+    AprilTag36h10,
+    /// AprilTag 36h11 (6x6 grid, 587 markers), OpenCV's `DICT_APRILTAG_36h11`
+    AprilTag36h11,
 }
 
 impl ArucoDictionary {
     /// Returns the side length of the inner bit grid (4, 5, or 6).
     pub fn marker_size(&self) -> usize {
         match self {
-            Self::Dict4x4_50 | Self::Dict4x4_100 | Self::Dict4x4_250 => 4,
-            Self::Dict5x5_50 | Self::Dict5x5_100 | Self::Dict5x5_250 => 5,
-            Self::Dict6x6_50 | Self::Dict6x6_100 | Self::Dict6x6_250 => 6,
+            Self::Dict4x4_50 | Self::Dict4x4_100 | Self::Dict4x4_250 | Self::AprilTag16h5 => 4,
+            Self::Dict5x5_50 | Self::Dict5x5_100 | Self::Dict5x5_250 | Self::AprilTag25h9 => 5,
+            Self::Dict6x6_50
+            | Self::Dict6x6_100
+            | Self::Dict6x6_250
+            | Self::AprilTag36h10
+            | Self::AprilTag36h11 => 6,
         }
     }
 
@@ -82,6 +95,10 @@ impl ArucoDictionary {
             Self::Dict4x4_50 | Self::Dict5x5_50 | Self::Dict6x6_50 => 50,
             Self::Dict4x4_100 | Self::Dict5x5_100 | Self::Dict6x6_100 => 100,
             Self::Dict4x4_250 | Self::Dict5x5_250 | Self::Dict6x6_250 => 250,
+            Self::AprilTag16h5 => 30,
+            Self::AprilTag25h9 => 35,
+            Self::AprilTag36h10 => 2320,
+            Self::AprilTag36h11 => 587,
         }
     }
 
@@ -94,6 +111,11 @@ impl ArucoDictionary {
             Self::Dict5x5_250 => 2,
             Self::Dict6x6_50 => 6,
             Self::Dict6x6_100 | Self::Dict6x6_250 => 5,
+            // OpenCV builds its AprilTag dictionaries with no correction:
+            // only exact codes are accepted.
+            Self::AprilTag16h5 | Self::AprilTag25h9 | Self::AprilTag36h10 | Self::AprilTag36h11 => {
+                0
+            }
         }
     }
 
@@ -891,8 +913,10 @@ pub fn draw_marker(dictionary: ArucoDictionary, id: usize, size: usize) -> Resul
         .ok_or_else(|| Error::InvalidInput(format!("marker id {} out of range", id)))?;
 
     // OpenCV's `generateImageMarker`: the cell grid resized to `size` with
-    // nearest-neighbour sampling, pixel `x` showing cell `floor(x * grid / size)`;
-    // payload bit 1 is white.
+    // `INTER_NEAREST`, pixel `x` showing cell `floor(x * (1 / (size / grid)))`
+    // in `f64` (`resizeNN`). That is not always `x * grid / size`: the
+    // rounded scale puts some cell boundaries one pixel later. Payload bit 1
+    // is white.
     let white = |gx: usize, gy: usize| {
         let border = |g: usize| g < border_bits || g >= grid - border_bits;
         if border(gx) || border(gy) {
@@ -901,10 +925,14 @@ pub fn draw_marker(dictionary: ArucoDictionary, id: usize, size: usize) -> Resul
         let bit_idx = (gy - border_bits) * payload_bits + (gx - border_bits);
         (code >> bit_idx) & 1 == 1
     };
+    let inv_scale = 1.0 / (size as f64 / grid as f64);
+    let cell: Vec<usize> = (0..size)
+        .map(|x| ((x as f64 * inv_scale).floor() as usize).min(grid - 1))
+        .collect();
     let mut pixels = vec![0u8; size * size];
     for y in 0..size {
         for x in 0..size {
-            if white(x * grid / size, y * grid / size) {
+            if white(cell[x], cell[y]) {
                 pixels[y * size + x] = 255;
             }
         }
@@ -1159,30 +1187,40 @@ fn rotate_90(code: u64, side: usize) -> u64 {
 /// bits from the high end, and drew bit 1 as black, so its markers were not
 /// OpenCV's.
 fn dictionary_codes(dict: ArucoDictionary) -> Vec<u64> {
+    use crate::aruco_tables as t;
     let side = dict.marker_size();
+    let nb = (side * side).div_ceil(8);
+    // The ArUco tables hold all four rotations of each code, the AprilTag
+    // tables only rotation 0.
+    let (table, stride): (&[u8], usize) = match dict {
+        ArucoDictionary::AprilTag16h5 => (&t::APRILTAG_16H5_BYTES, nb),
+        ArucoDictionary::AprilTag25h9 => (&t::APRILTAG_25H9_BYTES, nb),
+        ArucoDictionary::AprilTag36h10 => (&t::APRILTAG_36H10_BYTES, nb),
+        ArucoDictionary::AprilTag36h11 => (&t::APRILTAG_36H11_BYTES, nb),
+        _ => match side {
+            4 => (&t::DICT_4X4_BYTES, 4 * nb),
+            5 => (&t::DICT_5X5_BYTES, 4 * nb),
+            _ => (&t::DICT_6X6_BYTES, 4 * nb),
+        },
+    };
+    (0..dict.dict_size())
+        .map(|id| decode_code(&table[id * stride..id * stride + nb], side))
+        .collect()
+}
+
+/// One rotation-0 code in OpenCV's byte-list format (`nb` bytes, row-major,
+/// MSB-first, last partial byte right-aligned) as a code with bit
+/// `y * side + x` for cell `(x, y)`.
+fn decode_code(bytes: &[u8], side: usize) -> u64 {
     let bits = side * side;
     let nb = bits.div_ceil(8);
-    let count = dict.dict_size();
-
-    let (table, stride): (&[u8], usize) = match side {
-        4 => (&crate::aruco_tables::DICT_4X4_BYTES, 4 * nb),
-        5 => (&crate::aruco_tables::DICT_5X5_BYTES, 4 * nb),
-        _ => (&crate::aruco_tables::DICT_6X6_BYTES, 4 * nb),
-    };
-
     let last_byte_bits = bits - 8 * (nb - 1);
-    let mut out = Vec::with_capacity(count);
-    for id in 0..count {
-        let base = id * stride;
-        let mut code = 0u64;
-        for b in 0..bits {
-            let byte = table[base + b / 8];
-            let in_byte = if b / 8 == nb - 1 { last_byte_bits } else { 8 };
-            code |= u64::from((byte >> (in_byte - 1 - b % 8)) & 1) << b;
-        }
-        out.push(code);
+    let mut code = 0u64;
+    for b in 0..bits {
+        let in_byte = if b / 8 == nb - 1 { last_byte_bits } else { 8 };
+        code |= u64::from((bytes[b / 8] >> (in_byte - 1 - b % 8)) & 1) << b;
     }
-    out
+    code
 }
 
 // ---------------------------------------------------------------------------

@@ -1,12 +1,19 @@
-//! GPU-accelerated marker detection using wgpu compute shaders.
+//! GPU marker-grid scan using wgpu compute shaders.
 //!
-//! This module provides GPU acceleration for the inner loop of marker detection:
-//! - Binary grid sampling from candidate bounding boxes
-//! - Bitmask generation and rotation
-//! - Dictionary matching with confidence scoring
+//! A low-level kernel that, for caller-supplied axis-aligned candidate
+//! bounding boxes:
+//! - samples the binary cell grid (a cell is 1 when dark),
+//! - checks the border and extracts the payload,
+//! - matches it in all four rotations against caller-supplied codes.
 //!
-//! The CPU candidate finder still runs on the host; only the grid sampling
-//! and bit decoding runs on the GPU.
+//! The codes must use the kernel's convention (bit `y * side + x` set for a
+//! dark cell), the complement of [`crate::aruco::ArucoDictionary::get_marker`],
+//! where 1 is white.
+//!
+//! [`crate::markers::detect_aruco_markers`] and
+//! [`crate::markers::detect_apriltags`] do not use this kernel: they run
+//! OpenCV's `detectMarkers` pipeline ([`crate::aruco::ArucoDetector`]), which
+//! handles perspective and rotated markers that axis-aligned boxes cannot.
 
 #![allow(deprecated)]
 
@@ -21,7 +28,8 @@ use wgpu::util::DeviceExt;
 /// Global flag to enable/disable GPU marker detection at runtime.
 static USE_GPU: AtomicBool = AtomicBool::new(true);
 
-/// Enable or disable GPU marker detection globally.
+/// Set the global GPU marker flag, read back by [`is_gpu_enabled`]. The
+/// marker detectors in [`crate::markers`] run on the CPU and ignore it.
 pub fn use_gpu(enabled: bool) {
     USE_GPU.store(enabled, Ordering::Relaxed);
 }

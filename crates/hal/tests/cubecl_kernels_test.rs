@@ -1254,12 +1254,14 @@ fn advanced_depth_to_normals_point_away_from_the_camera_not_into_the_scene() {
     }
 }
 
+/// Single-window Lucas-Kanade, planar `[2, h, w]` (u plane, then v), with
+/// `A u = -sum(grad * It)`: prev(x) ~ next(x + u).
 fn cpu_lk(prev: &[f32], next: &[f32], h: usize, w: usize, window: usize) -> Vec<f32> {
     let half = window / 2;
     let mut out = vec![0.0f32; h * w * 2];
     for y in 0..h {
         for x in 0..w {
-            let o = (y * w + x) * 2;
+            let o = y * w + x;
             let border = 2 * half >= w
                 || 2 * half >= h
                 || x < half
@@ -1298,8 +1300,8 @@ fn cpu_lk(prev: &[f32], next: &[f32], h: usize, w: usize, window: usize) -> Vec<
             if det.abs() < 1e-8 {
                 continue;
             }
-            out[o] = (iyy / det) * ixt + (-ixy / det) * iyt;
-            out[o + 1] = (-ixy / det) * ixt + (ixx / det) * iyt;
+            out[o] = -((iyy / det) * ixt + (-ixy / det) * iyt);
+            out[h * w + o] = -((-ixy / det) * ixt + (ixx / det) * iyt);
         }
     }
     out
@@ -1322,30 +1324,33 @@ fn advanced_lucas_kanade_flow_matches_cpu() {
     let tp = up(&c, &prev, vec![h, w]);
     let tn = up(&c, &next, vec![h, w]);
 
-    let got = down(&c, &adv::lucas_kanade_flow(&ctx, &tp, &tn, window).unwrap());
+    let flow = adv::lucas_kanade_flow(&ctx, &tp, &tn, window).unwrap();
+    assert_eq!(flow.shape()[..], [2, h, w], "flow is planar [2, h, w]");
+    let got = down(&c, &flow);
     let want = cpu_lk(&prev, &next, h, w, window);
     assert_close("lucas-kanade flow", &got, &want, 1e-4);
 
-    // Interior pixels of an exact 1-pixel shift should recover a flow whose
-    // magnitude is 1. The *sign* of u is the opposite of the usual optical-flow
-    // convention (`It = Ix*u + Iy*v` with a positive rightward intensity step
-    // gives u = -1), and `lk_flow_kernel` is documented as exactly that
-    // structure-tensor solve with no negation, so the measured sign is -1.
-    // What this asserts is the physical content: |u| ~ 1 and v ~ 0, i.e. a
-    // genuine 1-pixel displacement recovered per pixel.
+    // Interior pixels of a 1-pixel shift to the right recover a flow whose
+    // magnitude matches the reference, with u > 0: prev(x) ~ next(x + u). The
+    // kernel used to return the negated flow (u ~ -1 here), interleaved per
+    // pixel.
     let half = window / 2;
+    let plane = h * w;
     let mut checked = 0;
+    let mut u_sum = 0.0f32;
     for y in half..h - half {
         for x in half..w - half {
-            let o = (y * w + x) * 2;
-            if got[o] != 0.0 || got[o + 1] != 0.0 {
+            let o = y * w + x;
+            let (u, v) = (got[o], got[plane + o]);
+            if u != 0.0 || v != 0.0 {
+                u_sum += u;
                 // The magnitude is compared against the CPU reference, not
                 // against 1. Near the image border the window straddles clamped
                 // pixels and the recovered displacement legitimately exceeds one
                 // pixel (1.36 at (4, 2)); the reference agrees exactly, so an
                 // absolute bound was failing on correct output.
-                let cpu_mag = (want[o] * want[o] + want[o + 1] * want[o + 1]).sqrt();
-                let mag = (got[o] * got[o] + got[o + 1] * got[o + 1]).sqrt();
+                let cpu_mag = want[o].hypot(want[plane + o]);
+                let mag = u.hypot(v);
                 assert!(
                     (mag - cpu_mag).abs() < 1e-4,
                     "pixel ({x},{y}): |flow| = {mag} but the CPU reference gives {cpu_mag}"
@@ -1360,10 +1365,9 @@ fn advanced_lucas_kanade_flow_matches_cpu() {
                 // -0.3753186 at (2, 2), exactly what the kernel produced. An
                 // absolute bound of 0.25 was failing on correct output.
                 assert!(
-                    (got[o + 1] - want[o + 1]).abs() < 1e-4,
-                    "pixel ({x},{y}): v={} but the CPU reference gives {}",
-                    got[o + 1],
-                    want[o + 1]
+                    (v - want[plane + o]).abs() < 1e-4,
+                    "pixel ({x},{y}): v={v} but the CPU reference gives {}",
+                    want[plane + o]
                 );
                 checked += 1;
             }
@@ -1373,12 +1377,17 @@ fn advanced_lucas_kanade_flow_matches_cpu() {
         checked > 50,
         "test bug: too few interior pixels produced flow ({checked})"
     );
+    let u_mean = u_sum / checked as f32;
+    assert!(
+        u_mean > 0.5,
+        "a shift to the right must give u > 0, mean u = {u_mean}"
+    );
     // And the border, where the window does not fit, must be exactly zero.
     for y in 0..h {
         for x in 0..half {
-            let o = (y * w + x) * 2;
+            let o = y * w + x;
             assert_eq!(got[o], 0.0, "left border flow must be zero");
-            assert_eq!(got[o + 1], 0.0, "left border flow must be zero");
+            assert_eq!(got[plane + o], 0.0, "left border flow must be zero");
         }
     }
 }

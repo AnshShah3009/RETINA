@@ -835,9 +835,11 @@ fn the_whole_shader_corpus_is_covered() {
         // shaders became four `*_packed16.wgsl` shaders; 102 since
         // resize_f32.wgsl took over planar multichannel tensors from
         // resize_f32_multichannel.wgsl; 101 since resize_f16.wgsl and
-        // resize_bf16.wgsl became resize_packed16.wgsl.
-        101,
-        "expected 101 .wgsl files across shaders/ and src/gpu_kernels/"
+        // resize_bf16.wgsl became resize_packed16.wgsl; 106 since the dense
+        // optical flow gained farneback_update_matrices.wgsl and the four
+        // tvl1_*.wgsl shaders that replaced its inline TV-L1 kernels.
+        106,
+        "expected 106 .wgsl files across shaders/ and src/gpu_kernels/"
     );
     let kernels = files
         .iter()
@@ -851,9 +853,11 @@ fn the_whole_shader_corpus_is_covered() {
 
     // Inline `r#"..."#` shaders in the kernel .rs files are compiled by the
     // same path and were an entire class of violation the shaders/ sweep missed.
+    // Four remain since the five inline TV-L1 kernels in optical_flow.rs moved
+    // to shaders/tvl1_*.wgsl.
     let inline = inline_wgsl_sources();
     assert!(
-        inline.len() >= 5,
+        inline.len() >= 4,
         "expected the inline WGSL in src/gpu_kernels/*.rs to be found, got {}",
         inline.len()
     );

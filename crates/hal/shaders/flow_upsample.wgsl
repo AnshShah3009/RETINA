@@ -1,5 +1,14 @@
-// Flow Upsampling Shader for Farneback Optical Flow
-// Upsamples flow field from coarser pyramid level
+// Upsamples a dense flow field to the next finer pyramid level.
+//
+// Layout: planar CHW, like every multichannel tensor in the workspace.
+// Plane 0 (`[0, src_w * src_h)`) is the horizontal flow u, plane 1 the
+// vertical flow v. The output uses the same layout at the destination size.
+//
+// Sampling is OpenCV INTER_LINEAR: half-pixel centres, edge samples clamped.
+// A displacement measured in coarse pixels is scaled to fine pixels, u by
+// dst_w / src_w and v by dst_h / src_h (2x for a half-resolution level).
+//
+// The uniform is `ResizeParams` from `gpu_kernels/resize.rs`.
 
 struct UpsampleParams {
     src_w: u32,
@@ -7,6 +16,9 @@ struct UpsampleParams {
     dst_w: u32,
     dst_h: u32,
     channels: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<storage, read> input_flow: array<f32>;
@@ -17,53 +29,45 @@ struct UpsampleParams {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = global_id.x;
     let y = global_id.y;
-    
-    if (x >= params.dst_w || y >= params.dst_h) {
+
+    if (x >= params.dst_w || y >= params.dst_h || params.src_w == 0u || params.src_h == 0u) {
         return;
     }
-    
-    let src_width_f = f32(params.src_w) - 1.0;
-    let src_height_f = f32(params.src_h) - 1.0;
-    let dst_width_f = f32(params.dst_w) - 1.0;
-    let dst_height_f = f32(params.dst_h) - 1.0;
-    
-    // Map destination coordinates to source coordinates
-    let src_x_f = f32(x) * src_width_f / dst_width_f;
-    let src_y_f = f32(y) * src_height_f / dst_height_f;
-    
-    // Bilinear interpolation of flow values
-    let x0 = u32(floor(src_x_f));
-    let y0 = u32(floor(src_y_f));
+
+    let src_w_f = f32(params.src_w);
+    let src_h_f = f32(params.src_h);
+    let dst_w_f = f32(params.dst_w);
+    let dst_h_f = f32(params.dst_h);
+
+    let sx = max((f32(x) + 0.5) * src_w_f / dst_w_f - 0.5, 0.0);
+    let sy = max((f32(y) + 0.5) * src_h_f / dst_h_f - 0.5, 0.0);
+
+    let x0 = min(params.src_w - 1u, u32(floor(sx)));
+    let y0 = min(params.src_h - 1u, u32(floor(sy)));
     let x1 = min(params.src_w - 1u, x0 + 1u);
     let y1 = min(params.src_h - 1u, y0 + 1u);
-    
-    let fx = src_x_f - f32(x0);
-    let fy = src_y_f - f32(y0);
-    
-    // Sample flow at four corners
-    let idx00 = (y0 * params.src_w + x0) * 2u;
-    let idx10 = (y0 * params.src_w + x1) * 2u;
-    let idx01 = (y1 * params.src_w + x0) * 2u;
-    let idx11 = (y1 * params.src_w + x1) * 2u;
-    
-    let u00 = input_flow[idx00 + 0u];
-    let v00 = input_flow[idx00 + 1u];
-    let u10 = input_flow[idx10 + 0u];
-    let v10 = input_flow[idx10 + 1u];
-    let u01 = input_flow[idx01 + 0u];
-    let v01 = input_flow[idx01 + 1u];
-    let u11 = input_flow[idx11 + 0u];
-    let v11 = input_flow[idx11 + 1u];
-    
-    // Bilinear interpolation
-    let u = mix(mix(u00, u10, fx), mix(u01, u11, fx), fy);
-    let v = mix(mix(v00, v10, fx), mix(v01, v11, fx), fy);
-    
-    // Scale flow to match destination resolution
-    let scale_x = dst_width_f / src_width_f;
-    let scale_y = dst_height_f / src_height_f;
-    
-    let dst_idx = (y * params.dst_w + x) * 2u;
-    output_flow[dst_idx + 0u] = u * scale_x;
-    output_flow[dst_idx + 1u] = v * scale_y;
+    let fx = select(0.0, clamp(sx - f32(x0), 0.0, 1.0), x0 != x1);
+    let fy = select(0.0, clamp(sy - f32(y0), 0.0, 1.0), y0 != y1);
+
+    let src_plane = params.src_w * params.src_h;
+    let i00 = y0 * params.src_w + x0;
+    let i10 = y0 * params.src_w + x1;
+    let i01 = y1 * params.src_w + x0;
+    let i11 = y1 * params.src_w + x1;
+
+    let u = mix(
+        mix(input_flow[i00], input_flow[i10], fx),
+        mix(input_flow[i01], input_flow[i11], fx),
+        fy
+    );
+    let v = mix(
+        mix(input_flow[src_plane + i00], input_flow[src_plane + i10], fx),
+        mix(input_flow[src_plane + i01], input_flow[src_plane + i11], fx),
+        fy
+    );
+
+    let dst_plane = params.dst_w * params.dst_h;
+    let o = y * params.dst_w + x;
+    output_flow[o] = u * (dst_w_f / src_w_f);
+    output_flow[dst_plane + o] = v * (dst_h_f / src_h_f);
 }

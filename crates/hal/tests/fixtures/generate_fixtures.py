@@ -286,6 +286,75 @@ def generate_optical_flow_fixtures():
             print(f"    Generated Farnebäck ref: {name}")
 
 
+def generate_dense_flow_parity_fixtures():
+    """OpenCV Farneback and DualTVL1 flow on a textured, non-square pair.
+
+    Consumed by crates/hal/tests/gpu_dense_optical_flow.rs, which runs the GPU
+    Farneback on the same frames and compares the flow with these. The frames
+    are a smooth sinusoidal texture (8-bit values stored as f32, H x W) and the
+    same texture rotated by 3 degrees and zoomed by 1.04 about the centre, so
+    the flow varies over the image. The flows are stored planar, [2, H, W]:
+    plane 0 is the x component, plane 1 the y component.
+    """
+    if not OPENCV_AVAILABLE:
+        print("  Skipping dense flow parity fixtures (needs OpenCV)")
+        return
+    print("Generating dense flow parity fixtures...")
+    out = os.path.join(FIXTURES_DIR, "optical_flow")
+    os.makedirs(out, exist_ok=True)
+
+    w, h = 96, 80
+    rng = np.random.default_rng(7)
+    waves = []
+    for _ in range(14):
+        wl = 7.0 + 25.0 * rng.random()
+        th = 2.0 * np.pi * rng.random()
+        ph = 2.0 * np.pi * rng.random()
+        amp = 9.0 + 6.0 * rng.random()
+        waves.append((np.cos(th) / wl, np.sin(th) / wl, ph, amp))
+
+    def texture(x, y):
+        v = np.full(x.shape, 128.0)
+        for fx, fy, ph, amp in waves:
+            v += amp * np.sin(2.0 * np.pi * (fx * x + fy * y) + ph)
+        return np.clip(v, 0.0, 255.0)
+
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float64)
+    cx, cy = w / 2.0, h / 2.0
+    s, th = 1.04, np.deg2rad(3.0)
+    m = np.array([[s * np.cos(th), -s * np.sin(th)], [s * np.sin(th), s * np.cos(th)]])
+    inv = np.linalg.inv(m)
+    px, py = xs - cx, ys - cy
+    sx = inv[0, 0] * px + inv[0, 1] * py + cx
+    sy = inv[1, 0] * px + inv[1, 1] * py + cy
+    prev = np.round(texture(xs, ys)).astype(np.uint8)
+    nxt = np.round(texture(sx, sy)).astype(np.uint8)
+    np.save(os.path.join(out, "dense_parity_frame1.npy"), prev.astype(np.float32))
+    np.save(os.path.join(out, "dense_parity_frame2.npy"), nxt.astype(np.float32))
+
+    # OpenCV's `levels` counts the levels *added* to the full-resolution
+    # frame (levels=2 builds three), whatever its documentation says.
+    for flags, tag in [(0, "box"), (cv2.OPTFLOW_FARNEBACK_GAUSSIAN, "gauss")]:
+        flow = cv2.calcOpticalFlowFarneback(prev, nxt, None, 0.5, 2, 15, 3, 5, 1.2, flags)
+        np.save(
+            os.path.join(out, f"dense_parity_farneback_{tag}.npy"),
+            np.ascontiguousarray(flow.transpose(2, 0, 1)).astype(np.float32),
+        )
+
+    # DualTVL1 lives in opencv-contrib (cv2.optflow). epsilon = 0 disables its
+    # early exit, which the GPU port does not have: every iteration runs.
+    if hasattr(cv2, "optflow"):
+        tvl1 = cv2.optflow.DualTVL1OpticalFlow_create(epsilon=0.0)
+        flow = tvl1.calc(prev, nxt, None)
+        np.save(
+            os.path.join(out, "dense_parity_tvl1.npy"),
+            np.ascontiguousarray(flow.transpose(2, 0, 1)).astype(np.float32),
+        )
+    else:
+        print("  cv2.optflow missing (needs opencv-contrib-python): no TV-L1 parity fixture")
+    print(f"  Generated dense flow parity fixtures ({w}x{h}, OpenCV {cv2.__version__})")
+
+
 def download_sintel_optical_flow():
     """Download Sintel optical flow test data."""
     print("Downloading Sintel optical flow fixtures...")
@@ -397,6 +466,7 @@ def generate_all_fixtures():
 
     generate_resize_fixtures()
     generate_optical_flow_fixtures()
+    generate_dense_flow_parity_fixtures()
     generate_icp_fixtures()
 
     print("=" * 60)
@@ -414,6 +484,11 @@ def main():
     parser.add_argument(
         "--optical-flow", action="store_true", help="Generate optical flow fixtures"
     )
+    parser.add_argument(
+        "--dense-flow-parity",
+        action="store_true",
+        help="Generate the OpenCV Farneback parity fixtures for the GPU dense flow",
+    )
     parser.add_argument("--icp", action="store_true", help="Generate ICP fixtures")
     parser.add_argument(
         "--download-sintel", action="store_true", help="Download Sintel dataset"
@@ -422,7 +497,14 @@ def main():
     args = parser.parse_args()
 
     if not any(
-        [args.all, args.resize, args.optical_flow, args.icp, args.download_sintel]
+        [
+            args.all,
+            args.resize,
+            args.optical_flow,
+            args.dense_flow_parity,
+            args.icp,
+            args.download_sintel,
+        ]
     ):
         # Default: generate all small fixtures
         args.all = True
@@ -432,6 +514,9 @@ def main():
 
     if args.all or args.optical_flow:
         generate_optical_flow_fixtures()
+
+    if args.all or args.dense_flow_parity:
+        generate_dense_flow_parity_fixtures()
 
     if args.all or args.icp:
         generate_icp_fixtures()

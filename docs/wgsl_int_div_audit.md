@@ -39,7 +39,7 @@ with `Device::create_shader_module`.
 
 The corpus is every `.wgsl` file under `crates/hal/shaders`, `crates/hal/src`,
 `crates/calib3d/src` and `crates/features/src`, plus every Rust raw string in
-`crates/hal/src` that contains `@compute`. That comes to 105 files and 9 inline
+`crates/hal/src` that contains `@compute`. That comes to 110 files and 4 inline
 shaders. `crates/viewer` is not included because it holds render shaders only.
 The fused-kernel WGSL generated in `crates/runtime/src/pipeline/fusion.rs` is
 not included either: it is stored as a string and never compiled.
@@ -77,12 +77,12 @@ remaining B source, `spatial.rs`, is not reachable through `dispatch`.
 
 ## Summary
 
-80 integer divisions or modulos, spread over 31 of the 114 sources that naga
-accepts (64 table rows):
+78 integer divisions or modulos, spread over 29 of the 114 sources that naga
+accepts (62 table rows):
 
 | class | sites | rows | before this audit |
 | --- | ---: | ---: | --- |
-| A, nonzero constant | 45 | 31 | 55 |
+| A, nonzero constant | 43 | 29 | 55 |
 | B, host-guaranteed | 2 | 2 | 4 (`feature_collection_f32.wgsl` moved to S) |
 | S, shader-proven | 33 | 31 | 8 |
 | C, needs a guard | 0 | 0 | 20 |
@@ -132,8 +132,6 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
 | `crates/hal/shaders/convolve_2d.wgsl` | `%` | `i32(params.height)` | 1 | S | Wrap branch, `h >= 1` (guard added) |
 | `crates/hal/shaders/convolve_2d.wgsl` | `%` | `i32(params.width)` | 1 | S | Wrap branch, `w >= 1` (guard added) |
 | `crates/hal/shaders/convolve_2d.wgsl` | `/` | `2` | 2 | A | literal (kernel centre) |
-| `crates/hal/shaders/farneback_poly_expand.wgsl` | `/` | `2` | 1 | A | literal |
-| `crates/hal/shaders/farneback_update_flow.wgsl` | `/` | `2` | 1 | A | literal |
 | `crates/hal/shaders/fast.wgsl` | `%` | `4u` | 1 | A | literal |
 | `crates/hal/shaders/fast.wgsl` | `/` | `16u` | 1 | A | literal |
 | `crates/hal/shaders/fast.wgsl` | `/` | `4u` | 2 | A | literal |
