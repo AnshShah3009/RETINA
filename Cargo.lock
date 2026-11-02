@@ -1766,7 +1766,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "image",
  "nalgebra",
- "pollster 1.0.1",
+ "pollster",
  "rand 0.10.3",
  "rand_distr",
  "rayon",
@@ -1883,7 +1883,7 @@ dependencies = [
  "cv-runtime",
  "image",
  "nalgebra",
- "pollster 1.0.1",
+ "pollster",
  "rand 0.10.3",
  "rayon",
  "tracing",
@@ -1918,7 +1918,7 @@ dependencies = [
  "nalgebra",
  "ndarray",
  "ndarray-npy",
- "pollster 1.0.1",
+ "pollster",
  "rayon",
  "rstar 0.14.0",
  "thiserror 2.0.21",
@@ -1938,7 +1938,7 @@ dependencies = [
  "cv-runtime",
  "image",
  "nalgebra",
- "pollster 1.0.1",
+ "pollster",
  "rand 0.10.3",
  "rayon",
  "tracing",
@@ -1990,7 +1990,7 @@ dependencies = [
  "cv-hal",
  "cv-math",
  "nalgebra",
- "pollster 1.0.1",
+ "pollster",
 ]
 
 [[package]]
@@ -2081,7 +2081,7 @@ dependencies = [
  "nalgebra",
  "num_cpus",
  "parking_lot 0.13.0",
- "pollster 1.0.1",
+ "pollster",
  "proptest",
  "rayon",
  "tempfile",
@@ -2118,7 +2118,7 @@ dependencies = [
  "cv-runtime",
  "image",
  "nalgebra",
- "pollster 1.0.1",
+ "pollster",
  "rayon",
  "thiserror 2.0.21",
 ]
@@ -2181,7 +2181,7 @@ dependencies = [
  "epaint",
  "image",
  "nalgebra",
- "pollster 0.4.0",
+ "pollster",
  "wgpu",
 ]
 
@@ -2457,7 +2457,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot 0.12.5",
  "percent-encoding",
- "pollster 1.0.1",
+ "pollster",
  "profiling",
  "raw-window-handle",
  "send_wrapper",
@@ -5552,12 +5552,6 @@ dependencies = [
  "rustix 1.1.6",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "pollster"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "pollster"
