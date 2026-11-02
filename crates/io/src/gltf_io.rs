@@ -28,8 +28,9 @@ pub struct GltfMesh {
 
 /// Read triangle meshes from a glTF or GLB file.
 ///
-/// One [`GltfMesh`] is returned per primitive of each node that instantiates a
-/// document mesh. The node's world transform — its own `node.transform()`
+/// One [`GltfMesh`] is returned per triangle primitive (`TRIANGLES`,
+/// `TRIANGLE_STRIP` or `TRIANGLE_FAN`; point and line primitives are skipped)
+/// of each node that instantiates a document mesh. The node's world transform — its own `node.transform()`
 /// composed with every ancestor — is applied to the positions and normals, so
 /// a mesh authored at the origin with the translation on the node comes back
 /// in world coordinates. A mesh referenced by several nodes is returned once
@@ -55,7 +56,17 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
 
         for world in worlds {
             for primitive in mesh.primitives() {
-                if primitive.mode() != gltf::mesh::Mode::Triangles {
+                // Triangle strips and fans are triangle topologies too and are
+                // unpacked below. They used to be skipped with the point and
+                // line modes, so a strip-encoded mesh vanished from the result
+                // while the call still returned `Ok`.
+                let mode = primitive.mode();
+                if !matches!(
+                    mode,
+                    gltf::mesh::Mode::Triangles
+                        | gltf::mesh::Mode::TriangleStrip
+                        | gltf::mesh::Mode::TriangleFan
+                ) {
                     continue;
                 }
 
@@ -94,7 +105,7 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
                 // panic surfaced much later in `cv_3d`, at
                 // `TriangleMesh::compute_face_normals`'s `self.vertices[face[0]]`.
                 // `read_obj` already rejects out-of-range face indices; do the same.
-                let mut faces: Vec<[usize; 3]> = if let Some(indices) = reader.read_indices() {
+                let sequence: Vec<usize> = if let Some(indices) = reader.read_indices() {
                     let idx: Vec<usize> = indices.into_u32().map(|i| i as usize).collect();
                     for &i in &idx {
                         if i >= positions.len() {
@@ -106,16 +117,12 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
                             )));
                         }
                     }
-                    idx.chunks(3)
-                        .filter(|c| c.len() == 3)
-                        .map(|c| [c[0], c[1], c[2]])
-                        .collect()
+                    idx
                 } else {
-                    // Non-indexed: every 3 vertices form a triangle
-                    (0..positions.len() / 3)
-                        .map(|i| [i * 3, i * 3 + 1, i * 3 + 2])
-                        .collect()
+                    // Non-indexed: the vertices themselves, in order.
+                    (0..positions.len()).collect()
                 };
+                let mut faces = triangles_from_sequence(mode, &sequence);
 
                 // glTF 2.0 §3.7.2.1: a node whose global transform has a
                 // negative determinant (a mirror) makes its triangles wind
@@ -142,6 +149,26 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
     }
 
     Ok(meshes)
+}
+
+/// Triangles of a triangle-topology primitive whose vertex sequence (its
+/// indices, or `0..count` without an index accessor) is `seq`, following
+/// glTF 2.0 §3.7.2.1:
+///
+/// * `TRIANGLES`: `{v[3i], v[3i+1], v[3i+2]}`;
+/// * `TRIANGLE_STRIP`: `{v[i], v[i + (1 + i % 2)], v[i + (2 - i % 2)]}`, which
+///   keeps every triangle counter-clockwise;
+/// * `TRIANGLE_FAN`: `{v[i + 1], v[i + 2], v[0]}`.
+fn triangles_from_sequence(mode: gltf::mesh::Mode, seq: &[usize]) -> Vec<[usize; 3]> {
+    match mode {
+        gltf::mesh::Mode::TriangleStrip => (0..seq.len().saturating_sub(2))
+            .map(|i| [seq[i], seq[i + 1 + i % 2], seq[i + 2 - i % 2]])
+            .collect(),
+        gltf::mesh::Mode::TriangleFan => (0..seq.len().saturating_sub(2))
+            .map(|i| [seq[i + 1], seq[i + 2], seq[0]])
+            .collect(),
+        _ => seq.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+    }
 }
 
 /// Column-major glTF matrix (`m[column][row]`) as a nalgebra matrix.
