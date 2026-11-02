@@ -6,16 +6,27 @@ use crate::Result;
 use crate::mesh::TriangleMesh;
 use cv_core::Error;
 use nalgebra::Point3;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 
 /// Read an STL file (ASCII or Binary)
 pub fn read_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
-    // Try to detect format by reading first 80 bytes
-    let mut header = [0u8; 80];
-    let bytes_read = reader.read(&mut header)?;
+    // Detect the format from the 80-byte header plus up to 512 bytes after it.
+    // `take(..).read_to_end` keeps reading until it has them all or the file
+    // ends: a single `read` may return fewer bytes than asked for (one at a
+    // time, from some readers), which used to leave most of the header unread
+    // and the rest of the parse misaligned. Peeking with `fill_buf` instead
+    // saw only what the caller's buffer happened to hold.
+    const HEADER: usize = 80;
+    const PEEK: usize = 512;
+    let mut prefix = Vec::with_capacity(HEADER + PEEK);
+    reader
+        .by_ref()
+        .take((HEADER + PEEK) as u64)
+        .read_to_end(&mut prefix)?;
 
     // Check for ASCII STL signature
-    let header_str = String::from_utf8_lossy(&header[..bytes_read]);
+    let header_len = prefix.len().min(HEADER);
+    let header_str = String::from_utf8_lossy(&prefix[..header_len]);
     let mut is_ascii = header_str.trim_start().starts_with("solid");
 
     if is_ascii {
@@ -23,37 +34,29 @@ pub fn read_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
         // despite the spec forbidding it. Genuine ASCII files always contain
         // "facet normal" (or at least "endsolid") shortly after, so look for
         // those markers before committing to the text parser.
-        let marker_in_header = header_str.contains("facet") || header_str.contains("endsolid");
-        let marker_in_peek = if marker_in_header {
-            false
-        } else {
-            let peek = reader.fill_buf()?;
-            let peek_str = String::from_utf8_lossy(&peek[..peek.len().min(512)]);
-            peek_str.contains("facet") || peek_str.contains("endsolid")
-        };
-        is_ascii = marker_in_header || marker_in_peek;
+        let prefix_str = String::from_utf8_lossy(&prefix);
+        is_ascii = prefix_str.contains("facet") || prefix_str.contains("endsolid");
     }
 
     if is_ascii {
-        // ASCII format
-        // Prepend the header bytes already consumed, then read the rest
+        // ASCII format: the bytes already consumed, then the rest.
         //
-        // The header must be decoded as UTF-8 *strictly*. It used to go through
-        // `from_utf8_lossy`, which silently replaced every invalid byte with
-        // U+FFFD and then parsed the result as text - so a file that is not
-        // valid UTF-8 at all was accepted and its mangled bytes were discarded
-        // as if they were a comment. The remaining bytes are read the same way
-        // (`read_to_string` rejects invalid UTF-8), so this only closes the gap
-        // the 80-byte header read had opened.
-        let header_prefix = std::str::from_utf8(&header[..bytes_read])
-            .map_err(|e| Error::ParseError(format!("STL ASCII header is not valid UTF-8: {e}")))?;
-        let mut rest = String::new();
-        reader.read_to_string(&mut rest)?;
-        let content = header_prefix.to_owned() + &rest;
+        // The text must be decoded as UTF-8 *strictly*. The header used to go
+        // through `from_utf8_lossy`, which silently replaced every invalid byte
+        // with U+FFFD and then parsed the result as text - so a file that is
+        // not valid UTF-8 at all was accepted and its mangled bytes were
+        // discarded as if they were a comment. Decoding the whole file at once
+        // also keeps a multi-byte character that straddles the prefix intact.
+        let mut bytes = prefix;
+        reader.read_to_end(&mut bytes)?;
+        let content = String::from_utf8(bytes)
+            .map_err(|e| Error::ParseError(format!("STL ASCII file is not valid UTF-8: {e}")))?;
         parse_ascii_stl(&content)
     } else {
-        // Binary format
-        parse_binary_stl(&header, reader)
+        // Binary format: the triangle count and triangles start at byte 80,
+        // possibly inside the prefix already read.
+        let rest = std::io::Cursor::new(prefix.split_off(header_len));
+        parse_binary_stl(rest.chain(reader))
     }
 }
 
@@ -222,7 +225,7 @@ fn parse_stl_coordinate(token: &str, line: &str) -> Result<f32> {
     Ok(value)
 }
 
-fn parse_binary_stl<R: BufRead>(_header: &[u8; 80], mut reader: R) -> Result<TriangleMesh> {
+fn parse_binary_stl<R: BufRead>(mut reader: R) -> Result<TriangleMesh> {
     // Header is already read
     let mut vertices: Vec<Point3<f32>> = Vec::new();
     let mut faces: Vec<[usize; 3]> = Vec::new();
