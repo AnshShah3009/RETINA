@@ -13,6 +13,8 @@
 //!   WGSL leaves to the implementation for NaN; the CPU's was `min` as well,
 //!   inconsistent with its other types and across platforms (see
 //!   `cpu_f32_trunc_keeps_ties_and_nan_on_every_lane`).
+//! * `sift_extrema` returned its mask with the kernel's u32-packed row stride
+//!   as the width, `(1, h, ceil(w / 4) * 4)`, where the CPU returns `(1, h, w)`.
 //!
 //! Results must match bit for bit, signed zero, subnormals and NaN payloads
 //! included. The one exception is a NaN that colour conversion computes: its
@@ -362,4 +364,46 @@ fn f32_fast_negative_threshold_matches_cpu() {
         corners > 100,
         "only {corners} corners: the test proves nothing"
     );
+}
+
+// ------------------------------------------------------------- SIFT extrema
+
+/// The GPU kernel packs four mask bytes per u32, so its rows are padded to
+/// `ceil(w / 4) * 4` bytes. The `ComputeContext` entry returned that padded
+/// buffer with shape `(1, h, ceil(w / 4) * 4)`, where the CPU returns the
+/// level's own shape `(1, h, w)`: the two disagreed on every width that is
+/// not a multiple of 4, and a caller indexing by the level's width read the
+/// padding. The mask must now equal the CPU's, shape and bytes.
+#[test]
+fn f32_sift_extrema_mask_has_the_level_shape() {
+    let Some(gpu) = gpu() else { return };
+    let cpu = CpuBackend::new().unwrap();
+    let mut r = Lcg(41);
+    let mut extrema = 0;
+    for w in [5usize, 6, 7, 8, 9, 13, 30] {
+        let h = 11;
+        let level = |r: &mut Lcg| -> CpuTensor<f32> {
+            let v = (0..h * w).map(|_| r.range(-1.0, 1.0)).collect();
+            tensor(v, 1, h, w)
+        };
+        let (p, c, n) = (level(&mut r), level(&mut r), level(&mut r));
+        let want = cpu.sift_extrema(&p, &c, &n, 0.3, 10.0).unwrap();
+        let got = gpu
+            .sift_extrema(
+                &p.to_gpu_ctx(gpu).unwrap(),
+                &c.to_gpu_ctx(gpu).unwrap(),
+                &n.to_gpu_ctx(gpu).unwrap(),
+                0.3,
+                10.0,
+            )
+            .unwrap();
+        assert_eq!(got.shape, want.shape, "width {w}");
+        assert_eq!(
+            got.as_slice().unwrap(),
+            want.as_slice().unwrap(),
+            "width {w}"
+        );
+        extrema += want.as_slice().unwrap().iter().filter(|&&m| m != 0).count();
+    }
+    assert!(extrema > 0, "no extrema: the test proves nothing");
 }
