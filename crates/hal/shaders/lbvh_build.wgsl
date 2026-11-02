@@ -68,6 +68,11 @@ fn init_nodes(
     nodes[i].parent = -1;
     nodes[i].left = -1;
     nodes[i].right = -1;
+    // Bounds start as the "not yet published" sentinel (all bits set - a NaN
+    // no arithmetic produces); lbvh_aabb.wgsl waits per word for a real value.
+    let unpublished = bitcast<f32>(0xFFFFFFFFu);
+    nodes[i].min_bound = vec4<f32>(unpublished);
+    nodes[i].max_bound = vec4<f32>(unpublished);
 }
 
 @compute @workgroup_size(256)
