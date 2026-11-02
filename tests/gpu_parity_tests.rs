@@ -271,6 +271,28 @@ fn probe_resize_multichannel() {
     assert_parity("RESIZE3", &cs, &gs, 1e-3);
 }
 
+/// A sigma of 0 used to reach the GPU shader as a -inf coefficient, giving NaN
+/// weights; the CPU falls back to unit sigma. Both must agree and be finite.
+#[test]
+fn probe_bilateral_zero_sigma() {
+    let Some(g) = gpu() else { return };
+    let cpu_ctx = CpuBackend::new().unwrap();
+    let (w, h) = (23usize, 17usize);
+    let cpu = mk(rng_f32(w * h, 61), 1, h, w);
+    let gt = cpu.to_gpu_ctx(g).unwrap();
+    for (sc, ss) in [(0.0f32, 0.0f32), (0.0, 2.0), (25.0, 0.0), (-1.0, -1.0)] {
+        let cr = cpu_ctx.bilateral_filter(&cpu, 5, sc, ss).unwrap();
+        let cs = cr.storage.as_slice().unwrap().to_vec();
+        let gr = g.bilateral_filter(&gt, 5, sc, ss).unwrap();
+        let gs = gr.to_cpu().unwrap().storage.as_slice().unwrap().to_vec();
+        assert!(
+            gs.iter().all(|v| v.is_finite()),
+            "GPU NaN/inf at sigma ({sc}, {ss})"
+        );
+        assert_parity(&format!("BILATERAL sigma ({sc}, {ss})"), &cs, &gs, 1e-4);
+    }
+}
+
 #[test]
 fn probe_gaussian_blur_multichannel() {
     let Some(g) = gpu() else { return };

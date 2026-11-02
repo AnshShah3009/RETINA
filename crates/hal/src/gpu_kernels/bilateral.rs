@@ -39,6 +39,19 @@ pub fn bilateral_filter<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zer
 ) -> Result<crate::GpuTensor<T>> {
     let sigma_color_f = sigma_color.to_f32();
     let sigma_space_f = sigma_space.to_f32();
+    // Same guard as the CPU filter: a sigma of 0 gives -inf coefficients and
+    // NaN weights, so a non-positive (or NaN) sigma weights with 1 instead. The
+    // radius below still comes from the caller's sigma_space, as on the CPU.
+    let sigma_color_eff = if sigma_color_f > 0.0 {
+        sigma_color_f
+    } else {
+        1.0
+    };
+    let sigma_space_eff = if sigma_space_f > 0.0 {
+        sigma_space_f
+    } else {
+        1.0
+    };
     let (h, w) = input.shape.hw();
     let c = input.shape.channels;
 
@@ -91,8 +104,8 @@ pub fn bilateral_filter<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zer
         width: w as u32,
         height: h as u32,
         radius,
-        sigma_color_sq_inv: -0.5 / (sigma_color_f * sigma_color_f),
-        sigma_space_sq_inv: -0.5 / (sigma_space_f * sigma_space_f),
+        sigma_color_sq_inv: -0.5 / (sigma_color_eff * sigma_color_eff),
+        sigma_space_sq_inv: -0.5 / (sigma_space_eff * sigma_space_eff),
         format,
         _pad1: 0,
         _pad2: 0,
