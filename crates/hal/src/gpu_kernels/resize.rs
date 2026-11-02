@@ -40,6 +40,17 @@ pub fn resize<T: cv_core::float::Float + bytemuck::Pod>(
     )
 }
 
+/// Resize a planar CHW tensor on the GPU.
+///
+/// Element `(ch, y, x)` of a `TensorShape::new(c, h, w)` tensor is at
+/// `ch * h * w + y * w + x`, as everywhere else in the workspace
+/// (`Tensor::index`, `Tensor::from_image_rgb`, `gaussian_blur`, `cvt_color`);
+/// each plane is resampled as an independent image.
+///
+/// A zero target size (or zero channels) returns an empty tensor of the
+/// target shape, and an empty source with a non-empty target returns zeros of
+/// the target shape, both without a dispatch. That is the CPU backend's
+/// behaviour.
 pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
     ctx: &GpuContext,
     input: &GpuTensor<T>,
@@ -55,31 +66,37 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
         ));
     }
     let (src_h, src_w) = input.shape.hw();
-    let (dst_w, dst_h) = (new_width as usize, new_height as usize);
     let c = input.shape.channels;
-
-    if c == 0 {
-        return Err(crate::Error::InvalidInput(
-            "Resize requires at least one channel".into(),
-        ));
-    }
-
-    let _out_shape = TensorShape::new(c, new_height as usize, new_width as usize);
-    let out_len = (new_width * new_height) as usize * c;
+    let out_shape = TensorShape::new(c, new_height as usize, new_width as usize);
+    let out_len = out_shape
+        .checked_len()
+        .ok_or_else(|| crate::Error::InvalidInput("Resize target size overflows".into()))?;
     let byte_size = (out_len * std::mem::size_of::<T>()) as u64;
 
+    // wgpu zero-initialises a new buffer, so an empty source needs no
+    // dispatch to come back as zeros. A storage binding may not be empty,
+    // hence the four-byte floor.
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Resize Output Buffer"),
-        size: byte_size,
+        size: byte_size.max(4),
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+    let output = crate::GpuTensor {
+        storage: crate::storage::WgpuGpuStorage::from_buffer(Arc::new(output_buffer), out_len),
+        shape: out_shape,
+        dtype: input.dtype,
+        _phantom: PhantomData,
+    };
+    if out_len == 0 || src_h == 0 || src_w == 0 {
+        return Ok(output);
+    }
 
     let params = ResizeParams {
         src_w: src_w as u32,
         src_h: src_h as u32,
-        dst_w: dst_w as u32,
-        dst_h: dst_h as u32,
+        dst_w: new_width,
+        dst_h: new_height,
         channels: c as u32,
         _pad0: 0,
         _pad1: 0,
@@ -95,16 +112,10 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
         });
 
     let shader_source = match mode {
-        InterpolationMode::Bilinear => {
-            if c == 1 {
-                include_str!("../../shaders/resize_f32.wgsl").to_string()
-            } else {
-                include_str!("../../shaders/resize_f32_multichannel.wgsl").to_string()
-            }
-        }
-        InterpolationMode::Lanczos4 => include_str!("../../shaders/lanczos4.wgsl").to_string(),
+        InterpolationMode::Bilinear => include_str!("../../shaders/resize_f32.wgsl"),
+        InterpolationMode::Lanczos4 => include_str!("../../shaders/lanczos4.wgsl"),
     };
-    let pipeline = ctx.create_compute_pipeline(&shader_source, "main");
+    let pipeline = ctx.create_compute_pipeline(shader_source, "main");
 
     let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Resize Bind Group"),
@@ -116,7 +127,7 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: output_buffer.as_entire_binding(),
+                resource: output.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -135,19 +146,11 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        let x = (dst_w as u32).div_ceil(16);
-        let y = (dst_h as u32).div_ceil(16);
-        pass.dispatch_workgroups(x, y, 1);
+        // One invocation per output element; the plane is `global_id.z`.
+        pass.dispatch_workgroups(new_width.div_ceil(16), new_height.div_ceil(16), c as u32);
     }
     ctx.submit(encoder);
-
-    let res_gpu = crate::GpuTensor {
-        storage: crate::storage::WgpuGpuStorage::from_buffer(Arc::new(output_buffer), out_len),
-        shape: cv_core::TensorShape::new(c, dst_h, dst_w),
-        dtype: input.dtype,
-        _phantom: PhantomData,
-    };
-    Ok(res_gpu)
+    Ok(output)
 }
 
 pub fn resize_lanczos4<T: cv_core::float::Float + bytemuck::Pod>(

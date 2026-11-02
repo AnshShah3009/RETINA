@@ -1,3 +1,9 @@
+// Bilinear resize of a planar CHW f32 tensor, half-pixel mapping.
+//
+// Element (ch, y, x) of a `TensorShape::new(c, h, w)` tensor is at
+// `ch * h * w + y * w + x`. Each plane is an independent image; the channel is
+// `global_id.z` (the host dispatches `channels` workgroups in z).
+
 struct Params {
     src_w: u32,
     src_h: u32,
@@ -13,16 +19,17 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> output_data: array<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
-fn get_f32(idx: u32) -> f32 {
-    return input_data[idx];
-}
-
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x_dst = global_id.x;
     let y_dst = global_id.y;
-    
-    if (x_dst >= params.dst_w || y_dst >= params.dst_h) {
+    let ch = global_id.z;
+
+    // An empty source has nothing to sample (and `src_w - 1u` would wrap);
+    // the host returns zeros for it without dispatching. A raw `dispatch`
+    // uniform with `channels == 0` predates the field being read: one plane.
+    if (x_dst >= params.dst_w || y_dst >= params.dst_h || ch >= max(params.channels, 1u)
+        || params.src_w == 0u || params.src_h == 0u) {
         return;
     }
 
@@ -34,8 +41,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let dst_height_f = max(f32(params.dst_h), 1.0);
 
     // Lower-bound in float; upper-bound index clamp in integer space.
-    var src_x_f = max((f32(x_dst) + 0.5) * src_width_f / dst_width_f - 0.5, 0.0);
-    var src_y_f = max((f32(y_dst) + 0.5) * src_height_f / dst_height_f - 0.5, 0.0);
+    let src_x_f = max((f32(x_dst) + 0.5) * src_width_f / dst_width_f - 0.5, 0.0);
+    let src_y_f = max((f32(y_dst) + 0.5) * src_height_f / dst_height_f - 0.5, 0.0);
 
     let x0 = min(params.src_w - 1u, u32(floor(src_x_f)));
     let y0 = min(params.src_h - 1u, u32(floor(src_y_f)));
@@ -44,13 +51,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     let dx = select(0.0, clamp(src_x_f - f32(x0), 0.0, 1.0), x0 != x1);
     let dy = select(0.0, clamp(src_y_f - f32(y0), 0.0, 1.0), y0 != y1);
-    
-    let p00 = get_f32(y0 * params.src_w + x0);
-    let p10 = get_f32(y0 * params.src_w + x1);
-    let p01 = get_f32(y1 * params.src_w + x0);
-    let p11 = get_f32(y1 * params.src_w + x1);
-    
-    let val_f = mix(mix(p00, p10, dx), mix(p01, p11, dx), dy);
-    
-    output_data[y_dst * params.dst_w + x_dst] = val_f;
+
+    let src_plane = ch * params.src_h * params.src_w;
+    let p00 = input_data[src_plane + y0 * params.src_w + x0];
+    let p10 = input_data[src_plane + y0 * params.src_w + x1];
+    let p01 = input_data[src_plane + y1 * params.src_w + x0];
+    let p11 = input_data[src_plane + y1 * params.src_w + x1];
+
+    // The CPU backend's order: (p00 (1 - dx) + p10 dx) (1 - dy) + (...) dy.
+    let v0 = p00 * (1.0 - dx) + p10 * dx;
+    let v1 = p01 * (1.0 - dx) + p11 * dx;
+    let dst_plane = ch * params.dst_h * params.dst_w;
+    output_data[dst_plane + y_dst * params.dst_w + x_dst] = v0 * (1.0 - dy) + v1 * dy;
 }

@@ -832,9 +832,11 @@ fn the_whole_shader_corpus_is_covered() {
         // 105 since a7c10ff added shaders/pyramid_down.wgsl; 106 with
         // shaders/threshold_f16_packed.wgsl, the no-SHADER_F16 fallback; 103
         // since the seven bilateral/fast/fast_nms/color_cvt f16 and bf16
-        // shaders became four `*_packed16.wgsl` shaders.
-        103,
-        "expected 103 .wgsl files across shaders/ and src/gpu_kernels/"
+        // shaders became four `*_packed16.wgsl` shaders; 102 since
+        // resize_f32.wgsl took over planar multichannel tensors from
+        // resize_f32_multichannel.wgsl.
+        102,
+        "expected 102 .wgsl files across shaders/ and src/gpu_kernels/"
     );
     let kernels = files
         .iter()

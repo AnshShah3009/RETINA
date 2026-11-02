@@ -8,6 +8,7 @@ use rayon::prelude::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 use wide::*;
 
+pub(crate) mod bilinear;
 pub mod border;
 pub mod canny_opencv;
 pub mod hough_standard;
