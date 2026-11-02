@@ -293,6 +293,55 @@ fn probe_bilateral_zero_sigma() {
     }
 }
 
+/// GPU Lanczos-4 against `cv_imgproc::resize` Lanczos, which matches
+/// `cv2.resize(INTER_LANCZOS4)` to +-1 LSB. The GPU shader used align-corners
+/// mapping, `x * (w - 1) / (nw - 1)`, so downscales and upscales were shifted by
+/// up to half a source pixel; half-pixel mapping brings it to rounding.
+#[test]
+fn probe_lanczos_matches_imgproc() {
+    use cv_hal::context::Interpolation;
+    let Some(g) = gpu() else { return };
+    for (sw, sh, dw, dh) in [
+        (48u32, 40u32, 31u32, 23u32),
+        (37, 29, 64, 50),
+        (64, 64, 32, 32),
+    ] {
+        let px: Vec<u8> = (0..sw * sh)
+            .map(|i| {
+                let (x, y) = (i % sw, i / sw);
+                (((x * 7 + y * 13) % 97) as f32 * 2.3 + (x as f32 * 0.4).sin() * 20.0 + 30.0) as u8
+            })
+            .collect();
+        let img = image::GrayImage::from_raw(sw, sh, px.clone()).unwrap();
+        let want = cv_imgproc::resize(&img, dw, dh, cv_imgproc::Interpolation::Lanczos);
+        let t = mk(
+            px.iter().map(|&v| v as f32).collect(),
+            1,
+            sh as usize,
+            sw as usize,
+        );
+        let got = g
+            .resize_with(
+                &t.to_gpu_ctx(g).unwrap(),
+                (dw as usize, dh as usize),
+                Interpolation::Lanczos,
+            )
+            .unwrap()
+            .to_cpu()
+            .unwrap();
+        let got = got.storage.as_slice().unwrap();
+        let worst = got
+            .iter()
+            .zip(want.as_raw())
+            .map(|(&a, &b)| (a.round().clamp(0.0, 255.0) - b as f32).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst <= 1.0,
+            "{sw}x{sh} -> {dw}x{dh}: max |GPU - imgproc| = {worst}"
+        );
+    }
+}
+
 #[test]
 fn probe_gaussian_blur_multichannel() {
     let Some(g) = gpu() else { return };

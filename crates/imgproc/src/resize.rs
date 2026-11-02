@@ -84,7 +84,7 @@ pub fn resize_ctx(
 
     // Bilinear resizing is a single implementation per backend, both routed
     // through the HAL: the CPU `ComputeContext::resize` and the GPU resize
-    // shader share the same align-corners bilinear mapping. Nearest/Cubic/
+    // shader share the same half-pixel bilinear mapping. Nearest/Cubic/
     // Lanczos have no HAL equivalent and stay CPU-only below.
     if interpolation == Interpolation::Linear
         && let Ok(device) = group.device()

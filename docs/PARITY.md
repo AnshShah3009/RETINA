@@ -203,10 +203,10 @@ Landed consistently across **all** implementations: `imgproc`'s cubic/lanczos
 resampler and RGB linear, `hal`'s CPU resize, and the WGSL bilinear resize
 shaders (u8; f32, which since the planar-CHW fix also serves multichannel
 tensors; and `resize_packed16.wgsl` for f16 and bf16, which takes the CPU's
-taps from the host). The GPU Lanczos-4 shaders (`lanczos4.wgsl` and the
-Lanczos entry of `resize_packed16.wgsl`) still map with align-corners
-(`x * (w - 1) / (nw - 1)`), an open divergence from `cv2.resize(INTER_LANCZOS4)`
-and from `imgproc`'s Lanczos, both half-pixel.
+taps from the host), and the GPU Lanczos-4 shaders (`lanczos4.wgsl` and the
+Lanczos entry of `resize_packed16.wgsl`), which used align-corners until
+`probe_lanczos_matches_imgproc` measured them 90 grey levels off `imgproc`'s
+Lanczos; they now agree to +-1.
 `crates/imgproc/tests/resize_sampling_convention.rs`
 pins the impulse response at **64 = 255/4** — OpenCV's value — and would have
 caught either convention being changed alone. The GPU path remains guarded only

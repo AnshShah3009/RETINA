@@ -202,13 +202,12 @@ fn main_lanczos(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let src_width_f = f32(params.src_w) - 1.0;
-    let src_height_f = f32(params.src_h) - 1.0;
-    let dst_width_f = max(f32(params.dst_w) - 1.0, 1.0);
-    let dst_height_f = max(f32(params.dst_h) - 1.0, 1.0);
-
-    let src_x_f = f32(x_dst) * src_width_f / dst_width_f;
-    let src_y_f = f32(y_dst) * src_height_f / dst_height_f;
+    // Half-pixel mapping, `(x + 0.5) * w / nw - 0.5`: OpenCV's
+    // INTER_LANCZOS4, cv_imgproc::resize and the bilinear shader. This used
+    // align-corners `x * (w - 1) / (nw - 1)`, which shifts every output pixel
+    // by up to half a source pixel against all of them.
+    let src_x_f = (f32(x_dst) + 0.5) * f32(params.src_w) / f32(params.dst_w) - 0.5;
+    let src_y_f = (f32(y_dst) + 0.5) * f32(params.src_h) / f32(params.dst_h) - 0.5;
 
     let kernel_radius = 4;
 
