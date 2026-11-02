@@ -292,6 +292,15 @@ pub fn conv2d(
     let width_in = input.shape()[3];
     let channels_out = weights.shape()[0];
     let k = weights.shape()[2];
+    // The launcher indexes weights as [c_out, c_in, k, k] with c_in taken
+    // from the input, so a weight tensor with fewer input channels would be
+    // read past its end.
+    if weights.shape()[1] != channels_in {
+        return Err(crate::Error::InvalidInput(format!(
+            "conv2d weight channels {} != input channels {channels_in}",
+            weights.shape()[1]
+        )));
+    }
     if weights.shape()[3] != k {
         return Err(crate::Error::InvalidInput(
             "conv2d expects a square kernel".into(),
