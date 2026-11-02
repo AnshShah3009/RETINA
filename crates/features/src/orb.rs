@@ -251,57 +251,64 @@ impl Orb {
 
     /// Detect keypoints using FAST at multiple scales
     pub fn detect(&self, image: &GrayImage) -> KeyPoints {
-        let mut all_keypoints = Vec::new();
-        let mut scale = 1.0f32;
+        // Every level is resized from the base image, never from the level
+        // above it, so the levels are independent and run in parallel. The
+        // scales are still accumulated serially (`scale *= scale_factor`) so
+        // each level sees exactly the f32 scale the serial loop computed, and
+        // the per-level lists are concatenated in level order, so the list
+        // handed to the response sort below is the one the serial loop built.
+        let scales: Vec<f32> = std::iter::successors(Some(1.0f32), |s| Some(s * self.scale_factor))
+            .take(self.n_levels)
+            .collect();
+        let levels: Vec<Vec<KeyPoint>> = scales
+            .par_iter()
+            .enumerate()
+            .map(|(level, &scale)| {
+                let level_image = if level == 0 {
+                    std::borrow::Cow::Borrowed(image)
+                } else {
+                    std::borrow::Cow::Owned(scale_image(image, scale))
+                };
+                let scaled: &GrayImage = &level_image;
+                // Do not truncate in raster order before non-max suppression and
+                // response ranking: on busy images that kept only the top-row
+                // candidates. Collect every candidate and let the final
+                // `truncate(self.n_features)` after the response sort enforce the
+                // keypoint budget.
+                let kps = fast_detect(scaled, self.fast_threshold, usize::MAX);
 
-        for level in 0..self.n_levels {
-            let scaled = if level == 0 {
-                image.clone()
-            } else {
-                scale_image(image, scale)
-            };
+                // Bug 5 fix: apply non-maximum suppression to FAST keypoints
+                let kps = fast::non_max_suppression(kps, scaled, self.fast_threshold);
 
-            // Do not truncate in raster order before non-max suppression and
-            // response ranking: on busy images that kept only the top-row
-            // candidates. Collect every candidate and let the final
-            // `truncate(self.n_features)` after the response sort enforce the
-            // keypoint budget.
-            let kps = fast_detect(&scaled, self.fast_threshold, usize::MAX);
+                // Bug 7 fix: compute FAST corner score so keypoints have a real response
+                // Bug 4 fix: if Harris scoring is selected, re-score with Harris response.
+                // The response of each keypoint depends only on the level image, so
+                // this maps in parallel and preserves the input order.
+                let candidates = kps.keypoints;
+                candidates
+                    .par_iter()
+                    .map(|kp| {
+                        let response = match self.score_type {
+                            ScoreType::Harris => {
+                                compute_harris_response(scaled, kp.x as i32, kp.y as i32)
+                            }
+                            ScoreType::Fast => fast::corner_score(
+                                scaled,
+                                kp.x as i32,
+                                kp.y as i32,
+                                self.fast_threshold,
+                            ) as f64,
+                        };
 
-            // Bug 5 fix: apply non-maximum suppression to FAST keypoints
-            let kps = fast::non_max_suppression(kps, &scaled, self.fast_threshold);
-
-            // Bug 7 fix: compute FAST corner score so keypoints have a real response
-            // Bug 4 fix: if Harris scoring is selected, re-score with Harris response.
-            // The response of each keypoint depends only on the level image, so
-            // this maps in parallel and preserves the input order.
-            let candidates = kps.keypoints;
-            let scored_kps: Vec<KeyPoint> = candidates
-                .par_iter()
-                .map(|kp| {
-                    let response = match self.score_type {
-                        ScoreType::Harris => {
-                            compute_harris_response(&scaled, kp.x as i32, kp.y as i32)
-                        }
-                        ScoreType::Fast => fast::corner_score(
-                            &scaled,
-                            kp.x as i32,
-                            kp.y as i32,
-                            self.fast_threshold,
-                        ) as f64,
-                    };
-
-                    KeyPoint::new(kp.x * scale as f64, kp.y * scale as f64)
-                        .with_size(self.patch_size as f64 * scale as f64)
-                        .with_octave(level as i32)
-                        .with_response(response)
-                })
-                .collect();
-
-            all_keypoints.extend(scored_kps);
-
-            scale *= self.scale_factor;
-        }
+                        KeyPoint::new(kp.x * scale as f64, kp.y * scale as f64)
+                            .with_size(self.patch_size as f64 * scale as f64)
+                            .with_octave(level as i32)
+                            .with_response(response)
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut all_keypoints: Vec<KeyPoint> = levels.into_iter().flatten().collect();
 
         all_keypoints.sort_by(|a, b| {
             b.response
@@ -1721,6 +1728,127 @@ mod tests {
                 compute_orb_descriptor(&turned, &kp.with_angle(theta + 180.0), &pattern, 31, false)
                     .unwrap();
             assert_eq!(d0.data, d1.data, "theta = {theta}");
+        }
+    }
+
+    /// Overlapping rectangles and discs of random grey levels plus mild noise:
+    /// thousands of FAST corners on every pyramid level.
+    fn shapes_scene(w: u32, h: u32, seed: u64) -> GrayImage {
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut img = GrayImage::from_pixel(w, h, Luma([128]));
+        for i in 0..(w * h / 600) as usize {
+            let cx = (next() % w as u64) as i64;
+            let cy = (next() % h as u64) as i64;
+            let r = (next() % 30 + 3) as i64;
+            let v = (next() % 256) as u8;
+            for y in (cy - r).max(0)..(cy + r).min(h as i64) {
+                for x in (cx - r).max(0)..(cx + r).min(w as i64) {
+                    if i % 2 == 0 || (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r {
+                        img.put_pixel(x as u32, y as u32, Luma([v]));
+                    }
+                }
+            }
+        }
+        for p in img.pixels_mut() {
+            p[0] = (p[0] as i16 + (next() % 7) as i16 - 3).clamp(0, 255) as u8;
+        }
+        img
+    }
+
+    /// `Orb::detect` as the serial level loop it was: each level resized with
+    /// `image::imageops::resize` (Triangle) from the base image, FAST, NMS and
+    /// scoring per level, levels appended in order, then the response sort.
+    fn reference_detect(orb: &Orb, image: &GrayImage) -> Vec<KeyPoint> {
+        let mut all = Vec::new();
+        let mut scale = 1.0f32;
+        for level in 0..orb.n_levels {
+            let scaled = if level == 0 {
+                image.clone()
+            } else {
+                image::imageops::resize(
+                    image,
+                    (image.width() as f32 / scale) as u32,
+                    (image.height() as f32 / scale) as u32,
+                    image::imageops::FilterType::Triangle,
+                )
+            };
+            let kps = fast_detect(&scaled, orb.fast_threshold, usize::MAX);
+            let kps = fast::non_max_suppression(kps, &scaled, orb.fast_threshold);
+            for kp in kps.keypoints {
+                let response = match orb.score_type {
+                    ScoreType::Harris => compute_harris_response(&scaled, kp.x as i32, kp.y as i32),
+                    ScoreType::Fast => {
+                        fast::corner_score(&scaled, kp.x as i32, kp.y as i32, orb.fast_threshold)
+                    }
+                };
+                all.push(
+                    KeyPoint::new(kp.x * scale as f64, kp.y * scale as f64)
+                        .with_size(orb.patch_size as f64 * scale as f64)
+                        .with_octave(level as i32)
+                        .with_response(response),
+                );
+            }
+            scale *= orb.scale_factor;
+        }
+        all.sort_by(|a, b| {
+            b.response
+                .partial_cmp(&a.response)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all.truncate(orb.n_features);
+        all
+    }
+
+    fn same_keypoints(a: &[KeyPoint], b: &[KeyPoint]) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(p, q)| {
+                p.x.to_bits() == q.x.to_bits()
+                    && p.y.to_bits() == q.y.to_bits()
+                    && p.size.to_bits() == q.size.to_bits()
+                    && p.angle.to_bits() == q.angle.to_bits()
+                    && p.response.to_bits() == q.response.to_bits()
+                    && p.octave == q.octave
+                    && p.class_id == q.class_id
+            })
+    }
+
+    /// The parallel pyramid (levels in parallel, row-parallel resize) returns
+    /// exactly the keypoints, in exactly the order, of the serial loop over
+    /// `image::imageops::resize` levels.
+    #[test]
+    fn detect_matches_the_serial_image_resize_pyramid() {
+        let images = [
+            shapes_scene(320, 240, 0x51ed_270b),
+            shapes_scene(203, 157, 0x2f6b_93a1),
+        ];
+        for img in &images {
+            for score_type in [ScoreType::Harris, ScoreType::Fast] {
+                for (scale_factor, n_levels) in [(1.2f32, 8usize), (1.5, 4), (2.0, 3), (1.2, 1)] {
+                    for n_features in [usize::MAX, 500, 7] {
+                        let orb = Orb {
+                            score_type,
+                            ..orb_with(scale_factor, n_levels, n_features)
+                        };
+                        let expect = reference_detect(&orb, img);
+                        let got = orb.detect(img);
+                        assert!(
+                            same_keypoints(&got.keypoints, &expect),
+                            "{}x{} scale {scale_factor} levels {n_levels} features {n_features}",
+                            img.width(),
+                            img.height()
+                        );
+                        if n_features == usize::MAX && n_levels == 8 {
+                            assert!(expect.len() > 300, "scene must give many keypoints");
+                        }
+                    }
+                }
+            }
         }
     }
 }
