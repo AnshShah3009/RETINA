@@ -1828,6 +1828,20 @@ impl ComputeContext for GpuContext {
                 };
 
                 // 1. Upload keypoints to GPU
+                // Zero-size buffers cannot be bound. No keypoints: no
+                // descriptors, as on the CPU. An empty image has nothing to
+                // describe a keypoint with.
+                if keypoints.keypoints.is_empty() {
+                    return Ok(cv_core::Descriptors {
+                        descriptors: Vec::new(),
+                    });
+                }
+                if image.shape.len() == 0 {
+                    return Err(crate::Error::InvalidInput(
+                        "compute_sift_descriptors: the image is empty".into(),
+                    ));
+                }
+
                 let kp_data: Vec<[f32; 4]> = keypoints
                     .keypoints
                     .iter()

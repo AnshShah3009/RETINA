@@ -38,6 +38,29 @@ pub fn remap(
     }
 
     let out_len = dst_w * dst_h;
+    // Nothing to sample into: an empty output, without binding the maps'
+    // zero-size buffers.
+    if out_len == 0 {
+        return Ok(super::zeros_tensor(
+            ctx,
+            TensorShape::new(c, dst_h, dst_w),
+            input.dtype,
+        ));
+    }
+    // A map needs its two coordinates per output pixel.
+    if map_x.shape.len() < out_len || map_y.shape.len() < out_len {
+        return Err(crate::Error::InvalidInput(format!(
+            "remap: map_x {:?} and map_y {:?} must both cover the output",
+            map_x.shape, map_y.shape
+        )));
+    }
+    // An empty image has no pixel to sample or replicate (and its zero-size
+    // buffer cannot be bound).
+    if input.shape.len() == 0 {
+        return Err(crate::Error::InvalidInput(
+            "remap: cannot sample an empty image".into(),
+        ));
+    }
     let byte_size = (out_len * 4) as u64;
     let usages =
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;

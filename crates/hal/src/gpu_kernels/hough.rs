@@ -286,7 +286,9 @@ pub fn hough_lines<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     let scaled_sin: Vec<f32> = sin.iter().map(|&s| s / layout.rho).collect();
     let exact = |x: usize, y: usize, n: usize| layout.index(n, layout.bin(x, y, cos[n], sin[n]));
 
-    let acc = if w == 0 || h == 0 {
+    // No pixels (a zero dimension or no channels): an empty accumulator,
+    // without binding the zero-size buffer.
+    let acc = if input.shape.len() == 0 {
         vec![0; layout.num_rho * layout.num_theta]
     } else {
         accumulate(

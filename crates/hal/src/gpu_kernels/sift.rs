@@ -24,6 +24,22 @@ pub fn sift_extrema(
     edge_threshold: f32,
 ) -> Result<Tensor<u8, GpuStorage<u8>>> {
     let (h, w) = dog_curr.shape.hw();
+    // An empty level has no extrema, as on the CPU, and must not bind its
+    // zero-size buffer. A neighbour level smaller than the current one would
+    // be read out of range.
+    if dog_curr.shape.len() == 0 {
+        return Ok(super::zeros_tensor(
+            ctx,
+            dog_curr.shape,
+            cv_core::DataType::U8,
+        ));
+    }
+    if dog_prev.shape.len() < dog_curr.shape.len() || dog_next.shape.len() < dog_curr.shape.len() {
+        return Err(crate::Error::InvalidInput(format!(
+            "sift_extrema: DoG levels {:?} / {:?} / {:?} differ in size",
+            dog_prev.shape, dog_curr.shape, dog_next.shape
+        )));
+    }
     // The shader packs 4 pixels per u32, writing with row stride ceil(w/4).
     // Total u32 elements = h * ceil(w/4), total bytes = h * ceil(w/4) * 4.
     let row_stride_u32 = w.div_ceil(4);

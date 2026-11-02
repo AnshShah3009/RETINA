@@ -28,6 +28,10 @@ pub fn akaze_diffusion(
 
     let (h, w) = input.shape.hw();
     let size = input.shape.len();
+    // An empty input would bind a zero-size buffer; its result is empty.
+    if size == 0 {
+        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
+    }
     let byte_size = (size * 4) as u64;
 
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -118,6 +122,14 @@ pub fn akaze_derivatives(
 )> {
     let (h, w) = input.shape.hw();
     let size = input.shape.len();
+    // An empty input would bind a zero-size buffer; each derivative is empty.
+    if size == 0 {
+        return Ok((
+            super::zeros_tensor(ctx, input.shape, input.dtype),
+            super::zeros_tensor(ctx, input.shape, input.dtype),
+            super::zeros_tensor(ctx, input.shape, input.dtype),
+        ));
+    }
     let byte_size = (size * 4) as u64;
 
     let lx_buffer = Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
@@ -217,6 +229,11 @@ pub fn akaze_derivatives(
 }
 
 pub fn akaze_contrast_k(ctx: &GpuContext, input: &Tensor<f32, GpuStorage<f32>>) -> Result<f32> {
+    // No pixels, no gradients: the 0.03 fallback below, without binding the
+    // zero-size input buffer.
+    if input.shape.len() == 0 {
+        return Ok(0.03);
+    }
     let (h, w) = input.shape.hw();
     let num_bins = 1000u32;
     let max_mag = 0.5f32;

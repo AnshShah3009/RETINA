@@ -28,6 +28,11 @@ pub fn hough_circles<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         ));
     }
 
+    // No pixels, no edge points to vote: no circles. Also keeps the
+    // zero-size input buffer out of a binding.
+    if input.shape.len() == 0 {
+        return Ok(Vec::new());
+    }
     let (h, w) = input.shape.hw();
     let min_radius_f32 = min_radius.to_f32();
     let max_radius_f32 = max_radius.to_f32();

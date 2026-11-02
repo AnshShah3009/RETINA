@@ -13,12 +13,27 @@
 //! and add, so they could not reproduce the CPU backend's f16 results, and
 //! one path everywhere is one behaviour to test.
 //!
-//! One limit: a bf16 subnormal (below 2^-126) widens to an f32 subnormal, and
-//! a device may flush those to zero in arithmetic and comparisons (the RTX
-//! 5070 Ti on Vulkan does). Every f16 value and intermediate is a normal f32,
-//! so f16 is unaffected; `threshold_bf16.wgsl` compares bit patterns and is
-//! exact too. The arithmetic bf16 kernels (bilateral, FAST, colour) can differ
-//! from the CPU on bf16 subnormal inputs.
+//! Subnormals: a bf16 value below 2^-126 widens to an f32 subnormal, and a
+//! product, sum or difference of small bf16 values can land there too. A
+//! device may flush f32 subnormals to zero in arithmetic and comparisons (the
+//! RTX 5070 Ti on Vulkan does). Every f16 value and intermediate is a normal
+//! f32, so f16 is unaffected. For bf16:
+//!
+//! * `threshold_bf16.wgsl` and `fast_nms_packed16.wgsl` compare bit patterns.
+//! * `fast_packed16.wgsl` and `color_cvt_packed16.wgsl` do their f32
+//!   operations on bits: `mul_bits` (the exact significand product rounded at
+//!   the result's precision) and `add_bits` (one float add where no operand
+//!   or result can be subnormal, otherwise the same add scaled by 2^64), with
+//!   comparisons through an order key. They stay bit-identical to the CPU on
+//!   subnormal inputs.
+//! * `bilateral_packed16.wgsl` is not: on an image whose intensities are
+//!   below about 2^-126 its weighted sums flush, exactly as the f32 shader's
+//!   do, so it still equals the GPU f32 path narrowed but not the CPU there.
+//!   Its contract is that f32 path (the weights come from the device's `exp`,
+//!   so it is not CPU-exact anyway), and reproducing the CPU would mean
+//!   rewriting the f32 bilateral's accumulation in the scaled domain, where
+//!   the range kernel `exp(-d^2 / (2 sigma_color^2))` does not scale with the
+//!   image unless sigma_color does.
 
 use crate::Result;
 

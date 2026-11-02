@@ -32,6 +32,10 @@ pub fn pointcloud_transform(
 ) -> Result<GpuTensor<f32>> {
     let num_points = input.shape.height as u32;
     let len = input.shape.len();
+    // No points: an empty result, without binding the zero-size buffer.
+    if len == 0 {
+        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
+    }
     let byte_size = (len * std::mem::size_of::<f32>()) as u64;
 
     // Create output buffer

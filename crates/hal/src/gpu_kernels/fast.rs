@@ -74,6 +74,11 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
             }
         };
 
+    // An empty image would bind a zero-size buffer; its score map is empty.
+    if out_len == 0 {
+        return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
+    }
+
     let params = FastParams {
         width: w as u32,
         height: h as u32,

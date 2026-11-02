@@ -48,6 +48,11 @@ pub fn extract_mesh(
     iso_level: f32,
     max_triangles: u32,
 ) -> Result<Vec<Vertex>> {
+    // An empty volume has no cells and no surface; its zero-size buffer
+    // cannot be bound.
+    if voxel_volume.shape.len() == 0 {
+        return Ok(Vec::new());
+    }
     let vol_shape = voxel_volume.shape;
     let (vx, vy, vz) = (
         vol_shape.width as u32,

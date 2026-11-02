@@ -102,6 +102,21 @@ pub fn undistort(
     }
 
     let out_len = (dst_w * dst_h) as usize;
+    // Nothing to sample into: an empty output, without a dispatch.
+    if out_len == 0 {
+        return Ok(super::zeros_tensor(
+            ctx,
+            TensorShape::new(c, dst_h as usize, dst_w as usize),
+            input.dtype,
+        ));
+    }
+    // An empty image has no pixel to sample or replicate (and its zero-size
+    // buffer cannot be bound).
+    if input.shape.len() == 0 {
+        return Err(crate::Error::InvalidInput(
+            "undistort: cannot sample an empty image".into(),
+        ));
+    }
     let byte_size = (out_len * 4) as u64;
     let usages =
         wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;

@@ -17,6 +17,10 @@ pub fn subtract(
         )));
     }
     let size = a.shape.len();
+    // Empty operands would bind zero-size buffers; the difference is empty.
+    if size == 0 {
+        return Ok(super::zeros_tensor(ctx, a.shape, a.dtype));
+    }
     let byte_size = (size * std::mem::size_of::<f32>()) as u64;
 
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {

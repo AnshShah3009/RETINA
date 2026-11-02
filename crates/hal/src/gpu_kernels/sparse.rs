@@ -18,8 +18,45 @@ pub fn spmv(
             "row_ptr must contain at least one element (CSR indptr)".into(),
         ));
     }
+    // The CPU backend's CSR validation, which this kernel lacked: without it
+    // a malformed matrix read out of range on the device instead of
+    // returning an error.
+    if col_indices.len() != values.len() {
+        return Err(crate::Error::InvalidInput(format!(
+            "spmv: col_indices ({}) and values ({}) must have equal length",
+            col_indices.len(),
+            values.len()
+        )));
+    }
+    if row_ptr[0] != 0 || row_ptr[row_ptr.len() - 1] as usize != col_indices.len() {
+        return Err(crate::Error::InvalidInput(
+            "spmv: malformed CSR row_ptr (must start at 0 and end at nnz)".into(),
+        ));
+    }
+    if row_ptr.windows(2).any(|p| p[0] > p[1]) {
+        return Err(crate::Error::InvalidInput(
+            "spmv: row_ptr must be non-decreasing".into(),
+        ));
+    }
+    let n_cols = x.shape.len();
+    if col_indices.iter().any(|&c| c as usize >= n_cols) {
+        return Err(crate::Error::InvalidInput(format!(
+            "spmv: column index out of range (columns = {})",
+            n_cols
+        )));
+    }
     let rows = row_ptr.len() - 1;
     let size = rows;
+    // No rows, or no entries (which an empty `x` implies after the column
+    // check): every output is 0, and the values buffer, `x` or the output
+    // would be a zero-size binding.
+    if rows == 0 || values.is_empty() {
+        return Ok(super::zeros_tensor(
+            ctx,
+            cv_core::TensorShape::new(1, rows, 1),
+            cv_core::DataType::F32,
+        ));
+    }
     let byte_size = (size * 4) as u64;
 
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {

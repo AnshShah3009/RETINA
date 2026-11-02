@@ -14,7 +14,13 @@ struct ColorParams {
     len: u32,
     code: u32,
     _pad0: u32,
-    _pad1: u32, // pad to 16 bytes for WGSL uniform alignment
+    _pad1: u32,
+    /// f32 bits of the CPU backend's weights (`T::from_f32(0.299)` etc.):
+    /// the shader multiplies with integer operations.
+    wr: u32,
+    wg: u32,
+    wb: u32,
+    _pad2: u32,
 }
 
 /// Uniform of `color_cvt_packed16.wgsl`: the f32 layout plus the format and
@@ -36,10 +42,13 @@ struct ColorParamsPacked16 {
 
 /// Colour conversion of a planar CHW image. RGB / BGR to gray only.
 ///
-/// f32 runs `color_cvt_f32.wgsl`. f16 and bf16 run `color_cvt_packed16.wgsl`
-/// on every device (no `SHADER_F16` needed), which reproduces the CPU
-/// backend's per-operation rounding, so the result is bit-identical to the
-/// CPU's for the same type. Other types return `NotSupported`.
+/// f32 runs `color_cvt_f32.wgsl`, which multiplies with integer operations
+/// and adds in a scaled domain where a subnormal could be flushed, so the
+/// result is bit-identical to the CPU backend's for every input (a NaN result
+/// is NaN, its payload aside). f16 and bf16 run `color_cvt_packed16.wgsl` on
+/// every device (no `SHADER_F16` needed), which reproduces the CPU backend's
+/// per-operation rounding, so the result is bit-identical to the CPU's for
+/// the same type. Other types return `NotSupported`.
 pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable>(
     ctx: &GpuContext,
     input: &GpuTensor<T>,
@@ -76,6 +85,10 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
                     code: code_int,
                     _pad0: 0,
                     _pad1: 0,
+                    wr: 0.299f32.to_bits(),
+                    wg: 0.587f32.to_bits(),
+                    wb: 0.114f32.to_bits(),
+                    _pad2: 0,
                 };
                 (
                     include_str!("../../shaders/color_cvt_f32.wgsl"),
@@ -114,6 +127,15 @@ pub fn color_convert<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroab
                 ));
             }
         };
+
+    // An empty image would bind a zero-size buffer; its gray image is empty.
+    if out_len == 0 {
+        return Ok(super::zeros_tensor(
+            ctx,
+            cv_core::TensorShape::new(out_channels, h, w),
+            input.dtype,
+        ));
+    }
 
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Color Convert Output"),
