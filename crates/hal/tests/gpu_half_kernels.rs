@@ -190,7 +190,12 @@ fn fast_matches_cpu<T: Half>() {
     let sizes = [(3usize, 5usize), (7, 7), (31, 45), (33, 64), (64, 33)];
     let mut corners = 0usize;
     for (k, &(h, w)) in sizes.iter().enumerate() {
-        for (scale, thresholds) in [(255.0f32, [20.0f32, 7.5, 40.0]), (1.0, [0.1, 0.03, 0.2])] {
+        // A negative threshold makes `high < low`, so a circle pixel can be
+        // both brighter and darker; the CPU counts it in both arcs.
+        for (scale, thresholds) in [
+            (255.0f32, [20.0f32, 7.5, 40.0, -7.5]),
+            (1.0, [0.1, 0.03, 0.2, -0.03]),
+        ] {
             let v: Vec<T> = image(h, w, scale, 100 + k as u32);
             let t = tensor(&v, 1, h, w);
             let gt = t.to_gpu_ctx(gpu).unwrap();

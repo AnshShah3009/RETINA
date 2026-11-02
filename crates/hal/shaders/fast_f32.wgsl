@@ -54,25 +54,44 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let v14 = get_f32(x - 2, y - 2);
     let v15 = get_f32(x - 1, y - 3);
 
+    // Two independent tests, as the CPU's `has_9_contiguous_generic`. With a
+    // negative threshold `high < low`, and a value between them is both
+    // brighter and darker; an `else if` here used to drop the darker bit.
     var b_mask = 0u;
     var d_mask = 0u;
 
-    if (v0 > high) { b_mask |= 1u; } else if (v0 < low) { d_mask |= 1u; }
-    if (v1 > high) { b_mask |= 2u; } else if (v1 < low) { d_mask |= 2u; }
-    if (v2 > high) { b_mask |= 4u; } else if (v2 < low) { d_mask |= 4u; }
-    if (v3 > high) { b_mask |= 8u; } else if (v3 < low) { d_mask |= 8u; }
-    if (v4 > high) { b_mask |= 16u; } else if (v4 < low) { d_mask |= 16u; }
-    if (v5 > high) { b_mask |= 32u; } else if (v5 < low) { d_mask |= 32u; }
-    if (v6 > high) { b_mask |= 64u; } else if (v6 < low) { d_mask |= 64u; }
-    if (v7 > high) { b_mask |= 128u; } else if (v7 < low) { d_mask |= 128u; }
-    if (v8 > high) { b_mask |= 256u; } else if (v8 < low) { d_mask |= 256u; }
-    if (v9 > high) { b_mask |= 512u; } else if (v9 < low) { d_mask |= 512u; }
-    if (v10 > high) { b_mask |= 1024u; } else if (v10 < low) { d_mask |= 1024u; }
-    if (v11 > high) { b_mask |= 2048u; } else if (v11 < low) { d_mask |= 2048u; }
-    if (v12 > high) { b_mask |= 4096u; } else if (v12 < low) { d_mask |= 4096u; }
-    if (v13 > high) { b_mask |= 8192u; } else if (v13 < low) { d_mask |= 8192u; }
-    if (v14 > high) { b_mask |= 16384u; } else if (v14 < low) { d_mask |= 16384u; }
-    if (v15 > high) { b_mask |= 32768u; } else if (v15 < low) { d_mask |= 32768u; }
+    if (v0 > high) { b_mask |= 1u; }
+    if (v0 < low) { d_mask |= 1u; }
+    if (v1 > high) { b_mask |= 2u; }
+    if (v1 < low) { d_mask |= 2u; }
+    if (v2 > high) { b_mask |= 4u; }
+    if (v2 < low) { d_mask |= 4u; }
+    if (v3 > high) { b_mask |= 8u; }
+    if (v3 < low) { d_mask |= 8u; }
+    if (v4 > high) { b_mask |= 16u; }
+    if (v4 < low) { d_mask |= 16u; }
+    if (v5 > high) { b_mask |= 32u; }
+    if (v5 < low) { d_mask |= 32u; }
+    if (v6 > high) { b_mask |= 64u; }
+    if (v6 < low) { d_mask |= 64u; }
+    if (v7 > high) { b_mask |= 128u; }
+    if (v7 < low) { d_mask |= 128u; }
+    if (v8 > high) { b_mask |= 256u; }
+    if (v8 < low) { d_mask |= 256u; }
+    if (v9 > high) { b_mask |= 512u; }
+    if (v9 < low) { d_mask |= 512u; }
+    if (v10 > high) { b_mask |= 1024u; }
+    if (v10 < low) { d_mask |= 1024u; }
+    if (v11 > high) { b_mask |= 2048u; }
+    if (v11 < low) { d_mask |= 2048u; }
+    if (v12 > high) { b_mask |= 4096u; }
+    if (v12 < low) { d_mask |= 4096u; }
+    if (v13 > high) { b_mask |= 8192u; }
+    if (v13 < low) { d_mask |= 8192u; }
+    if (v14 > high) { b_mask |= 16384u; }
+    if (v14 < low) { d_mask |= 16384u; }
+    if (v15 > high) { b_mask |= 32768u; }
+    if (v15 < low) { d_mask |= 32768u; }
 
     let b_ext = b_mask | (b_mask << 16u);
     let d_ext = d_mask | (d_mask << 16u);

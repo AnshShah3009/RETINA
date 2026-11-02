@@ -5,6 +5,9 @@
 //!   (`wb * b + wg * g + wr * r` against `wr * r + wg * g + wb * b`), left
 //!   the compiler free to fuse a product into the following add, and the
 //!   device flushed subnormal inputs, products and sums to zero.
+//! * `fast_detect` tested a darker pixel only when it was not brighter
+//!   (`else if`), while the CPU tests both. With a negative threshold a pixel
+//!   can be both, and the GPU missed dark arcs the CPU finds.
 //! * `threshold` compared floats, so the device flushed subnormal inputs and
 //!   thresholds to zero (`0 > -1e-45` was false). Its Trunc was `min`, which
 //!   WGSL leaves to the implementation for NaN; the CPU's was `min` as well,
@@ -315,4 +318,48 @@ fn f32_cvt_color_matches_cpu_bit_for_bit() {
         }
     }
     let _ = cvt_color_case(gpu, &cpu, v, h, w, "specials");
+}
+
+// --------------------------------------------------------------------- FAST
+
+#[test]
+fn f32_fast_negative_threshold_matches_cpu() {
+    let Some(gpu) = gpu() else { return };
+    let cpu = CpuBackend::new().unwrap();
+    let mut r = Lcg(29);
+    let (h, w) = (40usize, 48usize);
+    // A dark disc on a bright background and noise: with a negative
+    // threshold `high < low`, so a circle pixel between them is both
+    // "brighter" and "darker", and the CPU counts it in both arcs.
+    let v: Vec<f32> = (0..h * w)
+        .map(|i| {
+            let (y, x) = ((i / w) as f32, (i % w) as f32);
+            let d = ((x - 20.0).powi(2) + (y - 18.0).powi(2)).sqrt();
+            let base = if d < 6.0 { 40.0 } else { 200.0 };
+            base + r.range(-3.0, 3.0)
+        })
+        .collect();
+    let t = tensor(v, 1, h, w);
+    let gt = t.to_gpu_ctx(gpu).unwrap();
+    let mut corners = 0;
+    for th in [-5.0f32, -20.0, -0.5, 10.0] {
+        for nms in [false, true] {
+            let want = cpu.fast_detect(&t, th, nms).unwrap();
+            let got = gpu.fast_detect(&gt, th, nms).unwrap();
+            let got = got.to_cpu_ctx(gpu).unwrap();
+            let want = want.as_slice().unwrap();
+            corners += want.iter().filter(|s| **s > 0.0).count();
+            assert_bits_eq(
+                got.as_slice().unwrap(),
+                want,
+                false,
+                &|i| format!("pixel ({}, {})", i % w, i / w),
+                &format!("f32 FAST thresh {th} nms {nms}"),
+            );
+        }
+    }
+    assert!(
+        corners > 100,
+        "only {corners} corners: the test proves nothing"
+    );
 }
