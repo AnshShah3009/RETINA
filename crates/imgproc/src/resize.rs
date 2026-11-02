@@ -27,6 +27,14 @@ pub enum Interpolation {
     Area,
 }
 
+/// Resize `src` to `width x height`.
+///
+/// An empty `src` (zero width or height) with a non-empty target returns a
+/// black image of the target size. `cv::resize` raises there
+/// (`!ssize.empty()`), and the HAL's `ComputeContext::resize` returns
+/// `InvalidInput`; this image-in, image-out API (like `warp_affine` and
+/// `resize_rgb`) has no error to return, so the black image is its
+/// documented answer. An empty target returns an empty image.
 pub fn resize(src: &GrayImage, width: u32, height: u32, interpolation: Interpolation) -> GrayImage {
     // Attempt to get a default group, fallback to CPU only if scheduler fails (unlikely in initialized app)
     // For now, we can create a temporary CPU-only group or panic if init failed.

@@ -844,23 +844,92 @@ pub fn resample(x: &[f64], num: usize) -> Vec<f64> {
 
 /// Decimate (downsample with anti-aliasing lowpass filter).
 ///
-/// Applies a lowpass Butterworth filter at Nyquist/factor, then takes every
-/// `factor`-th sample.
+/// Matches `scipy.signal.decimate(x, factor)` with its defaults
+/// (`ftype='iir'`, `n=8`, `zero_phase=True`): an order-8 Chebyshev type I
+/// lowpass with 0.05 dB passband ripple and passband edge `0.8 / factor` of
+/// Nyquist, applied forward and backward with [`filtfilt`], then every
+/// `factor`-th sample starting at the first.
+///
+/// SciPy filters with second-order sections and `sosfiltfilt`; for this filter
+/// that pads by the same 27 samples and starts each pass from the same
+/// steady state as the transfer-function [`filtfilt`], so the two agree to
+/// round-off (better than 1e-8 for factors up to 13).
+///
+/// The passband ripple is real: an even-order Chebyshev filter sits at the
+/// bottom of its ripple at DC, so a constant comes back scaled by
+/// `10^(-0.05/10) ≈ 0.98855`, exactly as in SciPy.
+///
+/// This used an order-8 *Butterworth* at the same edge, which is 3 dB down at
+/// the edge rather than 0.05 dB: a tone at 0.18 cycles/sample, inside the band
+/// a factor-2 decimation keeps, came back at amplitude 0.895 instead of 0.994.
+///
+/// Signals shorter than 24 samples get a lower filter order (`len / 3`), where
+/// SciPy refuses them.
 pub fn decimate(x: &[f64], factor: usize) -> Vec<f64> {
     assert!(factor > 0, "factor must be >= 1");
     if factor == 1 {
         return x.to_vec();
     }
-    // 8th order Butterworth is standard (like scipy default)
-    let order = (8.min(x.len() / 3)).max(1);
-    // Cutoff at 0.8 * Nyquist/factor to allow some transition band
-    // Using normalised sample_rate = 1.0
-    let cutoff = 0.8 / (2.0 * factor as f64);
-    let cutoff = cutoff.clamp(0.001, 0.499);
-    let (b, a) = butter(order, cutoff, 1.0);
+    let order = 8.min(x.len() / 3).max(1);
+    let (b, a) = cheby1_lowpass(order, 0.05, 0.8 / factor as f64);
 
     let filtered = filtfilt(&b, &a, x);
     filtered.iter().step_by(factor).copied().collect()
+}
+
+/// Chebyshev type I digital lowpass, `scipy.signal.cheby1(order, rp, wn)`.
+///
+/// `rp` is the passband ripple in dB and `wn` the passband edge as a fraction
+/// of Nyquist (`0 < wn < 1`). Built the way SciPy builds it: the analog
+/// prototype `cheb1ap`, scaled to the prewarped edge, mapped through the
+/// bilinear transform (every zero at `z = -1`), with the prototype's gain
+/// carried through rather than renormalised - so an even order keeps its DC
+/// gain of `1 / sqrt(1 + eps^2)`.
+fn cheby1_lowpass(order: usize, rp: f64, wn: f64) -> (Vec<f64>, Vec<f64>) {
+    assert!(order > 0, "order must be >= 1");
+    assert!(wn > 0.0 && wn < 1.0, "wn must be in (0, 1)");
+    let n = order as f64;
+    let eps = (10f64.powf(0.1 * rp) - 1.0).sqrt();
+    let mu = (1.0 / eps).asinh() / n;
+
+    // Prototype poles p_m = -sinh(mu + i theta_m), theta_m = pi m / (2N),
+    // m = -N+1, -N+3, ..., N-1.
+    let proto: Vec<Complex<f64>> = (0..order)
+        .map(|k| {
+            let m = -(n - 1.0) + 2.0 * k as f64;
+            let theta = PI * m / (2.0 * n);
+            -Complex::new(mu, theta).sinh()
+        })
+        .collect();
+    let mut k_proto = proto
+        .iter()
+        .fold(Complex::new(1.0, 0.0), |acc, p| acc * -p)
+        .re;
+    if order % 2 == 0 {
+        k_proto /= (1.0 + eps * eps).sqrt();
+    }
+
+    // Prewarp and bilinear transform with z = (1 + s) / (1 - s), the same map
+    // `butter` uses: s = wc * p, wc = tan(pi wn / 2).
+    let wc = (PI * wn / 2.0).tan();
+    let one = Complex::new(1.0, 0.0);
+    let digital_poles: Vec<Complex<f64>> = proto
+        .iter()
+        .map(|&p| (one + p * wc) / (one - p * wc))
+        .collect();
+    let gain = proto
+        .iter()
+        .fold(Complex::new(k_proto, 0.0), |acc, &p| {
+            acc * Complex::new(wc, 0.0) / (one - p * wc)
+        })
+        .re;
+
+    let a = poly_from_roots(&digital_poles);
+    let b = poly_from_roots(&vec![Complex::new(-1.0, 0.0); order])
+        .into_iter()
+        .map(|c| c * gain)
+        .collect();
+    (b, a)
 }
 
 // ---------------------------------------------------------------------------

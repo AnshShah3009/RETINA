@@ -28,8 +28,9 @@ pub struct GltfMesh {
 
 /// Read triangle meshes from a glTF or GLB file.
 ///
-/// One [`GltfMesh`] is returned per primitive of each node that instantiates a
-/// document mesh. The node's world transform — its own `node.transform()`
+/// One [`GltfMesh`] is returned per triangle primitive (`TRIANGLES`,
+/// `TRIANGLE_STRIP` or `TRIANGLE_FAN`; point and line primitives are skipped)
+/// of each node that instantiates a document mesh. The node's world transform — its own `node.transform()`
 /// composed with every ancestor — is applied to the positions and normals, so
 /// a mesh authored at the origin with the translation on the node comes back
 /// in world coordinates. A mesh referenced by several nodes is returned once
@@ -55,8 +56,36 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
 
         for world in worlds {
             for primitive in mesh.primitives() {
-                if primitive.mode() != gltf::mesh::Mode::Triangles {
+                // Triangle strips and fans are triangle topologies too and are
+                // unpacked below. They used to be skipped with the point and
+                // line modes, so a strip-encoded mesh vanished from the result
+                // while the call still returned `Ok`.
+                let mode = primitive.mode();
+                if !matches!(
+                    mode,
+                    gltf::mesh::Mode::Triangles
+                        | gltf::mesh::Mode::TriangleStrip
+                        | gltf::mesh::Mode::TriangleFan
+                ) {
                     continue;
+                }
+
+                // glTF 2.0 requires every accessor's `count` to be at least 1.
+                // A zero count is not merely empty: the `gltf` crate's accessor
+                // iterator computes `count - 1` and panicked ("attempt to
+                // subtract with overflow"), so a malformed file aborted the
+                // caller. Reject it here, before any accessor is read.
+                if let Some(accessor) = primitive
+                    .attributes()
+                    .map(|(_, accessor)| accessor)
+                    .chain(primitive.indices())
+                    .find(|accessor| accessor.count() == 0)
+                {
+                    return Err(cv_core::Error::ParseError(format!(
+                        "glTF: accessor {} of mesh {:?} has count 0; glTF 2.0 requires count >= 1",
+                        accessor.index(),
+                        mesh_name
+                    )));
                 }
 
                 let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
@@ -94,7 +123,7 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
                 // panic surfaced much later in `cv_3d`, at
                 // `TriangleMesh::compute_face_normals`'s `self.vertices[face[0]]`.
                 // `read_obj` already rejects out-of-range face indices; do the same.
-                let faces: Vec<[usize; 3]> = if let Some(indices) = reader.read_indices() {
+                let sequence: Vec<usize> = if let Some(indices) = reader.read_indices() {
                     let idx: Vec<usize> = indices.into_u32().map(|i| i as usize).collect();
                     for &i in &idx {
                         if i >= positions.len() {
@@ -106,16 +135,25 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
                             )));
                         }
                     }
-                    idx.chunks(3)
-                        .filter(|c| c.len() == 3)
-                        .map(|c| [c[0], c[1], c[2]])
-                        .collect()
+                    idx
                 } else {
-                    // Non-indexed: every 3 vertices form a triangle
-                    (0..positions.len() / 3)
-                        .map(|i| [i * 3, i * 3 + 1, i * 3 + 2])
-                        .collect()
+                    // Non-indexed: the vertices themselves, in order.
+                    (0..positions.len()).collect()
                 };
+                let mut faces = triangles_from_sequence(mode, &sequence);
+
+                // glTF 2.0 §3.7.2.1: a node whose global transform has a
+                // negative determinant (a mirror) makes its triangles wind
+                // clockwise. The transform is baked into the positions above,
+                // so restore counter-clockwise winding by swapping two corners.
+                // Without this a mirrored instance came back inside out: the
+                // winding normal pointed opposite the (inverse-transposed)
+                // vertex normals.
+                if world.fixed_view::<3, 3>(0, 0).determinant() < 0.0 {
+                    for face in &mut faces {
+                        face.swap(1, 2);
+                    }
+                }
 
                 meshes.push(GltfMesh {
                     name: mesh_name.clone(),
@@ -129,6 +167,26 @@ pub fn read_gltf<P: AsRef<Path>>(path: P) -> Result<Vec<GltfMesh>> {
     }
 
     Ok(meshes)
+}
+
+/// Triangles of a triangle-topology primitive whose vertex sequence (its
+/// indices, or `0..count` without an index accessor) is `seq`, following
+/// glTF 2.0 §3.7.2.1:
+///
+/// * `TRIANGLES`: `{v[3i], v[3i+1], v[3i+2]}`;
+/// * `TRIANGLE_STRIP`: `{v[i], v[i + (1 + i % 2)], v[i + (2 - i % 2)]}`, which
+///   keeps every triangle counter-clockwise;
+/// * `TRIANGLE_FAN`: `{v[i + 1], v[i + 2], v[0]}`.
+fn triangles_from_sequence(mode: gltf::mesh::Mode, seq: &[usize]) -> Vec<[usize; 3]> {
+    match mode {
+        gltf::mesh::Mode::TriangleStrip => (0..seq.len().saturating_sub(2))
+            .map(|i| [seq[i], seq[i + 1 + i % 2], seq[i + 2 - i % 2]])
+            .collect(),
+        gltf::mesh::Mode::TriangleFan => (0..seq.len().saturating_sub(2))
+            .map(|i| [seq[i + 1], seq[i + 2], seq[0]])
+            .collect(),
+        _ => seq.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+    }
 }
 
 /// Column-major glTF matrix (`m[column][row]`) as a nalgebra matrix.
@@ -265,6 +323,20 @@ pub fn write_glb<P: AsRef<Path>>(
         )));
     }
 
+    // The NORMAL accessor is per vertex. A list of another length used to be
+    // written anyway, with the accessor declaring `n_verts` normals over a
+    // bufferView holding `normals.len()`: a short list overran its view. There
+    // is no valid encoding of such a mesh, so report it.
+    if let Some(norms) = normals
+        && norms.len() != n_verts
+    {
+        return Err(Error::ParseError(format!(
+            "glTF: {} normals for {} vertices; NORMAL is a per-vertex attribute",
+            norms.len(),
+            n_verts
+        )));
+    }
+
     // Position data
     let mut pos_data = Vec::with_capacity(n_verts * 12);
     // Seeded from the first vertex rather than from sentinels.
@@ -338,6 +410,15 @@ pub fn write_glb<P: AsRef<Path>>(
         }
     }
 
+    // glTF accessors need `count >= 1` and bufferViews `byteLength >= 1`, so a
+    // mesh without faces has no index accessor at all: its vertices are
+    // written as a POINTS primitive. An index accessor of count 0 over an
+    // empty bufferView used to be written instead, and `read_gltf` panicked on
+    // the file (`count - 1` in the gltf crate).
+    let has_indices = n_faces > 0;
+    // Accessor / bufferView numbering: [indices], POSITION, [NORMAL].
+    let first = usize::from(has_indices);
+
     // Build buffer: indices + positions + normals
     let mut bin_buffer = Vec::new();
     let idx_offset = 0;
@@ -362,16 +443,30 @@ pub fn write_glb<P: AsRef<Path>>(
     // Build JSON
     let has_normals = normals.is_some() && !norm_data.is_empty();
     let attributes = if has_normals {
-        r#""POSITION": 1, "NORMAL": 2"#
+        format!(r#""POSITION": {}, "NORMAL": {}"#, first, first + 1)
     } else {
-        r#""POSITION": 1"#
+        format!(r#""POSITION": {first}"#)
+    };
+    let primitive_topology = if has_indices {
+        r#""indices": 0"#
+    } else {
+        // POINTS: vertices only.
+        r#""mode": 0"#
     };
 
-    let mut accessors = format!(
-        r#"[
-    {{"bufferView": 0, "componentType": 5125, "count": {}, "type": "SCALAR"}},
-    {{"bufferView": 1, "componentType": 5126, "count": {}, "type": "VEC3", "min": [{}, {}, {}], "max": [{}, {}, {}]}}"#,
-        n_faces * 3,
+    let mut accessors = Vec::new();
+    let mut views = Vec::new();
+    if has_indices {
+        accessors.push(format!(
+            r#"{{"bufferView": 0, "componentType": 5125, "count": {}, "type": "SCALAR"}}"#,
+            n_faces * 3
+        ));
+        views.push(format!(
+            r#"{{"buffer": 0, "byteOffset": {idx_offset}, "byteLength": {idx_len}, "target": 34963}}"#
+        ));
+    }
+    accessors.push(format!(
+        r#"{{"bufferView": {first}, "componentType": 5126, "count": {}, "type": "VEC3", "min": [{}, {}, {}], "max": [{}, {}, {}]}}"#,
         n_verts,
         min_pos[0],
         min_pos[1],
@@ -379,30 +474,22 @@ pub fn write_glb<P: AsRef<Path>>(
         max_pos[0],
         max_pos[1],
         max_pos[2]
-    );
+    ));
+    views.push(format!(
+        r#"{{"buffer": 0, "byteOffset": {pos_offset}, "byteLength": {pos_len}, "target": 34962}}"#
+    ));
     if has_normals {
-        accessors += &format!(
-            r#",
-    {{"bufferView": 2, "componentType": 5126, "count": {}, "type": "VEC3"}}"#,
+        accessors.push(format!(
+            r#"{{"bufferView": {}, "componentType": 5126, "count": {}, "type": "VEC3"}}"#,
+            first + 1,
             n_verts
-        );
+        ));
+        views.push(format!(
+            r#"{{"buffer": 0, "byteOffset": {norm_offset}, "byteLength": {norm_len}, "target": 34962}}"#
+        ));
     }
-    accessors += "\n  ]";
-
-    let mut buffer_views = format!(
-        r#"[
-    {{"buffer": 0, "byteOffset": {}, "byteLength": {}, "target": 34963}},
-    {{"buffer": 0, "byteOffset": {}, "byteLength": {}, "target": 34962}}"#,
-        idx_offset, idx_len, pos_offset, pos_len
-    );
-    if has_normals {
-        buffer_views += &format!(
-            r#",
-    {{"buffer": 0, "byteOffset": {}, "byteLength": {}, "target": 34962}}"#,
-            norm_offset, norm_len
-        );
-    }
-    buffer_views += "\n  ]";
+    let accessors = format!("[\n    {}\n  ]", accessors.join(",\n    "));
+    let buffer_views = format!("[\n    {}\n  ]", views.join(",\n    "));
 
     let json = format!(
         r#"{{
@@ -410,12 +497,12 @@ pub fn write_glb<P: AsRef<Path>>(
   "scene": 0,
   "scenes": [{{"nodes": [0]}}],
   "nodes": [{{"mesh": 0}}],
-  "meshes": [{{"primitives": [{{"attributes": {{{}}}, "indices": 0}}]}}],
+  "meshes": [{{"primitives": [{{"attributes": {{{}}}, {}}}]}}],
   "accessors": {},
   "bufferViews": {},
   "buffers": [{{"byteLength": {}}}]
 }}"#,
-        attributes, accessors, buffer_views, total_bin_len
+        attributes, primitive_topology, accessors, buffer_views, total_bin_len
     );
 
     let json_bytes = json.as_bytes();

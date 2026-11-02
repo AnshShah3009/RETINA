@@ -100,9 +100,9 @@ fn packed16_taps<T: cv_core::float::Float>(
 /// values, rounded once. Other types return `NotSupported`.
 ///
 /// A zero target size (or zero channels) returns an empty tensor of the
-/// target shape, and an empty source with a non-empty target returns zeros of
-/// the target shape, both without a dispatch. That is the CPU backend's
-/// behaviour.
+/// target shape without a dispatch; an empty source with a non-empty target
+/// is `InvalidInput` (`cv::resize` asserts `!ssize.empty()`). That is the CPU
+/// backend's behaviour. An empty source used to return zeros.
 pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
     ctx: &GpuContext,
     input: &GpuTensor<T>,
@@ -131,6 +131,12 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
     let out_len = out_shape
         .checked_len()
         .ok_or_else(|| crate::Error::InvalidInput("Resize target size overflows".into()))?;
+    if out_len > 0 && (src_h == 0 || src_w == 0 || c == 0) {
+        return Err(crate::Error::InvalidInput(format!(
+            "resize: the source {:?} is empty and the target {dst_w}x{dst_h} is not",
+            input.shape
+        )));
+    }
     // A storage binding may be neither empty nor a partial word. Packed:
     // two values per u32 word, as `packed16::buffer_bytes` (which exists only
     // with `half-precision`).
@@ -139,9 +145,8 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
         Some(_) => (out_len.div_ceil(2).max(1) * 4) as u64,
     };
 
-    // wgpu zero-initialises a new buffer, so an empty source needs no
-    // dispatch to come back as zeros, and the packed shader can OR each half
-    // into its word.
+    // wgpu zero-initialises a new buffer, so the packed shader can OR each
+    // half into its word.
     let output_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Resize Output Buffer"),
         size: byte_size,
@@ -154,7 +159,7 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
         dtype: input.dtype,
         _phantom: PhantomData,
     };
-    if out_len == 0 || src_h == 0 || src_w == 0 {
+    if out_len == 0 {
         return Ok(output);
     }
 

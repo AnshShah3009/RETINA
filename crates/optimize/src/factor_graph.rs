@@ -119,6 +119,18 @@ impl Variable {
                 let r = d.rotation.scaled_axis();
                 DVector::from_vec(vec![t.x, t.y, t.z, r.x, r.y, r.z])
             }
+            // The heading is an angle, so its difference is wrapped to
+            // [-π, π), as `BetweenFactor` already does for its Pose2 residual.
+            // A plain subtraction made `π - 0.01` and `-π + 0.01` differ by
+            // -6.26 rad instead of 0.02, so a `PriorFactor<Pose2>` the value
+            // satisfies reported a 2π heading error, and iSAM2's
+            // relinearisation test (which also calls `local`) saw a 2π change.
+            (Variable::Pose2(a), Variable::Pose2(b)) => {
+                let d = b - a;
+                let theta = (d.z + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI)
+                    - std::f64::consts::PI;
+                DVector::from_vec(vec![d.x, d.y, theta])
+            }
             _ => other.to_vector() - self.to_vector(),
         }
     }

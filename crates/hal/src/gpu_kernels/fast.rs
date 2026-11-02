@@ -38,8 +38,10 @@ pub fn fast_detect<T: cv_core::float::Float + bytemuck::Pod + bytemuck::Zeroable
     let (h, w) = input.shape.hw();
     let c = input.shape.channels;
 
+    // A colour image is invalid input, as on the CPU, not an unsupported
+    // variant: FAST scores one plane.
     if c != 1 {
-        return Err(crate::Error::NotSupported(
+        return Err(crate::Error::InvalidInput(
             "FAST detection expects 1 channel image".into(),
         ));
     }

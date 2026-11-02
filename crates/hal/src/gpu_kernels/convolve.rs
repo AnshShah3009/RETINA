@@ -46,6 +46,14 @@ pub fn convolve_2d<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
     if input.shape.len() == 0 {
         return Ok(super::zeros_tensor(ctx, input.shape, input.dtype));
     }
+    // Each CHW plane is convolved on its own, one dispatch layer per plane.
+    let planes = input.shape.channels as u32;
+    let max_z = ctx.device.limits().max_compute_workgroups_per_dimension;
+    if planes > max_z {
+        return Err(crate::Error::NotSupported(format!(
+            "convolve_2d: {planes} channels exceed the GPU dispatch limit {max_z}"
+        )));
+    }
 
     let output_size = input.shape.len();
     let output_byte_size = (output_size * std::mem::size_of::<f32>()) as u64;
@@ -117,11 +125,10 @@ pub fn convolve_2d<T: Float + bytemuck::Pod + bytemuck::Zeroable + 'static>(
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
-        // One invocation per (pixel, channel); the shader recovers the channel
-        // index from x, so the dispatch covers `width * channels` columns.
+        // One invocation per pixel, one dispatch layer per CHW plane.
         let wg_x = (w as u32).div_ceil(16);
         let wg_y = (h as u32).div_ceil(16);
-        pass.dispatch_workgroups(wg_x, wg_y, 1);
+        pass.dispatch_workgroups(wg_x, wg_y, planes);
     }
     ctx.submit(encoder);
 

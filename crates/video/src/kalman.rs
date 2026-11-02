@@ -36,10 +36,22 @@ impl DynamicKalmanFilter {
             meas_noise_cov: DMatrix::identity(meas_params, meas_params),
             error_cov_pre: DMatrix::zeros(dynam_params, dynam_params),
             gain: DMatrix::zeros(dynam_params, meas_params),
-            error_cov_post: DMatrix::identity(dynam_params, dynam_params),
+            // `cv::KalmanFilter::init` starts `errorCovPost` at zero (only the
+            // transition matrix and the two noise covariances are identity).
+            // An identity here inflated the first prediction by `F Fᵀ` and
+            // moved the first correction off OpenCV's.
+            error_cov_post: DMatrix::zeros(dynam_params, dynam_params),
         }
     }
 
+    /// Time update, as `cv::KalmanFilter::predict`.
+    ///
+    /// Like OpenCV, the prediction is also copied into `state_post` /
+    /// `error_cov_post`, so a frame without a measurement (an occluded target)
+    /// leaves the filter at its prediction and the next `predict` extrapolates
+    /// from there. Without the copy every consecutive `predict` restarted from
+    /// the last *corrected* state: the predicted track froze in place and its
+    /// covariance never grew past one step of process noise.
     pub fn predict(&mut self, control: Option<&DVector<f64>>) -> &DVector<f64> {
         self.state_pre = &self.trans_matrix * &self.state_post;
         if let Some(u) = control {
@@ -48,6 +60,8 @@ impl DynamicKalmanFilter {
         self.error_cov_pre =
             &self.trans_matrix * &self.error_cov_post * self.trans_matrix.transpose()
                 + &self.process_noise_cov;
+        self.state_post.clone_from(&self.state_pre);
+        self.error_cov_post.clone_from(&self.error_cov_pre);
         &self.state_pre
     }
 

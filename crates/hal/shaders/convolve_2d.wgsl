@@ -80,6 +80,9 @@ fn get_input_index(x: i32, y: i32) -> i32 {
     return iy * w + ix;
 }
 
+// One dispatch layer (`global_id.z`) per CHW plane: each channel is
+// convolved on its own, as the CPU backend and `cv::filter2D` do. Only plane 0
+// used to be written; the other planes stayed zero.
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let x = i32(global_id.x);
@@ -88,6 +91,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (u32(x) >= params.width || u32(y) >= params.height) {
         return;
     }
+    let base = i32(global_id.z * params.width * params.height);
 
     let kw = i32(params.kernel_width);
     let kh = i32(params.kernel_height);
@@ -105,7 +109,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             var val = params.border_const;
             
             if (input_idx >= 0) {
-                val = input_data[input_idx];
+                val = input_data[base + input_idx];
             }
             
             let kernel_val = kernel_data[ky * kw + kx];
@@ -113,6 +117,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         }
     }
 
-    let out_idx = y * i32(params.width) + x;
+    let out_idx = base + y * i32(params.width) + x;
     output_data[out_idx] = sum;
 }

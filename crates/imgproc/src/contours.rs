@@ -231,9 +231,15 @@ pub fn convex_hull(contour: &Contour) -> Contour {
 /// chord *segment*. A final pass drops vertices lying within
 /// `epsilon / sqrt(2)` of the line through their neighbours when the turn is
 /// not back-tracking and the neighbours differ in both `x` and `y`, exactly
-/// as OpenCV does. A negative or NaN `epsilon` is treated as zero (OpenCV
-/// rejects it).
-pub fn approx_poly_dp(contour: &Contour, epsilon: f64, closed: bool) -> Contour {
+/// as OpenCV does.
+///
+/// `epsilon` must satisfy OpenCV's `epsilon >= 0 && epsilon < 1e30`: a
+/// negative, NaN, infinite or larger value is `InvalidInput` (OpenCV raises
+/// "Epsilon not valid"). It used to be clamped to 0 when negative or NaN,
+/// returning the contour unchanged, and to collapse the contour to one point
+/// when huge.
+pub fn approx_poly_dp(contour: &Contour, epsilon: f64, closed: bool) -> crate::Result<Contour> {
+    check_approx_epsilon(epsilon)?;
     let pts = &contour.points;
     let keep = approx_poly_dp_indices(
         pts.len(),
@@ -241,15 +247,27 @@ pub fn approx_poly_dp(contour: &Contour, epsilon: f64, closed: bool) -> Contour 
         epsilon,
         closed,
     );
-    Contour {
+    Ok(Contour {
         points: keep.into_iter().map(|i| pts[i]).collect(),
+    })
+}
+
+/// OpenCV's `approxPolyDP` precondition, `epsilon >= 0 && epsilon < 1e30`
+/// (false for NaN).
+pub(crate) fn check_approx_epsilon(epsilon: f64) -> crate::Result<()> {
+    if epsilon >= 0.0 && epsilon < 1e30 {
+        Ok(())
+    } else {
+        Err(cv_core::Error::InvalidInput(format!(
+            "approx_poly_dp: epsilon {epsilon} is not valid (must be >= 0 and < 1e30)"
+        )))
     }
 }
 
 /// `approxPolyDP_` on `count` points read through `pt`, returning the
 /// indices of the points kept, in output order. Coordinates and their
 /// differences are taken in `f64`, which for integer points is exactly
-/// OpenCV's arithmetic.
+/// OpenCV's arithmetic. `epsilon` has passed [`check_approx_epsilon`].
 pub(crate) fn approx_poly_dp_indices(
     count: usize,
     pt: impl Fn(usize) -> (f64, f64),
@@ -259,8 +277,7 @@ pub(crate) fn approx_poly_dp_indices(
     if count == 0 {
         return Vec::new();
     }
-    let eps = epsilon.max(0.0);
-    let eps = eps * eps;
+    let eps = epsilon * epsilon;
     let mut stack: Vec<(usize, usize)> = Vec::new();
     let mut dst: Vec<usize> = Vec::with_capacity(count);
     let mut is_closed = closed;
@@ -1278,7 +1295,7 @@ mod tests {
                 (0, 1),
             ],
         };
-        let a = approx_poly_dp(&c, 0.8, true);
+        let a = approx_poly_dp(&c, 0.8, true).unwrap();
         assert!(a.points.len() < c.points.len());
         assert!(a.points.len() >= 4);
     }

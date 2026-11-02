@@ -58,7 +58,29 @@ fn run(
     out.as_slice().unwrap().to_vec()
 }
 
-/// The modes from their definitions, f64, two-pass means.
+/// OpenCV's normalisation (`common_matchTemplate`): `num / den` inside the
+/// denominator, +-1 within 1.125 of it, else 0 (1 for `SqDiffNormed`); a
+/// window variance of at most `min(0.5, 10 * FLT_EPSILON * sum(I^2))` is a
+/// zero denominator.
+fn cv_norm(m: TemplateMatchMethod, num: f64, wnd_sum2: f64, diff2: f64, t_norm: f64) -> f64 {
+    let den = if diff2 <= (10.0 * f32::EPSILON as f64 * wnd_sum2).min(0.5) {
+        0.0
+    } else {
+        diff2.sqrt() * t_norm
+    };
+    if num.abs() < den {
+        num / den
+    } else if num.abs() < den * 1.125 {
+        num.signum()
+    } else if m == TemplateMatchMethod::SqDiffNormed {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+/// The modes from their definitions, f64, two-pass means, OpenCV's
+/// normalisation.
 fn definition(
     img: &[f32],
     iw: usize,
@@ -87,20 +109,15 @@ fn definition(
                 iic += (a - im) * (a - im);
                 ttc += (b - tm) * (b - tm);
             }
-            let norm = |num: f64, den: f64| {
-                if den > f32::EPSILON as f64 {
-                    num / den
-                } else {
-                    0.0
-                }
-            };
             out.push(match m {
                 TemplateMatchMethod::SqDiff => sd,
-                TemplateMatchMethod::SqDiffNormed => norm(sd, (ii * tt).sqrt()),
+                TemplateMatchMethod::SqDiffNormed => cv_norm(m, sd, ii, ii, tt.sqrt()),
                 TemplateMatchMethod::Ccorr => cc,
-                TemplateMatchMethod::CcorrNormed => norm(cc, (ii * tt).sqrt()),
+                TemplateMatchMethod::CcorrNormed => cv_norm(m, cc, ii, ii, tt.sqrt()),
                 TemplateMatchMethod::Ccoeff => co,
-                TemplateMatchMethod::CcoeffNormed => norm(co, iic.sqrt() * ttc.sqrt()),
+                // OpenCV: a constant template scores 1 everywhere.
+                TemplateMatchMethod::CcoeffNormed if ttc / n < f64::EPSILON => 1.0,
+                TemplateMatchMethod::CcoeffNormed => cv_norm(m, co, ii, iic, ttc.sqrt()),
             });
         }
     }
@@ -215,7 +232,10 @@ fn f64_template_matching_agrees_with_definition_and_old_kernel() {
                 } else {
                     (n + 2.0) * f32::EPSILON as f64 * scale
                 };
-                if !(is_normed(m) && def[i] == 0.0) {
+                // The old kernel predates OpenCV's degenerate-window rule
+                // (0 / +-1 / 1 outside the plain ratio): compare only where
+                // the definition is the ratio itself.
+                if !(is_normed(m) && (def[i] == 0.0 || def[i].abs() == 1.0)) {
                     assert!(
                         (g - old[i] as f64).abs() <= tol_old,
                         "{m:?} {iw}x{ih}/{tw}x{th} #{i}: got {g}, old f32 kernel {}",
