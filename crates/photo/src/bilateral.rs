@@ -1,72 +1,78 @@
 use image::{GrayImage, Luma};
 
+/// Edge-preserving bilateral filter on an 8-bit luma image, matching
+/// `cv::bilateralFilter` (OpenCV's `bilateralFilter_8u`).
+///
+/// * The kernel is the **disc** of offsets with `sqrt(dx² + dy²) <= radius`,
+///   not the square box around it.
+/// * The image is extended with OpenCV's `BORDER_DEFAULT` (reflect-101), so
+///   every output pixel averages the full disc.
+/// * `radius = d / 2` for `d > 0`, otherwise `cvRound(sigma_space * 1.5)`.
+/// * A non-positive sigma is replaced by 1, as OpenCV does.
+///
+/// The previous version used the square window, skipped out-of-image taps
+/// (renormalising over fewer neighbours) and took `ceil` of
+/// `1.5 * sigma_space`. On an 11x9 textured image it was off OpenCV by up to
+/// 16 grey levels in the interior and 26 at the border; see
+/// `tests/bilateral_opencv_parity.rs`.
 pub fn bilateral_filter(src: &GrayImage, d: i32, sigma_color: f32, sigma_space: f32) -> GrayImage {
     let width = src.width() as usize;
     let height = src.height() as usize;
     let mut dst = GrayImage::new(src.width(), src.height());
+    if width == 0 || height == 0 {
+        return dst;
+    }
 
     // Guard degenerate sigmas: sigma == 0 makes the coefficient -inf, and
-    // `0 * -inf` is NaN for any neighbour equal to the centre, so the whole
-    // image came back as garbage (`NaN.min(255.0) as u8 == 255`). OpenCV
-    // derives sigma from the kernel size when it is not positive; fall back to
-    // unit sigma here (same guard as the HAL bilateral filter).
-    let sigma_color = if sigma_color > 0.0 { sigma_color } else { 1.0 };
-    let sigma_space = if sigma_space > 0.0 { sigma_space } else { 1.0 };
+    // `0 * -inf` is NaN for any neighbour equal to the centre. OpenCV
+    // replaces a non-positive sigma with 1.
+    let sigma_color = if sigma_color > 0.0 { sigma_color } else { 1.0 } as f64;
+    let sigma_space = if sigma_space > 0.0 { sigma_space } else { 1.0 } as f64;
 
     let radius = if d <= 0 {
-        (sigma_space * 1.5).ceil() as i32
+        // cvRound: round half to even.
+        (sigma_space * 1.5).round_ties_even() as i32
     } else {
         d / 2
-    };
+    }
+    .max(1);
 
     let gauss_color_coeff = -0.5 / (sigma_color * sigma_color);
     let gauss_space_coeff = -0.5 / (sigma_space * sigma_space);
 
-    // Spatial weight depends only on the kernel offset. u8 intensities differ
-    // by 0..=255, so the range weight is a 256-entry table of the same exp.
-    let k = (2 * radius + 1) as usize;
-    let mut space_w = vec![0.0f32; k * k];
+    // Disc of offsets and their spatial weights, computed in f64 and stored
+    // as f32 like OpenCV's tables.
+    let mut taps: Vec<(i32, i32, f32)> = Vec::new();
     for dy in -radius..=radius {
         for dx in -radius..=radius {
-            let dist_sq = (dx * dx + dy * dy) as f32;
-            let iy = (dy + radius) as usize;
-            let ix = (dx + radius) as usize;
-            space_w[iy * k + ix] = (dist_sq * gauss_space_coeff).exp();
+            let r = ((dx * dx + dy * dy) as f64).sqrt();
+            if r > radius as f64 {
+                continue;
+            }
+            taps.push((dy, dx, (r * r * gauss_space_coeff).exp() as f32));
         }
     }
+    // u8 intensities differ by 0..=255, so the range weight is a table.
     let mut color_w = [0.0f32; 256];
-    for diff in 0..256 {
-        let d = diff as f32;
-        color_w[diff] = (d * d * gauss_color_coeff).exp();
+    for (diff, w) in color_w.iter_mut().enumerate() {
+        let d = diff as f64;
+        *w = (d * d * gauss_color_coeff).exp() as f32;
     }
 
+    let raw = src.as_raw();
     for y in 0..height {
         for x in 0..width {
             let mut sum_weight = 0.0f32;
             let mut sum_val = 0.0f32;
-            let center_u8 = src.get_pixel(x as u32, y as u32)[0];
+            let center = raw[y * width + x];
 
-            for dy in -radius..=radius {
-                let sy = y as i32 + dy;
-                if sy < 0 || sy >= height as i32 {
-                    continue;
-                }
-
-                for dx in -radius..=radius {
-                    let sx = x as i32 + dx;
-                    if sx < 0 || sx >= width as i32 {
-                        continue;
-                    }
-
-                    let val_u8 = src.get_pixel(sx as u32, sy as u32)[0];
-                    let val = val_u8 as f32;
-                    let diff = (val_u8 as i32 - center_u8 as i32).unsigned_abs() as usize;
-                    let weight = space_w[(dy + radius) as usize * k + (dx + radius) as usize]
-                        * color_w[diff];
-
-                    sum_val += val * weight;
-                    sum_weight += weight;
-                }
+            for &(dy, dx, space_w) in &taps {
+                let sy = reflect_101(y as i32 + dy, height as i32);
+                let sx = reflect_101(x as i32 + dx, width as i32);
+                let val = raw[sy * width + sx];
+                let weight = space_w * color_w[val.abs_diff(center) as usize];
+                sum_val += val as f32 * weight;
+                sum_weight += weight;
             }
 
             dst.put_pixel(
@@ -80,6 +86,21 @@ pub fn bilateral_filter(src: &GrayImage, d: i32, sigma_color: f32, sigma_space: 
     }
 
     dst
+}
+
+/// OpenCV's `borderInterpolate(p, len, BORDER_REFLECT_101)`: `gfedcb|abcdefgh|gfedcba`.
+fn reflect_101(mut p: i32, len: i32) -> usize {
+    if len == 1 {
+        return 0;
+    }
+    while p < 0 || p >= len {
+        if p < 0 {
+            p = -p;
+        } else {
+            p = 2 * len - 2 - p;
+        }
+    }
+    p as usize
 }
 
 #[cfg(test)]
@@ -184,6 +205,10 @@ mod tests {
 
     /// Spatial exp once per offset, times a 256-entry range exp, accumulated in
     /// the same neighbour order as `exp(space + color)`. u8 output stays identical.
+    ///
+    /// The reference below follows the same OpenCV semantics as
+    /// `bilateral_filter` (disc support, reflect-101 border, `cvRound` radius
+    /// clamped to 1); only the weight evaluation differs.
     #[test]
     fn precomputed_exps_match_fused_exp_bytes() {
         let images = [
@@ -222,10 +247,11 @@ mod tests {
         let sigma_color = if sigma_color > 0.0 { sigma_color } else { 1.0 };
         let sigma_space = if sigma_space > 0.0 { sigma_space } else { 1.0 };
         let radius = if d <= 0 {
-            (sigma_space * 1.5).ceil() as i32
+            (sigma_space * 1.5).round_ties_even() as i32
         } else {
             d / 2
-        };
+        }
+        .max(1);
         let gauss_color_coeff = -0.5 / (sigma_color * sigma_color);
         let gauss_space_coeff = -0.5 / (sigma_space * sigma_space);
         for y in 0..height {
@@ -234,15 +260,12 @@ mod tests {
                 let mut sum_val = 0.0f32;
                 let center_val = src.get_pixel(x as u32, y as u32)[0] as f32;
                 for dy in -radius..=radius {
-                    let sy = y as i32 + dy;
-                    if sy < 0 || sy >= height as i32 {
-                        continue;
-                    }
                     for dx in -radius..=radius {
-                        let sx = x as i32 + dx;
-                        if sx < 0 || sx >= width as i32 {
+                        if dx * dx + dy * dy > radius * radius {
                             continue;
                         }
+                        let sy = reflect_101(y as i32 + dy, height as i32);
+                        let sx = reflect_101(x as i32 + dx, width as i32);
                         let val = src.get_pixel(sx as u32, sy as u32)[0] as f32;
                         let dist_sq = (dx * dx + dy * dy) as f32;
                         let color_diff = val - center_val;
