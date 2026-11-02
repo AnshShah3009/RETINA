@@ -261,27 +261,42 @@ fn ring_bbox(ring: &[Point2D]) -> (f64, f64, f64, f64) {
     (min_x, min_y, max_x, max_y)
 }
 
+/// Whether a ring crosses or touches itself anywhere other than where
+/// consecutive edges meet - GEOS's "self-intersection" / "ring
+/// self-intersection" invalidity.
+///
+/// Only *proper* crossings (interiors crossing at a single point) used to
+/// count, so a ring that touches itself was valid: a figure-eight through one
+/// vertex, a vertex lying on another edge, a spike that doubles back along its
+/// own edge, and edges overlapping collinearly. shapely reports every one of
+/// those `is_valid == False`. Repeated consecutive vertices are allowed (as in
+/// GEOS) and are dropped first, so they do not read as a touch.
 fn ring_self_intersects(ring: &[Point2D]) -> bool {
-    let n = if ring.len() > 1
-        && (ring[0].x - ring.last().unwrap().x).abs() < EPS
-        && (ring[0].y - ring.last().unwrap().y).abs() < EPS
-    {
-        ring.len() - 1
-    } else {
-        ring.len()
-    };
-    if n < 4 {
+    let pts = dedup_ring(ring);
+    let n = pts.len();
+    if n < 3 {
         return false;
     }
     for i in 0..n {
-        let i2 = (i + 1) % n;
-        for j in (i + 2)..n {
-            let j2 = (j + 1) % n;
-            // Skip adjacent edges
-            if j2 == i {
+        let (p, q) = (&pts[i], &pts[(i + 1) % n]);
+        for j in (i + 1)..n {
+            let (r, s) = (&pts[j], &pts[(j + 1) % n]);
+            let next = j == i + 1;
+            let prev = i == 0 && j == n - 1;
+            if next || prev {
+                // Consecutive edges share exactly one vertex. They meet
+                // anywhere else only by folding back along each other: the far
+                // end of one lies on the other's line, on the same side of the
+                // shared vertex.
+                let (shared, a, b) = if next { (q, p, s) } else { (p, q, r) };
+                let back =
+                    (a.x - shared.x) * (b.x - shared.x) + (a.y - shared.y) * (b.y - shared.y);
+                if cross2d(a, shared, b) == 0.0 && back > 0.0 {
+                    return true;
+                }
                 continue;
             }
-            if segments_intersect_proper(&ring[i], &ring[i2], &ring[j], &ring[j2]) {
+            if segments_intersect(p, q, r, s) {
                 return true;
             }
         }
