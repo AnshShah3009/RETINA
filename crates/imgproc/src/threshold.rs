@@ -79,17 +79,13 @@ pub fn threshold_otsu(src: &GrayImage, max_value: u8, typ: ThresholdType) -> (u8
 
     let mut weight_background = 0.0f64;
     let mut sum_background = 0.0f64;
-    let mut best_between = -1.0f64;
+    // OpenCV's `getThreshVal_Otsu_8u` starts at 0 and moves only on a split
+    // with strictly positive between-class variance, so a single-valued image
+    // (no split at all) thresholds at 0: cv2 maps a constant 100 image to
+    // `max_value` under THRESH_BINARY. A previous revision fell back to the
+    // histogram mode here, which made the same image all 0.
+    let mut best_between = 0.0f64;
     let mut best_threshold = 0u8;
-
-    // Mode of the histogram: fallback threshold for uniform images (a
-    // previous revision returned 0, inverting the output vs. OpenCV).
-    let mode_level = hist
-        .iter()
-        .enumerate()
-        .max_by_key(|&(_, &c)| c)
-        .map(|(i, _)| i as u8)
-        .unwrap_or(0);
 
     for t in 0u16..=255 {
         let idx = t as usize;
@@ -113,12 +109,6 @@ pub fn threshold_otsu(src: &GrayImage, max_value: u8, typ: ThresholdType) -> (u8
             best_between = between;
             best_threshold = t as u8;
         }
-    }
-
-    // Uniform image: between-variance never became positive; fall back to
-    // the histogram mode instead of 0.
-    if best_between <= 0.0 {
-        best_threshold = mode_level;
     }
 
     let dst = threshold_cpu(src, best_threshold, max_value, typ);
