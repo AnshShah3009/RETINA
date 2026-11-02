@@ -18,3 +18,7 @@ criterion = { workspace = true }
 
 [features]
 default = []
+
+[[bench]]
+name = "registration_cpu"
+harness = false
