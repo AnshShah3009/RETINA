@@ -488,6 +488,14 @@ impl ComputeContext for CpuBackend {
                 image.shape, template.shape
             )));
         }
+        // `cv::matchTemplate` requires the template's type, channel count
+        // included, to be the image's.
+        if image.shape.channels != template.shape.channels {
+            return Err(crate::Error::InvalidInput(format!(
+                "match_template: the image has {} channels, the template {}",
+                image.shape.channels, template.shape.channels
+            )));
+        }
         if tmpl_h > img_h || tmpl_w > img_w {
             return Err(crate::Error::InvalidInput(
                 "Template larger than image".into(),
@@ -504,7 +512,8 @@ impl ComputeContext for CpuBackend {
             .ok_or_else(|| crate::Error::MemoryError("Output not on CPU".into()))?;
 
         // f64 accumulation, one pass per window, integral images for the
-        // window sums (see `cpu::template_match`).
+        // window sums, every term summed over the channels (see
+        // `cpu::template_match`).
         let img64: Vec<f64> = img.iter().map(|v| Float::to_f64(*v)).collect();
         let tmpl64: Vec<f64> = tmpl.iter().map(|v| Float::to_f64(*v)).collect();
         let scores = crate::cpu::template_match::match_template_f64(
@@ -514,8 +523,8 @@ impl ComputeContext for CpuBackend {
             &tmpl64,
             tmpl_w,
             tmpl_h,
+            image.shape.channels,
             method,
-            Float::to_f64(T::EPSILON),
         );
         dst.par_iter_mut()
             .zip(scores.par_iter())
