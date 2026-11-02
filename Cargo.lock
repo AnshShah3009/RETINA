@@ -2051,6 +2051,7 @@ dependencies = [
  "cv-3d",
  "cv-core",
  "cv-hal",
+ "cv-pointcloud",
  "nalgebra",
  "rayon",
 ]

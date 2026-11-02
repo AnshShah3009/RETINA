@@ -10,6 +10,7 @@ nalgebra = { workspace = true }
 cv-core = { workspace = true }
 cv-hal = { workspace = true }
 cv-3d = { workspace = true }
+cv-pointcloud = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
