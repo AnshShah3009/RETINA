@@ -129,12 +129,20 @@ fn filtfilt_still_filters_and_stays_zero_phase() {
 #[test]
 fn decimate_preserves_a_constant() {
     // `decimate` is filtfilt + a strided copy, so it inherited the same edge
-    // artifacts.
+    // artifacts: a constant must come back as a constant, edges included.
+    //
+    // Its level is SciPy's, not the input's. `decimate` is SciPy's order-8
+    // Chebyshev I filter with 0.05 dB ripple, and an even-order Chebyshev
+    // filter has DC gain 10^(-0.05/20) per pass, so the forward-backward pass
+    // scales a constant by 10^(-0.05/10):
+    // `scipy.signal.decimate(np.full(200, 5.0), q)` is 4.942765473284682..
+    // 4.942765473284695 for every sample, q = 2 and q = 4.
     let x = vec![5.0f64; 200];
+    let level = 5.0 * 10f64.powf(-0.05 / 10.0);
     for factor in [2usize, 4] {
         let y = decimate(&x, factor);
         assert_eq!(y.len(), 200 / factor);
-        let worst = y.iter().map(|v| (v - 5.0).abs()).fold(0.0f64, f64::max);
+        let worst = y.iter().map(|v| (v - level).abs()).fold(0.0f64, f64::max);
         assert!(worst < 1e-9, "decimate(x, {factor}) deviation {worst:.6e}");
     }
 }
