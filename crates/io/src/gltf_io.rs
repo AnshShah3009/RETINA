@@ -31,7 +31,8 @@ pub struct GltfMesh {
 /// One [`GltfMesh`] is returned per triangle primitive (`TRIANGLES`,
 /// `TRIANGLE_STRIP` or `TRIANGLE_FAN`; point and line primitives are skipped)
 /// of each node that instantiates a document mesh. The node's world transform — its own `node.transform()`
-/// composed with every ancestor — is applied to the positions and normals, so
+/// composed with every ancestor — is applied to the positions and normals
+/// (normals by its inverse transpose, then renormalised to unit length), so
 /// a mesh authored at the origin with the translation on the node comes back
 /// in world coordinates. A mesh referenced by several nodes is returned once
 /// per node, so none of those transforms is dropped. A mesh that no node
@@ -225,11 +226,24 @@ fn transform_normal(world: &Matrix4<f32>, n: Vector3<f32>) -> Vector3<f32> {
     // A singular linear part (a zero scale) has no inverse transpose. Keep the
     // previous direct transform rather than failing to load the mesh; the
     // geometry itself is degenerate in that case.
+    if linear == Matrix3::identity() {
+        return n;
+    }
     let normal_matrix = linear
         .try_inverse()
         .map(|inverse| inverse.transpose())
         .unwrap_or(linear);
-    normal_matrix * n
+    // ...and renormalised: glTF 2.0 defines a normal as "a unit XYZ vector"
+    // and `NORMAL` as "Normalized XYZ vertex normals", and the inverse
+    // transpose of any scale changes the length (scale 3 turned (0, 0, 1)
+    // into (0, 0, 0.333)). A zero vector has no direction and is kept.
+    let transformed = normal_matrix * n;
+    let len = transformed.norm();
+    if len > 0.0 && len.is_finite() {
+        transformed / len
+    } else {
+        transformed
+    }
 }
 
 /// World transform of every node that instantiates a mesh, keyed by mesh index.
