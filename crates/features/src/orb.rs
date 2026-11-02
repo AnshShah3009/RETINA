@@ -251,57 +251,64 @@ impl Orb {
 
     /// Detect keypoints using FAST at multiple scales
     pub fn detect(&self, image: &GrayImage) -> KeyPoints {
-        let mut all_keypoints = Vec::new();
-        let mut scale = 1.0f32;
+        // Every level is resized from the base image, never from the level
+        // above it, so the levels are independent and run in parallel. The
+        // scales are still accumulated serially (`scale *= scale_factor`) so
+        // each level sees exactly the f32 scale the serial loop computed, and
+        // the per-level lists are concatenated in level order, so the list
+        // handed to the response sort below is the one the serial loop built.
+        let scales: Vec<f32> = std::iter::successors(Some(1.0f32), |s| Some(s * self.scale_factor))
+            .take(self.n_levels)
+            .collect();
+        let levels: Vec<Vec<KeyPoint>> = scales
+            .par_iter()
+            .enumerate()
+            .map(|(level, &scale)| {
+                let level_image = if level == 0 {
+                    std::borrow::Cow::Borrowed(image)
+                } else {
+                    std::borrow::Cow::Owned(scale_image(image, scale))
+                };
+                let scaled: &GrayImage = &level_image;
+                // Do not truncate in raster order before non-max suppression and
+                // response ranking: on busy images that kept only the top-row
+                // candidates. Collect every candidate and let the final
+                // `truncate(self.n_features)` after the response sort enforce the
+                // keypoint budget.
+                let kps = fast_detect(scaled, self.fast_threshold, usize::MAX);
 
-        for level in 0..self.n_levels {
-            let scaled = if level == 0 {
-                image.clone()
-            } else {
-                scale_image(image, scale)
-            };
+                // Bug 5 fix: apply non-maximum suppression to FAST keypoints
+                let kps = fast::non_max_suppression(kps, scaled, self.fast_threshold);
 
-            // Do not truncate in raster order before non-max suppression and
-            // response ranking: on busy images that kept only the top-row
-            // candidates. Collect every candidate and let the final
-            // `truncate(self.n_features)` after the response sort enforce the
-            // keypoint budget.
-            let kps = fast_detect(&scaled, self.fast_threshold, usize::MAX);
+                // Bug 7 fix: compute FAST corner score so keypoints have a real response
+                // Bug 4 fix: if Harris scoring is selected, re-score with Harris response.
+                // The response of each keypoint depends only on the level image, so
+                // this maps in parallel and preserves the input order.
+                let candidates = kps.keypoints;
+                candidates
+                    .par_iter()
+                    .map(|kp| {
+                        let response = match self.score_type {
+                            ScoreType::Harris => {
+                                compute_harris_response(scaled, kp.x as i32, kp.y as i32)
+                            }
+                            ScoreType::Fast => fast::corner_score(
+                                scaled,
+                                kp.x as i32,
+                                kp.y as i32,
+                                self.fast_threshold,
+                            ) as f64,
+                        };
 
-            // Bug 5 fix: apply non-maximum suppression to FAST keypoints
-            let kps = fast::non_max_suppression(kps, &scaled, self.fast_threshold);
-
-            // Bug 7 fix: compute FAST corner score so keypoints have a real response
-            // Bug 4 fix: if Harris scoring is selected, re-score with Harris response.
-            // The response of each keypoint depends only on the level image, so
-            // this maps in parallel and preserves the input order.
-            let candidates = kps.keypoints;
-            let scored_kps: Vec<KeyPoint> = candidates
-                .par_iter()
-                .map(|kp| {
-                    let response = match self.score_type {
-                        ScoreType::Harris => {
-                            compute_harris_response(&scaled, kp.x as i32, kp.y as i32)
-                        }
-                        ScoreType::Fast => fast::corner_score(
-                            &scaled,
-                            kp.x as i32,
-                            kp.y as i32,
-                            self.fast_threshold,
-                        ) as f64,
-                    };
-
-                    KeyPoint::new(kp.x * scale as f64, kp.y * scale as f64)
-                        .with_size(self.patch_size as f64 * scale as f64)
-                        .with_octave(level as i32)
-                        .with_response(response)
-                })
-                .collect();
-
-            all_keypoints.extend(scored_kps);
-
-            scale *= self.scale_factor;
-        }
+                        KeyPoint::new(kp.x * scale as f64, kp.y * scale as f64)
+                            .with_size(self.patch_size as f64 * scale as f64)
+                            .with_octave(level as i32)
+                            .with_response(response)
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut all_keypoints: Vec<KeyPoint> = levels.into_iter().flatten().collect();
 
         all_keypoints.sort_by(|a, b| {
             b.response
@@ -351,35 +358,61 @@ impl Orb {
     /// Uses a circular mask (`dx*dx + dy*dy <= r*r`) to match the GPU shader.
     pub fn compute_orientations(&self, image: &GrayImage, keypoints: &mut KeyPoints) {
         let half_patch = self.patch_size / 2;
-        let r_sq = (half_patch * half_patch) as i64;
+        let r_sq = (half_patch as i64) * (half_patch as i64);
+
+        // Half-width of the circular mask on each patch row: the largest `dx`
+        // with `dx*dx + dy*dy <= r*r`, or -1 when the row is empty. Each row
+        // of the mask is the contiguous run `-u..=u`, so a keypoint's moments
+        // are sums over row slices instead of a bounds-checked pixel lookup
+        // per tap of the full square.
+        let half_widths: Vec<i64> = (-half_patch..=half_patch)
+            .map(|dy| {
+                let dy = dy as i64;
+                (0..=half_patch as i64)
+                    .rev()
+                    .find(|&dx| dx * dx + dy * dy <= r_sq)
+                    .unwrap_or(-1)
+            })
+            .collect();
+
+        let (width, height) = (image.width() as i64, image.height() as i64);
+        let raw = image.as_raw();
 
         keypoints.keypoints.par_iter_mut().for_each(|kp| {
-            let x = kp.x as i32;
-            let y = kp.y as i32;
+            let x = kp.x as i32 as i64;
+            let y = kp.y as i32 as i64;
 
-            let mut m01 = 0.0f64;
-            let mut m10 = 0.0f64;
+            // The moments are integer sums. The f64 accumulation this
+            // replaces added integer-valued products whose partial sums stay
+            // far below 2^53, so every one of its additions was exact and it
+            // produced exactly these integers (and +0.0, never -0.0, for an
+            // empty sum); `atan2` therefore sees the same two values.
+            let mut m01 = 0i64;
+            let mut m10 = 0i64;
 
-            for dy in -half_patch..=half_patch {
-                for dx in -half_patch..=half_patch {
-                    // Circular mask -- matches the GPU orientation kernel
-                    if (dx as i64 * dx as i64 + dy as i64 * dy as i64) > r_sq {
-                        continue;
-                    }
-
-                    let px = x + dx;
-                    let py = y + dy;
-
-                    if px >= 0 && px < image.width() as i32 && py >= 0 && py < image.height() as i32
-                    {
-                        let intensity = image.get_pixel(px as u32, py as u32)[0] as f64;
-                        m10 += intensity * dx as f64;
-                        m01 += intensity * dy as f64;
-                    }
+            for (dy, &u) in (-half_patch as i64..=half_patch as i64).zip(&half_widths) {
+                let py = y + dy;
+                if u < 0 || py < 0 || py >= height {
+                    continue;
                 }
+                // Intersect the mask row `x - u ..= x + u` with the image.
+                let lo = (x - u).max(0);
+                let hi = (x + u).min(width - 1);
+                if lo > hi {
+                    continue;
+                }
+                let row = &raw[(py * width) as usize..][lo as usize..=hi as usize];
+                let mut sum = 0i64;
+                let mut weighted = 0i64;
+                for (px, &v) in (lo..).zip(row) {
+                    sum += v as i64;
+                    weighted += v as i64 * (px - x);
+                }
+                m10 += weighted;
+                m01 += sum * dy;
             }
 
-            let angle = m01.atan2(m10);
+            let angle = (m01 as f64).atan2(m10 as f64);
             kp.angle = angle.to_degrees();
         });
     }
@@ -834,12 +867,9 @@ fn scale_image(image: &GrayImage, scale: f32) -> GrayImage {
     let new_width = (image.width() as f32 / scale) as u32;
     let new_height = (image.height() as f32 / scale) as u32;
 
-    image::imageops::resize(
-        image,
-        new_width,
-        new_height,
-        image::imageops::FilterType::Triangle,
-    )
+    // Byte-identical to `image::imageops::resize(.., FilterType::Triangle)`,
+    // which is serial and was most of `Orb::detect`'s time; see `resize`.
+    crate::resize::resize_triangle(image, new_width, new_height)
 }
 
 /// Compute Harris corner response at a single pixel using the same
@@ -1724,6 +1754,204 @@ mod tests {
                 compute_orb_descriptor(&turned, &kp.with_angle(theta + 180.0), &pattern, 31, false)
                     .unwrap();
             assert_eq!(d0.data, d1.data, "theta = {theta}");
+        }
+    }
+
+    /// Overlapping rectangles and discs of random grey levels plus mild noise:
+    /// thousands of FAST corners on every pyramid level.
+    fn shapes_scene(w: u32, h: u32, seed: u64) -> GrayImage {
+        let mut state = seed | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut img = GrayImage::from_pixel(w, h, Luma([128]));
+        for i in 0..(w * h / 600) as usize {
+            let cx = (next() % w as u64) as i64;
+            let cy = (next() % h as u64) as i64;
+            let r = (next() % 30 + 3) as i64;
+            let v = (next() % 256) as u8;
+            for y in (cy - r).max(0)..(cy + r).min(h as i64) {
+                for x in (cx - r).max(0)..(cx + r).min(w as i64) {
+                    if i % 2 == 0 || (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r {
+                        img.put_pixel(x as u32, y as u32, Luma([v]));
+                    }
+                }
+            }
+        }
+        for p in img.pixels_mut() {
+            p[0] = (p[0] as i16 + (next() % 7) as i16 - 3).clamp(0, 255) as u8;
+        }
+        img
+    }
+
+    /// `Orb::detect` as the serial level loop it was: each level resized with
+    /// `image::imageops::resize` (Triangle) from the base image, FAST, NMS and
+    /// scoring per level, levels appended in order, then the response sort.
+    fn reference_detect(orb: &Orb, image: &GrayImage) -> Vec<KeyPoint> {
+        let mut all = Vec::new();
+        let mut scale = 1.0f32;
+        for level in 0..orb.n_levels {
+            let scaled = if level == 0 {
+                image.clone()
+            } else {
+                image::imageops::resize(
+                    image,
+                    (image.width() as f32 / scale) as u32,
+                    (image.height() as f32 / scale) as u32,
+                    image::imageops::FilterType::Triangle,
+                )
+            };
+            let kps = fast_detect(&scaled, orb.fast_threshold, usize::MAX);
+            let kps = fast::non_max_suppression(kps, &scaled, orb.fast_threshold);
+            for kp in kps.keypoints {
+                let response = match orb.score_type {
+                    ScoreType::Harris => compute_harris_response(&scaled, kp.x as i32, kp.y as i32),
+                    ScoreType::Fast => {
+                        fast::corner_score(&scaled, kp.x as i32, kp.y as i32, orb.fast_threshold)
+                    }
+                };
+                all.push(
+                    KeyPoint::new(kp.x * scale as f64, kp.y * scale as f64)
+                        .with_size(orb.patch_size as f64 * scale as f64)
+                        .with_octave(level as i32)
+                        .with_response(response),
+                );
+            }
+            scale *= orb.scale_factor;
+        }
+        all.sort_by(|a, b| {
+            b.response
+                .partial_cmp(&a.response)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all.truncate(orb.n_features);
+        all
+    }
+
+    fn same_keypoints(a: &[KeyPoint], b: &[KeyPoint]) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(p, q)| {
+                p.x.to_bits() == q.x.to_bits()
+                    && p.y.to_bits() == q.y.to_bits()
+                    && p.size.to_bits() == q.size.to_bits()
+                    && p.angle.to_bits() == q.angle.to_bits()
+                    && p.response.to_bits() == q.response.to_bits()
+                    && p.octave == q.octave
+                    && p.class_id == q.class_id
+            })
+    }
+
+    /// The parallel pyramid (levels in parallel, row-parallel resize) returns
+    /// exactly the keypoints, in exactly the order, of the serial loop over
+    /// `image::imageops::resize` levels.
+    #[test]
+    fn detect_matches_the_serial_image_resize_pyramid() {
+        let images = [
+            shapes_scene(320, 240, 0x51ed_270b),
+            shapes_scene(203, 157, 0x2f6b_93a1),
+        ];
+        for img in &images {
+            for score_type in [ScoreType::Harris, ScoreType::Fast] {
+                for (scale_factor, n_levels) in [(1.2f32, 8usize), (1.5, 4), (2.0, 3), (1.2, 1)] {
+                    for n_features in [usize::MAX, 500, 7] {
+                        let orb = Orb {
+                            score_type,
+                            ..orb_with(scale_factor, n_levels, n_features)
+                        };
+                        let expect = reference_detect(&orb, img);
+                        let got = orb.detect(img);
+                        assert!(
+                            same_keypoints(&got.keypoints, &expect),
+                            "{}x{} scale {scale_factor} levels {n_levels} features {n_features}",
+                            img.width(),
+                            img.height()
+                        );
+                        if n_features == usize::MAX && n_levels == 8 {
+                            assert!(expect.len() > 300, "scene must give many keypoints");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `compute_orientations` as it was: a bounds-checked `get_pixel` per tap
+    /// of the square patch, the circular mask tested per tap, moments in f64.
+    fn reference_orientation(image: &GrayImage, kp: &KeyPoint, patch_size: i32) -> f64 {
+        let half_patch = patch_size / 2;
+        let r_sq = (half_patch * half_patch) as i64;
+        let x = kp.x as i32;
+        let y = kp.y as i32;
+        let mut m01 = 0.0f64;
+        let mut m10 = 0.0f64;
+        for dy in -half_patch..=half_patch {
+            for dx in -half_patch..=half_patch {
+                if (dx as i64 * dx as i64 + dy as i64 * dy as i64) > r_sq {
+                    continue;
+                }
+                let px = x + dx;
+                let py = y + dy;
+                if px >= 0 && px < image.width() as i32 && py >= 0 && py < image.height() as i32 {
+                    let intensity = image.get_pixel(px as u32, py as u32)[0] as f64;
+                    m10 += intensity * dx as f64;
+                    m01 += intensity * dy as f64;
+                }
+            }
+        }
+        m01.atan2(m10).to_degrees()
+    }
+
+    #[test]
+    fn orientations_match_the_per_pixel_f64_reference() {
+        let img = shapes_scene(97, 71, 0x0dd_ba11);
+        let saturated = GrayImage::from_fn(40, 33, |x, y| {
+            Luma([if (x + y) % 3 == 0 { 255 } else { 0 }])
+        });
+        let flat = GrayImage::from_pixel(25, 25, Luma([200]));
+        let mut kps = Vec::new();
+        // Every integer position, including the border rows and columns where
+        // the patch is clipped, positions just outside the frame, fractional
+        // positions, and ones far outside (empty patch, angle 0).
+        for y in -20..95 {
+            for x in -20..120 {
+                kps.push(KeyPoint::new(x as f64, y as f64));
+            }
+        }
+        for &(x, y) in &[
+            (10.7, 3.2),
+            (-0.5, 5.9),
+            (96.99, 70.01),
+            (1e6, 4.0),
+            (-1e6, -1e6),
+        ] {
+            kps.push(KeyPoint::new(x, y));
+        }
+        for image in [&img, &saturated, &flat] {
+            for patch_size in [31, 15, 8, 3, 1, 0] {
+                let orb = Orb {
+                    patch_size,
+                    ..orb_with(1.2, 8, 500)
+                };
+                let mut got = KeyPoints {
+                    keypoints: kps.clone(),
+                };
+                orb.compute_orientations(image, &mut got);
+                for (kp, g) in kps.iter().zip(&got.keypoints) {
+                    let expect = reference_orientation(image, kp, patch_size);
+                    assert_eq!(
+                        g.angle.to_bits(),
+                        expect.to_bits(),
+                        "patch {patch_size} at ({}, {}): {} vs {}",
+                        kp.x,
+                        kp.y,
+                        g.angle,
+                        expect
+                    );
+                }
+            }
         }
     }
 }

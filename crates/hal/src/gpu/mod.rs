@@ -64,6 +64,44 @@ pub fn requested_device_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
     .or_worse_values_from(adapter)
 }
 
+/// Key of [`GpuContext`]'s pipeline cache: the full WGSL source and the entry
+/// point. Hashed and compared by content, so a generated source never aliases
+/// another one that happened to live at the same address.
+#[derive(Debug, PartialEq, Eq)]
+struct PipelineKey {
+    source: Box<str>,
+    entry: Box<str>,
+}
+
+/// Borrowed form of [`PipelineKey`] for lookups; hashes identically.
+struct PipelineKeyRef<'a> {
+    source: &'a str,
+    entry: &'a str,
+}
+
+impl std::hash::Hash for PipelineKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        PipelineKeyRef {
+            source: &self.source,
+            entry: &self.entry,
+        }
+        .hash(state);
+    }
+}
+
+impl std::hash::Hash for PipelineKeyRef<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.source.hash(state);
+        self.entry.hash(state);
+    }
+}
+
+impl hashbrown::Equivalent<PipelineKey> for PipelineKeyRef<'_> {
+    fn equivalent(&self, key: &PipelineKey) -> bool {
+        *self.source == *key.source && *self.entry == *key.entry
+    }
+}
+
 /// Shared GPU Context containing Device and Queue.
 #[derive(Debug, Clone)]
 pub struct GpuContext {
@@ -71,7 +109,7 @@ pub struct GpuContext {
     pub queue: Arc<Queue>,
     gpu_index: u32,
     is_unified: bool,
-    pipeline_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, wgpu::ComputePipeline>>>,
+    pipeline_cache: Arc<std::sync::Mutex<hashbrown::HashMap<PipelineKey, wgpu::ComputePipeline>>>,
     last_submission: Arc<AtomicU64>,
 }
 
@@ -419,7 +457,7 @@ impl GpuContext {
             queue: Arc::new(queue),
             gpu_index,
             is_unified,
-            pipeline_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            pipeline_cache: Arc::new(std::sync::Mutex::new(hashbrown::HashMap::new())),
             last_submission: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -610,13 +648,19 @@ impl GpuContext {
         shader_source: &str,
         entry_point: &str,
     ) -> wgpu::ComputePipeline {
-        let cache_key = format!("{}:{}", shader_source, entry_point);
+        // Looked up by reference: a hit allocates and copies nothing (the key
+        // used to be `format!("{source}:{entry}")`, a copy of the whole
+        // shader on every call).
+        let lookup = PipelineKeyRef {
+            source: shader_source,
+            entry: entry_point,
+        };
 
         // Try to get from cache, handling mutex poison gracefully
         let cache_result = self.pipeline_cache.lock();
         match cache_result {
             Ok(cache) => {
-                if let Some(pipeline) = cache.get(&cache_key) {
+                if let Some(pipeline) = cache.get(&lookup) {
                     return pipeline.clone();
                 }
             }
@@ -646,7 +690,13 @@ impl GpuContext {
         // Try to insert into cache
         match self.pipeline_cache.lock() {
             Ok(mut cache) => {
-                cache.insert(cache_key, pipeline.clone());
+                cache.insert(
+                    PipelineKey {
+                        source: shader_source.into(),
+                        entry: entry_point.into(),
+                    },
+                    pipeline.clone(),
+                );
             }
             Err(_) => {
                 // Cache is poisoned, pipeline not cached

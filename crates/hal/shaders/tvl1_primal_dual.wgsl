@@ -23,7 +23,9 @@
 // invocation owns, so each invocation evaluates the primal step there too, by
 // the same function on the same inputs: every u' it uses is bit-identical to
 // the one the owner writes. Because neighbours read the old state while it is
-// being replaced, the state is ping-ponged: read `src`, write `dst`.
+// being replaced, the state is ping-ponged: read `src`, write `dst`. Within a
+// 16x16 workgroup the u' values are shared through workgroup memory, so only
+// the halo column and row are evaluated twice.
 //
 // State layout (n = width * height), planar: u1, u2 at planes 0, 1 (so the
 // warp, median and upsample shaders see the first 2n as a flow), then p11,
@@ -95,34 +97,71 @@ fn primal(x: u32, y: u32) -> vec2<f32> {
     return vec2<f32>(u1 + d1 + params.theta * div1, u2 + d2 + params.theta * div2);
 }
 
+// u' of the workgroup's 16x16 pixels plus the column to their right and the
+// row below them (the corner is never needed): [ty * TILE_W + tx].
+const TILE: u32 = 16u;
+const TILE_W: u32 = 17u;
+var<workgroup> tile: array<vec2<f32>, 289>;
+
 @compute @workgroup_size(16, 16)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+fn main(
+    @builtin(global_invocation_id) global_id: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(workgroup_id) wid: vec3<u32>,
+) {
     let x = global_id.x;
     let y = global_id.y;
     let w = params.width;
     let h = params.height;
+    let inside = x < w && y < h;
 
-    if (x >= w || y >= h) {
+    // Each u' is evaluated once per workgroup and shared, instead of three
+    // times per pixel (here and as the right / lower neighbour of two
+    // others). The first 32 invocations also evaluate the halo: 0..16 the
+    // column at x0 + 16, 16..32 the row at y0 + 16.
+    if (inside) {
+        tile[lid.y * TILE_W + lid.x] = primal(x, y);
+    }
+    let x0 = wid.x * TILE;
+    let y0 = wid.y * TILE;
+    if (li < TILE) {
+        let hx = x0 + TILE;
+        let hy = y0 + li;
+        if (hx < w && hy < h) {
+            tile[li * TILE_W + TILE] = primal(hx, hy);
+        }
+    } else if (li < 2u * TILE) {
+        let hx = x0 + li - TILE;
+        let hy = y0 + TILE;
+        if (hx < w && hy < h) {
+            tile[TILE * TILE_W + li - TILE] = primal(hx, hy);
+        }
+    }
+    workgroupBarrier();
+
+    if (!inside) {
         return;
     }
 
     let n = w * h;
     let i = y * w + x;
-    let u = primal(x, y);
+    let t = lid.y * TILE_W + lid.x;
+    let u = tile[t];
     let u1 = u.x;
     let u2 = u.y;
 
     var u1x = 0.0;
     var u2x = 0.0;
     if (x + 1u < w) {
-        let r = primal(x + 1u, y);
+        let r = tile[t + 1u];
         u1x = r.x - u1;
         u2x = r.y - u2;
     }
     var u1y = 0.0;
     var u2y = 0.0;
     if (y + 1u < h) {
-        let d = primal(x, y + 1u);
+        let d = tile[t + TILE_W];
         u1y = d.x - u1;
         u2y = d.y - u2;
     }

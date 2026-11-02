@@ -22,46 +22,50 @@ pub fn fast_detect(image: &GrayImage, threshold: u8, max_keypoints: usize) -> Ke
     // This scan was the single largest cost in ORB detection: it runs once per
     // pyramid level (8 per image) and measured 40 ms/frame on 640x480 TUM frames
     // while descriptor extraction, which already parallelises, took the rest.
+    //
+    // Each pixel is first screened with OpenCV's high-speed test before the
+    // full ring is read: a run of 9 contiguous taps always contains tap 0 or
+    // tap 8 (they are 8 apart, so 7 taps lie strictly between them on either
+    // side) and likewise tap 4 or tap 12. A pixel failing that for both the
+    // brighter and the darker class cannot have a 9-run of either, so skipping
+    // it changes nothing. The survivors get the full 16-tap test as two 16-bit
+    // masks whose 9-runs are found with shifts of the ring doubled into 32
+    // bits; that is exactly "9 contiguous taps on the circular ring", the test
+    // `has_n_contiguous` performs.
     let raw = image.as_raw();
     let w = width as usize;
+    let ring: [isize; 16] = circle_offsets.map(|(dx, dy)| dy as isize * w as isize + dx as isize);
     let mut rows: Vec<Vec<KeyPoint>> = (3..height - 3)
         .into_par_iter()
         .map(|y| {
             let mut found: Vec<KeyPoint> = Vec::new();
             let row = y as usize * w;
             for x in 3..width - 3 {
-                let p = raw[row + x as usize];
+                let center = row + x as usize;
+                let p = raw[center];
+                let tap = |i: usize| raw[(center as isize + ring[i]) as usize];
 
                 let high_threshold = p.saturating_add(threshold);
                 let low_threshold = p.saturating_sub(threshold);
+                let class =
+                    |v: u8| ((v > high_threshold) as u32) | (((v < low_threshold) as u32) << 1);
 
-                // Full test - check all 16 pixels directly
-                let mut pixel_values = [0u8; 16];
-                let mut brighter_count = 0u32;
-                let mut darker_count = 0u32;
-
-                for (i, (dx, dy)) in circle_offsets.iter().enumerate() {
-                    let px = (x + dx) as usize;
-                    let py = (y + dy) as usize;
-                    let val = raw[py * w + px];
-                    pixel_values[i] = val;
-
-                    if val > high_threshold {
-                        brighter_count += 1;
-                    } else if val < low_threshold {
-                        darker_count += 1;
-                    }
-                }
-
-                // Quick rejection: need at least 9 bright or 9 dark to have a chance
-                if brighter_count < 9 && darker_count < 9 {
+                // Bit 0: brighter, bit 1: darker.
+                let pair_08 = class(tap(0)) | class(tap(8));
+                let pair_412 = class(tap(4)) | class(tap(12));
+                if pair_08 & pair_412 == 0 {
                     continue;
                 }
 
-                // Check for 9 contiguous brighter or darker pixels
-                if has_n_contiguous(&pixel_values, p, threshold, 9, true)
-                    || has_n_contiguous(&pixel_values, p, threshold, 9, false)
-                {
+                let mut bright = 0u32;
+                let mut dark = 0u32;
+                for (i, &off) in ring.iter().enumerate() {
+                    let v = raw[(center as isize + off) as usize];
+                    bright |= ((v > high_threshold) as u32) << i;
+                    dark |= ((v < low_threshold) as u32) << i;
+                }
+
+                if has_9_contiguous_bits(bright) || has_9_contiguous_bits(dark) {
                     found.push(KeyPoint::new(x as f64, y as f64));
                 }
             }
@@ -79,7 +83,23 @@ pub fn fast_detect(image: &GrayImage, threshold: u8, max_keypoints: usize) -> Ke
     KeyPoints { keypoints }
 }
 
+/// Whether the 16-tap ring mask (bit `i` set when tap `i` passes) holds 9
+/// contiguous set bits, wrapping from tap 15 back to tap 0.
+///
+/// The ring is doubled into 32 bits so every circular run appears as a linear
+/// one; `r` then keeps a bit only where it starts a run of 2, 4, 8 and finally
+/// 9 set bits. The shifts fill with zeros, so no run is invented past bit 31.
+#[inline]
+fn has_9_contiguous_bits(mask: u32) -> bool {
+    let m = mask | (mask << 16);
+    let r = m & (m >> 1);
+    let r = r & (r >> 2);
+    let r = r & (r >> 4);
+    r & (m >> 8) != 0
+}
+
 /// Check if there are n contiguous pixels that are all brighter or all darker
+#[cfg(test)]
 fn has_n_contiguous(
     pixels: &[u8; 16],
     center: u8,
@@ -951,6 +971,106 @@ mod tests {
                 .iter()
                 .zip(&expect)
                 .all(|(p, q)| p.x.to_bits() == q.x.to_bits() && p.y.to_bits() == q.y.to_bits())
+        );
+    }
+
+    /// The ring in `fast_detect`'s tap order, for the reference scan below.
+    const REF_RING: [(i32, i32); 16] = [
+        (0, -3),
+        (1, -3),
+        (2, -2),
+        (3, -1),
+        (3, 0),
+        (3, 1),
+        (2, 2),
+        (1, 3),
+        (0, 3),
+        (-1, 3),
+        (-2, 2),
+        (-3, 1),
+        (-3, 0),
+        (-3, -1),
+        (-2, -2),
+        (-1, -3),
+    ];
+
+    /// The detector as it was before the high-speed pre-test and the bit-mask
+    /// run test: read all 16 taps, then `has_n_contiguous` both ways.
+    fn reference_fast_detect(image: &GrayImage, threshold: u8) -> Vec<(u32, u32)> {
+        let (w, h) = image.dimensions();
+        let mut out = Vec::new();
+        for y in 3..h.saturating_sub(3) {
+            for x in 3..w.saturating_sub(3) {
+                let p = image.get_pixel(x, y)[0];
+                let mut ring = [0u8; 16];
+                for (i, &(dx, dy)) in REF_RING.iter().enumerate() {
+                    ring[i] = image.get_pixel((x as i32 + dx) as u32, (y as i32 + dy) as u32)[0];
+                }
+                if has_n_contiguous(&ring, p, threshold, 9, true)
+                    || has_n_contiguous(&ring, p, threshold, 9, false)
+                {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn nine_run_bit_test_matches_has_n_contiguous_for_every_ring() {
+        // Every brighter pattern of the ring: bit i of `mask` makes tap i
+        // bright (255) against a centre of 128; the rest equal the centre.
+        for mask in 0u32..(1 << 16) {
+            let ring: [u8; 16] =
+                std::array::from_fn(|i| if mask >> i & 1 == 1 { 255 } else { 128 });
+            assert_eq!(
+                has_9_contiguous_bits(mask),
+                has_n_contiguous(&ring, 128, 20, 9, true),
+                "mask {mask:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_detect_matches_the_full_ring_reference_scan() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut images = Vec::new();
+        // Blocky texture with noise: many genuine corners.
+        images.push(GrayImage::from_fn(97, 61, |x, y| {
+            Luma([(((x / 6) * 53 + (y / 4) * 29) % 256) as u8 ^ (next() % 13) as u8])
+        }));
+        // Pure noise over the full range, so the saturating thresholds at 0
+        // and 255 are exercised.
+        images.push(GrayImage::from_fn(64, 48, |_, _| Luma([next() as u8])));
+        // Few grey levels: many taps exactly on a threshold.
+        images.push(GrayImage::from_fn(50, 40, |_, _| {
+            Luma([[0u8, 20, 40, 128, 215, 235, 255][(next() % 7) as usize]])
+        }));
+        // Smaller than the ring and exactly ring-sized.
+        images.push(GrayImage::from_fn(6, 6, |_, _| Luma([next() as u8])));
+        images.push(GrayImage::from_fn(7, 7, |_, _| Luma([next() as u8])));
+        let mut corners = 0;
+        for img in &images {
+            for t in [0u8, 1, 10, 20, 50, 127, 200, 255] {
+                let expect = reference_fast_detect(img, t);
+                let got: Vec<(u32, u32)> = fast_detect(img, t, usize::MAX)
+                    .keypoints
+                    .iter()
+                    .map(|kp| (kp.x as u32, kp.y as u32))
+                    .collect();
+                assert_eq!(got, expect, "{}x{} t={t}", img.width(), img.height());
+                corners += got.len();
+            }
+        }
+        assert!(
+            corners > 1000,
+            "the images must produce corners, got {corners}"
         );
     }
 }

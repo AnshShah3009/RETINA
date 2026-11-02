@@ -77,12 +77,12 @@ remaining B source, `spatial.rs`, is not reachable through `dispatch`.
 
 ## Summary
 
-78 integer divisions or modulos, spread over 29 of the 114 sources that naga
-accepts (62 table rows):
+81 integer divisions or modulos, spread over 30 of the 115 sources that naga
+accepts (65 table rows):
 
 | class | sites | rows | before this audit |
 | --- | ---: | ---: | --- |
-| A, nonzero constant | 43 | 29 | 55 |
+| A, nonzero constant | 46 | 32 | 55 |
 | B, host-guaranteed | 2 | 2 | 4 (`feature_collection_f32.wgsl` moved to S) |
 | S, shader-proven | 33 | 31 | 8 |
 | C, needs a guard | 0 | 0 | 20 |
@@ -111,6 +111,8 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
   `idx < width * height` check, which is false when width is 0. The f32 copy
   was already safe because `fast::extract_keypoints` returns early when
   `w * h == 0`. The packed-u8 copy has no host. No Rust file includes it.
+  `feature_compact_f32.wgsl`, the GPU compaction that has since replaced
+  `feature_collection_f32.wgsl`, divides by `max(width, 1u)`.
 
 ## Divisor table
 
@@ -132,6 +134,8 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
 | `crates/hal/shaders/convolve_2d.wgsl` | `%` | `i32(params.height)` | 1 | S | Wrap branch, `h >= 1` (guard added) |
 | `crates/hal/shaders/convolve_2d.wgsl` | `%` | `i32(params.width)` | 1 | S | Wrap branch, `w >= 1` (guard added) |
 | `crates/hal/shaders/convolve_2d.wgsl` | `/` | `2` | 2 | A | literal (kernel centre) |
+| `crates/hal/shaders/farneback_poly_setup.wgsl` | `%` | `6u` | 1 | A | literal (Gram matrix column) |
+| `crates/hal/shaders/farneback_poly_setup.wgsl` | `/` | `6u` | 1 | A | literal (Gram matrix row) |
 | `crates/hal/shaders/fast.wgsl` | `%` | `4u` | 1 | A | literal |
 | `crates/hal/shaders/fast.wgsl` | `/` | `16u` | 1 | A | literal |
 | `crates/hal/shaders/fast.wgsl` | `/` | `4u` | 2 | A | literal |
@@ -170,8 +174,9 @@ Each guard is in the shader, so it also covers the raw-uniform `dispatch` path.
 | `crates/hal/shaders/vector_ops.wgsl` | `/` | `2u` | 1 | A | literal |
 | `crates/hal/src/gpu_kernels/feature_collection.wgsl` | `%` | `params_2.width` | 1 | S | inside `total_idx < width * height`, which is false for width 0 (guard added: the division used to come before the check) |
 | `crates/hal/src/gpu_kernels/feature_collection.wgsl` | `/` | `params_2.width` | 1 | S | as above |
-| `crates/hal/src/gpu_kernels/feature_collection_f32.wgsl` | `%` | `params_2.width` | 1 | S | inside `gid < width * height` (moved there by this audit). The host also returns early in `fast::extract_keypoints` when `w * h == 0`. |
-| `crates/hal/src/gpu_kernels/feature_collection_f32.wgsl` | `/` | `params_2.width` | 1 | S | as above |
+| `crates/hal/src/gpu_kernels/feature_compact_f32.wgsl` | `%` | `max` | 1 | S | `w = max(scatter_params.width, 1u)` is at least 1. The host also returns early in `fast::extract_keypoints` when `w * h == 0`. |
+| `crates/hal/src/gpu_kernels/feature_compact_f32.wgsl` | `/` | `WG` | 1 | A | named constant 256 |
+| `crates/hal/src/gpu_kernels/feature_compact_f32.wgsl` | `/` | `max` | 1 | S | as above |
 | `crates/hal/src/gpu_kernels/orientation.wgsl` | `%` | `u32(2 * r + 1)` | 1 | S | `2r + 1` is odd for every i32 `r`, even when it wraps, so it is never 0. The operation is unsigned, so INT_MIN / -1 cannot occur. |
 | `crates/hal/src/gpu_kernels/orientation.wgsl` | `/` | `u32(2 * r + 1)` | 1 | S | as above |
 | `crates/hal/src/gpu_kernels/pointcloud_normals_fast_gpu.wgsl` | `/` | `256u` | 1 | A | literal |

@@ -184,17 +184,30 @@ fn run_pass(
     ctx.submit(encoder);
 }
 
+/// Uniform of `feature_compact_f32.wgsl`.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct CollectParams {
+struct CompactParams {
     width: u32,
     height: u32,
     num_elements: u32,
-    padding: u32,
+    num_blocks: u32,
 }
 
-/// Keypoints of an f32 score map from [`fast_detect`]. Other score types
-/// return `NotSupported`: the collection shader reads f32 scores.
+/// Pixels per workgroup of `feature_compact_f32.wgsl` (`BLOCK` there).
+const COMPACT_BLOCK: u32 = 1024;
+
+/// Most keypoints [`extract_keypoints`] returns before reporting an error.
+const MAX_KEYPOINTS: u32 = 1_000_000;
+
+/// Keypoints of an f32 score map from [`fast_detect`]: one per pixel with a
+/// score above zero, in row-major pixel order. Other score types return
+/// `NotSupported`: the compaction shader reads f32 scores.
+///
+/// The compaction runs on the GPU (`feature_compact_f32.wgsl`: per-block
+/// counts, a scan of the block counts, a scatter); only the keypoint total and
+/// the keypoints themselves are read back. It used to read back a count per
+/// pixel (8 MB at 1080p), scan it on the CPU and upload the offsets again.
 pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
     ctx: &GpuContext,
     score_map: &crate::GpuTensor<T>,
@@ -206,132 +219,97 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
     }
     let score_buffer = score_map.storage.buffer();
     let (h, w) = score_map.shape.hw();
-    let num_pixels: u32 = (w * h) as u32;
+    let num_pixels = w * h;
     if num_pixels == 0 {
         return Ok(Vec::new());
     }
+    let num_elements = u32::try_from(num_pixels)
+        .map_err(|_| crate::Error::InvalidInput(format!("score map {w}x{h} is too large")))?;
+    let num_blocks = num_elements.div_ceil(COMPACT_BLOCK);
 
-    // Bug 5 fix: Use the f32 collection shader that reads f32 scores directly,
-    // instead of the packed-u8 collection shader. For f32 score maps, each
-    // element is one pixel, so num_elements = num_pixels.
-    let num_elements = num_pixels;
+    let src = include_str!("feature_compact_f32.wgsl");
+    let count_pipeline = ctx.create_compute_pipeline(src, "block_counts");
+    let scan_pipeline = ctx.create_compute_pipeline(src, "scan_blocks");
 
-    // 1. Count pass
-    //
-    // `COPY_DST` is required as well as `COPY_SRC`: after the count pass this
-    // same buffer is overwritten with the sorted indices, via
-    // `Queue::write_buffer`, which wgpu rejects without it - "Usage flags
-    // BufferUsages(COPY_SRC | STORAGE) ... do not contain required usage flags
-    // BufferUsages(COPY_DST)". That turned every GPU ORB run into a panic
-    // inside `Orb::detect_and_compute_ctx`, which is what the `orb_benchmark`
-    // example exercises.
-    let usages =
-        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
-    let counts_buffer = ctx.get_buffer((num_elements as u64) * 4, usages);
+    // Block counts, turned in place into exclusive offsets, then the total at
+    // [num_blocks].
+    let usages = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
+    let blocks_buffer = ctx.get_buffer((num_blocks as u64 + 1) * 4, usages);
 
-    let params = CollectParams {
+    let params = CompactParams {
         width: w as u32,
         height: h as u32,
         num_elements,
-        padding: 0,
+        num_blocks,
     };
-
     let params_buffer = ctx
         .device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Collect Params"),
+            label: Some("Compact Params"),
             contents: bytemuck::bytes_of(&params),
             usage: wgpu::BufferUsages::UNIFORM,
         });
 
-    let shader_source = include_str!("feature_collection_f32.wgsl");
-    let shader = ctx
-        .device
-        .create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Feature Collection F32 Shader"),
-            source: wgpu::ShaderSource::Wgsl(shader_source.into()),
-        });
+    let bind = |pipeline: &wgpu::ComputePipeline, buffers: &[&wgpu::Buffer]| {
+        let entries: Vec<wgpu::BindGroupEntry<'_>> = buffers
+            .iter()
+            .enumerate()
+            .map(|(i, b)| wgpu::BindGroupEntry {
+                binding: i as u32,
+                resource: b.as_entire_binding(),
+            })
+            .collect();
+        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Compact Bind Group"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        })
+    };
+    let (gx, gy, gz) = crate::gpu_kernels::dispatch_groups_1d(num_blocks);
 
-    let count_pipeline = ctx
-        .device
-        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Count Points Pipeline"),
-            layout: None,
-            module: &shader,
-            entry_point: Some("count_points"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
+    let count_bg = bind(
+        &count_pipeline,
+        &[score_buffer, &blocks_buffer, &params_buffer],
+    );
+    let scan_bg = bind(&scan_pipeline, &[&blocks_buffer, &params_buffer]);
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Count Points"),
         });
     {
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Count Bind Group"),
-            layout: &count_pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: score_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: counts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: params_buffer.as_entire_binding(),
-                },
-            ],
-        });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&count_pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_elements, 256);
-        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
+        pass.set_bind_group(0, &count_bg, &[]);
+        pass.dispatch_workgroups(gx, gy, gz);
+        pass.set_pipeline(&scan_pipeline);
+        pass.set_bind_group(0, &scan_bg, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
     }
     ctx.submit(encoder);
 
-    // 2. Scan pass
-    let counts_data: Vec<u32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
+    let total: Vec<u32> = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
         ctx.device.clone(),
         &ctx.queue,
-        &counts_buffer,
-        0,
-        (num_elements as usize) * 4,
+        &blocks_buffer,
+        num_blocks as u64 * 4,
+        4,
     ))?;
-
-    let mut total = 0u32;
-    let mut indices = Vec::with_capacity(num_elements as usize);
-    for &c in &counts_data {
-        indices.push(total);
-        // f32 collection: each element is 0 or 1
-        if c <= 1 {
-            total += c;
-        }
-    }
+    let total = total[0];
 
     if total == 0 {
-        ctx.return_buffer(counts_buffer, usages);
+        ctx.return_buffer(blocks_buffer, usages);
         return Ok(Vec::new());
     }
 
-    if total > 1000000 {
-        ctx.return_buffer(counts_buffer, usages);
+    if total > MAX_KEYPOINTS {
+        ctx.return_buffer(blocks_buffer, usages);
         return Err(crate::Error::InvalidInput(format!(
             "Too many keypoints detected: {}",
             total
         )));
     }
 
-    // Upload scanned indices
-    ctx.queue
-        .write_buffer(&counts_buffer, 0, bytemuck::cast_slice(&indices));
-
-    // 3. Collect pass
     let kp_size = std::mem::size_of::<cv_core::KeyPointF32>();
     let kp_buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Extracted Keypoints"),
@@ -340,54 +318,24 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
         mapped_at_creation: false,
     });
 
-    let collect_pipeline = ctx
-        .device
-        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Collect Points Pipeline"),
-            layout: None,
-            module: &shader,
-            entry_point: Some("collect_points"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
+    let scatter_pipeline = ctx.create_compute_pipeline(src, "scatter");
+    let scatter_bg = bind(
+        &scatter_pipeline,
+        &[score_buffer, &blocks_buffer, &kp_buffer, &params_buffer],
+    );
     let mut encoder = ctx
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Collect Points"),
         });
     {
-        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Collect Bind Group"),
-            layout: &collect_pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: score_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: counts_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: kp_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: params_buffer.as_entire_binding(),
-                },
-            ],
-        });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-        pass.set_pipeline(&collect_pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
-        let (wg_x, wg_y, wg_z) = crate::gpu_kernels::dispatch_1d(num_elements, 256);
-        pass.dispatch_workgroups(wg_x, wg_y, wg_z);
+        pass.set_pipeline(&scatter_pipeline);
+        pass.set_bind_group(0, &scatter_bg, &[]);
+        pass.dispatch_workgroups(gx, gy, gz);
     }
     ctx.submit(encoder);
 
-    // Read back keypoints
     let kps = pollster::block_on(crate::gpu_kernels::buffer_utils::read_buffer(
         ctx.device.clone(),
         &ctx.queue,
@@ -396,7 +344,7 @@ pub fn extract_keypoints<T: cv_core::float::Float + bytemuck::Pod>(
         (total as usize) * kp_size,
     ))?;
 
-    ctx.return_buffer(counts_buffer, usages);
+    ctx.return_buffer(blocks_buffer, usages);
 
     Ok(kps)
 }
