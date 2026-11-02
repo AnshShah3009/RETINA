@@ -465,7 +465,7 @@ fn every_shader_compiles() {
         ("canny", include_str!("../crates/hal/shaders/canny.wgsl")),
         ("warp", include_str!("../crates/hal/shaders/warp.wgsl")),
         // The 16-bit shaders that need no device feature. The `enable f16`
-        // ones (`threshold_f16.wgsl`, `resize_f16.wgsl`) are absent: they
+        // one (`threshold_f16.wgsl`) is absent: it
         // compile only on a device created with `SHADER_F16`, which this
         // helper does not check. `gpu_threshold_f16.rs` and
         // `gpu_half_kernels.rs` in cv-hal run the reachable ones for real.
@@ -495,10 +495,12 @@ fn every_shader_compiles() {
             "threshold_f16_packed",
             include_str!("../crates/hal/shaders/threshold_f16_packed.wgsl"),
         ),
-        // No caller: `resize` returns NotSupported for 16-bit types.
+        // f16 and bf16 resize (bilinear and Lanczos-4 entry points),
+        // replacing `resize_f16.wgsl` (positions in f16, needed SHADER_F16)
+        // and `resize_bf16.wgsl` (one value per word), which had no caller.
         (
-            "resize_bf16",
-            include_str!("../crates/hal/shaders/resize_bf16.wgsl"),
+            "resize_packed16",
+            include_str!("../crates/hal/shaders/resize_packed16.wgsl"),
         ),
         (
             "threshold_bf16",
@@ -1462,7 +1464,8 @@ fn shader_storage_element_types_match_their_hosts() {
         ("fast_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("fast_nms_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("color_cvt_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
-        ("resize_bf16.wgsl", &[(0, "u32"), (1, "u32")]),
+        // Binding 3 is the `Tap` struct table (a layout view, not asserted).
+        ("resize_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("stereo_match.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("subtract.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("warp.wgsl", &[(0, "f32"), (1, "f32")]),

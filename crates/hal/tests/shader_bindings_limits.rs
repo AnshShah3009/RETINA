@@ -834,9 +834,10 @@ fn the_whole_shader_corpus_is_covered() {
         // since the seven bilateral/fast/fast_nms/color_cvt f16 and bf16
         // shaders became four `*_packed16.wgsl` shaders; 102 since
         // resize_f32.wgsl took over planar multichannel tensors from
-        // resize_f32_multichannel.wgsl.
-        102,
-        "expected 102 .wgsl files across shaders/ and src/gpu_kernels/"
+        // resize_f32_multichannel.wgsl; 101 since resize_f16.wgsl and
+        // resize_bf16.wgsl became resize_packed16.wgsl.
+        101,
+        "expected 101 .wgsl files across shaders/ and src/gpu_kernels/"
     );
     let kernels = files
         .iter()

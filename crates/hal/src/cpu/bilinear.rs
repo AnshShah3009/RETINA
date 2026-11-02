@@ -28,34 +28,54 @@ pub(crate) struct Tap<T> {
 /// upper-bound index clamp is in integer space so rounding cannot index out of
 /// bounds. Empty when `dst == 0`; callers must not ask for taps when
 /// `src == 0` and `dst > 0` (there is nothing to sample).
+///
+/// The position is computed in `T` when `T` is at least as wide as f32, and
+/// in f32 for the 16-bit types, whose own arithmetic cannot hold it:
+/// `(x + 0.5) * src` overflows f16 above 65504 (so a 512-wide source resized
+/// to 256 sampled its last column from output 128 on), and bf16 cannot count
+/// past 256. Only the weight `d` is then rounded to `T`; `1 - d` is computed
+/// in `T`, as the interpolation is.
 pub(crate) fn bilinear_taps<T: Float>(src: usize, dst: usize) -> Vec<Tap<T>> {
-    let src_f = T::from_f32(src as f32);
-    let dst_f = T::from_f32(dst.max(1) as f32);
+    let tap = |(i0, i1, d): (usize, usize, T)| Tap {
+        i0,
+        i1,
+        w0: T::ONE - d,
+        w1: d,
+    };
+    if std::mem::size_of::<T>() < std::mem::size_of::<f32>() {
+        positions::<f32>(src, dst)
+            .into_iter()
+            .map(|(i0, i1, d)| tap((i0, i1, T::from_f32(d))))
+            .collect()
+    } else {
+        positions::<T>(src, dst).into_iter().map(tap).collect()
+    }
+}
+
+/// `(i0, i1, d)` per output index, computed in `C`.
+fn positions<C: Float>(src: usize, dst: usize) -> Vec<(usize, usize, C)> {
+    let src_f = C::from_f32(src as f32);
+    let dst_f = C::from_f32(dst.max(1) as f32);
     let last = src.saturating_sub(1);
     (0..dst)
         .map(|x| {
-            let v = (T::from_f32(x as f32) + T::from_f32(0.5)) * src_f / dst_f - T::from_f32(0.5);
-            let f = if v < T::ZERO { T::ZERO } else { v };
+            let v = (C::from_f32(x as f32) + C::from_f32(0.5)) * src_f / dst_f - C::from_f32(0.5);
+            let f = if v < C::ZERO { C::ZERO } else { v };
             let i0 = (f.to_f32() as usize).min(last);
             let i1 = (i0 + 1).min(last);
             let d = if i0 == i1 {
-                T::ZERO
+                C::ZERO
             } else {
-                let d = f - T::from_f32(i0 as f32);
-                if d < T::ZERO {
-                    T::ZERO
-                } else if d > T::ONE {
-                    T::ONE
+                let d = f - C::from_f32(i0 as f32);
+                if d < C::ZERO {
+                    C::ZERO
+                } else if d > C::ONE {
+                    C::ONE
                 } else {
                     d
                 }
             };
-            Tap {
-                i0,
-                i1,
-                w0: T::ONE - d,
-                w1: d,
-            }
+            (i0, i1, d)
         })
         .collect()
 }

@@ -31,10 +31,12 @@
 //!
 //! **Scope, and what was actually checked.** `cv_hal`'s CPU resize implements
 //! the mapping and this test covers the value the caller observes. The GPU path
-//! is a separate implementation - `hal/shaders/resize_f32.wgsl` and its f16,
-//! bf16 and multichannel variants, reached through `gpu_kernels::resize` - and
-//! it is **not** covered by a test here, because that needs an adapter. It was
-//! checked by reading:
+//! is a separate implementation - `hal/shaders/resize_f32.wgsl` (any channel
+//! count) and `resize_packed16.wgsl` (f16 and bf16, which samples the CPU's
+//! own taps, handed over by the host), reached through `gpu_kernels::resize` -
+//! and it is **not** covered by a test here, because that needs an adapter
+//! (`cv-hal`'s `resize_planar_layout` and `gpu_half_resize` compare it with
+//! the CPU). The f32 shader was checked by reading:
 //!
 //! ```wgsl
 //! src_width_f  = f32(params.src_w);
