@@ -67,6 +67,18 @@ impl ArucoDictionary {
         }
     }
 
+    /// OpenCV's `maxCorrectionBits` for the predefined dictionary of the same
+    /// name (`DICT_4X4_50` .. `DICT_6X6_250`).
+    pub(crate) fn max_correction_bits(&self) -> u32 {
+        match self {
+            Self::Dict4x4_50 | Self::Dict4x4_100 | Self::Dict4x4_250 => 1,
+            Self::Dict5x5_50 | Self::Dict5x5_100 => 3,
+            Self::Dict5x5_250 => 2,
+            Self::Dict6x6_50 => 6,
+            Self::Dict6x6_100 | Self::Dict6x6_250 => 5,
+        }
+    }
+
     /// Get the bit pattern for marker `id`.
     ///
     /// Returns a `marker_size x marker_size` grid of 0/1 values (row-major),
@@ -99,6 +111,16 @@ pub struct DetectedMarker {
     pub id: usize,
     /// Image-space corner coordinates (top-left, top-right, bottom-right, bottom-left).
     pub corners: [(f64, f64); 4],
+}
+
+/// A candidate quad that passed the shape filters but did not decode to a
+/// dictionary marker (one of OpenCV's `rejectedImgPoints`).
+#[derive(Debug, Clone)]
+pub(crate) struct RejectedCandidate {
+    /// Corners in the same order as [`DetectedMarker::corners`].
+    pub(crate) corners: [(f64, f64); 4],
+    /// Payload bits sampled in image orientation (border excluded).
+    pub(crate) payload: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,14 +167,7 @@ impl ArucoDetector {
     /// 4. For each candidate: sample grid bits, check border, read payload
     /// 5. Match against all 4 rotations of each dictionary code
     pub fn detect<T: Float>(&self, image: &CpuTensor<T>) -> Result<Vec<DetectedMarker>> {
-        let (h, w) = (image.shape.height, image.shape.width);
-        if image.shape.channels != 1 || h == 0 || w == 0 {
-            return Err(Error::InvalidInput(
-                "aruco detect requires single-channel (1, H, W) image".into(),
-            ));
-        }
-        let data = image.as_slice()?;
-        let gray: Vec<u8> = data.iter().map(|&v| float_to_u8(v)).collect();
+        let (gray, w, h) = tensor_to_gray(image)?;
         self.detect_gray(&gray, w, h)
     }
 
@@ -172,6 +187,18 @@ impl ArucoDetector {
 
     /// Internal: run detection on raw grayscale u8 buffer.
     fn detect_gray(&self, gray: &[u8], w: usize, h: usize) -> Result<Vec<DetectedMarker>> {
+        Ok(self.detect_gray_with_rejected(gray, w, h)?.0)
+    }
+
+    /// Detection on a raw grayscale buffer that also returns the candidates
+    /// which passed the shape filters but did not decode (OpenCV's
+    /// `rejectedImgPoints`), for board-aware refinement.
+    pub(crate) fn detect_gray_with_rejected(
+        &self,
+        gray: &[u8],
+        w: usize,
+        h: usize,
+    ) -> Result<(Vec<DetectedMarker>, Vec<RejectedCandidate>)> {
         // 1. Adaptive threshold
         let binary = adaptive_threshold(
             gray,
@@ -197,6 +224,7 @@ impl ArucoDetector {
 
         // 4-5. Decode each candidate
         let mut detections = Vec::new();
+        let mut rejected = Vec::new();
         for c in &candidates {
             // Decode from raw grayscale using a per-candidate threshold
             // (min..max midpoint of the bounding box): robust to overall
@@ -213,24 +241,23 @@ impl ArucoDetector {
                 grid,
                 Some((c.min_x, c.min_y, c.max_x, c.max_y)),
             );
-            if !border_is_black(&bits, grid) {
-                continue;
-            }
+            let corners = [
+                (c.min_x as f64, c.min_y as f64),
+                (c.max_x as f64, c.min_y as f64),
+                (c.max_x as f64, c.max_y as f64),
+                (c.min_x as f64, c.max_y as f64),
+            ];
             let payload = extract_payload(&bits, payload_bits, border_bits);
-            let (id, _rot, dist) = decode_with_rotations(payload, &codes, payload_bits);
-            if dist == 0 {
-                detections.push(DetectedMarker {
-                    id,
-                    corners: [
-                        (c.min_x as f64, c.min_y as f64),
-                        (c.max_x as f64, c.min_y as f64),
-                        (c.max_x as f64, c.max_y as f64),
-                        (c.min_x as f64, c.max_y as f64),
-                    ],
-                });
+            if border_is_black(&bits, grid) {
+                let (id, _rot, dist) = decode_with_rotations(payload, &codes, payload_bits);
+                if dist == 0 {
+                    detections.push(DetectedMarker { id, corners });
+                    continue;
+                }
             }
+            rejected.push(RejectedCandidate { corners, payload });
         }
-        Ok(detections)
+        Ok((detections, rejected))
     }
 }
 
@@ -357,6 +384,38 @@ pub fn draw_marker(dictionary: ArucoDictionary, id: usize, size: usize) -> Resul
 // ===========================================================================
 // Internal helpers
 // ===========================================================================
+
+/// Validate a `(1, H, W)` tensor and convert it to a grayscale `u8` buffer,
+/// returning `(pixels, width, height)`.
+pub(crate) fn tensor_to_gray<T: Float>(image: &CpuTensor<T>) -> Result<(Vec<u8>, usize, usize)> {
+    let (h, w) = (image.shape.height, image.shape.width);
+    if image.shape.channels != 1 || h == 0 || w == 0 {
+        return Err(Error::InvalidInput(
+            "aruco detect requires single-channel (1, H, W) image".into(),
+        ));
+    }
+    let data = image.as_slice()?;
+    Ok((data.iter().map(|&v| float_to_u8(v)).collect(), w, h))
+}
+
+/// Hamming distance between a payload sampled in image orientation and the
+/// code of marker `id`, when the marker's top-left corner is image corner
+/// `top_left` (0 = top-left, then clockwise). Like OpenCV's
+/// `Dictionary::getDistanceToId(bits, id, false)` on bits extracted in the
+/// marker's own orientation. `None` when `id` is not in the dictionary.
+pub(crate) fn payload_distance_to_id(
+    dictionary: ArucoDictionary,
+    payload: u64,
+    id: usize,
+    top_left: usize,
+) -> Option<u32> {
+    let code = *dictionary_codes(dictionary).get(id)?;
+    // `rotate_90` turns the bit grid clockwise; the image shows the marker
+    // turned clockwise `top_left` times, so turn it back.
+    let side = dictionary.marker_size();
+    let upright = rotate_variants(payload, side)[(4 - top_left % 4) % 4];
+    Some((upright ^ code).count_ones())
+}
 
 /// Convert a Float pixel value to u8. Assumes [0,1] for floats and [0,255] for u8-like values.
 fn float_to_u8<T: Float>(v: T) -> u8 {
