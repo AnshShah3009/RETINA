@@ -119,7 +119,19 @@ pub fn calibrate_camera_planar_with_options(
         homographies.push(estimate_homography_dlt(&obj2d, img)?);
     }
 
-    let k = intrinsics_from_planar_homographies(&homographies)?;
+    // Zhang's closed form needs the absolute conic `B` it solves for to be
+    // definite. With few or nearly fronto-parallel views it often is not, and
+    // then `sqrt(lambda / B11)` is NaN and the whole calibration was refused
+    // as "non-finite or degenerate" - on data `cv2.calibrateCamera` calibrates
+    // without complaint, because OpenCV never uses Zhang's form: it fixes the
+    // principal point at the image centre, solves the two focal lengths from
+    // the vanishing points (`initIntrinsicParams2D`) and lets the bundle
+    // adjustment free the rest. Do the same whenever Zhang's answer is not a
+    // camera.
+    let k = match intrinsics_from_planar_homographies(&homographies) {
+        Ok(k) if is_plausible_camera_matrix(&k) => k,
+        _ => opencv_initial_intrinsics(&homographies, image_size)?,
+    };
     let mut fx = k[(0, 0)];
     let mut fy = k[(1, 1)];
     let mut cx = k[(0, 2)];
@@ -725,6 +737,73 @@ fn intrinsics_from_planar_homographies(homographies: &[Matrix3<f64>]) -> Result<
     let u0 = gamma * v0 / beta - b13 * alpha * alpha / lambda;
 
     Ok(Matrix3::new(alpha, gamma, u0, 0.0, beta, v0, 0.0, 0.0, 1.0))
+}
+
+/// A closed-form camera matrix that can seed calibration: finite, with
+/// positive focal lengths.
+fn is_plausible_camera_matrix(k: &Matrix3<f64>) -> bool {
+    k.iter().all(|v| v.is_finite()) && k[(0, 0)] > 0.0 && k[(1, 1)] > 0.0
+}
+
+/// OpenCV's `initIntrinsicParams2D`: principal point at the image centre,
+/// focal lengths from the orthogonality of each view's vanishing points.
+///
+/// For each homography (shifted so the principal point is the origin) the
+/// directions `h = H·e1`, `v = H·e2` and their bisectors `(h ± v)/2` are
+/// images of orthogonal pairs, so `x1·x2/fx² + y1·y2/fy² + z1·z2 = 0`; that
+/// is linear in `(1/fx², 1/fy²)` and solved over all views in least squares.
+fn opencv_initial_intrinsics(
+    homographies: &[Matrix3<f64>],
+    image_size: (u32, u32),
+) -> Result<Matrix3<f64>> {
+    let cx = if image_size.0 == 0 {
+        0.5
+    } else {
+        (image_size.0 as f64 - 1.0) * 0.5
+    };
+    let cy = if image_size.1 == 0 {
+        0.5
+    } else {
+        (image_size.1 as f64 - 1.0) * 0.5
+    };
+    let mut a = DMatrix::<f64>::zeros(2 * homographies.len(), 2);
+    let mut b = nalgebra::DVector::<f64>::zeros(2 * homographies.len());
+    for (i, h) in homographies.iter().enumerate() {
+        let mut h = *h;
+        for c in 0..3 {
+            h[(0, c)] -= h[(2, c)] * cx;
+            h[(1, c)] -= h[(2, c)] * cy;
+        }
+        let mut hv = h.column(0).into_owned();
+        let mut vv = h.column(1).into_owned();
+        let mut d1 = (hv + vv) * 0.5;
+        let mut d2 = (hv - vv) * 0.5;
+        for v in [&mut hv, &mut vv, &mut d1, &mut d2] {
+            let n = v.norm();
+            if n > 0.0 {
+                *v /= n;
+            }
+        }
+        a[(2 * i, 0)] = hv[0] * vv[0];
+        a[(2 * i, 1)] = hv[1] * vv[1];
+        a[(2 * i + 1, 0)] = d1[0] * d2[0];
+        a[(2 * i + 1, 1)] = d1[1] * d2[1];
+        b[2 * i] = -hv[2] * vv[2];
+        b[2 * i + 1] = -d1[2] * d2[2];
+    }
+    let f = a
+        .svd(true, true)
+        .solve(&b, 1e-12)
+        .map_err(|e| cv_core::Error::AlgorithmError(format!("initial intrinsics: {e}")))?;
+    let fx = (1.0 / f[0]).abs().sqrt();
+    let fy = (1.0 / f[1]).abs().sqrt();
+    let k = Matrix3::new(fx, 0.0, cx, 0.0, fy, cy, 0.0, 0.0, 1.0);
+    if !is_plausible_camera_matrix(&k) {
+        return Err(cv_core::Error::AlgorithmError(
+            "degenerate calibration system: no closed-form focal length".to_string(),
+        ));
+    }
+    Ok(k)
 }
 
 /// Compute camera extrinsics from homography
