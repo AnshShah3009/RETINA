@@ -120,27 +120,20 @@ pub fn compute_fpfh_features(cloud: &PointCloud, radius: f32) -> Result<Vec<FPFH
         result
     };
 
-    // Open3D's `ComputeFPFHFeature`, in f64 as there.
+    // Open3D's `ComputeFPFHFeature`, in f64 as there; the descriptor itself is
+    // `cv-pointcloud`'s, shared with `cv_pointcloud::compute_fpfh_feature`.
     let points64: Vec<Vector3<f64>> = points.iter().map(|p| p.coords.cast::<f64>()).collect();
     let normals64: Vec<Vector3<f64>> = normals.iter().map(|v| v.cast::<f64>()).collect();
     let neighborhoods: Vec<Vec<usize>> = (0..n).map(|i| radius_search(&points[i], i)).collect();
 
-    // --- Step 1: Compute SPFH for every point ---
-    let all_spfh: Vec<[f64; 33]> = (0..n)
-        .map(|i| compute_spfh(i, &neighborhoods[i], &points64, &normals64))
-        .collect();
-
-    // --- Step 2: Weight SPFHs to produce FPFH ---
-    let fpfh_features: Vec<FPFHFeature> = (0..n)
-        .map(|i| {
-            let fpfh = weight_spfh(i, &neighborhoods[i], &points64, &all_spfh);
-            FPFHFeature {
+    Ok(
+        cv_pointcloud::fpfh_from_neighbourhoods(&points64, &normals64, &neighborhoods)
+            .into_iter()
+            .map(|fpfh| FPFHFeature {
                 histogram: fpfh.map(|v| v as f32),
-            }
-        })
-        .collect();
-
-    Ok(fpfh_features)
+            })
+            .collect(),
+    )
 }
 
 /// Estimate normals via PCA over radius-based neighbours.
@@ -256,111 +249,4 @@ fn estimate_normals_pca(points: &[Point3<f32>], radius: f32) -> (Vec<Vector3<f32
     }
 
     (normals, unsolved)
-}
-
-/// Open3D's `ComputePairFeatures` (after PCL's `computePairFeatures`): the
-/// Darboux-frame angles `(theta, alpha, phi)` of the pair `(p1, n1)`,
-/// `(p2, n2)`, or zeros for coincident points or a degenerate frame (which
-/// Open3D still bins).
-///
-/// The source of the frame is whichever point's normal makes the smaller angle
-/// with the line joining them, so the features of a pair do not depend on
-/// which point is the query; `v = d x n_source`, as PCL and Open3D.
-fn pair_features(
-    p1: &Vector3<f64>,
-    n1: &Vector3<f64>,
-    p2: &Vector3<f64>,
-    n2: &Vector3<f64>,
-) -> [f64; 3] {
-    let mut dp = p2 - p1;
-    let dist = dp.norm();
-    if dist == 0.0 {
-        return [0.0; 3];
-    }
-    let angle1 = n1.dot(&dp) / dist;
-    let angle2 = n2.dot(&dp) / dist;
-    let (src, tgt, phi) = if angle1.abs().acos() > angle2.abs().acos() {
-        dp = -dp;
-        (n2, n1, -angle2)
-    } else {
-        (n1, n2, angle1)
-    };
-    let v = dp.cross(src);
-    let v_norm = v.norm();
-    if v_norm == 0.0 {
-        return [0.0; 3];
-    }
-    let v = v / v_norm;
-    let w = src.cross(&v);
-    let alpha = v.dot(tgt);
-    let theta = w.dot(tgt).atan2(src.dot(tgt));
-    [theta, alpha, phi]
-}
-
-/// Bin of `value` in 11 equal bins over `[lo, hi]`, clamped.
-fn bin11(value: f64, lo: f64, hi: f64) -> usize {
-    ((11.0 * (value - lo) / (hi - lo)).floor() as i64).clamp(0, 10) as usize
-}
-
-/// Simplified Point Feature Histogram of point `i` (Open3D's
-/// `ComputeSPFHFeature`): bins 0-10 theta over `[-pi, pi]`, 11-21 alpha and
-/// 22-32 phi over `[-1, 1]`; each neighbour adds `100 / k` to one bin of each,
-/// so each sub-histogram sums to 100.
-///
-/// This used to differ from Open3D in every respect that shows in the
-/// numbers: the bins were ordered (alpha, phi, theta), the frame was
-/// `v = n x d` (mirroring alpha and theta), there was no source/target swap
-/// (so a pair's features depended on which point was asked), and each
-/// sub-histogram summed to 1.
-fn compute_spfh(
-    i: usize,
-    neighbors: &[usize],
-    points: &[Vector3<f64>],
-    normals: &[Vector3<f64>],
-) -> [f64; 33] {
-    let mut histogram = [0.0f64; 33];
-    if neighbors.is_empty() {
-        return histogram;
-    }
-    let increment = 100.0 / neighbors.len() as f64;
-    for &j in neighbors {
-        let [theta, alpha, phi] = pair_features(&points[i], &normals[i], &points[j], &normals[j]);
-        histogram[bin11(theta, -std::f64::consts::PI, std::f64::consts::PI)] += increment;
-        histogram[11 + bin11(alpha, -1.0, 1.0)] += increment;
-        histogram[22 + bin11(phi, -1.0, 1.0)] += increment;
-    }
-    histogram
-}
-
-/// Fast Point Feature Histogram of point `i` (Open3D's `ComputeFPFHFeature`):
-/// the neighbours' SPFHs weighted by the inverse *squared* distance, each
-/// sub-histogram of that sum scaled to 100, plus the point's own SPFH.
-///
-/// It used `1 / (k |d|)` weights and scaled the whole 33-bin sum to 100.
-fn weight_spfh(
-    i: usize,
-    neighbors: &[usize],
-    points: &[Vector3<f64>],
-    all_spfh: &[[f64; 33]],
-) -> [f64; 33] {
-    let mut fpfh = [0.0f64; 33];
-    let mut sums = [0.0f64; 3];
-    for &j in neighbors {
-        let dist_sq = (points[j] - points[i]).norm_squared();
-        if dist_sq == 0.0 {
-            continue;
-        }
-        for bin in 0..33 {
-            let value = all_spfh[j][bin] / dist_sq;
-            sums[bin / 11] += value;
-            fpfh[bin] += value;
-        }
-    }
-    for bin in 0..33 {
-        if sums[bin / 11] != 0.0 {
-            fpfh[bin] *= 100.0 / sums[bin / 11];
-        }
-        fpfh[bin] += all_spfh[i][bin];
-    }
-    fpfh
 }

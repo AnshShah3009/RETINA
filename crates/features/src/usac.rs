@@ -106,7 +106,10 @@ pub struct UsacResult<M> {
     pub model: M,
     /// Number of inliers of `model`.
     pub inliers: usize,
-    /// Score the caller's scorer gave `model` (higher is better).
+    /// Score the caller's scorer gave `model`: a **cost, lower is better**.
+    /// [`estimate_usac`] keeps the hypothesis with the smallest score, and
+    /// every scorer in [`scorers`] returns a cost (MSAC/MAGSAC truncated
+    /// residuals, RANSAC's outlier count).
     pub score: f64,
     /// Per-correspondence inlier flags for `model`.
     pub mask: Vec<bool>,
@@ -115,6 +118,10 @@ pub struct UsacResult<M> {
 }
 
 /// USAC-based model estimation
+///
+/// `scorer(model, points)` returns `(inliers, score, mask)`, where `score` is
+/// a **cost**: the hypothesis with the lowest score wins (ties keep the
+/// earlier one), and that score is reported in [`UsacResult::score`].
 pub fn estimate_usac<M, E, S>(
     points: &[Point2<f64>],
     params: &UsacParams,
@@ -506,6 +513,35 @@ mod tests {
         let (ai, _, am) = scorers::score_magsac(&good, &pts, 3.0, line_residual);
         assert_eq!(ai, 20);
         assert_eq!(am.len(), pts.len());
+    }
+
+    /// `UsacResult::score` is the smallest score the scorer produced: the
+    /// estimator minimises. (Its documentation used to say "higher is
+    /// better".)
+    #[test]
+    fn result_score_is_the_minimum_the_scorer_returned() {
+        use std::cell::RefCell;
+        let pts: Vec<Point2<f64>> = (0..30)
+            .map(|x| Point2::new(x as f64, if x % 3 == 0 { 50.0 } else { x as f64 }))
+            .collect();
+        let seen = RefCell::new(Vec::new());
+        let scorer = |m: &(f64, f64), p: &[Point2<f64>]| {
+            let r = line_score(m, p);
+            seen.borrow_mut().push(r.1);
+            r
+        };
+        let params = UsacParams {
+            max_iterations: 200,
+            ..UsacParams::default()
+        };
+        let res = estimate_usac(&pts, &params, &line_model, &scorer, 2).unwrap();
+        let seen = seen.borrow();
+        let min = seen.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max = seen.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        assert!(min < max, "the scorer must have seen different models");
+        assert_eq!(res.score, min);
+        // And the cheapest model is the true line y = x.
+        assert!((res.model.0 - 1.0).abs() < 1e-9 && res.model.1.abs() < 1e-9);
     }
 
     #[test]

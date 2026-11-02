@@ -32,8 +32,54 @@ pub fn convert_gray_to_rgb_in_pool(gray: &GrayImage, pool: Option<&ThreadPool>) 
     }
 }
 
-use crate::simd::rgb_to_gray_simd;
+/// OpenCV's 8-bit colour-to-grey weights: `0.299`, `0.587`, `0.114` in 15-bit
+/// fixed point (`cvtColor` `RGB2GRAY` / `BGR2GRAY` for `CV_8U`).
+const R2Y: u32 = 9798;
+const G2Y: u32 = 19235;
+const B2Y: u32 = 3735;
+const GRAY_SHIFT: u32 = 15;
 
+#[inline]
+fn gray_fixed(r: u8, g: u8, b: u8) -> u8 {
+    // At most 255 * 32768 + 2^14 before the shift, so u32 cannot overflow and
+    // the result is at most 255.
+    ((r as u32 * R2Y + g as u32 * G2Y + b as u32 * B2Y + (1 << (GRAY_SHIFT - 1))) >> GRAY_SHIFT)
+        as u8
+}
+
+/// Interleaved RGB `u8` to grey, exactly `cv2.cvtColor(.., COLOR_RGB2GRAY)`:
+/// `(9798 R + 19235 G + 3735 B + 2^14) >> 15`.
+///
+/// OpenCV 4.13 uses these 15-bit weights; on all 2^24 colours this matches it
+/// with no mismatch. The f32 `0.299 R + 0.587 G + 0.114 B` with half-away
+/// rounding that `convert_rgb_to_gray` used before (via
+/// `cv_hal::cpu::simd::rgb_to_gray_simd`) was one grey level off on 21,247 of
+/// them (0.127%). See `tests/rgb_to_gray_opencv_parity.rs`.
+///
+/// # Panics
+///
+/// If `rgb.len() != 3 * gray.len()`.
+pub fn rgb_to_gray_u8(rgb: &[u8], gray: &mut [u8]) {
+    assert_eq!(rgb.len(), gray.len() * 3, "rgb_to_gray_u8: length mismatch");
+    for (g, px) in gray.iter_mut().zip(rgb.chunks_exact(3)) {
+        *g = gray_fixed(px[0], px[1], px[2]);
+    }
+}
+
+/// Interleaved BGR `u8` to grey, exactly `cv2.cvtColor(.., COLOR_BGR2GRAY)`
+/// (the weights of [`rgb_to_gray_u8`] with the channel order swapped).
+///
+/// # Panics
+///
+/// If `bgr.len() != 3 * gray.len()`.
+pub fn bgr_to_gray_u8(bgr: &[u8], gray: &mut [u8]) {
+    assert_eq!(bgr.len(), gray.len() * 3, "bgr_to_gray_u8: length mismatch");
+    for (g, px) in gray.iter_mut().zip(bgr.chunks_exact(3)) {
+        *g = gray_fixed(px[2], px[1], px[0]);
+    }
+}
+
+/// RGB to grey with OpenCV's 8-bit weights; see [`rgb_to_gray_u8`].
 pub fn convert_rgb_to_gray(rgb: &RgbImage) -> GrayImage {
     convert_rgb_to_gray_in_pool(rgb, None)
 }
@@ -45,12 +91,11 @@ pub fn convert_rgb_to_gray_in_pool(rgb: &RgbImage, pool: Option<&ThreadPool>) ->
         let mut gray_data = vec![0u8; count];
         let rgb_data = rgb.as_raw();
 
-        // Process in parallel chunks, but use SIMD within each chunk
         gray_data
-            .par_chunks_mut(4096) // Larger chunk size for SIMD efficiency
+            .par_chunks_mut(4096)
             .zip(rgb_data.par_chunks(4096 * 3))
             .for_each(|(g_chunk, rgb_chunk)| {
-                rgb_to_gray_simd(rgb_chunk, g_chunk);
+                rgb_to_gray_u8(rgb_chunk, g_chunk);
             });
 
         GrayImage::from_raw(w, h, gray_data).unwrap()

@@ -352,7 +352,7 @@ fn subspace_min(
 /// Backtracking Armijo search on `x + α d`, `α ∈ (0, 1]`, with safeguarded
 /// quadratic interpolation. Every trial point is feasible because `x` and
 /// `x + d` are. Returns `(α, f)` of an accepted step that decreases `f`.
-fn line_search(
+pub(crate) fn line_search(
     f: &impl Fn(&[f64]) -> f64,
     x: &[f64],
     fx: f64,

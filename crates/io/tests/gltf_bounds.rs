@@ -14,12 +14,14 @@
 //! - min greater than max on every axis, in a 876-byte file. No importer can
 //! read that as an extent.
 //!
-//! glTF requires `min` and `max` to be present when written, so the fix records a
-//! degenerate box at the origin, which is valid.
+//! The bounds are now seeded from the first vertex. An empty mesh used to get a
+//! degenerate box at the origin over a count-0 accessor, which is itself
+//! invalid glTF; it is now written with no mesh and no POSITION accessor at all
+//! (see `an_empty_mesh_is_a_valid_asset_with_no_mesh`).
 
 #![cfg(feature = "gltf")]
 
-use cv_io::gltf_io::write_glb;
+use cv_io::gltf_io::{read_gltf, write_glb};
 use nalgebra::Point3;
 
 /// Parse the POSITION accessor's `min`/`max` out of a written GLB's JSON chunk.
@@ -53,24 +55,32 @@ fn write_temp(name: &str, verts: &[Point3<f32>], faces: &[[usize; 3]]) -> Vec<u8
 }
 
 #[test]
-fn an_empty_mesh_records_a_valid_degenerate_box() {
+fn an_empty_mesh_is_a_valid_asset_with_no_mesh() {
+    // glTF 2.0's schema requires accessor.count >= 1, bufferView.byteLength
+    // >= 1, buffer.byteLength >= 1, mesh.primitives minItems 1 and (when
+    // present) meshes minItems 1, so an empty mesh has no encoding as a mesh.
+    // It used to be written as a POSITION accessor of count 0 over a 0-byte
+    // bufferView and buffer (with a degenerate box at the origin as bounds),
+    // which `read_gltf` then rejected ("accessor 0 ... has count 0"). It is
+    // now an asset with a scene and no mesh, which reads back as no meshes.
     let bytes = write_temp("empty.glb", &[], &[]);
-    let (min, max) = position_bounds(&bytes);
-
-    assert_eq!(min.len(), 3);
-    assert_eq!(max.len(), 3);
-    for i in 0..3 {
+    let text = String::from_utf8_lossy(&bytes);
+    for key in [
+        "\"meshes\"",
+        "\"accessors\"",
+        "\"bufferViews\"",
+        "\"buffers\"",
+    ] {
         assert!(
-            min[i] <= max[i],
-            "accessor axis {i} is inverted: min={} > max={}",
-            min[i],
-            max[i]
+            !text.contains(key),
+            "an empty mesh has no valid {key}: {text}"
         );
     }
-    assert!(
-        min.iter().chain(max.iter()).all(|v| v.is_finite()),
-        "an accessor bound must be finite: min={min:?} max={max:?}"
-    );
+    assert!(!text.contains("\"count\": 0") && !text.contains("\"byteLength\": 0"));
+
+    let dir = std::env::temp_dir().join("glb_bounds_tests");
+    let meshes = read_gltf(dir.join("empty.glb")).expect("the empty GLB must be readable");
+    assert!(meshes.is_empty(), "{} meshes read back", meshes.len());
 }
 
 /// The control: a single vertex records its own coordinates.

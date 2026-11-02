@@ -207,7 +207,32 @@ impl SfMState {
     /// parameters) full state rebuilds, which made bundle adjustment appear to
     /// hang (a 12-camera / 1400-landmark reconstruction spent minutes in one
     /// Jacobian). `numerical_jacobian_fd` keeps the old scheme as a test oracle.
+    ///
+    /// This is the full Jacobian, every camera included; the solvers use
+    /// [`Self::gauge_fixed_jacobian`].
     pub fn numerical_jacobian_sparse(&self) -> SparseMatrix {
+        self.analytic_jacobian(false)
+    }
+
+    /// The Jacobian [`bundle_adjust`] solves with: [`Self::numerical_jacobian_sparse`]
+    /// with the first camera's six columns empty, which holds that camera's pose
+    /// fixed.
+    ///
+    /// Reprojection error is invariant under a similarity transform of the
+    /// whole reconstruction, so with every camera free the normal equations
+    /// have a 7-dimensional null space (rotation, translation, scale) that only
+    /// the Levenberg-Marquardt damping kept from being singular, and the
+    /// solution drifted along it: camera 0 of `tests/ba_gauge.rs` moved by
+    /// 2.0e-2 in translation and 2.5e-3 rad. Fixing the first camera's pose
+    /// removes six of the seven directions, the standard choice; the scale
+    /// direction remains and is left to the damping. The empty columns give
+    /// zero rows and columns in `J^T J` and zero entries in `J^T r`, so the
+    /// conjugate-gradient step is exactly zero for those parameters.
+    pub fn gauge_fixed_jacobian(&self) -> SparseMatrix {
+        self.analytic_jacobian(true)
+    }
+
+    fn analytic_jacobian(&self, fix_first_camera: bool) -> SparseMatrix {
         let params = self.to_parameters();
         let n_res = self.residuals().len();
         let n_params = params.len();
@@ -346,6 +371,9 @@ impl SfMState {
         }
 
         let _ = params;
+        if fix_first_camera && n_cam > 0 {
+            triplets.retain(|t| t.col >= 6);
+        }
         SparseMatrix::from_triplets(n_res, n_params, &triplets)
     }
 
@@ -467,12 +495,21 @@ impl SfMState {
         if count > 0 { error / count as f64 } else { 0.0 }
     }
 
-    pub fn remove_outliers(&mut self, threshold: f64) {
+    /// Mark as invalid every landmark whose RMS reprojection error over its
+    /// observations exceeds `threshold_px` pixels (or that lies behind a
+    /// camera observing it).
+    ///
+    /// The threshold used to be compared, undocumented, with the *mean squared*
+    /// error, i.e. in px^2: `bundle_adjust`'s `remove_outliers(10.0)` pruned
+    /// landmarks above sqrt(10) = 3.16 px, not 10 px. It is now in pixels, and
+    /// `bundle_adjust` passes [`ROBUST_OUTLIER_RMS_PX`], the same 3.16 px.
+    pub fn remove_outliers(&mut self, threshold_px: f64) {
+        let threshold_sq = threshold_px * threshold_px;
         let outlier_indices: Vec<usize> = self
             .landmarks
             .iter()
             .enumerate()
-            .filter(|(_, lm)| self.compute_point_reprojection_error_index(lm) > threshold)
+            .filter(|(_, lm)| self.compute_point_reprojection_error_index(lm) > threshold_sq)
             .map(|(i, _)| i)
             .collect();
 
@@ -513,9 +550,14 @@ impl CostFunction for SfMState {
     fn jacobian(&self, params: &DVector<f64>) -> SparseMatrix {
         let mut temp_state = self.clone();
         temp_state.from_parameters(params);
-        temp_state.numerical_jacobian_sparse()
+        temp_state.gauge_fixed_jacobian()
     }
 }
+
+/// RMS reprojection error, in pixels, above which [`bundle_adjust`]'s robust
+/// pass ([`BundleAdjustmentConfig::robust_kernel`]) drops a landmark:
+/// sqrt(10) px, the value the former px^2 threshold of 10 meant.
+pub const ROBUST_OUTLIER_RMS_PX: f64 = 3.162_277_660_168_379_5;
 
 pub struct BundleAdjustmentConfig {
     pub max_iterations: usize,
@@ -537,6 +579,12 @@ impl Default for BundleAdjustmentConfig {
     }
 }
 
+/// Levenberg-Marquardt bundle adjustment of every camera pose and landmark.
+///
+/// The first camera's pose (`state.cameras[0]`) is held fixed to remove the
+/// gauge freedom (see [`SfMState::gauge_fixed_jacobian`]); every other camera
+/// and every landmark is optimised. With `robust_kernel`, landmarks above
+/// [`ROBUST_OUTLIER_RMS_PX`] are dropped every fifth iteration.
 pub fn bundle_adjust(state: &mut SfMState, config: &BundleAdjustmentConfig) {
     // use_sparsity=false requests the dense (sequential) solver explicitly;
     // a previous revision ignored the flag entirely. The ctx (sparse) path does
@@ -585,7 +633,7 @@ fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfi
     };
 
     for iteration in 0..config.max_iterations {
-        let j = state.numerical_jacobian_sparse();
+        let j = state.gauge_fixed_jacobian();
         let r = &current_residuals;
 
         // (J^T J + lambda*diag(J^T J)) delta = -J^T r, built from the sparse
@@ -654,7 +702,7 @@ fn bundle_adjust_sequential(state: &mut SfMState, config: &BundleAdjustmentConfi
         }
 
         if config.robust_kernel && iteration % 5 == 0 {
-            state.remove_outliers(10.0);
+            state.remove_outliers(ROBUST_OUTLIER_RMS_PX);
             // Removing outliers zeroes their residual rows, so the cost the
             // next step is compared against must be re-measured. Comparing
             // the outlier-free cost of the next step with this stale,

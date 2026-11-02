@@ -398,6 +398,19 @@ pub mod point_cloud {
 
     // ── Approximate / fast-but-less-accurate methods ─────────────────────────
 
+    /// Whether a cross product of length `len`, built from offsets whose
+    /// lengths multiply to `scale` (summed, for several products), is too short
+    /// to give a direction: the offsets are within ~1e-5 rad of collinear, the
+    /// level of f32 rounding in the product, or the cloud has no extent.
+    ///
+    /// Relative, because `len` scales as the square of the point spacing: the
+    /// absolute `len < 1e-10` this replaces rejected every normal of a cloud
+    /// spaced below about 1e-5 (and accepted rounding noise of about 1e-8 from
+    /// truly collinear neighbours at unit scale).
+    fn is_degenerate_cross(len: f32, scale: f32) -> bool {
+        !(len > 1e-5 * scale)
+    }
+
     /// **Fast-approximate** normals: use k=3 neighbours only, skip full PCA.
     ///
     /// Instead of accumulating a covariance matrix, the normal is simply
@@ -473,7 +486,11 @@ pub mod point_cloud {
                 let v1 = Vector3::new(p1.x - c.x, p1.y - c.y, p1.z - c.z);
                 let n = v0.cross(&v1);
                 let len = n.norm();
-                if len < 1e-10 { Vector3::z() } else { n / len }
+                if is_degenerate_cross(len, v0.norm() * v1.norm()) {
+                    Vector3::z()
+                } else {
+                    n / len
+                }
             })
             .collect()
     }
@@ -565,14 +582,20 @@ pub mod point_cloud {
                 });
                 // Accumulate cross products of consecutive pairs.
                 let mut acc = Vector3::zeros();
+                let mut scale = 0.0f32;
                 let n = neighbours.len();
                 for j in 0..n {
                     let a = neighbours[j];
                     let b = neighbours[(j + 1) % n];
                     acc += a.cross(&b);
+                    scale += a.norm() * b.norm();
                 }
                 let len = acc.norm();
-                if len < 1e-10 { Vector3::z() } else { acc / len }
+                if is_degenerate_cross(len, scale) {
+                    Vector3::z()
+                } else {
+                    acc / len
+                }
             })
             .collect()
     }

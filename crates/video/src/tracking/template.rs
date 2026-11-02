@@ -45,26 +45,37 @@ impl TemplateTracker {
         if tw > frame.width() || th > frame.height() {
             return None;
         }
-        let mut best_pos = last_pos;
+        let mut best: Option<(u32, u32)> = None;
         let mut best_score = f32::INFINITY;
 
-        // Search in neighborhood
+        // Search in neighborhood, clipped to the positions where the template
+        // fits in the frame.
         let search_min_x = last_pos.0.saturating_sub(self.search_radius);
-        let search_max_x = (last_pos.0 + self.search_radius).min(frame.width() - tw);
+        let search_max_x = last_pos
+            .0
+            .saturating_add(self.search_radius)
+            .min(frame.width() - tw);
         let search_min_y = last_pos.1.saturating_sub(self.search_radius);
-        let search_max_y = (last_pos.1 + self.search_radius).min(frame.height() - th);
+        let search_max_y = last_pos
+            .1
+            .saturating_add(self.search_radius)
+            .min(frame.height() - th);
 
+        // If the clipped window is empty no position within the radius fits
+        // (the frame shrank, or the target left it): the target is lost. This
+        // used to return the stale last position as a match, which could lie
+        // entirely outside the frame.
         for y in search_min_y..=search_max_y {
             for x in search_min_x..=search_max_x {
                 let score = self.compute_match_score(frame, template, x, y);
-                if score < best_score {
+                if best.is_none() || score < best_score {
                     best_score = score;
-                    best_pos = (x, y);
+                    best = Some((x, y));
                 }
             }
         }
 
-        Some(best_pos)
+        best
     }
 
     fn compute_match_score(&self, frame: &GrayImage, template: &GrayImage, x: u32, y: u32) -> f32 {

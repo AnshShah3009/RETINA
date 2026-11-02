@@ -181,6 +181,13 @@ impl rstar::PointDistance for PointWrapper {
 /// Uses PCA/SVD on the covariance matrix of the neighborhood.
 /// Modifies the point cloud in place to add normals.
 ///
+/// The neighbourhood of a point is its `k` nearest points *including the point
+/// itself*, as Open3D's `estimate_normals(KDTreeSearchParamKNN(k))`; fewer than
+/// three give the default `(0, 0, 1)`, as there. (It used to skip the nearest
+/// result and take `k` others, leaving the point out of its own covariance;
+/// see `tests/normals_knn_open3d.rs`.) The sign is the eigensolver's, as in
+/// Open3D.
+///
 /// Points with a non-finite coordinate have no neighbourhood: they are left out
 /// of the search tree and get the default `(0, 0, 1)` normal, the same as a
 /// point with fewer than three neighbours.
@@ -207,11 +214,9 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
                 return default_normal();
             }
             let query_point = [p.x, p.y, p.z];
-            let neighbors: Vec<&PointWrapper> = tree
-                .nearest_neighbor_iter(query_point)
-                .skip(1)
-                .take(k)
-                .collect();
+            // The nearest result is the point itself (or a duplicate of it).
+            let neighbors: Vec<&PointWrapper> =
+                tree.nearest_neighbor_iter(query_point).take(k).collect();
 
             if neighbors.len() < 3 {
                 return default_normal(); // Default up
@@ -789,8 +794,19 @@ pub fn cluster_dbscan(pc: &PointCloud, eps: f32, min_points: usize) -> Vec<i32> 
     labels
 }
 
-/// Compute FPFH features.
-/// Returns an N x 33 histogram feature vector for each point.
+/// FPFH (Fast Point Feature Histogram) descriptors, as Open3D's
+/// `compute_fpfh_feature` with `KDTreeSearchParamRadius(search_radius)`.
+///
+/// Returns one 33-bin descriptor per point: theta, alpha and phi, 11 bins each
+/// (see [`crate::fpfh`]). A point with neighbours has a descriptor summing to
+/// 600; one with none within `search_radius` gets all zeros. Returns `None`
+/// when the cloud has no normals.
+///
+/// This used to differ from Open3D in bin order, frame handedness, the
+/// source/target choice, the neighbour weighting and the normalisation (point 0
+/// of `tests/fpfh_matches_open3d.rs` had 3.41 in bin 0 where Open3D has 5.00,
+/// and descriptors summed to 100); it now shares `cv-registration`'s
+/// Open3D-verified implementation.
 pub fn compute_fpfh_feature(pc: &PointCloud, search_radius: f32) -> Option<Vec<[f32; 33]>> {
     let normals = pc.normals.as_ref()?;
     let n_points = pc.len();
@@ -807,151 +823,25 @@ pub fn compute_fpfh_feature(pc: &PointCloud, search_radius: f32) -> Option<Vec<[
     let tree = RTree::bulk_load(wrappers);
     let r2 = search_radius * search_radius;
 
-    // 1. Compute SPFH (Simplified Point Feature Histograms)
-    let spfh: Vec<[f32; 33]> = (0..n_points)
+    let neighbourhoods: Vec<Vec<usize>> = (0..n_points)
         .into_par_iter()
         .map(|i| {
             let p = pc.points[i];
-            let n = normals[i];
-            let query_point = [p.x, p.y, p.z];
-
-            // Find neighbors
-            let neighbors: Vec<&PointWrapper> =
-                tree.locate_within_distance(query_point, r2).collect();
-
-            if neighbors.len() <= 1 {
-                return [0.0; 33];
-            }
-
-            let mut hist = [0.0; 33]; // 11 bins for alpha, 11 for phi, 11 for theta
-            let mut count = 0;
-
-            for nb in neighbors {
-                let j = nb.0;
-                if i == j {
-                    continue;
-                }
-
-                let p_j = pc.points[j];
-                let n_j = normals[j];
-
-                let (alpha, phi, theta) = compute_pair_features(&p, &n, &p_j, &n_j);
-
-                // Binning: assume ranges.
-                // alpha: [-1, 1] -> cos angle.
-                // phi: [-1, 1]
-                // theta: [-PI, PI]
-
-                let bin_alpha = ((alpha + 1.0) * 5.5).floor().clamp(0.0, 10.0) as usize;
-                let bin_phi = ((phi + 1.0) * 5.5).floor().clamp(0.0, 10.0) as usize;
-                let bin_theta = ((theta + std::f32::consts::PI)
-                    * (11.0 / (2.0 * std::f32::consts::PI)))
-                    .floor()
-                    .clamp(0.0, 10.0) as usize;
-
-                hist[bin_alpha] += 1.0;
-                hist[11 + bin_phi] += 1.0;
-                hist[22 + bin_theta] += 1.0;
-                count += 1;
-            }
-
-            if count > 0 {
-                let inv_k = 1.0 / count as f32;
-                for val in &mut hist {
-                    *val *= inv_k;
-                }
-            }
-            hist
+            tree.locate_within_distance([p.x, p.y, p.z], r2)
+                .map(|nb| nb.0)
+                .filter(|&j| j != i)
+                .collect()
         })
         .collect();
+    let points64: Vec<Vector3<f64>> = pc.points.iter().map(|p| p.coords.cast::<f64>()).collect();
+    let normals64: Vec<Vector3<f64>> = normals.iter().map(|v| v.cast::<f64>()).collect();
 
-    // 2. Compute FPFH (Weighted sum of neighbors' SPFH)
-    let fpfh: Vec<[f32; 33]> = (0..n_points)
-        .into_par_iter()
-        .map(|i| {
-            let p = pc.points[i];
-            let query_point = [p.x, p.y, p.z];
-
-            let neighbors: Vec<&PointWrapper> =
-                tree.locate_within_distance(query_point, r2).collect();
-
-            if neighbors.len() <= 1 {
-                return spfh[i];
-            }
-
-            let mut final_hist = spfh[i]; // Start with own SPFH
-            let k = neighbors.len() - 1; // excluding self
-            let weight = 1.0 / k as f32;
-
-            for nb in neighbors {
-                let j = nb.0;
-                if i == j {
-                    continue;
-                }
-
-                let dist = (p - pc.points[j]).norm();
-                if dist < 1e-6 {
-                    continue;
-                }
-
-                let w = weight / dist; // Simple weighting
-
-                for k in 0..33 {
-                    final_hist[k] += spfh[j][k] * w;
-                }
-            }
-
-            // Normalize again? FPFH usually normalized to sum to 100 or 1.
-            // Simple normalization
-            let sum: f32 = final_hist.iter().sum();
-            if sum > 1e-6 {
-                let scale = 100.0 / sum;
-                for val in &mut final_hist {
-                    *val *= scale;
-                }
-            }
-
-            final_hist
-        })
-        .collect();
-
-    Some(fpfh)
-}
-
-fn compute_pair_features(
-    p1: &Point3<f32>,
-    n1: &Vector3<f32>,
-    p2: &Point3<f32>,
-    n2: &Vector3<f32>,
-) -> (f32, f32, f32) {
-    let delta = p2 - p1;
-    let dist = delta.norm();
-
-    if dist < 1e-6 {
-        return (0.0, 0.0, 0.0);
-    }
-
-    // Darboux frame from Rusu et al. (ICRA 2009): `u = n1`, `v = u × d`, with
-    // `d = p2 - p1`. The sign matters: `delta.cross(u)` is `-v`, which flips the
-    // sign of `alpha` and `theta` and mirrors their bins about the centre, so
-    // the same cloud produced a different descriptor here than in
-    // `cv-registration`'s implementation of the same paper (measured on
-    // `p1=(0,0,0), n1=z, p2=(1,0,0), n2=y`: alpha bin 0 instead of bin 10).
-    let u = n1;
-    let v = u.cross(&delta);
-    let v_norm = v.norm();
-
-    if v_norm < 1e-6 {
-        return (0.0, 0.0, 0.0);
-    }
-    let v = v / v_norm;
-    let w = u.cross(&v);
-
-    let alpha = v.dot(n2);
-    let phi = u.dot(&delta) / dist;
-    let theta = w.dot(n2).atan2(u.dot(n2));
-
-    (alpha, phi, theta)
+    Some(
+        crate::fpfh::fpfh_from_neighbourhoods(&points64, &normals64, &neighbourhoods)
+            .into_iter()
+            .map(|h| h.map(|v| v as f32))
+            .collect(),
+    )
 }
 
 #[cfg(test)]

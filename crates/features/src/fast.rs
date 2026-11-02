@@ -11,14 +11,7 @@ pub fn fast_detect(image: &GrayImage, threshold: u8, max_keypoints: usize) -> Ke
     let mut keypoints = Vec::new();
 
     // Bresenham circle of radius 3 - 16 points
-    // These are the (x, y) offsets from the center pixel
-    #[rustfmt::skip]
-    let circle_offsets: [(i32, i32); 16] = [
-        (0, -3),  (1, -3),  (2, -2),  (3, -1),
-        (3, 0),   (3, 1),   (2, 2),   (1, 3),
-        (0, 3),   (-1, 3),  (-2, 2),  (-3, 1),
-        (-3, 0),  (-3, -1), (-2, -2), (-1, -3),
-    ];
+    let circle_offsets = CIRCLE_OFFSETS;
 
     // Scan the image one row at a time, in parallel. Each pixel's verdict
     // depends only on its own 16-pixel neighbourhood, so rows are independent;
@@ -130,51 +123,37 @@ fn has_n_contiguous(
     false
 }
 
-/// FAST corner score (OpenCV `FASTScore`): the maximum, over the two
-/// candidate 9-pixel arcs, of the summed intensity deviation from the
-/// center minus the threshold.
+/// FAST corner score, OpenCV's `cornerScore<16>` (`fast_score.cpp`): the
+/// **largest threshold for which `(x, y)` is still a FAST-9 corner**, i.e. the
+/// maximum over all 9-pixel arcs of the ring of the smallest
+/// `|ring - centre|` on that arc, minus one, where the arc is all brighter or
+/// all darker than the centre. `0` when `(x, y)` is not a corner at
+/// `threshold` (the value OpenCV's suppression grid holds for non-corners).
+///
+/// A corner at `threshold` therefore always scores `>= threshold`, and
+/// re-running the detector with the score as the threshold still finds it
+/// while `score + 1` does not. This is the `response` OpenCV's
+/// `FastFeatureDetector` reports with non-maximum suppression on, and the
+/// value its 3x3 suppression compares (see [`fast_detect_opencv`]).
+///
+/// This used to be Rosten's score - the arc's summed `|difference|` minus
+/// `9 * threshold` - which differs from OpenCV's on every corner (372 against
+/// OpenCV's 44 on the first keypoint of `tests/fast_opencv_parity.rs`) and
+/// orders corners differently.
 ///
 /// # Borders
 ///
 /// The ring reaches 3 pixels past the centre in every direction, so taps near
-/// an edge — and every tap of a centre within 3 pixels of a border — fall
+/// an edge - and every tap of a centre within 3 pixels of a border - fall
 /// outside the image. Those taps are **clamped to the nearest border pixel**
-/// rather than panicking; this was unchecked `get_pixel((x + dx) as u32, ..)`,
-/// which both panicked on a negative `x`/`y` and panicked on any coordinate
-/// past the edge, so every keypoint within 3 pixels of a border was a panic
-/// waiting to happen. Clamping is also what keeps the ring's 16 states well
-/// defined there: a corner half cut off by the frame still gets a real ranking
-/// score instead of being silently dropped. A *centre* outside the image has no
-/// pixels to measure and scores `0.0`, matching the border rule
-/// [`orb::compute_harris_response`] uses for a keypoint with no usable window.
-///
-/// `fast_detect` only ever emits centres in `[3, width - 3) x [3, height - 3)`,
-/// so its own keypoints are all scored on fully in-bounds rings; the clamping
-/// only affects callers that score an arbitrary coordinate themselves.
-///
-/// A previous revision returned the MINIMUM ring difference — nearly zero
-/// for genuine corners (half the ring sits on each side), so NMS ranked
-/// corners arbitrarily.
+/// rather than panicking, so a corner half cut off by the frame still gets a
+/// real score. A *centre* outside the image has no pixels to measure and
+/// scores `0.0`, matching the border rule [`orb::compute_harris_response`]
+/// uses for a keypoint with no usable window. OpenCV never scores within 3
+/// pixels of the border; `fast_detect` and [`fast_detect_opencv`] only emit
+/// centres in `[3, width - 3) x [3, height - 3)`, so the clamping only affects
+/// callers that score an arbitrary coordinate themselves.
 pub fn corner_score(image: &GrayImage, x: i32, y: i32, threshold: u8) -> f64 {
-    const CIRCLE_OFFSETS: [(i32, i32); 16] = [
-        (0, -3),
-        (1, -3),
-        (2, -2),
-        (3, -1),
-        (3, 0),
-        (3, 1),
-        (2, 2),
-        (1, 3),
-        (0, 3),
-        (-1, 3),
-        (-2, 2),
-        (-3, 1),
-        (-3, 0),
-        (-3, -1),
-        (-2, -2),
-        (-1, -3),
-    ];
-
     // A centre outside the frame has no intensity to compare against.
     if x < 0 || y < 0 || x >= image.width() as i32 || y >= image.height() as i32 {
         return 0.0;
@@ -187,98 +166,153 @@ pub fn corner_score(image: &GrayImage, x: i32, y: i32, threshold: u8) -> f64 {
         image.get_pixel(cx.clamp(0, max_x) as u32, cy.clamp(0, max_y) as u32)[0] as i32
     };
 
-    let p = tap(x, y);
-    let t = threshold as i32;
-    let pi = p;
-
-    let mut diffs = [0i32; 16];
-    let mut state = [0u8; 16]; // 1 brighter, 2 darker
-    for (i, &(dx, dy)) in CIRCLE_OFFSETS.iter().enumerate() {
-        let val = tap(x + dx, y + dy);
-        let d = val - pi;
-        diffs[i] = d.abs();
-        if d > t {
-            state[i] = 1;
-        } else if d < -t {
-            state[i] = 2;
-        }
+    let centre = tap(x, y);
+    let mut ring = [0i32; 16];
+    for (r, &(dx, dy)) in ring.iter_mut().zip(CIRCLE_OFFSETS.iter()) {
+        *r = tap(x + dx, y + dy);
     }
-
-    let mut best: i32 = 0;
-    for want in [1u8, 2u8] {
-        // Longest contiguous arc of `want` pixels; track its summed |diff|.
-        let mut arc_sum = 0i32;
-        let mut arc_len = 0usize;
-        let mut best_arc_sum = 0i32;
-        let mut best_arc_len = 0usize;
-        for i in 0..(16 + 9) {
-            let idx = i % 16;
-            if state[idx] == want {
-                arc_sum += diffs[idx];
-                arc_len += 1;
-                if arc_len > best_arc_len || (arc_len == best_arc_len && arc_sum > best_arc_sum) {
-                    best_arc_len = arc_len;
-                    best_arc_sum = arc_sum;
-                }
-            } else {
-                arc_sum = 0;
-                arc_len = 0;
-            }
-        }
-        if best_arc_len >= 9 {
-            best = best.max(sliding_max9(&diffs, &state, want));
-        }
+    let score = opencv_corner_score(centre, &ring, threshold as i32);
+    if score >= threshold as i32 {
+        score as f64
+    } else {
+        0.0
     }
-
-    // Score relative to the threshold, as OpenCV's V = sum - t.
-    //
-    // The excess is *not* clamped to u8. A u8 response saturates at 255, so on
-    // a busy image the several thousand keypoints that exceed the threshold all
-    // score identically and the caller's top-N cut keeps an arbitrary subset -
-    // measured on TUM fr1_desk, registration swung 12, 25, 9, 17 and 28 views
-    // out of 40 purely as the feature budget changed which of the tied
-    // keypoints survived. Returning the excess at full range restores a real
-    // ordering, so the strongest corners are always the ones kept.
-    //
-    // The value is capped only where it would exceed what a caller can store
-    // in an f64 response, which no reachable image can approach.
-    best.saturating_sub(t * 9).max(0) as f64
 }
 
-/// The same measure as [`corner_score`], kept as the `u8` form the FAST detector
-/// itself compares against its threshold. Same border rules: clamped taps, and
-/// `0.0` (here `0u8`) for a centre outside the image.
+/// OpenCV's `cornerScore<16>` on a centre value and its 16 ring values (in
+/// ring order, either direction, any starting tap).
+///
+/// Returns `max(threshold - 1, s)` where `s` is the largest threshold for
+/// which the centre is a corner, exactly as OpenCV's scalar code does: `d[k]
+/// = centre - ring[k]` extended to 25 entries, `a0` tracks the best "centre
+/// brighter" arc minimum, `b0` the best "centre darker" arc maximum, and the
+/// result is `-b0 - 1`.
+fn opencv_corner_score(centre: i32, ring: &[i32; 16], threshold: i32) -> i32 {
+    const K: usize = 8;
+    const N: usize = K * 3 + 1;
+    let mut d = [0i32; N];
+    for (k, dk) in d.iter_mut().enumerate() {
+        *dk = centre - ring[k % 16];
+    }
+
+    let mut a0 = threshold;
+    for k in (0..16).step_by(2) {
+        let mut a = d[k + 1].min(d[k + 2]);
+        a = a.min(d[k + 3]);
+        if a <= a0 {
+            continue;
+        }
+        a = a.min(d[k + 4]);
+        a = a.min(d[k + 5]);
+        a = a.min(d[k + 6]);
+        a = a.min(d[k + 7]);
+        a = a.min(d[k + 8]);
+        a0 = a0.max(a.min(d[k]));
+        a0 = a0.max(a.min(d[k + 9]));
+    }
+
+    let mut b0 = -a0;
+    for k in (0..16).step_by(2) {
+        let mut b = d[k + 1].max(d[k + 2]);
+        b = b.max(d[k + 3]);
+        b = b.max(d[k + 4]);
+        b = b.max(d[k + 5]);
+        if b >= b0 {
+            continue;
+        }
+        b = b.max(d[k + 6]);
+        b = b.max(d[k + 7]);
+        b = b.max(d[k + 8]);
+        b0 = b0.min(b.max(d[k]));
+        b0 = b0.min(b.max(d[k + 9]));
+    }
+
+    -b0 - 1
+}
+
+/// [`corner_score`] as a `u8`, the form OpenCV keeps in its suppression grid.
+/// The score never exceeds 254, so nothing saturates. Same border rules:
+/// clamped taps, and `0` for a centre outside the image.
 pub fn corner_score_u8(image: &GrayImage, x: i32, y: i32, threshold: u8) -> u8 {
     corner_score(image, x, y, threshold).min(255.0) as u8
 }
 
-/// Maximum sum of |differences| over any window of exactly 9 contiguous
-/// circle positions whose state matches `want` throughout.
-fn sliding_max9(diffs: &[i32; 16], state: &[u8; 16], want: u8) -> i32 {
-    let mut best = 0i32;
-    // windows wrap the ring: start anywhere, length 9
-    for start in 0..16 {
-        let mut ok = true;
-        let mut s = 0i32;
-        for k in 0..9 {
-            let idx = (start + k) % 16;
-            if state[idx] != want {
-                ok = false;
-                break;
-            }
-            s += diffs[idx];
-        }
-        if ok && s > best {
-            best = s;
-        }
+/// The 16-pixel Bresenham circle of radius 3, as `(dx, dy)`.
+#[rustfmt::skip]
+const CIRCLE_OFFSETS: [(i32, i32); 16] = [
+    (0, -3),  (1, -3),  (2, -2),  (3, -1),
+    (3, 0),   (3, 1),   (2, 2),   (1, 3),
+    (0, 3),   (-1, 3),  (-2, 2),  (-3, 1),
+    (-3, 0),  (-3, -1), (-2, -2), (-1, -3),
+];
+
+/// `cv::FAST(image, keypoints, threshold, nonmax_suppression,
+/// FastFeatureDetector::TYPE_9_16)`, keypoint for keypoint.
+///
+/// * Every pixel in `[3, width - 3) x [3, height - 3)` with 9 contiguous ring
+///   pixels all `> centre + threshold` or all `< centre - threshold` is a
+///   corner (the same test as [`fast_detect`]).
+/// * With `nonmax_suppression`, a corner is kept only if its
+///   [`corner_score`] is **strictly greater** than the score of each of its 8
+///   neighbours (non-corners score 0), so two adjacent corners with equal
+///   scores are both dropped, as in OpenCV.
+/// * Keypoints come out in raster order with `size = 7`, `angle = -1`,
+///   `octave = 0` and `response` = the score with suppression on, `0` with it
+///   off - what OpenCV reports.
+///
+/// This is not the greedy 5-pixel-radius [`non_max_suppression`] that
+/// [`crate::orb`] uses; see `tests/fast_opencv_parity.rs` for the comparison
+/// with `cv2.FastFeatureDetector`.
+pub fn fast_detect_opencv(image: &GrayImage, threshold: u8, nonmax_suppression: bool) -> KeyPoints {
+    let corners = fast_detect(image, threshold, usize::MAX).keypoints;
+    let keypoint = |x: usize, y: usize, response: f64| {
+        KeyPoint::new(x as f64, y as f64)
+            .with_size(7.0)
+            .with_response(response)
+    };
+    if !nonmax_suppression {
+        return KeyPoints {
+            keypoints: corners
+                .iter()
+                .map(|k| keypoint(k.x as usize, k.y as usize, 0.0))
+                .collect(),
+        };
     }
-    best
+
+    let w = image.width() as usize;
+    let h = image.height() as usize;
+    // Score grid: 0 everywhere but at corners, like OpenCV's row buffers.
+    let mut score = vec![0u8; w * h];
+    for k in &corners {
+        let (x, y) = (k.x as usize, k.y as usize);
+        score[y * w + x] = corner_score_u8(image, x as i32, y as i32, threshold);
+    }
+    let keypoints = corners
+        .iter()
+        .filter_map(|k| {
+            let (x, y) = (k.x as usize, k.y as usize);
+            // Corners lie in [3, w - 3) x [3, h - 3), so all 8 neighbours
+            // are inside the grid.
+            let s = score[y * w + x];
+            let beats_all = (y - 1..=y + 1)
+                .flat_map(|ny| (x - 1..=x + 1).map(move |nx| (nx, ny)))
+                .filter(|&(nx, ny)| (nx, ny) != (x, y))
+                .all(|(nx, ny)| s > score[ny * w + nx]);
+            beats_all.then(|| keypoint(x, y, s as f64))
+        })
+        .collect();
+    KeyPoints { keypoints }
 }
 
 /// Non-maximum suppression for FAST keypoints
 ///
-/// Greedy: candidates are visited strongest first (stable on ties) and one is
-/// kept unless a keypoint already kept lies closer than 5 pixels.
+/// Greedy: candidates are visited strongest first by OpenCV's
+/// [`corner_score`] (stable on ties) and one is kept unless a keypoint already
+/// kept lies closer than 5 pixels.
+///
+/// This is *not* OpenCV's FAST suppression, which keeps a corner only if its
+/// score beats its 8 neighbours; that is [`fast_detect_opencv`]. ORB's
+/// detector uses this one.
 pub fn non_max_suppression(keypoints: KeyPoints, image: &GrayImage, threshold: u8) -> KeyPoints {
     // Each score depends only on its own keypoint, so scoring in parallel and
     // collecting in order gives exactly the serial list.
@@ -628,8 +662,8 @@ mod tests {
     /// A uniform bright frame with a single dark pixel at `(dx, dy)`.
     ///
     /// That pixel is a FAST corner in the strongest possible form: its ring is
-    /// 16 taps of +255, so every 9-arc is available and the score is exactly
-    /// `9 * 255 - 9 * threshold`. Placing the dark pixel hard against the frame
+    /// 16 taps of +255, so every 9-arc is available and it stays a corner for
+    /// every threshold below 255. Placing the dark pixel hard against the frame
     /// corner makes the ring taps clamp, which is the case that used to panic.
     fn dark_pixel_image(dx: i32, dy: i32, w: u32, h: u32) -> GrayImage {
         let mut img = GrayImage::from_pixel(w, h, Luma([255]));
@@ -637,9 +671,11 @@ mod tests {
         img
     }
 
-    /// Hand-derived: 9 taps at +255 on the chosen arc, minus `9 * threshold`.
-    fn dark_pixel_score(threshold: u8) -> f64 {
-        9.0 * 255.0 - 9.0 * threshold as f64
+    /// Hand-derived: every arc's smallest |difference| is 255, so the corner
+    /// test `255 > t` holds for every `t <= 254` and the score (the largest
+    /// such `t`) is 254, whatever threshold it was detected at.
+    fn dark_pixel_score(_threshold: u8) -> f64 {
+        254.0
     }
 
     /// Interior scoring must be unchanged by the border handling — the clamp may
@@ -647,12 +683,12 @@ mod tests {
     /// derived from the pixel pattern by hand, not read back from the function
     /// under test.
     #[test]
-    fn corner_score_interior_is_exactly_the_hand_derived_arc_sum() {
+    fn corner_score_interior_is_exactly_the_hand_derived_score() {
         let img = dark_pixel_image(20, 20, 60, 60);
         assert_eq!(
             corner_score(&img, 20, 20, T),
             dark_pixel_score(T),
-            "an isolated dark pixel must score 9*255 - 9t"
+            "an isolated dark pixel must score 254"
         );
         assert_eq!(
             corner_score_u8(&img, 20, 20, T),
@@ -677,17 +713,17 @@ mod tests {
     /// would leave the image to the left and up clamp onto the border column
     /// and row, which is that same dark pixel for `(0, -3)` and `(-1, -3)` and
     /// the bright column otherwise. 14 of the 16 taps are therefore +255 and
-    /// contiguous, so a full 9-arc exists and the score is the same
-    /// `9 * 255 - 9 * threshold` an interior pixel gets.
+    /// contiguous, so a full 9-arc exists and the score is the same 254 an
+    /// interior pixel gets.
     #[test]
-    fn corner_score_at_the_frame_corner_is_the_clamped_arc_sum() {
+    fn corner_score_at_the_frame_corner_is_the_clamped_score() {
         let corner = dark_pixel_image(0, 0, 60, 60);
         assert_eq!(
             corner_score(&corner, 0, 0, T),
             dark_pixel_score(T),
-            "the clamped ring at the frame corner must score 9*255 - 9t"
+            "the clamped ring at the frame corner must score 254"
         );
-        assert_eq!(corner_score_u8(&corner, 0, 0, T), 255);
+        assert_eq!(corner_score_u8(&corner, 0, 0, T), 254);
 
         // The value is not an artefact of the corner: the same pattern one
         // pixel in, where the ring is fully in bounds, scores identically.
@@ -765,6 +801,49 @@ mod tests {
         assert_eq!(corner_score(&img, 3, h as i32, T), 0.0);
         assert_eq!(corner_score_u8(&img, -1, -1, T), 0);
         assert_eq!(corner_score_u8(&img, w as i32 + 5, h as i32 + 5, T), 0);
+    }
+
+    /// The defining property of OpenCV's score, checked against the detector
+    /// rather than a copy of the formula: a corner found at threshold `t`
+    /// scores `s >= t`, is still detected at threshold `s`, and is gone at
+    /// `s + 1`.
+    #[test]
+    fn corner_score_is_the_largest_threshold_that_keeps_the_corner() {
+        let mut s = 7u32;
+        let img = GrayImage::from_fn(40, 30, |_, _| {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            Luma([(s >> 24) as u8])
+        });
+        let found_at = |t: u8, x: f64, y: f64| {
+            fast_detect(&img, t, usize::MAX)
+                .keypoints
+                .iter()
+                .any(|k| k.x == x && k.y == y)
+        };
+        let mut checked = 0;
+        for t in [5u8, 30, 70] {
+            for kp in fast_detect(&img, t, usize::MAX).keypoints {
+                let score = corner_score(&img, kp.x as i32, kp.y as i32, t);
+                assert!(
+                    score >= t as f64,
+                    "({}, {}) t={t} score={score}",
+                    kp.x,
+                    kp.y
+                );
+                let score = score as u8;
+                assert!(found_at(score, kp.x, kp.y), "lost at its own score {score}");
+                if score < 255 {
+                    assert!(
+                        !found_at(score + 1, kp.x, kp.y),
+                        "({}, {}) still a corner above its score {score}",
+                        kp.x,
+                        kp.y
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "only {checked} corners checked");
     }
 
     /// `non_max_suppression` scores whatever keypoints it is handed, so a

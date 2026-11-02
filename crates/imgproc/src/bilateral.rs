@@ -1,6 +1,11 @@
 //! Bilateral Filter
 //!
 //! Edge-preserving smoothing filter that uses both spatial and range (intensity) distance.
+//!
+//! The kernel follows `cv::bilateralFilter`: the disc of offsets within the
+//! radius, a reflect-101 (`BORDER_DEFAULT`) border, and OpenCV's radius rule.
+//! [`bilateral_filter_rgb`] reproduces `cv2.bilateralFilter` on a 3-channel
+//! `u8` image byte for byte; see `tests/bilateral_opencv_parity.rs`.
 
 use cv_runtime::orchestrator::RuntimeRunner;
 use rayon::prelude::*;
@@ -8,11 +13,15 @@ use rayon::prelude::*;
 /// Bilateral filter parameters
 #[derive(Debug, Clone)]
 pub struct BilateralFilterParams {
-    /// Filter size (must be odd)
+    /// Kernel diameter, OpenCV's `d`: the radius is `kernel_size / 2`, or
+    /// `cvRound(1.5 * sigma_space)` when `kernel_size <= 0`, and at least 1.
     pub kernel_size: i32,
     /// Spatial sigma (larger = more smoothing)
     pub sigma_space: f32,
-    /// Range sigma (larger = less edge preservation, more smoothing)
+    /// Range sigma (larger = less edge preservation, more smoothing).
+    ///
+    /// For the `u8` paths this is normalised intensity: OpenCV's
+    /// `sigmaColor` is `sigma_range * 255`. For depth it is in depth units.
     pub sigma_range: f32,
 }
 
@@ -26,33 +35,58 @@ impl Default for BilateralFilterParams {
     }
 }
 
-/// One spatial weight per kernel offset, in `(ky, kx)` loop order.
+/// OpenCV's bilateral kernel: the disc of offsets with
+/// `sqrt(dx² + dy²) <= radius` and the spatial weight of each, in OpenCV's
+/// `(dy, dx)` raster order.
 ///
-/// Each entry is `(-((kx*kx + ky*ky) as f32) / sigma_space_sq).exp()`, the
-/// same value the tap used to evaluate. Callers multiply it on the left of
-/// the range weight (`spatial * range`), which is the previous order.
-fn spatial_weights(half_kernel: i32, sigma_space_sq: f32) -> Vec<f32> {
-    let mut weights = Vec::new();
-    for ky in -half_kernel..=half_kernel {
-        for kx in -half_kernel..=half_kernel {
-            let spatial_dist = (kx * kx + ky * ky) as f32;
-            weights.push((-spatial_dist / sigma_space_sq).exp());
+/// * `radius = kernel_size / 2` for `kernel_size > 0`, otherwise
+///   `cvRound(1.5 * sigma_space)`; never below 1.
+/// * A non-positive `sigma_space` is replaced by 1, as OpenCV does.
+/// * Weights are `exp(-r² / (2 sigma_space²))` evaluated in f64 and stored as
+///   f32, like OpenCV's `space_weight` table.
+fn disc_taps(kernel_size: i32, sigma_space: f32) -> Vec<(i32, i32, f32)> {
+    let sigma_space = if sigma_space > 0.0 { sigma_space } else { 1.0 } as f64;
+    let radius = if kernel_size <= 0 {
+        // cvRound: round half to even.
+        (sigma_space * 1.5).round_ties_even() as i32
+    } else {
+        kernel_size / 2
+    }
+    .max(1);
+    let gauss_space_coeff = -0.5 / (sigma_space * sigma_space);
+
+    let mut taps = Vec::new();
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            let r = ((dx * dx + dy * dy) as f64).sqrt();
+            if r > radius as f64 {
+                continue;
+            }
+            taps.push((dy, dx, (r * r * gauss_space_coeff).exp() as f32));
         }
     }
-    weights
+    taps
 }
 
-fn spatial_index(kx: i32, ky: i32, half_kernel: i32) -> usize {
-    let extent = (half_kernel * 2 + 1) as usize;
-    (ky + half_kernel) as usize * extent + (kx + half_kernel) as usize
+/// `-0.5 / sigma²`, with OpenCV's replacement of a non-positive sigma by 1.
+fn gauss_color_coeff(sigma_color: f32) -> f64 {
+    let sigma_color = if sigma_color > 0.0 { sigma_color } else { 1.0 } as f64;
+    -0.5 / (sigma_color * sigma_color)
 }
 
-/// `(-(d as f32) * (d as f32) / sigma_range_sq).exp()` for integer diffs 0..=255.
-fn u8_range_lut(sigma_range_sq: f32) -> [f32; 256] {
-    std::array::from_fn(|d| {
-        let range_dist = d as f32;
-        (-range_dist * range_dist / sigma_range_sq).exp()
-    })
+/// OpenCV's `borderInterpolate(p, len, BORDER_REFLECT_101)`: `gfedcb|abcdefgh|gfedcba`.
+fn reflect_101(mut p: i32, len: i32) -> usize {
+    if len == 1 {
+        return 0;
+    }
+    while p < 0 || p >= len {
+        if p < 0 {
+            p = -p;
+        } else {
+            p = 2 * len - 2 - p;
+        }
+    }
+    p as usize
 }
 
 impl BilateralFilterParams {
@@ -99,6 +133,18 @@ pub fn bilateral_filter_depth(
     bilateral_filter_depth_ctx(depth, width, height, params, &runner)
 }
 
+/// Depth bilateral filter with `cv::bilateralFilter`'s kernel geometry.
+///
+/// On a depth map with no invalid samples this is `cv2.bilateralFilter` on a
+/// `CV_32FC1` image with `sigmaColor = sigma_range` (in depth units): a disc
+/// kernel (see [`disc_taps`]), a reflect-101 border, and the Gaussian of the
+/// absolute depth difference as the range weight. OpenCV interpolates that
+/// weight from a 4096-bin table spanning the image's value range; this
+/// evaluates it directly, which agrees to a few ulp.
+///
+/// Depth-specific on top of OpenCV: a centre that is `<= 0` or NaN (no
+/// measurement) is passed through, and such neighbours are left out of the
+/// average.
 #[allow(clippy::needless_range_loop)]
 fn bilateral_filter_depth_internal(
     depth: &[f32],
@@ -110,13 +156,9 @@ fn bilateral_filter_depth_internal(
     if width == 0 || height == 0 {
         return;
     }
-    let kernel_size = params.kernel_size;
-    let half_kernel = kernel_size / 2;
-    let sigma_space_sq = 2.0 * params.sigma_space * params.sigma_space;
-    let sigma_range_sq = 2.0 * params.sigma_range * params.sigma_range;
-    // Spatial weight depends only on the offset. Range stays per tap: depth
-    // differences are not integer 0..=255.
-    let spatial = spatial_weights(half_kernel, sigma_space_sq);
+    let taps = disc_taps(params.kernel_size, params.sigma_space);
+    let color_coeff = gauss_color_coeff(params.sigma_range);
+    let (w, h) = (width as i32, height as i32);
 
     output
         .par_chunks_mut(width as usize)
@@ -135,31 +177,20 @@ fn bilateral_filter_depth_internal(
                 let mut sum = 0.0f32;
                 let mut weight_sum = 0.0f32;
 
-                for ky in -half_kernel..=half_kernel {
-                    for kx in -half_kernel..=half_kernel {
-                        let nx = x as i32 + kx;
-                        let ny = y + ky;
+                for &(dy, dx, space_w) in &taps {
+                    let ny = reflect_101(y + dy, h);
+                    let nx = reflect_101(x as i32 + dx, w);
+                    let neighbor_val = depth[ny * width as usize + nx];
 
-                        if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
-                            continue;
-                        }
-
-                        let nidx = ny as usize * width as usize + nx as usize;
-                        let neighbor_val = depth[nidx];
-
-                        if neighbor_val <= 0.0 || neighbor_val.is_nan() {
-                            continue;
-                        }
-
-                        let spatial_weight = spatial[spatial_index(kx, ky, half_kernel)];
-
-                        let range_dist = (center_val - neighbor_val).abs();
-                        let range_weight = (-range_dist * range_dist / sigma_range_sq).exp();
-
-                        let weight = spatial_weight * range_weight;
-                        sum += neighbor_val * weight;
-                        weight_sum += weight;
+                    if neighbor_val <= 0.0 || neighbor_val.is_nan() {
+                        continue;
                     }
+
+                    let diff = (neighbor_val - center_val).abs() as f64;
+                    let range_w = (diff * diff * color_coeff).exp() as f32;
+                    let weight = space_w * range_w;
+                    sum += neighbor_val * weight;
+                    weight_sum += weight;
                 }
 
                 row[x] = if weight_sum > 0.0 {
@@ -211,6 +242,14 @@ pub fn bilateral_filter_rgb(
     bilateral_filter_rgb_ctx(image, width, height, params, &runner)
 }
 
+/// `cv::bilateralFilter` on an interleaved 3-channel `u8` image
+/// (OpenCV's `bilateralFilter_8u`, `cn = 3`), byte for byte.
+///
+/// `sigmaColor` is `sigma_range * 255` (the crate's range sigma is normalised
+/// intensity). The range weight is OpenCV's: a table over the **L1** colour
+/// distance `|d0| + |d1| + |d2|`, `exp(-L1² / (2 sigmaColor²))`. Taps are
+/// the disc of [`disc_taps`] over a reflect-101 border, accumulated in f32 in
+/// OpenCV's order and rounded with `cvRound`.
 fn bilateral_filter_rgb_internal(
     image: &[u8],
     output: &mut [u8],
@@ -221,22 +260,19 @@ fn bilateral_filter_rgb_internal(
     if width == 0 || height == 0 {
         return;
     }
-    let kernel_size = params.kernel_size;
-    let half_kernel = kernel_size / 2;
-    let sigma_space_sq = 2.0 * params.sigma_space * params.sigma_space;
-    // Range distances here are 0-255 per channel; scale the configured
-    // sigma into that domain (sigma_range=0.1 on raw u8 distances gave
-    // weights of e^-(1/0.02), making the filter an exact no-op).
-    let sigma_range_u8 = params.sigma_range * 255.0;
-    let sigma_range_sq = 2.0 * sigma_range_u8 * sigma_range_u8;
-    let spatial = spatial_weights(half_kernel, sigma_space_sq);
-    // Per-channel integer diffs. The product of these entries is the
-    // factored form of exp(-(dr²+dg²+db²) / sigma_range_sq), multiplied
-    // as spatial * range in the same order as the direct weight.
-    let range_lut = u8_range_lut(sigma_range_sq);
+    let taps = disc_taps(params.kernel_size, params.sigma_space);
+    let color_coeff = gauss_color_coeff(params.sigma_range * 255.0);
+    // L1 distance over three u8 channels spans 0..=765.
+    let color_w: Vec<f32> = (0..3 * 256)
+        .map(|i| {
+            let d = i as f64;
+            (d * d * color_coeff).exp() as f32
+        })
+        .collect();
 
     let channels = 3;
     let stride = width as usize * channels;
+    let (w, h) = (width as i32, height as i32);
 
     output
         .par_chunks_mut(stride)
@@ -244,57 +280,39 @@ fn bilateral_filter_rgb_internal(
         .for_each(|(y, row)| {
             let y = y as i32;
             for x in 0..width as usize {
-                let pixel_offset = x * channels;
                 let idx = (y as usize * width as usize + x) * channels;
+                let c0 = image[idx];
+                let c1 = image[idx + 1];
+                let c2 = image[idx + 2];
 
-                let center_r = image[idx] as f32;
-                let center_g = image[idx + 1] as f32;
-                let center_b = image[idx + 2] as f32;
-
-                let mut sum_r = 0.0f32;
-                let mut sum_g = 0.0f32;
-                let mut sum_b = 0.0f32;
+                let mut sum0 = 0.0f32;
+                let mut sum1 = 0.0f32;
+                let mut sum2 = 0.0f32;
                 let mut weight_sum = 0.0f32;
 
-                for ky in -half_kernel..=half_kernel {
-                    for kx in -half_kernel..=half_kernel {
-                        let nx = x as i32 + kx;
-                        let ny = y + ky;
-
-                        if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
-                            continue;
-                        }
-
-                        let nidx = (ny as usize * width as usize + nx as usize) * channels;
-
-                        let nr = image[nidx] as f32;
-                        let ng = image[nidx + 1] as f32;
-                        let nb = image[nidx + 2] as f32;
-
-                        let spatial_weight = spatial[spatial_index(kx, ky, half_kernel)];
-
-                        let dr = (center_r - nr).abs() as usize;
-                        let dg = (center_g - ng).abs() as usize;
-                        let db = (center_b - nb).abs() as usize;
-                        let range_weight = range_lut[dr] * range_lut[dg] * range_lut[db];
-
-                        let weight = spatial_weight * range_weight;
-                        sum_r += nr * weight;
-                        sum_g += ng * weight;
-                        sum_b += nb * weight;
-                        weight_sum += weight;
-                    }
+                for &(dy, dx, space_w) in &taps {
+                    let ny = reflect_101(y + dy, h);
+                    let nx = reflect_101(x as i32 + dx, w);
+                    let nidx = (ny * width as usize + nx) * channels;
+                    let n0 = image[nidx];
+                    let n1 = image[nidx + 1];
+                    let n2 = image[nidx + 2];
+                    let l1 = n0.abs_diff(c0) as usize
+                        + n1.abs_diff(c1) as usize
+                        + n2.abs_diff(c2) as usize;
+                    let weight = space_w * color_w[l1];
+                    weight_sum += weight;
+                    sum0 += n0 as f32 * weight;
+                    sum1 += n1 as f32 * weight;
+                    sum2 += n2 as f32 * weight;
                 }
 
-                if weight_sum > 0.0 {
-                    row[pixel_offset] = (sum_r / weight_sum).round().clamp(0.0, 255.0) as u8;
-                    row[pixel_offset + 1] = (sum_g / weight_sum).round().clamp(0.0, 255.0) as u8;
-                    row[pixel_offset + 2] = (sum_b / weight_sum).round().clamp(0.0, 255.0) as u8;
-                } else {
-                    row[pixel_offset] = image[idx];
-                    row[pixel_offset + 1] = image[idx + 1];
-                    row[pixel_offset + 2] = image[idx + 2];
-                }
+                // The centre tap always has weight `space_w(0) * 1 = 1`, so
+                // `weight_sum >= 1`.
+                let out = &mut row[x * channels..x * channels + channels];
+                out[0] = (sum0 / weight_sum).round_ties_even().clamp(0.0, 255.0) as u8;
+                out[1] = (sum1 / weight_sum).round_ties_even().clamp(0.0, 255.0) as u8;
+                out[2] = (sum2 / weight_sum).round_ties_even().clamp(0.0, 255.0) as u8;
             }
         });
 }
@@ -340,6 +358,14 @@ pub fn joint_bilateral_filter(
     joint_bilateral_filter_ctx(depth, guidance, width, height, params, &runner)
 }
 
+/// Joint bilateral filter: depth smoothed with range weights from an RGB
+/// guidance image.
+///
+/// Uses the same kernel geometry as [`bilateral_filter_depth`] and
+/// `cv::bilateralFilter` (disc taps from [`disc_taps`], reflect-101 border,
+/// radius never below 1); the range weight is the Gaussian of the guidance's
+/// L2 colour distance with `sigma = sigma_range * 255`. Invalid depth (`<= 0`
+/// or NaN) is passed through at the centre and skipped as a neighbour.
 #[allow(clippy::needless_range_loop)]
 fn joint_bilateral_filter_internal(
     depth: &[f32],
@@ -352,16 +378,9 @@ fn joint_bilateral_filter_internal(
     if width == 0 || height == 0 {
         return;
     }
-    let kernel_size = params.kernel_size;
-    let half_kernel = kernel_size / 2;
-    let sigma_space_sq = 2.0 * params.sigma_space * params.sigma_space;
-    // Guidance is u8 (0-255); scale the range sigma accordingly.
-    let sigma_range_u8 = params.sigma_range * 255.0;
-    let sigma_range_sq = 2.0 * sigma_range_u8 * sigma_range_u8;
-    // Float path: the range weight is still the direct exp, so f32 results
-    // stay bit-exact. The spatial factor depends only on the offset.
-    let spatial = spatial_weights(half_kernel, sigma_space_sq);
-
+    let taps = disc_taps(params.kernel_size, params.sigma_space);
+    let color_coeff = gauss_color_coeff(params.sigma_range * 255.0) as f32;
+    let (w, h) = (width as i32, height as i32);
     let channels = 3;
 
     output
@@ -373,6 +392,11 @@ fn joint_bilateral_filter_internal(
                 let idx = y as usize * width as usize + x;
                 let center_depth = depth[idx];
 
+                if center_depth <= 0.0 || center_depth.is_nan() {
+                    row[x] = center_depth;
+                    continue;
+                }
+
                 let gidx = idx * channels;
                 let center_gi = [
                     guidance[gidx] as f32,
@@ -380,48 +404,28 @@ fn joint_bilateral_filter_internal(
                     guidance[gidx + 2] as f32,
                 ];
 
-                if center_depth <= 0.0 || center_depth.is_nan() {
-                    row[x] = center_depth;
-                    continue;
-                }
-
                 let mut sum = 0.0f32;
                 let mut weight_sum = 0.0f32;
 
-                for ky in -half_kernel..=half_kernel {
-                    for kx in -half_kernel..=half_kernel {
-                        let nx = x as i32 + kx;
-                        let ny = y + ky;
+                for &(dy, dx, space_w) in &taps {
+                    let ny = reflect_101(y + dy, h);
+                    let nx = reflect_101(x as i32 + dx, w);
+                    let nidx = ny * width as usize + nx;
+                    let neighbor_depth = depth[nidx];
 
-                        if nx < 0 || nx >= width as i32 || ny < 0 || ny >= height as i32 {
-                            continue;
-                        }
-
-                        let nidx = ny as usize * width as usize + nx as usize;
-                        let neighbor_depth = depth[nidx];
-
-                        if neighbor_depth <= 0.0 || neighbor_depth.is_nan() {
-                            continue;
-                        }
-
-                        let ngidx = nidx * channels;
-                        let neighbor_gi = [
-                            guidance[ngidx] as f32,
-                            guidance[ngidx + 1] as f32,
-                            guidance[ngidx + 2] as f32,
-                        ];
-
-                        let spatial_weight = spatial[spatial_index(kx, ky, half_kernel)];
-
-                        let range_dist_sq = (center_gi[0] - neighbor_gi[0]).powi(2)
-                            + (center_gi[1] - neighbor_gi[1]).powi(2)
-                            + (center_gi[2] - neighbor_gi[2]).powi(2);
-                        let range_weight = (-range_dist_sq / sigma_range_sq).exp();
-
-                        let weight = spatial_weight * range_weight;
-                        sum += neighbor_depth * weight;
-                        weight_sum += weight;
+                    if neighbor_depth <= 0.0 || neighbor_depth.is_nan() {
+                        continue;
                     }
+
+                    let ngidx = nidx * channels;
+                    let range_dist_sq = (center_gi[0] - guidance[ngidx] as f32).powi(2)
+                        + (center_gi[1] - guidance[ngidx + 1] as f32).powi(2)
+                        + (center_gi[2] - guidance[ngidx + 2] as f32).powi(2);
+                    let range_weight = (range_dist_sq * color_coeff).exp();
+
+                    let weight = space_w * range_weight;
+                    sum += neighbor_depth * weight;
+                    weight_sum += weight;
                 }
 
                 row[x] = if weight_sum > 0.0 {
@@ -565,68 +569,74 @@ mod tests {
         );
     }
 
-    /// The u8 range table is the factored Gaussian. Rounded bytes must match
-    /// the direct `exp(-(dr²+dg²+db²)/σ²)` the loop used to evaluate.
+    /// The precomputed disc and colour tables reproduce a direct evaluation of
+    /// OpenCV's formula: for every offset with `dx² + dy² <= r²`, sample
+    /// through a mirror border (written here independently as a fold), weight
+    /// by `exp(-r²/2σs²) * exp(-L1²/2σc²)` and round the weighted mean.
     #[test]
-    fn rgb_range_table_matches_direct_exp_bytes() {
-        let (w, h) = (16u32, 12u32);
+    fn rgb_tables_match_direct_opencv_formula() {
+        let (w, h) = (16i32, 12i32);
         let mut image = vec![0u8; (w * h * 3) as usize];
         let mut s = 1u32;
         for p in image.iter_mut() {
             s = s.wrapping_mul(1664525).wrapping_add(1013904223);
             *p = (s >> 24) as u8;
         }
-        let params = BilateralFilterParams {
-            kernel_size: 5,
-            sigma_space: 3.0,
-            sigma_range: 0.1,
-        };
-        let mut got = vec![0u8; image.len()];
-        bilateral_filter_rgb_internal(&image, &mut got, w, h, params.clone());
+        for (kernel_size, sigma_space, sigma_range) in [(5, 3.0f32, 0.1f32), (0, 1.5, 0.3)] {
+            let params = BilateralFilterParams {
+                kernel_size,
+                sigma_space,
+                sigma_range,
+            };
+            let mut got = vec![0u8; image.len()];
+            bilateral_filter_rgb_internal(&image, &mut got, w as u32, h as u32, params);
 
-        let half = params.kernel_size / 2;
-        let sigma_space_sq = 2.0 * params.sigma_space * params.sigma_space;
-        let sigma_range_u8 = params.sigma_range * 255.0;
-        let sigma_range_sq = 2.0 * sigma_range_u8 * sigma_range_u8;
-        let mut expect = vec![0u8; image.len()];
-        for y in 0..h as i32 {
-            for x in 0..w as i32 {
-                let idx = ((y as u32 * w + x as u32) * 3) as usize;
-                let cr = image[idx] as f32;
-                let cg = image[idx + 1] as f32;
-                let cb = image[idx + 2] as f32;
-                let mut sr = 0.0f32;
-                let mut sg = 0.0f32;
-                let mut sb = 0.0f32;
-                let mut weight_sum = 0.0f32;
-                for ky in -half..=half {
-                    for kx in -half..=half {
-                        let nx = x + kx;
-                        let ny = y + ky;
-                        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                            continue;
+            let radius = if kernel_size > 0 {
+                kernel_size / 2
+            } else {
+                (sigma_space as f64 * 1.5).round_ties_even() as i32
+            };
+            let cs = -0.5 / (sigma_space as f64 * sigma_space as f64);
+            let sc = (sigma_range * 255.0) as f64;
+            let cc = -0.5 / (sc * sc);
+            // Mirror about the first/last sample, without repeating it.
+            let fold = |p: i32, n: i32| -> i32 {
+                let period = 2 * n - 2;
+                let m = p.rem_euclid(period);
+                if m < n { m } else { period - m }
+            };
+            let mut expect = vec![0u8; image.len()];
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = ((y * w + x) * 3) as usize;
+                    let mut sums = [0.0f32; 3];
+                    let mut weight_sum = 0.0f32;
+                    for dy in -radius..=radius {
+                        for dx in -radius..=radius {
+                            let r2 = dx * dx + dy * dy;
+                            if r2 > radius * radius {
+                                continue;
+                            }
+                            let nidx = ((fold(y + dy, h) * w + fold(x + dx, w)) * 3) as usize;
+                            let l1: i32 = (0..3)
+                                .map(|c| (image[nidx + c] as i32 - image[idx + c] as i32).abs())
+                                .sum();
+                            let ws = (r2 as f64 * cs).exp() as f32;
+                            let wc = ((l1 * l1) as f64 * cc).exp() as f32;
+                            let weight = ws * wc;
+                            weight_sum += weight;
+                            for c in 0..3 {
+                                sums[c] += image[nidx + c] as f32 * weight;
+                            }
                         }
-                        let nidx = ((ny as u32 * w + nx as u32) * 3) as usize;
-                        let nr = image[nidx] as f32;
-                        let ng = image[nidx + 1] as f32;
-                        let nb = image[nidx + 2] as f32;
-                        let spatial_dist = (kx * kx + ky * ky) as f32;
-                        let spatial_weight = (-spatial_dist / sigma_space_sq).exp();
-                        let range_dist_sq =
-                            (cr - nr).powi(2) + (cg - ng).powi(2) + (cb - nb).powi(2);
-                        let range_weight = (-range_dist_sq / sigma_range_sq).exp();
-                        let weight = spatial_weight * range_weight;
-                        sr += nr * weight;
-                        sg += ng * weight;
-                        sb += nb * weight;
-                        weight_sum += weight;
+                    }
+                    for c in 0..3 {
+                        expect[idx + c] =
+                            (sums[c] / weight_sum).round_ties_even().clamp(0.0, 255.0) as u8;
                     }
                 }
-                expect[idx] = (sr / weight_sum).round().clamp(0.0, 255.0) as u8;
-                expect[idx + 1] = (sg / weight_sum).round().clamp(0.0, 255.0) as u8;
-                expect[idx + 2] = (sb / weight_sum).round().clamp(0.0, 255.0) as u8;
             }
+            assert_eq!(got, expect, "kernel_size={kernel_size}");
         }
-        assert_eq!(got, expect);
     }
 }

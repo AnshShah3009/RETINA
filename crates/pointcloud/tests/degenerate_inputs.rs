@@ -198,11 +198,17 @@ fn a_negative_eps_produces_no_clusters() {
 }
 
 #[test]
-fn fpfh_uses_the_published_darboux_frame() {
+fn fpfh_uses_open3ds_darboux_frame() {
     // Two points, one pair. p1 at the origin with its normal along +z, p2 on the
-    // +x axis with its normal along +y. Rusu et al. (ICRA 2009) build the frame
-    // as u = n1, v = u x d, w = u x v, giving alpha = v . n2 = +1 (the last
-    // alpha bin), phi = u . d / |d| = 0 and theta = atan2(w . n2, u . n2) = 0.
+    // +x axis with its normal along +y. Open3D (after PCL) takes as source the
+    // point whose normal is closer to the joining line (a tie here, so p1) and
+    // builds v = d x n1 = -y, so alpha = v . n2 = -1 (alpha bin 0), phi = 0 and
+    // theta = 0. This used to pin v = n1 x d, the mirrored frame, which put alpha
+    // in the last bin.
+    //
+    // Open3D 0.20.0 `compute_fpfh_feature(KDTreeSearchParamRadius(2.0))` gives
+    // both points 200 in theta bin 5, alpha bin 0 and phi bin 5 (100 from the
+    // point's own SPFH, 100 from its rescaled neighbour), and 0 elsewhere.
     let pc = PointCloud::new(vec![
         Point3::new(0.0f32, 0.0, 0.0),
         Point3::new(1.0f32, 0.0, 0.0),
@@ -214,25 +220,17 @@ fn fpfh_uses_the_published_darboux_frame() {
     .unwrap();
 
     let features = compute_fpfh_feature(&pc, 2.0).expect("normals are present");
-    let hist = &features[0];
-
-    let alpha_bin = ((1.0f32 + 1.0) * 5.5f32).floor().clamp(0.0, 10.0) as usize;
-    assert_eq!(alpha_bin, 10);
-    assert!(
-        (hist[alpha_bin] - 100.0 / 3.0).abs() < 1e-3,
-        "alpha = +1 belongs in bin {alpha_bin}; histogram = {:?}",
-        hist
-    );
-    assert_eq!(
-        hist[0], 0.0,
-        "alpha = -1 is the mirrored frame: histogram = {:?}",
-        hist
-    );
-
-    // Control: the histogram is normalised and finite, and phi/theta are centred
-    // for this configuration.
-    assert!((hist.iter().sum::<f32>() - 100.0).abs() < 1e-3);
-    assert!(hist.iter().all(|v| v.is_finite() && *v >= 0.0));
-    assert!((hist[11 + 5] - 100.0 / 3.0).abs() < 1e-3);
-    assert!((hist[22 + 5] - 100.0 / 3.0).abs() < 1e-3);
+    for (i, hist) in features.iter().enumerate() {
+        for (bin, &v) in hist.iter().enumerate() {
+            let want = if bin == 5 || bin == 11 || bin == 22 + 5 {
+                200.0
+            } else {
+                0.0
+            };
+            assert!(
+                (v - want).abs() < 1e-3,
+                "point {i} bin {bin} is {v}, Open3D {want}: {hist:?}"
+            );
+        }
+    }
 }

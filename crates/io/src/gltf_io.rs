@@ -31,7 +31,8 @@ pub struct GltfMesh {
 /// One [`GltfMesh`] is returned per triangle primitive (`TRIANGLES`,
 /// `TRIANGLE_STRIP` or `TRIANGLE_FAN`; point and line primitives are skipped)
 /// of each node that instantiates a document mesh. The node's world transform — its own `node.transform()`
-/// composed with every ancestor — is applied to the positions and normals, so
+/// composed with every ancestor — is applied to the positions and normals
+/// (normals by its inverse transpose, then renormalised to unit length), so
 /// a mesh authored at the origin with the translation on the node comes back
 /// in world coordinates. A mesh referenced by several nodes is returned once
 /// per node, so none of those transforms is dropped. A mesh that no node
@@ -225,11 +226,24 @@ fn transform_normal(world: &Matrix4<f32>, n: Vector3<f32>) -> Vector3<f32> {
     // A singular linear part (a zero scale) has no inverse transpose. Keep the
     // previous direct transform rather than failing to load the mesh; the
     // geometry itself is degenerate in that case.
+    if linear == Matrix3::identity() {
+        return n;
+    }
     let normal_matrix = linear
         .try_inverse()
         .map(|inverse| inverse.transpose())
         .unwrap_or(linear);
-    normal_matrix * n
+    // ...and renormalised: glTF 2.0 defines a normal as "a unit XYZ vector"
+    // and `NORMAL` as "Normalized XYZ vertex normals", and the inverse
+    // transpose of any scale changes the length (scale 3 turned (0, 0, 1)
+    // into (0, 0, 0.333)). A zero vector has no direction and is kept.
+    let transformed = normal_matrix * n;
+    let len = transformed.norm();
+    if len > 0.0 && len.is_finite() {
+        transformed / len
+    } else {
+        transformed
+    }
 }
 
 /// World transform of every node that instantiates a mesh, keyed by mesh index.
@@ -304,8 +318,6 @@ pub fn write_glb<P: AsRef<Path>>(
     faces: &[[usize; 3]],
     normals: Option<&[Vector3<f32>]>,
 ) -> Result<()> {
-    use std::io::Write;
-
     // Build minimal binary glTF manually (no gltf crate write support needed)
     let n_verts = vertices.len();
     let n_faces = faces.len();
@@ -337,6 +349,29 @@ pub fn write_glb<P: AsRef<Path>>(
         )));
     }
 
+    // An empty mesh has no valid encoding *as a mesh*: the glTF 2.0 schema
+    // requires accessor `count >= 1`, bufferView and buffer `byteLength >= 1`,
+    // at least one primitive per mesh and at least one mesh in `meshes` when
+    // present. It used to be written as a POSITION accessor of count 0 over
+    // 0-byte views. It is now a valid asset whose scene holds one node with no
+    // mesh (and no BIN chunk), which `read_gltf` reads back as no meshes. (A
+    // scene without `nodes` is valid glTF too, but the `gltf` crate rejects it.)
+    if n_verts == 0 {
+        if let Some(face) = faces.first() {
+            return Err(Error::ParseError(format!(
+                "glTF: face index {} is out of range: only 0 vertex/vertices were given",
+                face[0]
+            )));
+        }
+        let json = r#"{
+  "asset": {"version": "2.0", "generator": "RETINA cv-io"},
+  "scene": 0,
+  "scenes": [{"nodes": [0]}],
+  "nodes": [{}]
+}"#;
+        return write_glb_container(path.as_ref(), json, &[]);
+    }
+
     // Position data
     let mut pos_data = Vec::with_capacity(n_verts * 12);
     // Seeded from the first vertex rather than from sentinels.
@@ -365,13 +400,6 @@ pub fn write_glb<P: AsRef<Path>>(
             min_pos = coords;
             max_pos = coords;
         }
-    }
-    if vertices.is_empty() {
-        // An empty mesh has no extent. glTF requires min and max to be present
-        // when they are written, and a degenerate box at the origin is valid,
-        // where the sentinel pair is not.
-        min_pos = [0.0; 3];
-        max_pos = [0.0; 3];
     }
 
     // Normal data
@@ -505,14 +533,23 @@ pub fn write_glb<P: AsRef<Path>>(
         attributes, primitive_topology, accessors, buffer_views, total_bin_len
     );
 
-    let json_bytes = json.as_bytes();
-    let mut json_padded = json_bytes.to_vec();
+    write_glb_container(path.as_ref(), &json, &bin_buffer)
+}
+
+/// Write the GLB container: header, JSON chunk and, when `bin` is not empty,
+/// the BIN chunk (GLB 2.0 makes it optional; a buffer of `byteLength` 0 is
+/// not allowed, so an asset without binary data has none).
+fn write_glb_container(path: &Path, json: &str, bin: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let mut json_padded = json.as_bytes().to_vec();
     while json_padded.len() % 4 != 0 {
         json_padded.push(b' ');
     }
 
     // GLB header: magic + version + length
-    let total_length = 12 + 8 + json_padded.len() + 8 + total_bin_len;
+    let bin_chunk_len = if bin.is_empty() { 0 } else { 8 + bin.len() };
+    let total_length = 12 + 8 + json_padded.len() + bin_chunk_len;
 
     // The GLB header stores its own length in a u32. A larger mesh would wrap
     // and produce a file whose declared length disagrees with its contents.
@@ -522,7 +559,7 @@ pub fn write_glb<P: AsRef<Path>>(
         ))
     })?;
 
-    let mut file = std::fs::File::create(path.as_ref())
+    let mut file = std::fs::File::create(path)
         .map_err(|e| cv_core::Error::IoError(format!("Failed to create GLB: {}", e)))?;
 
     // Header
@@ -536,9 +573,11 @@ pub fn write_glb<P: AsRef<Path>>(
     file.write_all(&json_padded)?;
 
     // BIN chunk
-    file.write_all(&(total_bin_len as u32).to_le_bytes())?;
-    file.write_all(&0x004e4942u32.to_le_bytes())?; // "BIN\0"
-    file.write_all(&bin_buffer)?;
+    if !bin.is_empty() {
+        file.write_all(&(bin.len() as u32).to_le_bytes())?;
+        file.write_all(&0x004e4942u32.to_le_bytes())?; // "BIN\0"
+        file.write_all(bin)?;
+    }
 
     Ok(())
 }

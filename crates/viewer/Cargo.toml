@@ -20,4 +20,4 @@ default = []
 [dev-dependencies]
 # The readback test drives the pipeline directly and needs to block on the
 # async wgpu calls.
-pollster = "0.4"
+pollster = { workspace = true }

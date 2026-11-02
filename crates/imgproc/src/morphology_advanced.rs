@@ -189,69 +189,88 @@ pub fn black_hat(image: &GrayImage, kernel_size: usize) -> GrayImage {
     out
 }
 
-/// Hit-or-miss transform.
+/// Hit-or-miss transform, `cv2.morphologyEx(image, MORPH_HITMISS, kernel)`.
 ///
 /// The kernel is a 2D array of `i8` values:
-///   *  1 = must be foreground (non-zero)
+///   *  1 = must be foreground
 ///   *  0 = don't care
-///   * -1 = must be background (zero)
+///   * -1 = must be background
 ///
-/// The result pixel is 255 where the pattern matches, 0 otherwise.
-/// `kernel` should be a flat row-major slice with dimensions `kw x kh`.
+/// `kernel` is a flat row-major slice with dimensions `kw x kh`, anchored at
+/// `(kw / 2, kh / 2)`.
+///
+/// Computed as OpenCV does: `erode(image, kernel == 1) & erode(!image,
+/// kernel == -1)`, each erosion taking the minimum over its taps that land in
+/// the image. So:
+///
+/// * an out-of-image tap is **don't care** for both sets (OpenCV's erosion
+///   border never wins a minimum). This used to treat it as background, so a
+///   `1` reaching off the frame always failed and a `-1` always passed;
+/// * on a binary 0/255 image the result is 255 where the pattern matches and
+///   0 elsewhere; on any other image it is that bitwise AND of the two
+///   erosions, as OpenCV returns;
+/// * an all-zero kernel returns `image` unchanged, as OpenCV does.
+///
+/// See `tests/hit_or_miss_opencv_parity.rs`.
 #[allow(clippy::needless_range_loop)]
 pub fn hit_or_miss(image: &GrayImage, kernel: &[i8], kw: usize, kh: usize) -> GrayImage {
     if image.width() == 0 || image.height() == 0 {
         return image.clone();
     }
+    let hits: Vec<(isize, isize)> = taps_with(kernel, kw, kh, 1);
+    let misses: Vec<(isize, isize)> = taps_with(kernel, kw, kh, -1);
+    if hits.is_empty() && misses.is_empty() {
+        return image.clone();
+    }
     let width = image.width() as usize;
     let height = image.height() as usize;
-    let cx = kw / 2;
-    let cy = kh / 2;
 
     let src = image.as_raw();
     let mut out = GrayImage::new(image.width(), image.height());
     let out_raw = out.as_mut();
 
+    // Minimum of `f(pixel)` over the taps that land in the image; 255 (the
+    // erosion identity) when none do.
+    let erode_at = |x: usize, y: usize, taps: &[(isize, isize)], f: fn(u8) -> u8| -> u8 {
+        let mut m = 255u8;
+        for &(dx, dy) in taps {
+            let px = x as isize + dx;
+            let py = y as isize + dy;
+            if px < 0 || py < 0 || px >= width as isize || py >= height as isize {
+                continue;
+            }
+            m = m.min(f(src[py as usize * width + px as usize]));
+        }
+        m
+    };
+
     out_raw
         .par_chunks_mut(width)
         .enumerate()
         .for_each(|(y, row)| {
-            'pixel: for x in 0..width {
-                for ky in 0..kh {
-                    for kx in 0..kw {
-                        let k_val = kernel[ky * kw + kx];
-                        if k_val == 0 {
-                            continue;
-                        }
-                        let px = x as isize + kx as isize - cx as isize;
-                        let py = y as isize + ky as isize - cy as isize;
-
-                        if px < 0 || py < 0 || px >= width as isize || py >= height as isize {
-                            // Out-of-bounds treated as background (0).
-                            if k_val == 1 {
-                                row[x] = 0;
-                                continue 'pixel;
-                            }
-                            // k_val == -1 expects background, which is satisfied.
-                            continue;
-                        }
-
-                        let pix = src[py as usize * width + px as usize];
-                        if k_val == 1 && pix == 0 {
-                            row[x] = 0;
-                            continue 'pixel;
-                        }
-                        if k_val == -1 && pix != 0 {
-                            row[x] = 0;
-                            continue 'pixel;
-                        }
-                    }
-                }
-                row[x] = 255;
+            for x in 0..width {
+                let e1 = erode_at(x, y, &hits, |v| v);
+                let e2 = erode_at(x, y, &misses, |v| !v);
+                row[x] = e1 & e2;
             }
         });
 
     out
+}
+
+/// Offsets, relative to the anchor `(kw / 2, kh / 2)`, of the kernel entries
+/// equal to `want`.
+fn taps_with(kernel: &[i8], kw: usize, kh: usize, want: i8) -> Vec<(isize, isize)> {
+    let (cx, cy) = ((kw / 2) as isize, (kh / 2) as isize);
+    let mut taps = Vec::new();
+    for ky in 0..kh {
+        for kx in 0..kw {
+            if kernel[ky * kw + kx] == want {
+                taps.push((kx as isize - cx, ky as isize - cy));
+            }
+        }
+    }
+    taps
 }
 
 #[cfg(test)]

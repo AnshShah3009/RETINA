@@ -10,6 +10,13 @@ updates:
     groups:
       cargo-minor-and-patch:
         update-types: ["minor", "patch"]
+      # geo depends on i_overlay; our direct i_overlay must stay on the version
+      # geo uses, so the two only move together.
+      geo:
+        patterns: ["geo", "geo-types", "i_overlay"]
+    ignore:
+      - dependency-name: "i_overlay"
+        update-types: ["version-update:semver-major"]
     labels: ["dependencies"]
 
   - package-ecosystem: github-actions

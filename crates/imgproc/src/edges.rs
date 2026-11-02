@@ -266,8 +266,11 @@ pub fn sobel_with_border(src: &GrayImage, border: BorderMode) -> (GrayImage, Gra
     (gx, gy)
 }
 
+/// 3x3 Sobel `(dx, dy)` pair with OpenCV's default border,
+/// [`BorderMode::Reflect101`] (it used to be `Replicate`). Use
+/// [`sobel_with_border`] for any other border.
 pub fn sobel(src: &GrayImage) -> (GrayImage, GrayImage) {
-    sobel_with_border(src, BorderMode::Replicate)
+    sobel_with_border(src, BorderMode::Reflect101)
 }
 
 pub fn scharr_with_border(src: &GrayImage, border: BorderMode) -> (GrayImage, GrayImage) {
@@ -283,8 +286,11 @@ pub fn scharr_with_border(src: &GrayImage, border: BorderMode) -> (GrayImage, Gr
     (gx, gy)
 }
 
+/// Scharr `(dx, dy)` pair with OpenCV's default border,
+/// [`BorderMode::Reflect101`] (it used to be `Replicate`). Use
+/// [`scharr_with_border`] for any other border.
 pub fn scharr(src: &GrayImage) -> (GrayImage, GrayImage) {
-    scharr_with_border(src, BorderMode::Replicate)
+    scharr_with_border(src, BorderMode::Reflect101)
 }
 
 pub fn sobel_magnitude(gx: &GrayImage, gy: &GrayImage) -> GrayImage {
@@ -320,7 +326,16 @@ pub fn sobel_magnitude_ctx(gx: &GrayImage, gy: &GrayImage, group: &RuntimeRunner
     })
 }
 
+/// `cv2.Laplacian(src, CV_8U, ksize=1)`: the 4-neighbour kernel
+/// `[0 1 0; 1 -4 1; 0 1 0]`, saturated to `u8`, with OpenCV's default border
+/// [`BorderMode::Reflect101`] (it used to be `Replicate`). Use
+/// [`laplacian_with_border`] for any other border.
 pub fn laplacian(src: &GrayImage) -> GrayImage {
+    laplacian_with_border(src, BorderMode::Reflect101)
+}
+
+/// [`laplacian`] with an explicit border.
+pub fn laplacian_with_border(src: &GrayImage, border: BorderMode) -> GrayImage {
     let runner = cv_runtime::default_runner().unwrap_or_else(|_| {
         // Fallback: use CPU registry if available
         cv_runtime::registry()
@@ -328,13 +343,23 @@ pub fn laplacian(src: &GrayImage) -> GrayImage {
             .map(|reg| cv_runtime::RuntimeRunner::Sync(reg.default_cpu().id()))
             .unwrap_or_else(|| cv_runtime::RuntimeRunner::Sync(cv_hal::DeviceId(0)))
     });
-    laplacian_ctx(src, &runner)
+    laplacian_with_border_ctx(src, border, &runner)
 }
 
+/// [`laplacian`] on an explicit runner (reflect-101 border).
 pub fn laplacian_ctx(src: &GrayImage, group: &RuntimeRunner) -> GrayImage {
+    laplacian_with_border_ctx(src, BorderMode::Reflect101, group)
+}
+
+/// [`laplacian_with_border`] on an explicit runner.
+pub fn laplacian_with_border_ctx(
+    src: &GrayImage,
+    border: BorderMode,
+    group: &RuntimeRunner,
+) -> GrayImage {
     let kernel = Kernel::from_slice(&[0.0, 1.0, 0.0, 1.0, -4.0, 1.0, 0.0, 1.0, 0.0], 3, 3);
     let mut out = GrayImage::new(src.width(), src.height());
-    convolve_with_border_into_ctx(src, &mut out, &kernel, BorderMode::Replicate, group);
+    convolve_with_border_into_ctx(src, &mut out, &kernel, border, group);
     out
 }
 

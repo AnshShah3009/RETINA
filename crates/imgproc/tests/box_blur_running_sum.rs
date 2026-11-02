@@ -1,9 +1,10 @@
 //! `box_blur` CPU path: the O(1)-per-pixel running-sum implementation must
-//! return exactly the bytes of the dense O(size^2) replicate-border
-//! convolution it replaced (`convolve_with_border_into_ctx` + `box_kernel`).
+//! return exactly the bytes of the dense O(size^2) convolution it replaced
+//! (`convolve_with_border_into_ctx` + `box_kernel`), for every border mode.
 
 use cv_imgproc::{
-    BorderMode, box_blur_cpu_into, box_blur_ctx, box_kernel, convolve_with_border_into_ctx,
+    BorderMode, box_blur_cpu_into, box_blur_cpu_with_border_into, box_blur_ctx, box_kernel,
+    convolve_with_border_into_ctx,
 };
 use cv_runtime::RuntimeRunner;
 use image::GrayImage;
@@ -27,17 +28,24 @@ fn noise(w: u32, h: u32, seed: u64) -> GrayImage {
     })
 }
 
-fn dense(img: &GrayImage, size: usize) -> GrayImage {
+fn dense_with(img: &GrayImage, size: usize, border: BorderMode) -> GrayImage {
     let mut out = GrayImage::new(img.width(), img.height());
-    convolve_with_border_into_ctx(
-        img,
-        &mut out,
-        &box_kernel(size),
-        BorderMode::Replicate,
-        &cpu_runner(),
-    );
+    convolve_with_border_into_ctx(img, &mut out, &box_kernel(size), border, &cpu_runner());
     out
 }
+
+fn dense(img: &GrayImage, size: usize) -> GrayImage {
+    dense_with(img, size, BorderMode::Replicate)
+}
+
+const BORDERS: [BorderMode; 6] = [
+    BorderMode::Replicate,
+    BorderMode::Reflect101,
+    BorderMode::Reflect,
+    BorderMode::Wrap,
+    BorderMode::Constant(0),
+    BorderMode::Constant(200),
+];
 
 #[test]
 fn running_sum_box_blur_is_byte_identical_to_dense_convolution() {
@@ -55,10 +63,20 @@ fn running_sum_box_blur_is_byte_identical_to_dense_convolution() {
                 reference.as_raw(),
                 "box_blur size {size} on {w}x{h} differs from the dense loop"
             );
-            // The public CPU entry point routes to the same code.
+            for border in BORDERS {
+                let mut fast = GrayImage::new(w, h);
+                box_blur_cpu_with_border_into(&img, &mut fast, size, border);
+                assert_eq!(
+                    fast.as_raw(),
+                    dense_with(&img, size, border).as_raw(),
+                    "box_blur size {size} on {w}x{h} with {border:?} differs from the dense loop"
+                );
+            }
+            // The public CPU entry point routes to the same code, with
+            // OpenCV's default reflect-101 border.
             assert_eq!(
                 box_blur_ctx(&img, size, &cpu_runner()).as_raw(),
-                reference.as_raw()
+                dense_with(&img, size, BorderMode::Reflect101).as_raw()
             );
         }
     }
