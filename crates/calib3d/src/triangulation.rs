@@ -468,6 +468,9 @@ impl Triangulator {
 
     /// Estimate camera pose using iterative Levenberg-Marquardt refinement.
     /// Returns the refined Pose given an initial guess, 3D points, 2D projections, and camera intrinsics.
+    ///
+    /// The pose is perturbed as `R' = exp(w) R`, `t' = t + dt`; see
+    /// [`Self::pnp_point_jacobian`] for the Jacobian of one residual.
     pub fn refine_pnp(
         initial_pose: &Pose,
         object_points: &[Vector3<f64>],
@@ -475,12 +478,10 @@ impl Triangulator {
         model: &cv_core::PinholeModel,
         max_iters: usize,
     ) -> Pose {
-        // Implementation using numerical differentiation for projection to support distortion
         let mut current_pose = *initial_pose;
         let mut lambda = 0.001;
 
         let n = object_points.len();
-        let eps = 1e-6;
 
         for _ in 0..max_iters {
             let mut jtj = nalgebra::Matrix6::<f64>::zeros();
@@ -500,68 +501,13 @@ impl Triangulator {
                 }
 
                 let uv = model.project(&Point3::from(p_c));
-                let du = uv.x - image_points[i][0];
-                let dv = uv.y - image_points[i][1];
-                current_err += du * du + dv * dv;
+                let r =
+                    nalgebra::Vector2::new(uv.x - image_points[i][0], uv.y - image_points[i][1]);
+                current_err += r.norm_squared();
 
-                // Numerical Jacobian of projection d(u,v)/d(p_c)
-                let mut j_proj = nalgebra::Matrix2x3::zeros();
-
-                let p_c_x = Point3::new(p_c.x + eps, p_c.y, p_c.z);
-                let p_c_x_neg = Point3::new(p_c.x - eps, p_c.y, p_c.z);
-                let uv_x = model.project(&p_c_x);
-                let uv_x_neg = model.project(&p_c_x_neg);
-                j_proj.set_column(
-                    0,
-                    &nalgebra::Vector2::new(
-                        (uv_x.x - uv_x_neg.x) / (2.0 * eps),
-                        (uv_x.y - uv_x_neg.y) / (2.0 * eps),
-                    ),
-                );
-
-                let p_c_y = Point3::new(p_c.x, p_c.y + eps, p_c.z);
-                let p_c_y_neg = Point3::new(p_c.x, p_c.y - eps, p_c.z);
-                let uv_y = model.project(&p_c_y);
-                let uv_y_neg = model.project(&p_c_y_neg);
-                j_proj.set_column(
-                    1,
-                    &nalgebra::Vector2::new(
-                        (uv_y.x - uv_y_neg.x) / (2.0 * eps),
-                        (uv_y.y - uv_y_neg.y) / (2.0 * eps),
-                    ),
-                );
-
-                let p_c_z = Point3::new(p_c.x, p_c.y, p_c.z + eps);
-                let p_c_z_neg = Point3::new(p_c.x, p_c.y, p_c.z - eps);
-                let uv_z = model.project(&p_c_z);
-                let uv_z_neg = model.project(&p_c_z_neg);
-                j_proj.set_column(
-                    2,
-                    &nalgebra::Vector2::new(
-                        (uv_z.x - uv_z_neg.x) / (2.0 * eps),
-                        (uv_z.y - uv_z_neg.y) / (2.0 * eps),
-                    ),
-                );
-
-                // Jacobian d(p_c)/d(pose)
-                // d(p_c)/dt = I
-                // d(p_c)/domega = -[p_c]x
-
-                let dpc_domega = nalgebra::Matrix3::new(
-                    0.0, p_c.z, -p_c.y, -p_c.z, 0.0, p_c.x, p_c.y, -p_c.x, 0.0,
-                ); // Note: this is actually [p_c]x, so d/domega is -[p_c]x?
-                // p_new = R * p + t.  R approx (I + [w]x). p_new = p + [w]x * p + t = p - [p]x * w + t.
-                // So d(p)/d(w) = -[p]x.
-
-                let j_rot = j_proj * (-dpc_domega);
-                let j_trans = j_proj; // * I
-
-                let mut j = nalgebra::Matrix2x6::zeros();
-                j.fixed_view_mut::<2, 3>(0, 0).copy_from(&j_rot);
-                j.fixed_view_mut::<2, 3>(0, 3).copy_from(&j_trans);
-
+                let j = Self::pnp_point_jacobian(model, &rot, &t, &p_w);
                 jtj += j.transpose() * j;
-                jtr += j.transpose() * nalgebra::Vector2::new(du, dv);
+                jtr += j.transpose() * r;
             }
 
             let mut lhs = jtj;
@@ -569,29 +515,14 @@ impl Triangulator {
                 lhs[(k, k)] *= 1.0 + lambda;
             }
 
-            if let Some(delta) = lhs.lu().solve(&jtr) {
-                // Update pose
+            // Levenberg-Marquardt step: (J^T J + lambda diag) delta = -J^T r.
+            if let Some(delta) = lhs.lu().solve(&(-jtr)) {
                 let omega = Vector3::new(delta[0], delta[1], delta[2]);
                 let dt = Vector3::new(delta[3], delta[4], delta[5]);
 
                 let d_rot = nalgebra::Rotation3::new(omega);
                 let next_rot = d_rot * current_pose.rotation.to_rotation_matrix();
-                let next_t = current_pose.translation - dt; // We solved J*delta = -r, so new = old + delta?
-                // Wait, typically J*delta = -r -> delta is step towards solution.
-                // My J was d(error)/d(param).  Actually J should be d(residual)/d(param).
-                // residual = proj - obs.
-                // r_new = r_old + J * delta. Want r_new = 0. J * delta = -r_old.
-                // So delta = - (J^T J)^-1 J^T r.
-                // But here I solved (J^T J) * delta = J^T r.  So delta is (J^T J)^-1 J^T r.
-                // So this delta is -step? No, J^T r is gradient.
-                // Gauss-Newton: step = -(J^T J)^-1 J^T r.
-                // Here delta = (J^T J)^-1 (J^T r).
-                // So step = -delta.
-
-                // Let's check my previous code:
-                // next_t = current_pose.translation - dt;
-                // This implies dt was "positive" step size but subtracted.
-
+                let next_t = current_pose.translation + dt;
                 let next_pose = Pose::new(next_rot.into_inner(), next_t);
 
                 // Simple check for improvement
@@ -621,6 +552,52 @@ impl Triangulator {
         current_pose
     }
 
+    /// Jacobian of the reprojection residual `project(R X + t) - x` of one
+    /// point with respect to `(w, dt)`, for the perturbation `R' = exp(w) R`,
+    /// `t' = t + dt` used by [`Self::refine_pnp`].
+    ///
+    /// The camera-frame point moves by `w x (R X) + dt`, so the rotation block
+    /// is `J_proj * (-[R X]x)`. It used `-[R X + t]x`, the camera-frame point,
+    /// which is the derivative of a different perturbation (one that also
+    /// rotates `t`) and is wrong whenever `t != 0`: from 37 px RMS with the
+    /// camera 6 units away, four iterations reached 1.1e-2 px instead of
+    /// converging. `J_proj` is a central difference of `model.project`, so
+    /// distortion is included.
+    fn pnp_point_jacobian(
+        model: &cv_core::PinholeModel,
+        rot: &nalgebra::UnitQuaternion<f64>,
+        t: &Vector3<f64>,
+        p_w: &Vector3<f64>,
+    ) -> nalgebra::Matrix2x6<f64> {
+        let eps = 1e-6;
+        let rotated = rot * p_w;
+        let p_c = rotated + t;
+
+        // Numerical Jacobian of projection d(u,v)/d(p_c)
+        let mut j_proj = nalgebra::Matrix2x3::zeros();
+        for axis in 0..3 {
+            let mut plus = p_c;
+            let mut minus = p_c;
+            plus[axis] += eps;
+            minus[axis] -= eps;
+            let a = model.project(&Point3::from(plus));
+            let b = model.project(&Point3::from(minus));
+            j_proj.set_column(
+                axis,
+                &nalgebra::Vector2::new((a.x - b.x) / (2.0 * eps), (a.y - b.y) / (2.0 * eps)),
+            );
+        }
+
+        // d(p_c)/dw = -[R X]x, d(p_c)/dt = I.
+        let neg_skew = nalgebra::Matrix3::new(
+            0.0, rotated.z, -rotated.y, -rotated.z, 0.0, rotated.x, rotated.y, -rotated.x, 0.0,
+        );
+        let mut j = nalgebra::Matrix2x6::zeros();
+        j.fixed_view_mut::<2, 3>(0, 0)
+            .copy_from(&(j_proj * neg_skew));
+        j.fixed_view_mut::<2, 3>(0, 3).copy_from(&j_proj);
+        j
+    }
     /// Refine a 3D point estimate using non-linear least squares (Gauss-Newton).
     pub fn refine_triangulation(
         projection_matrices: &[Matrix3x4<f64>],
@@ -703,6 +680,58 @@ impl Triangulator {
 mod tests {
     use super::*;
     use nalgebra::Matrix3x4;
+
+    /// The analytic Jacobian of `refine_pnp` equals central differences of
+    /// the residual under its own perturbation `R' = exp(w) R`, `t' = t + dt`,
+    /// with a distorted camera far from the origin. The camera-frame point
+    /// used in place of `R X` (the old rotation block) is off by more than half
+    /// the Jacobian's largest entry here.
+    #[test]
+    fn pnp_jacobian_matches_finite_differences() {
+        let model = cv_core::PinholeModel::new(
+            CameraIntrinsics::new(800.0, 790.0, 320.0, 240.0, 640, 480),
+            cv_core::Distortion::new(-0.2, 0.05, 0.001, -0.002, 0.0),
+        );
+        let rot = nalgebra::UnitQuaternion::from_euler_angles(0.1, -0.2, 0.05);
+        let t = Vector3::new(0.4, -0.3, 6.0);
+        let p_w = Vector3::new(0.7, -0.5, 0.3);
+
+        let residual = |w: Vector3<f64>, dt: Vector3<f64>| {
+            let r = nalgebra::UnitQuaternion::from_scaled_axis(w) * rot;
+            let q = model.project(&Point3::from(r * p_w + t + dt));
+            nalgebra::Vector2::new(q.x, q.y)
+        };
+        let h = 1e-6;
+        let mut fd = nalgebra::Matrix2x6::<f64>::zeros();
+        for k in 0..6 {
+            let mut e = nalgebra::Vector6::<f64>::zeros();
+            e[k] = h;
+            let split = |v: nalgebra::Vector6<f64>| {
+                (
+                    Vector3::new(v[0], v[1], v[2]),
+                    Vector3::new(v[3], v[4], v[5]),
+                )
+            };
+            let (wp, tp) = split(e);
+            let (wm, tm) = split(-e);
+            fd.set_column(k, &((residual(wp, tp) - residual(wm, tm)) / (2.0 * h)));
+        }
+
+        let analytic = Triangulator::pnp_point_jacobian(&model, &rot, &t, &p_w);
+        let scale = fd.amax();
+        assert!(
+            (analytic - fd).amax() < 1e-5 * scale,
+            "analytic {analytic} vs finite differences {fd}"
+        );
+
+        // The old rotation block, -[R X + t]x, against the same differences.
+        let p_c = rot * p_w + t;
+        let old_skew = Matrix3::new(0.0, p_c.z, -p_c.y, -p_c.z, 0.0, p_c.x, p_c.y, -p_c.x, 0.0);
+        let j_proj = analytic.fixed_view::<2, 3>(0, 3).into_owned();
+        let old_rot = j_proj * old_skew;
+        let err = (old_rot - fd.fixed_view::<2, 3>(0, 0)).amax();
+        assert!(err > 0.5 * scale, "old block error {err} vs scale {scale}");
+    }
 
     #[test]
     fn test_triangulation() {
