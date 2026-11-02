@@ -1273,7 +1273,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde",
- "spin 0.12.3",
+ "spin",
  "tynm",
  "xxhash-rust",
 ]
@@ -1350,7 +1350,7 @@ dependencies = [
  "libc",
  "log",
  "pliron",
- "spin 0.12.3",
+ "spin",
  "sysinfo",
  "winapi",
 ]
@@ -1405,7 +1405,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "spin 0.12.3",
+ "spin",
  "toml",
  "turso",
  "wasm-bindgen",
@@ -1474,7 +1474,7 @@ dependencies = [
  "rustc_apfloat",
  "serde",
  "smallvec",
- "spin 0.12.3",
+ "spin",
  "thiserror 2.0.21",
  "variadics_please",
 ]
@@ -1690,7 +1690,7 @@ dependencies = [
  "num-traits",
  "paste",
  "serde",
- "spin 0.12.3",
+ "spin",
  "variadics_please",
 ]
 
@@ -1766,7 +1766,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "image",
  "nalgebra",
- "pollster 0.4.0",
+ "pollster 1.0.1",
  "rand 0.10.3",
  "rand_distr",
  "rayon",
@@ -1882,7 +1882,7 @@ dependencies = [
  "cv-runtime",
  "image",
  "nalgebra",
- "pollster 0.4.0",
+ "pollster 1.0.1",
  "rand 0.10.3",
  "rayon",
  "tracing",
@@ -1915,7 +1915,7 @@ dependencies = [
  "nalgebra",
  "ndarray",
  "ndarray-npy",
- "pollster 0.4.0",
+ "pollster 1.0.1",
  "rayon",
  "rstar 0.14.0",
  "thiserror 2.0.21",
@@ -1935,7 +1935,7 @@ dependencies = [
  "cv-runtime",
  "image",
  "nalgebra",
- "pollster 0.4.0",
+ "pollster 1.0.1",
  "rand 0.10.3",
  "rayon",
  "tracing",
@@ -1987,7 +1987,7 @@ dependencies = [
  "cv-hal",
  "cv-math",
  "nalgebra",
- "pollster 0.4.0",
+ "pollster 1.0.1",
 ]
 
 [[package]]
@@ -2078,7 +2078,7 @@ dependencies = [
  "nalgebra",
  "num_cpus",
  "parking_lot 0.13.0",
- "pollster 0.4.0",
+ "pollster 1.0.1",
  "proptest",
  "rayon",
  "tempfile",
@@ -2115,7 +2115,7 @@ dependencies = [
  "cv-runtime",
  "image",
  "nalgebra",
- "pollster 0.4.0",
+ "pollster 1.0.1",
  "rayon",
  "thiserror 2.0.21",
 ]
@@ -4080,9 +4080,9 @@ dependencies = [
 
 [[package]]
 name = "las"
-version = "0.9.11"
+version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48c2594be0d2ec4f04c944f5cb5160625cd1a69451db14de73b990065f97fb84"
+checksum = "a8823fdc8209bf345e7ec7586f2e1f5ad0f978899ebb9e637c6d54e0f26cba0b"
 dependencies = [
  "byteorder",
  "chrono",
@@ -4095,9 +4095,9 @@ dependencies = [
 
 [[package]]
 name = "laz"
-version = "0.12.2"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4913af39d4e471d749fbcec0d726c5d4fc6f97cac851a62ff7a84300a7a7579"
+checksum = "5a1bd8242fad6a61a7520b73d072ddf63dff1f3680e3f5c157b1dc6e8e5ab2ec"
 dependencies = [
  "byteorder",
  "num-traits",
@@ -5476,7 +5476,7 @@ dependencies = [
  "rustc_apfloat",
  "slotmap",
  "smallvec",
- "spin 0.10.1",
+ "spin",
  "thiserror 2.0.21",
  "utf8-chars",
 ]
@@ -6830,15 +6830,6 @@ dependencies = [
  "num-traits",
  "robust",
  "smallvec",
-]
-
-[[package]]
-name = "spin"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
-dependencies = [
- "lock_api 0.4.14",
 ]
 
 [[package]]

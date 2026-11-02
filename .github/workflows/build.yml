@@ -54,6 +54,11 @@ jobs:
       # a bf16 shader it include_str!'d did not exist.
       run: cargo check -p cv-hal --features half-precision
 
+    - name: Test LAS feature
+      # Off by default and never built in CI, so the edition-2024 migration
+      # left two compile errors in it and the las 0.11 upgrade needed a port.
+      run: cargo test -p cv-io --features las
+
     - name: Build examples
       # `cargo build --workspace` does not build examples, so without this
       # `example_smoke` silently skipped every example: the guard it has always
