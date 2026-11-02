@@ -2,7 +2,6 @@ use crate::GpuTensor;
 use crate::Result;
 use crate::gpu::GpuContext;
 use cv_core::TensorShape;
-use cv_core::storage::Storage;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -48,14 +47,13 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
     new_height: u32,
     mode: InterpolationMode,
 ) -> Result<GpuTensor<T>> {
-    // Only the f32 WGSL shader exists; reject other dtypes instead of
-    // panicking on the downcast below.
+    // Only f32 shaders are wired up (`resize_f16.wgsl` and `resize_bf16.wgsl`
+    // have no caller), so other dtypes are refused.
     if cv_core::DataType::from_type::<T>().ok() != Some(cv_core::DataType::F32) {
         return Err(crate::Error::NotSupported(
             "Resize GPU kernel only supports f32".into(),
         ));
     }
-    use crate::storage::GpuStorage;
     let (src_h, src_w) = input.shape.hw();
     let (dst_w, dst_h) = (new_width as usize, new_height as usize);
     let c = input.shape.channels;
@@ -114,13 +112,7 @@ pub fn resize_with_mode<T: cv_core::float::Float + bytemuck::Pod>(
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: input
-                    .storage
-                    .as_any()
-                    .downcast_ref::<GpuStorage<f32>>()
-                    .unwrap()
-                    .buffer()
-                    .as_entire_binding(),
+                resource: input.storage.buffer().as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,

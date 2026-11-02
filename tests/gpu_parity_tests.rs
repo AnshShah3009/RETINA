@@ -442,31 +442,38 @@ fn every_shader_compiles() {
         ),
         ("canny", include_str!("../crates/hal/shaders/canny.wgsl")),
         ("warp", include_str!("../crates/hal/shaders/warp.wgsl")),
-        // The bf16 family. The `*_f16` siblings are deliberately absent: they
-        // are behind cv-hal's `half-precision` feature, which nothing enables,
-        // and they cannot compile on wgpu 28 anyway - its ShaderModuleDescriptor
-        // has no field for naga capabilities, so `array<f16>` is rejected with
-        // "Using `f16` values requires the naga::valid::Capabilities::FLOAT16
-        // flag". Asserting them here would report a failure for code that is
-        // unreachable and gated, rather than a real one.
+        // The 16-bit shaders that need no device feature. The `enable f16`
+        // ones (`threshold_f16.wgsl`, `resize_f16.wgsl`) are absent: they
+        // compile only on a device created with `SHADER_F16`, which this
+        // helper does not check. `gpu_threshold_f16.rs` and
+        // `gpu_half_kernels.rs` in cv-hal run the reachable ones for real.
         //
-        // The bf16 family. Three of these had no bfloat16-to-f32 conversion and
-        // used the raw u32 bit pattern as a value, which is the same defect
-        // class as the Canny/match_template/Hough packed-u8 bugs; the
-        // sibling bf16 shaders that do it correctly unpack with a shift and a
-        // mask, and these now do too.
+        // bilateral, fast, fast_nms and color_cvt each have one packed16
+        // shader for both f16 and bf16 (two values per u32 word, widened and
+        // rounded with integer operations), replacing `*_f16.wgsl` shaders
+        // that needed SHADER_F16 and `*_bf16.wgsl` shaders that read one value
+        // per word or raced on shared output words.
         (
-            "bilateral_bf16",
-            include_str!("../crates/hal/shaders/bilateral_bf16.wgsl"),
+            "bilateral_packed16",
+            include_str!("../crates/hal/shaders/bilateral_packed16.wgsl"),
         ),
         (
-            "fast_bf16",
-            include_str!("../crates/hal/shaders/fast_bf16.wgsl"),
+            "fast_packed16",
+            include_str!("../crates/hal/shaders/fast_packed16.wgsl"),
         ),
         (
-            "fast_nms_bf16",
-            include_str!("../crates/hal/shaders/fast_nms_bf16.wgsl"),
+            "fast_nms_packed16",
+            include_str!("../crates/hal/shaders/fast_nms_packed16.wgsl"),
         ),
+        (
+            "color_cvt_packed16",
+            include_str!("../crates/hal/shaders/color_cvt_packed16.wgsl"),
+        ),
+        (
+            "threshold_f16_packed",
+            include_str!("../crates/hal/shaders/threshold_f16_packed.wgsl"),
+        ),
+        // No caller: `resize` returns NotSupported for 16-bit types.
         (
             "resize_bf16",
             include_str!("../crates/hal/shaders/resize_bf16.wgsl"),
@@ -1420,14 +1427,19 @@ fn shader_storage_element_types_match_their_hosts() {
         ("marching_cubes.wgsl", &[(4, "i32")]),
         ("marching_cubes_count.wgsl", &[(1, "u32"), (3, "u32")]),
         ("marching_cubes_emit.wgsl", &[(3, "i32"), (4, "u32")]),
-        ("bilateral_f16.wgsl", &[(0, "f16")]),
-        ("fast_f16.wgsl", &[(0, "f16")]),
         ("threshold_f16.wgsl", &[(0, "f16")]),
         // The SHADER_F16 fallback reads the same f16 tensor as two halves per
         // word. Like `matching.wgsl`, the packing is the point: the host
         // dispatches one invocation per word, not per element.
         ("threshold_f16_packed.wgsl", &[(0, "u32"), (1, "u32")]),
-        ("bilateral_bf16.wgsl", &[(0, "u32"), (1, "u32")]),
+        ("threshold_bf16.wgsl", &[(0, "u32"), (1, "u32")]),
+        // The packed16 shaders hold an f16 or bf16 tensor two values per
+        // word. The 2-D ones have two invocations per output word, so their
+        // output is `atomic<u32>` (asserted as u32) and each ORs in its half.
+        ("bilateral_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
+        ("fast_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
+        ("fast_nms_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
+        ("color_cvt_packed16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("resize_bf16.wgsl", &[(0, "u32"), (1, "u32")]),
         ("stereo_match.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
         ("subtract.wgsl", &[(0, "f32"), (1, "f32"), (2, "f32")]),
