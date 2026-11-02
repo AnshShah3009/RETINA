@@ -35,6 +35,9 @@ hashbrown = { workspace = true }
 tracing = { workspace = true }
 cubecl = { version = "0.11.3", optional = true, features = ["wgpu"] }
 cubecl-wgpu = { version = "0.11.3", optional = true }
+# Already in the tree under `cubecl`; named directly only for `StreamId`, which
+# `cubecl` does not re-export (its `environment` path is shadowed).
+cubecl-environment = { version = "0.11.3", optional = true, default-features = false }
 cubecl-cuda = { version = "0.11.3", optional = true }
 
 [features]
@@ -46,7 +49,7 @@ tensorrt = []
 directml = []
 webgpu = []
 mlx = []
-cubecl = ["dep:cubecl", "dep:cubecl-wgpu"]
+cubecl = ["dep:cubecl", "dep:cubecl-wgpu", "dep:cubecl-environment"]
 wgpu_backend = []
 full-precision = ["cv-core/full-precision"]
 half-precision = ["cv-core/half-precision"]
