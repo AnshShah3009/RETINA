@@ -386,6 +386,19 @@ stored in the tests, so CI needs no OpenCV.
   output). *Not fixed:* `cv_hal::cpu::simd::rgb_to_gray_simd` itself still
   uses the float weights; it lives in `cv-hal`.
 
+- **`hit_or_miss` treated out-of-image pixels as background**, so a `1` that
+  reached off the frame always failed and a `-1` always passed.
+  `cv2.morphologyEx(MORPH_HITMISS)` is `erode(src, k == 1) & erode(~src, k ==
+  -1)` with erosion's default border, which never wins a minimum: off-frame
+  taps are don't-care for both sets. Two more differences surfaced in the
+  comparison: on a non-binary image OpenCV returns that bitwise AND (the old
+  code thresholded at non-zero and wrote 0/255), and an all-zero kernel returns
+  the image unchanged (the old code returned all 255). Before, on a 10x8 image
+  with four kernels, the binary corner kernel differed at the border pixel
+  `(0, 3)` and grey input in up to 59 of 80 pixels; after, all eight outputs
+  plus the two special cases match OpenCV 4.13 exactly.
+  `tests/hit_or_miss_opencv_parity.rs`.
+
 ## OPEN: `erf` is accurate to ~1.5e-7, where SciPy is ~1e-16
 
 Found from a failing `scientific` test, and the diagnosis is not the obvious one.
