@@ -272,7 +272,6 @@ type Key = (String, String, String);
 
 struct Audit {
     rows: BTreeMap<Key, Row>,
-    not_compiled: Vec<String>,
 }
 
 /// Cells of a markdown table row, with surrounding backticks stripped.
@@ -322,13 +321,7 @@ fn read_audit() -> Audit {
         );
     }
 
-    let not_compiled = section(&doc, "## Sources naga rejects")
-        .into_iter()
-        .filter(|l| l.starts_with("| `crates/"))
-        .map(|l| cells(l)[0].clone())
-        .collect();
-
-    Audit { rows, not_compiled }
+    Audit { rows }
 }
 
 fn suggested_row(key: &Key, sites: &[&Site]) -> String {
@@ -376,25 +369,14 @@ fn every_integer_division_is_in_the_audit() {
 
     let mut problems = Vec::new();
 
-    // Sources naga rejects never reach a pipeline, so they cannot be scanned.
-    // They are pinned so that fixing one forces it into the audit proper.
-    let rejected_names: Vec<&String> = rejected.iter().map(|(s, _)| s).collect();
+    // A source naga rejects never reaches a pipeline, and its divisions cannot
+    // be scanned. Six used to (see `Sources naga rejects` in the document);
+    // all were fixed or deleted, and none may come back.
     for (source, diag) in &rejected {
-        if !audit.not_compiled.contains(source) {
-            problems.push(format!(
-                "{source} does not parse/validate and is not listed under \
-                 `Sources naga rejects`:\n{diag}"
-            ));
-        }
-    }
-    for source in &audit.not_compiled {
-        if !rejected_names.contains(&source) {
-            problems.push(format!(
-                "{source} is listed under `Sources naga rejects` but now \
-                 validates (or no longer exists): audit its divisions and \
-                 move it into the divisor table"
-            ));
-        }
+        problems.push(format!(
+            "{source} does not parse/validate, so no pipeline can be built \
+             from it and its divisions cannot be audited:\n{diag}"
+        ));
     }
 
     for (key, found) in &sites {
