@@ -9,7 +9,7 @@
 //!
 //!   cargo bench -p cv-hal --features cubecl --bench cubecl_kernels
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use cubecl::prelude::*;
 use cubecl::std::tensor::TensorHandle;
 use cubecl_wgpu::WgpuDevice;
@@ -17,6 +17,7 @@ use cv_hal::gpu_kernels::cubecl_advanced as adv;
 use cv_hal::gpu_kernels::cubecl_backend as be;
 use cv_hal::gpu_kernels::cubecl_optimized as opt;
 use cv_hal::gpu_kernels::cubecl_proto as proto;
+use std::hint::black_box;
 use std::time::Duration;
 
 fn data(n: usize, seed: u32) -> Vec<f32> {

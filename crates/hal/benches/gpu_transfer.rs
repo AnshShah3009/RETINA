@@ -10,9 +10,10 @@
 //!
 //!   cargo bench -p cv-hal --bench gpu_transfer
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use cv_hal::gpu::GpuContext;
 use cv_hal::gpu_kernels::buffer_utils;
+use std::hint::black_box;
 use std::time::Duration;
 use wgpu::BufferUsages;
 
