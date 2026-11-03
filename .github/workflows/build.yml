@@ -69,6 +69,11 @@ jobs:
       # left two compile errors in it and the las 0.11 upgrade needed a port.
       run: cargo test -p cv-io --features las
 
+    - name: Test GPU marker scan feature
+      # cv-objdetect's `gpu` feature is not enabled by any other workspace
+      # crate, so the workspace test run does not compile it.
+      run: cargo test -p cv-objdetect --features gpu
+
     - name: Check CubeCL feature
       # The CubeCL kernels, their tests and benches are behind a feature
       # nothing else builds; this runner has no GPU, so macOS runs the tests.

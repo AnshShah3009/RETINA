@@ -62,6 +62,7 @@ if [ "$mode" = "full" ]; then
   step "cubecl: no warnings" no_warnings -p cv-hal --features cubecl --all-targets
   step "cubecl: kernel tests" cargo test -p cv-hal --features cubecl --test cubecl_kernels_test
   step "io: las + gltf" cargo test -p cv-io --features las,gltf
+  step "objdetect: gpu feature" cargo test -p cv-objdetect --features gpu
   step "examples build" cargo build --workspace --examples
   step "benches build" cargo bench --workspace --no-run
   if command -v cargo-deny >/dev/null 2>&1; then
