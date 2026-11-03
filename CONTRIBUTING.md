@@ -139,6 +139,7 @@ that touches Rust code, manifests, shaders or test fixtures:
 | Job | Checks |
 | --- | --- |
 | Linux | fmt, build, half-precision and CubeCL feature checks, LAS feature tests, no warnings, examples, clippy, nextest, doctests |
+| Supply chain | `cargo deny check` against [`deny.toml`](deny.toml): RustSec advisories, permissive licences only, crates.io as the only source |
 | macOS | CPU and MLX backend builds and tests, plus the CubeCL and f16/bf16 GPU kernel tests on the runner's **Metal GPU** |
 
 The Linux runner has no GPU, so the macOS job is where GPU code is tested in CI.

@@ -64,6 +64,11 @@ if [ "$mode" = "full" ]; then
   step "io: las + gltf" cargo test -p cv-io --features las,gltf
   step "examples build" cargo build --workspace --examples
   step "benches build" cargo bench --workspace --no-run
+  if command -v cargo-deny >/dev/null 2>&1; then
+    step "cargo-deny" cargo deny check
+  else
+    printf 'skipping cargo-deny (install with: cargo install cargo-deny --locked)\n'
+  fi
 fi
 
 printf '\n'

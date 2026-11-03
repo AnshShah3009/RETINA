@@ -11,6 +11,7 @@ on:
       - '**/*.npy'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - 'deny.toml'
       - '.github/workflows/build.yml'
   pull_request:
     branches: [ master, develop, research/cubecl ]
@@ -22,6 +23,7 @@ on:
       - '**/*.npy'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - 'deny.toml'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -105,6 +107,20 @@ jobs:
       # the first thing a user copies, a doc example that has never been run is
       # not documentation.
       run: cargo test --doc --workspace
+
+  deny:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+    - name: Check advisories, bans, licences and sources
+      uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        # Every feature, so optional backends (CubeCL, MLX, FFmpeg) are checked too.
+        command: check
+        arguments: --all-features
 
   ci-macos:
     name: CI (macOS)
