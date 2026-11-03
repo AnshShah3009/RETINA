@@ -27,6 +27,11 @@ on:
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
+# A newer push to the same branch or PR supersedes the running one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -56,23 +61,16 @@ jobs:
     - name: Check formatting
       run: cargo fmt --all -- --check
 
-    - name: Build workspace
-      run: cargo build --workspace
-
     - name: Check half-precision feature
       # Nothing else builds this feature, and it went uncompilable unnoticed:
       # a bf16 shader it include_str!'d did not exist.
       run: cargo check -p cv-hal --features half-precision
 
-    - name: Test LAS feature
-      # Off by default and never built in CI, so the edition-2024 migration
-      # left two compile errors in it and the las 0.11 upgrade needed a port.
-      run: cargo test -p cv-io --features las
-
-    - name: Test GPU marker scan feature
-      # cv-objdetect's `gpu` feature is not enabled by any other workspace
-      # crate, so the workspace test run does not compile it.
-      run: cargo test -p cv-objdetect --features gpu
+    - name: Test optional features
+      # Off by default, so the workspace test run never compiles them: the
+      # edition-2024 migration once left two compile errors in `las`, and
+      # nothing else enables cv-objdetect's `gpu` marker scan.
+      run: cargo test -p cv-io -p cv-objdetect --features cv-io/las,cv-io/gltf,cv-objdetect/gpu
 
     - name: Check CubeCL feature
       # The CubeCL kernels, their tests and benches are behind a feature
@@ -128,9 +126,11 @@ jobs:
         arguments: --all-features
 
   ci-macos:
+    # The only runner with a GPU (Metal), so this job runs the GPU tests and
+    # examples. Formatting, clippy, warnings and doctests are checked on Linux.
     name: CI (macOS)
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
 
     steps:
     - name: Checkout code
@@ -140,9 +140,9 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
       with:
         toolchain: stable
-        components: clippy
 
     - name: Set up Python
+      # cv-python's PyO3 build needs an interpreter.
       uses: actions/setup-python@v7
       with:
         python-version: '3.11'
@@ -150,29 +150,21 @@ jobs:
     - name: Cache Rust build artifacts
       uses: Swatinem/rust-cache@v2
       with:
-        key: macos-v1
+        key: macos-v2
 
     - name: Install cargo-nextest
       uses: taiki-e/install-action@nextest
 
-    - name: Build workspace (CPU backend)
-      run: cargo build --workspace --features cpu
     - name: Build examples
-      run: cargo build --workspace --features cpu --examples
+      # tests/example_smoke.rs runs them; only here do their GPU paths get a GPU.
+      run: cargo build --workspace --examples
 
-    - name: Build workspace (MLX backend)
-      run: cargo build --workspace --features mlx
-    - name: Build examples
-      run: cargo build --workspace --features mlx --examples
+    - name: Run tests (Metal GPU)
+      run: cargo nextest run --workspace --no-fail-fast
 
-    - name: Run clippy
-      run: cargo clippy --workspace --lib -- -W clippy::all
-
-    - name: Run tests (CPU backend)
-      run: cargo nextest run --workspace --no-fail-fast --features cpu
-
-    - name: Run tests (MLX backend)
-      run: cargo nextest run --workspace --no-fail-fast --features mlx
+    - name: Test MLX context
+      # `mlx` only changes crates/hal/src/mlx.rs, so cv-hal's tests cover it.
+      run: cargo test -p cv-hal --features mlx
 
     - name: Test CubeCL kernels (Metal)
       # The only CI runner with a GPU, so the only place the CubeCL kernels
