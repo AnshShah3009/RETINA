@@ -72,8 +72,6 @@ pub mod markers;
 pub mod matcher;
 /// ORB (Oriented FAST and Rotated BRIEF) detector and descriptor
 pub mod orb;
-/// RANSAC-based model estimation and outlier rejection
-pub mod ransac;
 /// Row-parallel Triangle resize for the ORB pyramid (byte-identical to `image`)
 mod resize;
 /// Visual-localization retrieval: bag-of-words vocabulary and inverted-file
@@ -81,8 +79,6 @@ mod resize;
 pub mod retrieval;
 /// SIFT (Scale-Invariant Feature Transform) detector and descriptor
 pub mod sift;
-/// USAC/NAPSAC/MAGSAC — enhanced RANSAC sampling and scoring strategies
-pub mod usac;
 
 pub use akaze::*;
 pub use assignment::*;
@@ -100,10 +96,8 @@ pub use line_matcher::*;
 pub use markers::*;
 pub use matcher::*;
 pub use orb::*;
-pub use ransac::*;
 pub use retrieval::*;
 pub use sift::*;
-pub use usac::*;
 
 // `charuco` and `markers` both define a `CharucoBoard`. The crate-root name is
 // the tensor-API board that `CharucoDetector::new` takes; the image-API board
