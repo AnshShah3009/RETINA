@@ -1,28 +1,7 @@
 use cv_core::PointCloud;
-use nalgebra::{Matrix3, Point3, Vector3};
+use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 use rstar::{AABB, RTree, RTreeObject};
-
-/// Analytic minimum eigenvector of a 3×3 symmetric matrix.
-///
-/// The shared implementation in `cv-math` (Open3D `PointCloudImpl.h` /
-/// Geometric Tools `RobustEigenSymmetric3x3`) is generic over the element type,
-/// and its `f32` instantiation cannot resolve a three-point neighbourhood: the
-/// out-of-plane eigenvalue is exactly zero while the in-plane spread is thin, so
-/// `det((A - qI) / p)` saturates at its `±1` clamp, the two small eigenvalues
-/// look repeated, and the returned vector is an arbitrary element of their shared
-/// span - for a planar cloud, one that lies *in* the plane. Solving the same
-/// covariance in `f64` separates the eigenvalues, so upcast the matrix, run the
-/// solver, and cast the unit eigenvector back.
-fn fast_eigen3x3_min(m: &Matrix3<f32>) -> Vector3<f32> {
-    let v = cv_math::linalg::min_eigenvector_3x3(&m.map(|value| value as f64));
-    Vector3::new(v.x as f32, v.y as f32, v.z as f32)
-}
-
-/// The normal given to a point whose neighbourhood cannot determine one.
-fn default_normal() -> Vector3<f32> {
-    Vector3::new(0.0, 0.0, 1.0)
-}
 
 /// Whether a point has a position at all.
 ///
@@ -105,8 +84,12 @@ impl rstar::PointDistance for PointWrapper {
 }
 
 /// Estimate normals for the point cloud using K-nearest neighbors.
-/// Uses PCA/SVD on the covariance matrix of the neighborhood.
+/// Uses PCA on the covariance matrix of the neighborhood.
 /// Modifies the point cloud in place to add normals.
+///
+/// An `f32` wrapper over [`crate::normals::estimate_normals_knn`]: the points
+/// are converted to `f64`, the normals estimated there and converted back. An
+/// empty cloud is left without normals.
 ///
 /// The neighbourhood of a point is its `k` nearest points *including the point
 /// itself*, as Open3D's `estimate_normals(KDTreeSearchParamKNN(k))`; fewer than
@@ -123,54 +106,9 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
         return;
     }
 
-    let wrappers: Vec<PointWrapper> = pc
-        .points
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| has_position(p))
-        .map(|(i, p)| PointWrapper(i, *p))
-        .collect();
-
-    let tree = RTree::bulk_load(wrappers);
-
-    let normals: Vec<Vector3<f32>> = pc
-        .points
-        .par_iter()
-        .map(|p| {
-            if !has_position(p) {
-                return default_normal();
-            }
-            let query_point = [p.x, p.y, p.z];
-            // The nearest result is the point itself (or a duplicate of it).
-            let neighbors: Vec<&PointWrapper> =
-                tree.nearest_neighbor_iter(query_point).take(k).collect();
-
-            if neighbors.len() < 3 {
-                return default_normal(); // Default up
-            }
-
-            // Compute centroid
-            let mut centroid = Vector3::zeros();
-            for n in &neighbors {
-                centroid += n.1.coords;
-            }
-            centroid /= neighbors.len() as f32;
-
-            // Compute covariance matrix
-            let mut cov = Matrix3::zeros();
-            for n in &neighbors {
-                let d = n.1.coords - centroid;
-                cov += d * d.transpose();
-            }
-            cov /= neighbors.len() as f32;
-
-            // Analytic minimum eigenvector (Open3D / Geometric Tools algorithm).
-            // Faster and more numerically stable than full SymmetricEigen decomposition.
-            fast_eigen3x3_min(&cov)
-        })
-        .collect();
-
-    pc.normals = Some(normals);
+    let points: Vec<Point3<f64>> = pc.points.iter().map(|p| p.cast::<f64>()).collect();
+    let normals = crate::normals::estimate_normals_knn(&points, k);
+    pc.normals = Some(normals.iter().map(|n| n.cast::<f32>()).collect());
 }
 
 /// Orient normals consistently using simple neighbor voting.
@@ -920,25 +858,5 @@ mod tests {
                 n
             );
         }
-    }
-
-    #[test]
-    fn test_analytic_eigensolver_known() {
-        // A matrix with eigenvalues 2, 1, 0 along x, y, z axes.
-        // Minimum eigenvector should be (0, 0, ±1).
-        let mut m = nalgebra::Matrix3::zeros();
-        m[(0, 0)] = 2.0;
-        m[(1, 1)] = 1.0;
-        m[(2, 2)] = 0.0;
-        let n = fast_eigen3x3_min(&m);
-        assert!(n.z.abs() > 0.99, "Expected z-eigenvector, got {:?}", n);
-    }
-
-    #[test]
-    fn test_analytic_eigensolver_isotropic() {
-        // Isotropic matrix: all eigenvalues equal. Any unit vector is valid.
-        let m = nalgebra::Matrix3::identity() * 3.0;
-        let n = fast_eigen3x3_min(&m);
-        assert!((n.norm() - 1.0).abs() < 1e-5, "Not unit length: {:?}", n);
     }
 }
