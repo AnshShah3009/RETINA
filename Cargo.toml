@@ -50,6 +50,7 @@ futures = { workspace = true }
 wgpu = { workspace = true }
 rand = { workspace = true }
 bytemuck = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 default = ["full-precision"]

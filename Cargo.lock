@@ -1754,7 +1754,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cv-3d"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "cv-calib3d"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -1800,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "cv-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "cv-eval",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "cv-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "half",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "cv-distributed"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "atomic-wait",
  "cv-hal",
@@ -1836,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "cv-dnn"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "cv-imgproc",
@@ -1847,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "cv-eval"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "nalgebra",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "cv-examples"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-3d",
  "cv-core",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "cv-features"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -1893,7 +1893,7 @@ dependencies = [
 
 [[package]]
 name = "cv-geometry2d"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "geo",
  "i_overlay",
@@ -1902,7 +1902,7 @@ dependencies = [
 
 [[package]]
 name = "cv-hal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "approx",
  "bytemuck",
@@ -1931,7 +1931,7 @@ dependencies = [
 
 [[package]]
 name = "cv-imgproc"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "cv-core",
@@ -1948,7 +1948,7 @@ dependencies = [
 
 [[package]]
 name = "cv-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-3d",
  "cv-core",
@@ -1959,7 +1959,7 @@ dependencies = [
 
 [[package]]
 name = "cv-localization"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-calib3d",
  "cv-core",
@@ -1972,7 +1972,7 @@ dependencies = [
 
 [[package]]
 name = "cv-math"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "geo",
@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "cv-optimize"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "cv-hal",
@@ -1996,7 +1996,7 @@ dependencies = [
 
 [[package]]
 name = "cv-photo"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "cv-imgproc",
@@ -2005,7 +2005,7 @@ dependencies = [
 
 [[package]]
 name = "cv-plot"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tempfile",
  "thiserror 2.0.21",
@@ -2013,7 +2013,7 @@ dependencies = [
 
 [[package]]
 name = "cv-pointcloud"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "cv-math",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "cv-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-3d",
  "cv-core",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "cv-registration"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "cv-3d",
@@ -2059,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "cv-rendering"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "nalgebra",
@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "cv-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "atomic-wait",
  "bytemuck",
@@ -2095,7 +2095,7 @@ dependencies = [
 
 [[package]]
 name = "cv-scientific"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "cv-geometry2d",
@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "cv-sfm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-calib3d",
  "cv-core",
@@ -2127,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "cv-signal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-math",
  "rustfft",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "cv-slam"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-calib3d",
  "cv-core",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "cv-video"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "cv-hal",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "cv-videoio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cv-core",
  "ffmpeg-next",
@@ -2173,7 +2173,7 @@ dependencies = [
 
 [[package]]
 name = "cv-viewer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "cv-core",
@@ -6334,6 +6334,7 @@ dependencies = [
  "image",
  "nalgebra",
  "rand 0.10.3",
+ "serde_json",
  "tokio",
  "wgpu",
 ]

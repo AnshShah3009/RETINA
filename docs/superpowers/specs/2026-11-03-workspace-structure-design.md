@@ -50,11 +50,11 @@ dependencies) is the only current candidate; revisit it if that happens.
 
 ```text
 L0 foundation   cv-core, cv-geometry2d, cv-plot
-L1 backends     cv-hal, cv-math, cv-eval, cv-photo, cv-rendering, cv-videoio, cv-viewer
+L1 backends     cv-hal, cv-io, cv-math, cv-eval, cv-photo, cv-rendering, cv-videoio, cv-viewer
 L2 numerics     cv-optimize, cv-pointcloud, cv-signal, cv-video, cv-distributed
 L3 runtime      cv-runtime
 L4 domain       cv-imgproc, cv-3d
-L5 domain       cv-calib3d, cv-features, cv-registration, cv-io, cv-dnn
+L5 domain       cv-calib3d, cv-features, cv-registration, cv-dnn
 L6 domain       cv-objdetect, cv-cli
 L7 pipelines    cv-sfm, cv-slam, cv-localization, cv-examples
 L8 surface      cv-python, rust-cv-native (root: facade, workspace tests)
@@ -70,7 +70,7 @@ edges are listed explicitly where intended). `docs/ARCHITECTURE.md` mirrors it.
 | --- | --- | --- |
 | `cv-features → cv-calib3d` | ArUco/ChArUco/AprilTag and HOG/Haar live in `cv-features` and need PnP, undistortion and DLT; `ransac`/`usac` use calib3d's DLT solvers | New crate **`cv-objdetect`** (OpenCV's `objdetect` module, which holds ArUco/ChArUco, HOG and cascades since 4.7) takes `aruco`, `aruco_tables`, `charuco`, `markers`, `hog`, `haar_cascade`. `ransac` and `usac` move to **`cv-calib3d`** (OpenCV's USAC lives in calib3d). `cv-features` then depends on no geometry crate. |
 | `corner_subpix` in `cv-calib3d` | Misplaced | Moves to **`cv-imgproc`** (OpenCV `cornerSubPix` is in imgproc); `cv-calib3d` re-exports it. |
-| `cv-io → cv-3d` | `cv-io` needs only the `TriangleMesh` type, but pulls in hal, runtime and wgpu | `TriangleMesh` moves to **`cv-core::mesh`** beside `PointCloud`; `cv_3d::mesh` re-exports it. |
+| `cv-io` (L1) `→ cv-3d` (L4) | File formats belong low in the graph, but `cv-io` needs only the `TriangleMesh` type, but pulls in hal, runtime and wgpu | `TriangleMesh` moves to **`cv-core::mesh`** beside `PointCloud`; `cv_3d::mesh` re-exports it. |
 | `cv-3d → cv-scientific` | `cv-scientific` is a 60-line re-export shim over math/geometry2d/signal/pointcloud | **Remove `cv-scientific`**; users depend on the real crates. Its behavioural tests move to the crates they test. |
 
 `cv-runtime → cv-distributed` is a legitimate downward edge and stays.
