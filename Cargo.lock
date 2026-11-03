@@ -1818,6 +1818,7 @@ dependencies = [
  "nalgebra",
  "num-traits",
  "rand 0.10.3",
+ "rand_distr",
  "rayon",
  "thiserror 2.0.21",
  "wide",

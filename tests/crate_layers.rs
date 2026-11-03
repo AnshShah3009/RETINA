@@ -59,7 +59,7 @@ const LAYERS: &[(&str, u8)] = &[
 /// Edges that break the layer order today and are being removed by the
 /// workspace-structure plan (docs/superpowers/plans/2026-11-03-workspace-structure.md).
 /// Nothing may be added here.
-const KNOWN_VIOLATIONS: &[(&str, &str)] = &[("cv-features", "cv-calib3d"), ("cv-io", "cv-3d")];
+const KNOWN_VIOLATIONS: &[(&str, &str)] = &[("cv-features", "cv-calib3d")];
 
 /// Workspace crates and their normal + build dependencies on other workspace
 /// crates.

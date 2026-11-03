@@ -16,6 +16,7 @@ rayon = { workspace = true }
 wide = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
+rand_distr = { workspace = true }
 num-traits = { version = "0.2", default-features = false }
 bytemuck = { workspace = true, features = ["derive"] }
 # `bytemuck` makes `f16`/`bf16` `Pod`, which every GPU upload and kernel needs.
