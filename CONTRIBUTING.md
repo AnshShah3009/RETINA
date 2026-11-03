@@ -260,7 +260,7 @@ GPU code lives in `crates/hal`: WGSL shaders in `crates/hal/shaders/`, host code
   its units, its failure modes, and which reference function it mirrors.
 - **Dependencies:** prefer what the workspace already uses (see the root
   `Cargo.toml` `[workspace.dependencies]`). New dependencies need a reason in the
-  PR; licences must be compatible with MIT/Apache-2.0.
+  PR; licences must be permissive and compatible with MIT (`deny.toml` lists them).
 
 ## Commit messages
 
@@ -340,8 +340,12 @@ case someone is already working on it.
 
 ## License
 
-RETINA is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
-at your option. Unless you explicitly state otherwise, any contribution you
-intentionally submit for inclusion in the work, as defined in the Apache-2.0
-license, shall be dual licensed as above, without any additional terms or
-conditions.
+RETINA is licensed under the [MIT license](LICENSE). By submitting a
+contribution you agree that it is licensed under the MIT license too, without
+any additional terms or conditions.
+
+If your change copies or closely ports code or data from another project, keep
+that project's licence compatible with MIT (permissive: MIT, BSD, Apache-2.0,
+ISC, Zlib), say in the doc comment which file it follows, and add an entry to
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Copyleft (GPL, LGPL, AGPL)
+code cannot be accepted.

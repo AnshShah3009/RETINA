@@ -71,7 +71,7 @@ Regenerate the dependency lists with
 ### Workspace conventions
 
 - **One version.** Every crate inherits `version`, `edition`, `rust-version`
-  (1.95), `license` (MIT OR Apache-2.0) and `repository` from
+  (1.95), `license` (MIT) and `repository` from
   `[workspace.package]` and is released in lockstep.
 - **One dependency table.** Crates name external and internal dependencies with
   `{ workspace = true }`; versions live in the root `[workspace.dependencies]`.

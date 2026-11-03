@@ -7,7 +7,9 @@ name = "cv_native"
 version = "0.1.0"
 description = "Native Python bindings for Rust CV library"
 requires-python = ">=3.7"
+license = { file = "LICENSE" }
 classifiers = [
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: Implementation :: PyPy",

@@ -1,5 +1,6 @@
 // Embedded ArUco dictionaries generated from OpenCV 4.x
-// modules/objdetect/src/aruco/predefined_dictionaries.hpp (Apache-2.0).
+// modules/objdetect/src/aruco/predefined_dictionaries.hpp (Apache-2.0; the
+// AprilTag families are BSD-2-Clause). See THIRD_PARTY_NOTICES.md.
 // Byte-compatible with published cv::aruco DICT_* markers.
 // Layout: flat [id][rotation(4)][bytes]; bits MSB-first, row-major, the bits
 // of a last partial byte right-aligned (OpenCV's `getBitsFromByteList`).

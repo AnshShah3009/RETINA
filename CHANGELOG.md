@@ -12,7 +12,7 @@ also get a row in [docs/bug-log.md](docs/bug-log.md).
 
 ### Added
 
-- Open-source project files: dual MIT/Apache-2.0 license texts, `CONTRIBUTING.md`,
+- Open-source project files: the MIT license, third-party notices, `CONTRIBUTING.md`,
   `CODE_OF_CONDUCT.md`, `SECURITY.md`, `GOVERNANCE.md`, issue forms, a pull
   request template, CODEOWNERS, Dependabot, `docs/ARCHITECTURE.md`, a docs index,
   and `scripts/check.sh` to run CI's checks locally. README examples are doctested.
@@ -42,6 +42,8 @@ also get a row in [docs/bug-log.md](docs/bug-log.md).
     `cv_io::mesh`); `cv-io` no longer depends on `cv-3d` or wgpu.
   - `cv-scientific` is removed; use `cv-math`, `cv-geometry2d`, `cv-signal` and
     `cv-pointcloud` directly.
+- RETINA is licensed under MIT (`license = "MIT"` in every crate). OpenCV- and
+  AprilTag-derived content keeps its notices in `THIRD_PARTY_NOTICES.md`.
 - Every crate shares the workspace version (0.2.0), edition, MSRV 1.95, licence
   and repository through `[workspace.package]`. `tests/crate_layers.rs` enforces
   the crate layer order, and CI runs `cargo deny` (advisories, licences, sources).

@@ -8,7 +8,7 @@ yanked = "deny"
 ignore = []
 
 [licenses]
-# Permissive licences only, so RETINA stays usable under MIT OR Apache-2.0.
+# Permissive licences only, all compatible with RETINA's MIT license.
 # Dual-licensed crates (e.g. "MIT OR Apache-2.0 OR LGPL-2.1-or-later") pass
 # on their permissive option.
 allow = [

@@ -1,7 +1,7 @@
 # RETINA
 
 [![Build and Test](https://github.com/AnshShah3009/RETINA/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/AnshShah3009/RETINA/actions/workflows/build.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 
 **A native Rust computer-vision workspace with CPU and GPU backends, built to
@@ -207,13 +207,9 @@ Issue forms ask for what a maintainer needs to reproduce a problem.
 
 ## License
 
-Licensed under either of
+RETINA is free and open source under the [MIT license](LICENSE). Contributions
+are accepted under the same license.
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
+Some content is derived from other open-source projects (OpenCV's ArUco and
+AprilTag dictionaries, and algorithms that port specific OpenCV sources); their
+notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

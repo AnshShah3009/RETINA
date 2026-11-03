@@ -95,7 +95,7 @@ Each merge keeps the behaviour of the copy that matches the reference library
 
 - `[workspace.package]`: `version = "0.2.0"` (lockstep: every crate shares the
   workspace version, as Bevy and wgpu do), `edition = "2024"`,
-  `rust-version = "1.95"`, `license = "MIT OR Apache-2.0"`, `repository`,
+  `rust-version = "1.95"`, `license = "MIT"`, `repository`,
   `homepage`, `authors`. Every crate inherits them.
 - Every internal dependency goes through `[workspace.dependencies]`.
 - `publish = false` on `cv-examples` and `cv-python`.
