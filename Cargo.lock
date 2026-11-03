@@ -2034,6 +2034,7 @@ version = "0.2.0"
 dependencies = [
  "cv-core",
  "cv-math",
+ "hashbrown 0.17.1",
  "nalgebra",
  "rayon",
  "rstar 0.14.0",

@@ -5,7 +5,7 @@
 //!
 //! All heavy loops use **rayon** for automatic parallelism.
 
-use nalgebra::{Point3, Vector3};
+use nalgebra::Point3;
 
 pub mod bounding_box;
 pub mod crop_filter;
@@ -23,15 +23,7 @@ pub use radius_filter::radius_outlier_removal;
 pub use statistical_filter::statistical_outlier_removal;
 pub use transform::{paint_uniform, transform_points};
 pub use uniform_filter::uniform_downsample;
-pub use voxel_filter::voxel_downsample;
-
-/// Result of voxel downsampling, optionally including normals and colors.
-#[derive(Debug, Clone)]
-pub struct VoxelDownsampleResult {
-    pub points: Vec<Point3<f64>>,
-    pub normals: Option<Vec<Vector3<f64>>>,
-    pub colors: Option<Vec<Vector3<f64>>>,
-}
+pub use voxel_filter::{VoxelDownsampleResult, voxel_downsample};
 
 /// f64 KD-tree over `points` for the k-NN filters.
 ///
@@ -75,6 +67,7 @@ fn knn_excluding_self(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::Vector3;
 
     /// Helper: generate a small cluster around the origin.
     fn cluster(n: usize, spacing: f64) -> Vec<Point3<f64>> {

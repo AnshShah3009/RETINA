@@ -8,7 +8,8 @@
 //! infinite) as having no position: it is left out of every search tree and
 //! every statistic, so it can never change another point's result.
 
-use nalgebra::Point3;
+use hashbrown::HashMap;
+use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
 
 /// Whether a point has a position at all (every coordinate finite).
@@ -150,4 +151,148 @@ pub fn statistical_outlier_removal(
     }
 
     (inlier_points, inlier_indices)
+}
+
+/// Result of [`voxel_downsample`]: one entry per occupied voxel, in sorted
+/// voxel-key order. `normals` / `colors` are `Some` exactly when the
+/// corresponding input was given.
+#[derive(Debug, Clone)]
+pub struct VoxelDownsampleResult {
+    pub points: Vec<Point3<f64>>,
+    pub normals: Option<Vec<Vector3<f64>>>,
+    pub colors: Option<Vec<Vector3<f64>>>,
+}
+
+/// Voxel downsampling (Open3D's `voxel_down_sample`).
+///
+/// Groups points into cubic voxels of side `voxel_size` on the global grid
+/// (key `floor(p / voxel_size)`, computed as `floor(p * (1 / voxel_size))` in
+/// `f64`) and replaces each voxel's contents with the centroid. Optionally
+/// averages normals (and re-normalises them; normals that cancel fall back to
+/// the voxel's first normal, then to `+Z`) and colors. The output is in sorted
+/// voxel-key order, so it is the same on every run. Normal or colour slices
+/// shorter than `points` contribute only the entries they have.
+///
+/// This is intentionally *not* `cv_3d::spatial::VoxelGrid`: that grid is
+/// `f32`, carries no normals/colors, and keys voxels relative to its `origin`.
+/// `cv_3d::filters::voxel_downsample`, `cv_3d::gpu::voxel_downsample` and the
+/// `f32` [`crate::point_cloud::voxel_down_sample`] all call this function.
+///
+/// # Invalid and non-finite input
+///
+/// An empty cloud, or a voxel size that is zero, negative, NaN or infinite,
+/// gives an empty result (with empty `normals` / `colors` when they were
+/// given). A point with a non-finite coordinate is skipped: it joins no voxel.
+pub fn voxel_downsample(
+    points: &[Point3<f64>],
+    normals: Option<&[Vector3<f64>]>,
+    colors: Option<&[Vector3<f64>]>,
+    voxel_size: f64,
+) -> VoxelDownsampleResult {
+    // NaN is not `<= 0`. A non-finite size used to fall through, and
+    // `(NaN).floor() as i64` is 0, so every non-finite point landed in voxel
+    // `(0, 0, 0)` and poisoned the centroid of whatever finite point was there.
+    if points.is_empty() || !voxel_size.is_finite() || voxel_size <= 0.0 {
+        return VoxelDownsampleResult {
+            points: Vec::new(),
+            normals: normals.map(|_| Vec::new()),
+            colors: colors.map(|_| Vec::new()),
+        };
+    }
+
+    let inv = 1.0 / voxel_size;
+
+    // Group points by voxel key.
+    let mut voxels: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+    for (i, p) in points.iter().enumerate() {
+        if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+            continue;
+        }
+        let key = (
+            (p.x * inv).floor() as i64,
+            (p.y * inv).floor() as i64,
+            (p.z * inv).floor() as i64,
+        );
+        voxels.entry(key).or_default().push(i);
+    }
+
+    let has_normals = normals.is_some();
+    let has_colors = colors.is_some();
+
+    // Sort voxel keys so output ordering is deterministic across runs
+    // (HashMap iteration order is randomized per process).
+    let mut sorted_keys: Vec<(i64, i64, i64)> = voxels.keys().copied().collect();
+    sorted_keys.sort_unstable();
+
+    let mut out_points = Vec::with_capacity(voxels.len());
+    let mut out_normals = if has_normals {
+        Some(Vec::with_capacity(voxels.len()))
+    } else {
+        None
+    };
+    let mut out_colors = if has_colors {
+        Some(Vec::with_capacity(voxels.len()))
+    } else {
+        None
+    };
+
+    for key in &sorted_keys {
+        let indices = &voxels[key];
+        let n = indices.len() as f64;
+
+        // Average position.
+        let mut sum = Vector3::zeros();
+        for &i in indices {
+            sum += points[i].coords;
+        }
+        out_points.push(Point3::from(sum / n));
+
+        // Average normals (then re-normalise).
+        if let (Some(norms), Some(out_n)) = (&normals, &mut out_normals) {
+            let mut nsum = Vector3::zeros();
+            // Indices come from the voxel keys, and the caller may pass fewer
+            // normals than points. `voxel_downsample(&[P;2], Some(&[n;1]),
+            // None, 2.0)` panicked on element 1 of a 1-element slice. Every other
+            // `filters` function validates its optional inputs; this one did not.
+            for &i in indices {
+                if let Some(n) = norms.get(i) {
+                    nsum += n;
+                }
+            }
+            let len = nsum.norm();
+            if len > 1e-15 {
+                out_n.push(nsum / len);
+            } else {
+                // Opposing normals cancelled: fall back to the first normal
+                // in the voxel rather than an arbitrary +Z.
+                let Some(first) = norms.get(indices[0]).copied() else {
+                    out_n.push(Vector3::new(0.0, 0.0, 1.0));
+                    continue;
+                };
+                let fl = first.norm();
+                if fl > 1e-15 {
+                    out_n.push(first / fl);
+                } else {
+                    out_n.push(Vector3::new(0.0, 0.0, 1.0));
+                }
+            }
+        }
+
+        // Average colors.
+        if let (Some(cols), Some(out_c)) = (&colors, &mut out_colors) {
+            let mut csum = Vector3::zeros();
+            for &i in indices {
+                if let Some(c) = cols.get(i) {
+                    csum += c;
+                }
+            }
+            out_c.push(csum / n);
+        }
+    }
+
+    VoxelDownsampleResult {
+        points: out_points,
+        normals: out_normals,
+        colors: out_colors,
+    }
 }

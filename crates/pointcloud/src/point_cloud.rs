@@ -36,124 +36,52 @@ fn has_position(p: &Point3<f32>) -> bool {
 
 /// Downsample a point cloud with a voxel grid.
 /// Returns a new point cloud with one point per voxel (the centroid).
+///
+/// An `f32` wrapper over [`crate::filters::voxel_downsample`]: the points,
+/// colours and normals are converted to `f64`, reduced there (global grid,
+/// sorted voxel-key order, normals averaged and re-normalised) and converted
+/// back.
+///
+/// A voxel size that is not a positive finite number returns the cloud
+/// unchanged, as does an empty cloud. Points with a non-finite coordinate are
+/// skipped: they join no voxel.
 pub fn voxel_down_sample(pc: &PointCloud, voxel_size: f32) -> PointCloud {
     // Written as `!(voxel_size > 0.0)` rather than `voxel_size <= 0.0`: NaN is
     // neither greater than zero nor less than or equal to it, so a NaN voxel
     // size used to slip past the guard and `(p.x / NaN).floor() as i32` then
     // saturated to 0 for every coordinate - a 16-point cloud came back as a
-    // single point, the centroid of the whole input.
-    if !(voxel_size > 0.0) || pc.is_empty() {
+    // single point, the centroid of the whole input. The shared filter returns
+    // an empty result for an invalid size; this function's contract is the
+    // unchanged cloud.
+    if !(voxel_size > 0.0 && voxel_size.is_finite()) || pc.is_empty() {
         return pc.clone();
     }
 
-    let n = pc.len();
-    let mut indices: Vec<(i32, i32, i32, usize)> = Vec::with_capacity(n);
+    let points: Vec<Point3<f64>> = pc.points.iter().map(|p| p.cast::<f64>()).collect();
+    let normals: Option<Vec<Vector3<f64>>> = pc
+        .normals
+        .as_ref()
+        .map(|n| n.iter().map(|v| v.cast::<f64>()).collect());
+    let colors: Option<Vec<Vector3<f64>>> = pc
+        .colors
+        .as_ref()
+        .map(|c| c.iter().map(|p| p.coords.cast::<f64>()).collect());
 
-    // 1. Compute indices
-    for i in 0..n {
-        let p = pc.points[i];
-        // `(NaN / vs).floor() as i32` saturates to 0, so a point without a
-        // position joined voxel (0, 0, 0) and turned a real point's centroid
-        // into NaN. Skip it, as the rest of this module does.
-        if !has_position(&p) {
-            continue;
-        }
-        let hx = (p.x / voxel_size).floor() as i32;
-        let hy = (p.y / voxel_size).floor() as i32;
-        let hz = (p.z / voxel_size).floor() as i32;
-        indices.push((hx, hy, hz, i));
-    }
-
-    // 2. Sort by voxel index
-    // Parallel sort if large enough, otherwise sequential
-    if n > 10000 {
-        indices.par_sort_unstable_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.cmp(&b.2))
-        });
-    } else {
-        indices.sort_unstable_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.cmp(&b.2))
-        });
-    }
-
-    // 3. Aggregate
-    let mut new_points = Vec::new();
-    let has_colors = pc.colors.is_some();
-    let has_normals = pc.normals.is_some();
-
-    let mut new_colors = if has_colors { Some(Vec::new()) } else { None };
-    let mut new_normals = if has_normals { Some(Vec::new()) } else { None };
-
-    if indices.is_empty() {
-        return PointCloud::default();
-    }
-
-    let mut current_voxel = (indices[0].0, indices[0].1, indices[0].2);
-    let mut sum_p = Vector3::zeros();
-    let mut sum_c = Vector3::zeros();
-    let mut sum_n = Vector3::zeros();
-    let mut count = 0;
-
-    for &(hx, hy, hz, idx) in &indices {
-        if (hx, hy, hz) != current_voxel {
-            // Push previous voxel
-            let factor = 1.0 / count as f32;
-            new_points.push(Point3::from(sum_p * factor));
-
-            if let Some(nc) = &mut new_colors {
-                nc.push(Point3::from(sum_c * factor));
-            }
-            if let Some(nn) = &mut new_normals {
-                let mut n = sum_n * factor;
-                if n.norm_squared() > 1e-6 {
-                    n.normalize_mut();
-                }
-                nn.push(n);
-            }
-
-            // Reset
-            current_voxel = (hx, hy, hz);
-            sum_p = Vector3::zeros();
-            sum_c = Vector3::zeros();
-            sum_n = Vector3::zeros();
-            count = 0;
-        }
-
-        sum_p += pc.points[idx].coords;
-        if has_colors && let Some(colors) = &pc.colors {
-            sum_c += colors[idx].coords;
-        }
-        if has_normals && let Some(normals) = &pc.normals {
-            sum_n += normals[idx];
-        }
-        count += 1;
-    }
-
-    // Push last voxel
-    if count > 0 {
-        let factor = 1.0 / count as f32;
-        new_points.push(Point3::from(sum_p * factor));
-
-        if let Some(nc) = &mut new_colors {
-            nc.push(Point3::from(sum_c * factor));
-        }
-        if let Some(nn) = &mut new_normals {
-            let mut n = sum_n * factor;
-            if n.norm_squared() > 1e-6 {
-                n.normalize_mut();
-            }
-            nn.push(n);
-        }
-    }
+    let r = crate::filters::voxel_downsample(
+        &points,
+        normals.as_deref(),
+        colors.as_deref(),
+        voxel_size as f64,
+    );
 
     PointCloud {
-        points: new_points,
-        colors: new_colors,
-        normals: new_normals,
+        points: r.points.iter().map(|p| p.cast::<f32>()).collect(),
+        colors: r
+            .colors
+            .map(|c| c.iter().map(|v| Point3::from(v.cast::<f32>())).collect()),
+        normals: r
+            .normals
+            .map(|n| n.iter().map(|v| v.cast::<f32>()).collect()),
     }
 }
 
