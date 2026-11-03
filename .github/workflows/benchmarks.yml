@@ -27,7 +27,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -46,7 +46,7 @@ jobs:
 
     - name: Upload benchmark artifacts
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: benchmark-results-${{ github.run_id }}
         path: target/criterion/
@@ -55,7 +55,7 @@ jobs:
 
     - name: Publish criterion report
       if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: criterion-html-report
         path: target/criterion/report/
@@ -69,7 +69,7 @@ jobs:
 
     steps:
     - name: Download PR benchmark results
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: benchmark-results-${{ github.run_id }}
         path: pr_results
