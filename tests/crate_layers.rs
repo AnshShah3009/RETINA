@@ -24,7 +24,6 @@ const LAYERS: &[(&str, u8)] = &[
     ("cv-io", 1),
     ("cv-math", 1),
     ("cv-eval", 1),
-    ("cv-photo", 1),
     ("cv-rendering", 1),
     ("cv-videoio", 1),
     ("cv-viewer", 1),
@@ -39,11 +38,12 @@ const LAYERS: &[(&str, u8)] = &[
     // L4 domain: images and 3-D data
     ("cv-imgproc", 4),
     ("cv-3d", 4),
-    // L5 domain: geometry, features, registration
+    // L5 domain: geometry, features, registration, photography
     ("cv-calib3d", 5),
     ("cv-features", 5),
     ("cv-registration", 5),
     ("cv-dnn", 5),
+    ("cv-photo", 5),
     // L6 domain built on features and geometry
     ("cv-objdetect", 6),
     ("cv-cli", 6),

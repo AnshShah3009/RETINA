@@ -10,14 +10,10 @@ authors.workspace = true
 
 [dependencies]
 cv-core = { workspace = true }
-image = { workspace = true }
-
-# Dev-only: the parity example in examples/ also exercises cv-imgproc's
-# tone-mapping routines (CLAHE, histogram equalisation) alongside this crate's
-# bilateral filter, and those crates are what the OpenCV reference is measured
-# against. Dev-dependency only, so the published library graph is unchanged.
-[dev-dependencies]
+# The gray bilateral filter is cv-imgproc's `bilateral_filter_gray`, the one
+# implementation shared with the colour and depth bilateral filters.
 cv-imgproc = { workspace = true }
+image = { workspace = true }
 
 [features]
 default = []
