@@ -38,16 +38,10 @@ mod gradients;
 
 /// AKAZE (Accelerated-KAZE) feature detector and descriptor
 pub mod akaze;
-/// ArUco marker detection, generation, and pose estimation (tensor-based API)
-pub mod aruco;
-/// OpenCV's predefined ArUco dictionaries as packed bytes
-pub mod aruco_tables;
 /// Optimal assignment / bipartite matching (Hungarian algorithm)
 pub mod assignment;
 /// BRIEF (Binary Robust Independent Elementary Features) descriptor
 pub mod brief;
-/// ChArUco board detection — fiducial marker board with chessboard corners
-pub mod charuco;
 /// Feature descriptor types and trait implementations
 pub mod descriptor;
 /// FAST (Features from Accelerated Segment Test) corner detection
@@ -56,18 +50,12 @@ pub mod fast;
 pub mod flann;
 /// GFTT (Good Features to Track) corner detection
 pub mod gftt;
-/// Haar cascade classifier for object detection (Viola-Jones)
-pub mod haar_cascade;
 /// Harris corner detection algorithm
 pub mod harris;
-/// Histogram of Oriented Gradients (HOG) feature extraction
-pub mod hog;
 /// LBD (Line Band Descriptor) for line feature matching
 pub mod lbd;
 /// Line feature matching and tracking
 pub mod line_matcher;
-/// Marker detection and tracking
-pub mod markers;
 /// Feature descriptor matching with various strategies
 pub mod matcher;
 /// ORB (Oriented FAST and Rotated BRIEF) detector and descriptor
@@ -83,26 +71,17 @@ pub mod sift;
 pub use akaze::*;
 pub use assignment::*;
 pub use brief::*;
-pub use charuco::*;
 pub use descriptor::*;
 pub use fast::*;
 pub use flann::*;
 pub use gftt::*;
-pub use haar_cascade::*;
 pub use harris::*;
-pub use hog::*;
 pub use lbd::*;
 pub use line_matcher::*;
-pub use markers::*;
 pub use matcher::*;
 pub use orb::*;
 pub use retrieval::*;
 pub use sift::*;
-
-// `charuco` and `markers` both define a `CharucoBoard`. The crate-root name is
-// the tensor-API board that `CharucoDetector::new` takes; the image-API board
-// from `create_charuco_board` stays reachable as `markers::CharucoBoard`.
-pub use charuco::CharucoBoard;
 
 pub use cv_core::{Error, KeyPoint, KeyPoints, Result};
 

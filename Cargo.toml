@@ -39,6 +39,7 @@ cv-pointcloud = { workspace = true }
 cv-distributed = { workspace = true }
 cv-eval = { workspace = true }
 cv-localization = { workspace = true }
+cv-objdetect = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -54,7 +55,7 @@ geo = { workspace = true }
 
 [features]
 default = ["full-precision"]
-gpu = ["cv-calib3d/gpu", "cv-features/gpu"]
+gpu = ["cv-calib3d/gpu", "cv-features/gpu", "cv-objdetect/gpu"]
 full-precision = ["cv-core/full-precision"]
 half-precision = ["cv-core/half-precision"]
 all-precision = ["cv-core/all-precision"]
@@ -116,6 +117,7 @@ members = [
     "crates/eval",
     "crates/cli",
     "crates/localization",
+    "crates/objdetect",
 ]
 
 [workspace.package]
@@ -199,6 +201,7 @@ cv-distributed = { version = "0.2.0", path = "./crates/distributed", features = 
 cv-eval = { version = "0.2.0", path = "./crates/eval" }
 cv-cli = { version = "0.2.0", path = "./crates/cli" }
 cv-localization = { version = "0.2.0", path = "./crates/localization" }
+cv-objdetect = { version = "0.2.0", path = "./crates/objdetect" }
 
 [profile.release]
 opt-level = 3

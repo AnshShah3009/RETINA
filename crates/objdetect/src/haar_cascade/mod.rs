@@ -27,7 +27,7 @@ struct SquaredIntegralImage {
 /// # Usage
 ///
 /// ```no_run
-/// # use cv_features::haar_cascade::HaarCascade;
+/// # use cv_objdetect::haar_cascade::HaarCascade;
 /// # use image::GrayImage;
 /// let cascade = HaarCascade { stages: vec![], size: (24, 24) };
 /// let image = GrayImage::new(640, 480);

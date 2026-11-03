@@ -1879,7 +1879,6 @@ version = "0.2.0"
 dependencies = [
  "bytemuck",
  "criterion",
- "cv-calib3d",
  "cv-core",
  "cv-hal",
  "cv-imgproc",
@@ -1983,6 +1982,22 @@ dependencies = [
  "num-traits",
  "rayon",
  "rstar 0.14.0",
+]
+
+[[package]]
+name = "cv-objdetect"
+version = "0.2.0"
+dependencies = [
+ "bytemuck",
+ "cv-calib3d",
+ "cv-core",
+ "cv-hal",
+ "cv-imgproc",
+ "image",
+ "nalgebra",
+ "pollster",
+ "rayon",
+ "wgpu",
 ]
 
 [[package]]
@@ -6307,6 +6322,7 @@ dependencies = [
  "cv-io",
  "cv-localization",
  "cv-math",
+ "cv-objdetect",
  "cv-optimize",
  "cv-photo",
  "cv-plot",

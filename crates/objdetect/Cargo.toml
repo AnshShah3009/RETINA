@@ -1,0 +1,28 @@
+[package]
+name = "cv-objdetect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Object and marker detection: ArUco, ChArUco, AprilTag, HOG and Haar cascades"
+
+[dependencies]
+cv-core = { workspace = true }
+cv-hal = { workspace = true }
+cv-imgproc = { workspace = true }
+cv-calib3d = { workspace = true }
+nalgebra = { workspace = true }
+rayon = { workspace = true }
+image = { workspace = true }
+
+# Optional GPU marker scan
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+bytemuck = { workspace = true, features = ["derive"], optional = true }
+
+[features]
+default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]

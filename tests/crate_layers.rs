@@ -45,6 +45,7 @@ const LAYERS: &[(&str, u8)] = &[
     ("cv-registration", 5),
     ("cv-dnn", 5),
     // L6 domain built on features and geometry
+    ("cv-objdetect", 6),
     ("cv-cli", 6),
     // L7 pipelines
     ("cv-sfm", 7),
@@ -55,11 +56,6 @@ const LAYERS: &[(&str, u8)] = &[
     ("cv-python", 8),
     ("rust-cv-native", 8),
 ];
-
-/// Edges that break the layer order today and are being removed by the
-/// workspace-structure plan (docs/superpowers/plans/2026-11-03-workspace-structure.md).
-/// Nothing may be added here.
-const KNOWN_VIOLATIONS: &[(&str, &str)] = &[("cv-features", "cv-calib3d")];
 
 /// Workspace crates and their normal + build dependencies on other workspace
 /// crates.
@@ -132,16 +128,11 @@ fn every_workspace_crate_has_a_layer() {
 fn crate_dependencies_respect_layers() {
     let graph = workspace_graph();
     let mut violations = Vec::new();
-    let mut still_known = BTreeSet::new();
     for (krate, deps) in &graph {
         let Some(from) = layer(krate) else { continue };
         for dep in deps {
             let Some(to) = layer(dep) else { continue };
             if to < from {
-                continue;
-            }
-            if KNOWN_VIOLATIONS.contains(&(krate.as_str(), dep.as_str())) {
-                still_known.insert((krate.as_str(), dep.as_str()));
                 continue;
             }
             violations.push(format!("{krate} (L{from}) -> {dep} (L{to})"));
@@ -151,13 +142,5 @@ fn crate_dependencies_respect_layers() {
         violations.is_empty(),
         "dependencies on the same or a higher layer:\n  {}",
         violations.join("\n  ")
-    );
-    let fixed: Vec<_> = KNOWN_VIOLATIONS
-        .iter()
-        .filter(|v| !still_known.contains(*v))
-        .collect();
-    assert!(
-        fixed.is_empty(),
-        "remove fixed entries from KNOWN_VIOLATIONS: {fixed:?}"
     );
 }

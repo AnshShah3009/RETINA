@@ -1,4 +1,4 @@
-//! `cv_features::markers` against OpenCV 4.13's `cv2.aruco`.
+//! `cv_objdetect::markers` against OpenCV 4.13's `cv2.aruco`.
 //!
 //! The PNG fixtures and the expected values below come from
 //! `tests/fixtures/markers/generate.py`: dictionaries, markers and ChArUco
@@ -6,9 +6,9 @@
 //! `CharucoDetector` find in them.
 
 use cv_core::{CpuTensor, TensorShape};
-use cv_features::aruco::ArucoDetector;
-use cv_features::charuco::{CharucoBoard as TensorBoard, CharucoDetector, CharucoParameters};
-use cv_features::markers::*;
+use cv_objdetect::aruco::ArucoDetector;
+use cv_objdetect::charuco::{CharucoBoard as TensorBoard, CharucoDetector, CharucoParameters};
+use cv_objdetect::markers::*;
 use image::{GrayImage, Luma};
 
 fn fixture(name: &str) -> GrayImage {
@@ -238,7 +238,7 @@ fn draws_opencv_markers() {
     // `INTER_NEAREST` resize: at 34 px, pixel 17 still shows cell 2
     // (`floor(17 * (1 / (34 / 6)))`), not cell 3 (`17 * 6 / 34`). Cells 2
     // and 3 of marker 0 differ in its first payload row.
-    let m = cv_features::aruco::draw_marker(ArucoDictionary::Dict4x4_50, 0, 34).unwrap();
+    let m = cv_objdetect::aruco::draw_marker(ArucoDictionary::Dict4x4_50, 0, 34).unwrap();
     let px = m.as_slice().unwrap();
     for i in 0..34 {
         assert_eq!(px[i * 34 + 17], px[i * 34 + 16], "row {i}");

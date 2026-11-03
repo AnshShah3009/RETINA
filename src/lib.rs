@@ -12,6 +12,7 @@ pub use cv_imgproc as imgproc;
 pub use cv_io as io;
 pub use cv_localization as localization;
 pub use cv_math as math;
+pub use cv_objdetect as objdetect;
 pub use cv_optimize as optimize;
 pub use cv_photo as photo;
 pub use cv_plot as plot;

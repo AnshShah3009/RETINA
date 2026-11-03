@@ -30,6 +30,7 @@ const WGSL_DIRS: &[&str] = &[
     "crates/hal/src",
     "crates/calib3d/src",
     "crates/features/src",
+    "crates/objdetect/src",
 ];
 
 /// Directories whose `.rs` files may embed WGSL in raw string literals.
