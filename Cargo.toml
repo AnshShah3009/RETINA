@@ -1,10 +1,13 @@
 [package]
 name = "rust-cv-native"
-version = "0.2.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "Native Rust computer vision library with multi-backend acceleration"
-repository = "https://github.com/AnshShah3009/RETINA"
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 readme = "README.md"
 keywords = ["computer-vision", "image-processing", "point-cloud", "gpu", "opencv"]
 categories = ["computer-vision", "multimedia::images", "science"]
@@ -115,6 +118,15 @@ members = [
     "crates/localization",
 ]
 
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/AnshShah3009/RETINA"
+homepage = "https://github.com/AnshShah3009/RETINA"
+authors = ["Ansh Shah and the RETINA contributors"]
+
 [workspace.dependencies]
 # Shared External Dependencies
 rayon = "1.12"
@@ -160,34 +172,34 @@ tract-onnx = "0.23.9"
 rustfft = "6.4"
 
 # Internal Workspace Crates
-cv-core = { path = "./crates/core" }
-cv-hal = { path = "./crates/hal" }
-cv-imgproc = { path = "./crates/imgproc" }
-cv-features = { path = "./crates/features" }
-cv-video = { path = "./crates/video" }
-cv-3d = { path = "./crates/3d" }
-cv-calib3d = { path = "./crates/calib3d" }
-cv-sfm = { path = "./crates/sfm" }
-cv-slam = { path = "./crates/slam" }
-cv-runtime = { path = "./crates/runtime", features = ["tracing"] }
-cv-optimize = { path = "./crates/optimize" }
-cv-scientific = { path = "./crates/scientific" }
-cv-videoio = { path = "./crates/videoio" }
-cv-photo = { path = "./crates/photo" }
-cv-io = { path = "./crates/io" }
-cv-dnn = { path = "./crates/dnn" }
-cv-rendering = { path = "./crates/rendering" }
-cv-registration = { path = "./crates/registration" }
-cv-plot = { path = "./crates/plot" }
-cv-viewer = { path = "./crates/viewer" }
-cv-math = { path = "./crates/math" }
-cv-geometry2d = { path = "./crates/geometry2d" }
-cv-signal = { path = "./crates/signal_proc" }
-cv-pointcloud = { path = "./crates/pointcloud" }
-cv-distributed = { path = "./crates/distributed", features = ["tracing"] }
-cv-eval = { path = "./crates/eval" }
-cv-cli = { path = "./crates/cli" }
-cv-localization = { path = "./crates/localization" }
+cv-core = { version = "0.2.0", path = "./crates/core" }
+cv-hal = { version = "0.2.0", path = "./crates/hal" }
+cv-imgproc = { version = "0.2.0", path = "./crates/imgproc" }
+cv-features = { version = "0.2.0", path = "./crates/features" }
+cv-video = { version = "0.2.0", path = "./crates/video" }
+cv-3d = { version = "0.2.0", path = "./crates/3d" }
+cv-calib3d = { version = "0.2.0", path = "./crates/calib3d" }
+cv-sfm = { version = "0.2.0", path = "./crates/sfm" }
+cv-slam = { version = "0.2.0", path = "./crates/slam" }
+cv-runtime = { version = "0.2.0", path = "./crates/runtime", features = ["tracing"] }
+cv-optimize = { version = "0.2.0", path = "./crates/optimize" }
+cv-scientific = { version = "0.2.0", path = "./crates/scientific" }
+cv-videoio = { version = "0.2.0", path = "./crates/videoio" }
+cv-photo = { version = "0.2.0", path = "./crates/photo" }
+cv-io = { version = "0.2.0", path = "./crates/io" }
+cv-dnn = { version = "0.2.0", path = "./crates/dnn" }
+cv-rendering = { version = "0.2.0", path = "./crates/rendering" }
+cv-registration = { version = "0.2.0", path = "./crates/registration" }
+cv-plot = { version = "0.2.0", path = "./crates/plot" }
+cv-viewer = { version = "0.2.0", path = "./crates/viewer" }
+cv-math = { version = "0.2.0", path = "./crates/math" }
+cv-geometry2d = { version = "0.2.0", path = "./crates/geometry2d" }
+cv-signal = { version = "0.2.0", path = "./crates/signal_proc" }
+cv-pointcloud = { version = "0.2.0", path = "./crates/pointcloud" }
+cv-distributed = { version = "0.2.0", path = "./crates/distributed", features = ["tracing"] }
+cv-eval = { version = "0.2.0", path = "./crates/eval" }
+cv-cli = { version = "0.2.0", path = "./crates/cli" }
+cv-localization = { version = "0.2.0", path = "./crates/localization" }
 
 [profile.release]
 opt-level = 3

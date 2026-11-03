@@ -1,8 +1,12 @@
 [package]
 name = "cv-eval"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 description = "Evaluation metrics for visual localization, SfM and SLAM: trajectory ATE/RPE, reconstruction quality and retrieval metrics"
 
 [dependencies]
