@@ -19,7 +19,6 @@ pub use cv_pointcloud as pointcloud;
 pub use cv_registration as registration;
 pub use cv_rendering as rendering;
 pub use cv_runtime as runtime;
-pub use cv_scientific as scientific;
 pub use cv_sfm as sfm;
 pub use cv_signal as signal;
 pub use cv_slam as slam;

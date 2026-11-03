@@ -36,7 +36,6 @@ const LAYERS: &[(&str, u8)] = &[
     ("cv-distributed", 2),
     // L3 runtime
     ("cv-runtime", 3),
-    ("cv-scientific", 3),
     // L4 domain: images and 3-D data
     ("cv-imgproc", 4),
     ("cv-3d", 4),

@@ -59,11 +59,11 @@ cv-plot = { workspace = true }
 cv-core = { workspace = true }
 cv-registration = { workspace = true }
 cv-rendering = { workspace = true }
-cv-scientific = { workspace = true }
 cv-3d = { workspace = true }
 cv-features = { workspace = true, features = ["gpu"] }
 cv-hal = { workspace = true }
 cv-runtime = { workspace = true }
+cv-math = { workspace = true }
 nalgebra = { workspace = true }
 rand = { workspace = true }
 image = { workspace = true }

@@ -274,10 +274,10 @@ fn cg_solve_checked(
             "triplet ({r}, {c}) is out of bounds for a {nrows}x{ncols} matrix"
         )));
     }
-    let mat = cv_scientific::sparse::CsrMatrix::from_triplets(nrows, ncols, triplets);
+    let mat = cv_math::sparse::CsrMatrix::from_triplets(nrows, ncols, triplets);
     let b_vec = DVector::from_vec(b);
     let result =
-        cv_scientific::sparse::cg_solve(&mat, &b_vec, 1000, 1e-10).map_err(CgSolveError::Solver)?;
+        cv_math::sparse::cg_solve(&mat, &b_vec, 1000, 1e-10).map_err(CgSolveError::Solver)?;
     Ok(result.as_slice().to_vec())
 }
 

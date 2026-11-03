@@ -1761,8 +1761,8 @@ dependencies = [
  "cv-core",
  "cv-hal",
  "cv-math",
+ "cv-pointcloud",
  "cv-runtime",
- "cv-scientific",
  "futures",
  "hashbrown 0.17.1",
  "image",
@@ -1861,11 +1861,11 @@ dependencies = [
  "cv-core",
  "cv-features",
  "cv-hal",
+ "cv-math",
  "cv-plot",
  "cv-registration",
  "cv-rendering",
  "cv-runtime",
- "cv-scientific",
  "image",
  "nalgebra",
  "rand 0.10.3",
@@ -2030,11 +2030,13 @@ dependencies = [
  "cv-core",
  "cv-dnn",
  "cv-features",
+ "cv-geometry2d",
  "cv-imgproc",
+ "cv-math",
  "cv-optimize",
  "cv-photo",
  "cv-runtime",
- "cv-scientific",
+ "cv-signal",
  "cv-slam",
  "cv-videoio",
  "image",
@@ -2091,19 +2093,6 @@ dependencies = [
  "tokio",
  "tracing",
  "wgpu",
-]
-
-[[package]]
-name = "cv-scientific"
-version = "0.2.0"
-dependencies = [
- "cv-core",
- "cv-geometry2d",
- "cv-math",
- "cv-pointcloud",
- "cv-signal",
- "geo",
- "nalgebra",
 ]
 
 [[package]]
@@ -6323,7 +6312,6 @@ dependencies = [
  "cv-registration",
  "cv-rendering",
  "cv-runtime",
- "cv-scientific",
  "cv-sfm",
  "cv-signal",
  "cv-slam",
@@ -6331,6 +6319,7 @@ dependencies = [
  "cv-videoio",
  "cv-viewer",
  "futures",
+ "geo",
  "image",
  "nalgebra",
  "rand 0.10.3",

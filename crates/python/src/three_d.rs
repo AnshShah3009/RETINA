@@ -326,7 +326,7 @@ fn voxel_downsample(points: Vec<(f64, f64, f64)>, voxel_size: f64) -> Vec<(f64, 
 /// Query a KD-tree for the k nearest neighbours of a point.
 #[pyfunction]
 fn kdtree_query(points: Vec<Vec<f64>>, query: Vec<f64>, k: usize) -> PyResult<Vec<(usize, f64)>> {
-    let tree = cv_scientific::spatial::KDTree::new(&points)
+    let tree = cv_math::spatial::KDTree::new(&points)
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
     Ok(tree.query(&query, k))
 }
@@ -336,7 +336,7 @@ fn kdtree_query(points: Vec<Vec<f64>>, query: Vec<f64>, k: usize) -> PyResult<Ve
 /// Compute the convex hull of a set of 2D points.
 #[pyfunction]
 fn convex_hull_2d(points: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
-    use cv_scientific::geometry2d::{Point2D, convex_hull};
+    use cv_geometry2d::geometry2d::{Point2D, convex_hull};
     let pts: Vec<Point2D> = points.iter().map(|&(x, y)| Point2D::new(x, y)).collect();
     let hull = convex_hull(&pts);
     hull.exterior.iter().map(|p| (p.x, p.y)).collect()
@@ -345,7 +345,7 @@ fn convex_hull_2d(points: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
 /// Compute the Delaunay triangulation of a set of 2D points.
 #[pyfunction]
 fn delaunay(points: Vec<(f64, f64)>) -> Vec<(usize, usize, usize)> {
-    use cv_scientific::geometry2d::{Point2D, delaunay_triangulation};
+    use cv_geometry2d::geometry2d::{Point2D, delaunay_triangulation};
     let pts: Vec<Point2D> = points.iter().map(|&(x, y)| Point2D::new(x, y)).collect();
     delaunay_triangulation(&pts)
         .into_iter()
@@ -356,7 +356,7 @@ fn delaunay(points: Vec<(f64, f64)>) -> Vec<(usize, usize, usize)> {
 /// Compute the area of a polygon defined by its vertices.
 #[pyfunction]
 fn polygon_area(vertices: Vec<(f64, f64)>) -> f64 {
-    use cv_scientific::geometry2d::{Point2D, Polygon};
+    use cv_geometry2d::geometry2d::{Point2D, Polygon};
     let mut pts: Vec<Point2D> = vertices.iter().map(|&(x, y)| Point2D::new(x, y)).collect();
     if pts.len() >= 2
         && (pts.first().unwrap().x != pts.last().unwrap().x
@@ -371,7 +371,7 @@ fn polygon_area(vertices: Vec<(f64, f64)>) -> f64 {
 /// Test whether a point lies inside a polygon.
 #[pyfunction]
 fn point_in_polygon(x: f64, y: f64, polygon: Vec<(f64, f64)>) -> bool {
-    use cv_scientific::geometry2d::{Point2D, Polygon, point_in_polygon as pip};
+    use cv_geometry2d::geometry2d::{Point2D, Polygon, point_in_polygon as pip};
     let mut pts: Vec<Point2D> = polygon
         .iter()
         .map(|&(px, py)| Point2D::new(px, py))

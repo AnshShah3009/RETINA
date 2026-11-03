@@ -13,7 +13,7 @@ bytemuck = { workspace = true }
 nalgebra = { workspace = true }
 cv-core = { workspace = true }
 cv-math = { workspace = true }
-cv-scientific = { workspace = true }
+cv-pointcloud = { workspace = true }
 cv-runtime = { workspace = true }
 cv-hal = { workspace = true }
 image = { workspace = true }

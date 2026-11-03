@@ -26,7 +26,6 @@ cv-runtime = { workspace = true }
 cv-optimize = { workspace = true }
 cv-videoio = { workspace = true }
 cv-photo = { workspace = true }
-cv-scientific = { workspace = true }
 cv-viewer = { workspace = true }
 cv-io = { workspace = true }
 cv-dnn = { workspace = true }
@@ -51,6 +50,7 @@ wgpu = { workspace = true }
 rand = { workspace = true }
 bytemuck = { workspace = true }
 serde_json = { workspace = true }
+geo = { workspace = true }
 
 [features]
 default = ["full-precision"]
@@ -99,7 +99,6 @@ members = [
     "crates/slam",
     "crates/runtime",
     "crates/optimize",
-    "crates/scientific",
     "crates/python",
     "crates/viewer",
     "crates/io",
@@ -184,7 +183,6 @@ cv-sfm = { version = "0.2.0", path = "./crates/sfm" }
 cv-slam = { version = "0.2.0", path = "./crates/slam" }
 cv-runtime = { version = "0.2.0", path = "./crates/runtime", features = ["tracing"] }
 cv-optimize = { version = "0.2.0", path = "./crates/optimize" }
-cv-scientific = { version = "0.2.0", path = "./crates/scientific" }
 cv-videoio = { version = "0.2.0", path = "./crates/videoio" }
 cv-photo = { version = "0.2.0", path = "./crates/photo" }
 cv-io = { version = "0.2.0", path = "./crates/io" }

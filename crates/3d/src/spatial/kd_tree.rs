@@ -10,7 +10,7 @@ use std::collections::BinaryHeap;
 ///
 /// A generic arbitrary-dimension `f64` KD-tree exists in
 /// [`cv_math::spatial::KDTree`] (also re-exported as
-/// `cv_scientific::spatial::KDTree`, and already used by
+/// `cv_math::spatial::KDTree`, and already used by
 /// `crate::gpu::point_cloud::compute_normals_cpu_kdtree`). This type is
 /// **deliberately not** a thin wrapper around it, because delegation would both
 /// change behaviour and regress the hot path:

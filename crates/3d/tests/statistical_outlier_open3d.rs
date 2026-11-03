@@ -62,7 +62,7 @@ fn the_pointcloud_crate_agrees() {
         (20, 0.3, 340),
         (3, 2.0, 484),
     ] {
-        let (_, idx) = cv_scientific::point_cloud::remove_statistical_outliers(&pc, nb, ratio);
+        let (_, idx) = cv_pointcloud::point_cloud::remove_statistical_outliers(&pc, nb, ratio);
         assert_eq!(
             idx.len(),
             open3d,

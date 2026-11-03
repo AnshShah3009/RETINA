@@ -24,7 +24,6 @@ numpy = { workspace = true }
 cv-core = { workspace = true }
 cv-features = { workspace = true }
 cv-3d = { workspace = true }
-cv-scientific = { workspace = true }
 cv-runtime = { workspace = true }
 cv-slam = { workspace = true }
 cv-videoio = { workspace = true }
@@ -32,6 +31,9 @@ cv-dnn = { workspace = true }
 cv-optimize = { workspace = true }
 cv-photo = { workspace = true }
 cv-imgproc = { workspace = true }
+cv-math = { workspace = true }
+cv-signal = { workspace = true }
+cv-geometry2d = { workspace = true }
 nalgebra = { workspace = true }
 rustfft = { workspace = true }
 image = { workspace = true }

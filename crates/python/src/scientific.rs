@@ -3,7 +3,7 @@ use pyo3::prelude::*;
 /// Compute the 1D FFT of real-valued input.
 #[pyfunction]
 fn fft(py: Python<'_>, data: Vec<f64>) -> Vec<(f64, f64)> {
-    py.detach(|| cv_scientific::fft::fft(&data))
+    py.detach(|| cv_signal::fft::fft(&data))
         .into_iter()
         .map(|c| (c.re, c.im))
         .collect()
@@ -16,7 +16,7 @@ fn ifft(py: Python<'_>, data: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
         .iter()
         .map(|&(re, im)| rustfft::num_complex::Complex::new(re, im))
         .collect();
-    py.detach(|| cv_scientific::fft::ifft(&complex))
+    py.detach(|| cv_signal::fft::ifft(&complex))
         .into_iter()
         .map(|c| (c.re, c.im))
         .collect()
@@ -30,19 +30,19 @@ fn welch_psd(
     nperseg: usize,
     sample_rate: f64,
 ) -> (Vec<f64>, Vec<f64>) {
-    py.detach(|| cv_scientific::signal::welch(&data, nperseg, None, sample_rate))
+    py.detach(|| cv_signal::signal::welch(&data, nperseg, None, sample_rate))
 }
 
 /// Design a Butterworth lowpass filter.
 #[pyfunction]
 fn butter_lowpass(order: usize, cutoff: f64, sample_rate: f64) -> (Vec<f64>, Vec<f64>) {
-    cv_scientific::signal::butter(order, cutoff, sample_rate)
+    cv_signal::signal::butter(order, cutoff, sample_rate)
 }
 
 /// Zero-phase forward-backward digital filtering.
 #[pyfunction]
 fn filtfilt(py: Python<'_>, b: Vec<f64>, a: Vec<f64>, x: Vec<f64>) -> Vec<f64> {
-    py.detach(|| cv_scientific::signal::filtfilt(&b, &a, &x))
+    py.detach(|| cv_signal::signal::filtfilt(&b, &a, &x))
 }
 
 /// Find peaks (local maxima) in a 1D signal.
@@ -54,14 +54,14 @@ fn find_peaks(
     min_height: Option<f64>,
     min_distance: Option<usize>,
 ) -> Vec<usize> {
-    py.detach(|| cv_scientific::signal::find_peaks(&data, min_height, min_distance))
+    py.detach(|| cv_signal::signal::find_peaks(&data, min_height, min_distance))
 }
 
 /// Simple linear regression: y = slope * x + intercept.
 #[pyfunction]
 fn linear_regression(py: Python<'_>, x: Vec<f64>, y: Vec<f64>) -> PyResult<(f64, f64, f64)> {
     let result = py
-        .detach(|| cv_scientific::stats::linregress(&x, &y))
+        .detach(|| cv_math::stats::linregress(&x, &y))
         .map_err(PyErr::new::<pyo3::exceptions::PyValueError, _>)?;
     Ok((result.slope, result.intercept, result.r_squared))
 }
