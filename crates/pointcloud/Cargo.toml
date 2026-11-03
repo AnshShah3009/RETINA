@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 cv-core = { workspace = true }
 cv-math = { workspace = true }
+hashbrown = { workspace = true }
 nalgebra = { workspace = true }
 rstar = { workspace = true }
 rayon = { workspace = true }

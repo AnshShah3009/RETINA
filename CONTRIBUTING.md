@@ -331,6 +331,15 @@ verify it:
   OpenCV's); USAC's local refinement keeps a refit model even when it scores worse.
 - **Joint bilateral filter:** uses an L2 colour distance; OpenCV's colour
   bilateral uses L1.
+- **Bilateral, sigma <= 0:** OpenCV 4.13's `bilateralFilter` returns a copy of
+  the input when either sigma is not positive; `cv-imgproc` replaces it with 1
+  (as the inner `bilateralFilter_8u` does). Matching OpenCV touches the gray,
+  RGB and depth paths.
+- **HAL CPU bilateral** (`crates/hal/src/cpu/compute_context_impl.rs`): square
+  window instead of OpenCV's disc, `ceil` instead of `cvRound` radius, no
+  minimum radius of 1, replicate instead of reflect-101 border, no rounding. For
+  `[[0,100,0],[100,0,100],[0,100,0]]`, `d = 1` it returns the input where OpenCV
+  gives a centre of 60. The GPU kernel mirrors it, so both change together.
 - **Performance:** GPU `fast::extract_keypoints` waits on the GPU twice (count,
   then keypoints); readback staging buffers are allocated per call.
 - **Docs:** examples for crates that have none (`crates/*/examples/`).

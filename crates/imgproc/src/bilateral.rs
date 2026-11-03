@@ -4,10 +4,12 @@
 //!
 //! The kernel follows `cv::bilateralFilter`: the disc of offsets within the
 //! radius, a reflect-101 (`BORDER_DEFAULT`) border, and OpenCV's radius rule.
-//! [`bilateral_filter_rgb`] reproduces `cv2.bilateralFilter` on a 3-channel
-//! `u8` image byte for byte; see `tests/bilateral_opencv_parity.rs`.
+//! [`bilateral_filter_gray`] and [`bilateral_filter_rgb`] reproduce
+//! `cv2.bilateralFilter` on 1- and 3-channel `u8` images byte for byte; see
+//! `tests/bilateral_opencv_parity.rs` and `tests/bilateral_gray_opencv_parity.rs`.
 
 use cv_runtime::orchestrator::RuntimeRunner;
+use image::GrayImage;
 use rayon::prelude::*;
 
 /// Bilateral filter parameters
@@ -87,6 +89,72 @@ fn reflect_101(mut p: i32, len: i32) -> usize {
         }
     }
     p as usize
+}
+
+/// `cv::bilateralFilter` on an 8-bit single-channel image (OpenCV's
+/// `bilateralFilter_8u`, `cn = 1`), byte for byte.
+///
+/// Unlike the [`BilateralFilterParams`] entry points, `sigma_color` is
+/// OpenCV's `sigmaColor` in absolute grey levels, not normalised intensity:
+/// scaling by 1/255 and back is not exact in `f32` and would move some
+/// weights.
+///
+/// * The kernel is the disc of offsets with `sqrt(dx² + dy²) <= radius`
+///   as OpenCV builds it: `radius = d / 2` for `d > 0`, otherwise
+///   `cvRound(1.5 * sigma_space)`, and never below 1.
+/// * The image is extended with `BORDER_DEFAULT` (reflect-101), so every
+///   output pixel averages the full disc.
+/// * A non-positive sigma is replaced by 1, as `bilateralFilter_8u` does.
+///   (OpenCV 4.13's `cv::bilateralFilter` returns a copy of the input before
+///   reaching that rule; this function keeps the documented replacement.)
+/// * The range weight is a 256-entry table `exp(-diff² / (2 sigma_color²))`;
+///   weights and sums are `f32`, accumulated in OpenCV's tap order, and the
+///   mean is rounded with `cvRound` (half to even).
+///
+/// `cv_photo::bilateral_filter` delegates here.
+pub fn bilateral_filter_gray(
+    src: &GrayImage,
+    d: i32,
+    sigma_color: f32,
+    sigma_space: f32,
+) -> GrayImage {
+    let (width, height) = src.dimensions();
+    let mut dst = GrayImage::new(width, height);
+    if width == 0 || height == 0 {
+        return dst;
+    }
+    let taps = disc_taps(d, sigma_space);
+    let color_coeff = gauss_color_coeff(sigma_color);
+    // u8 intensities differ by 0..=255, so the range weight is a table.
+    let mut color_w = [0.0f32; 256];
+    for (diff, w) in color_w.iter_mut().enumerate() {
+        let diff = diff as f64;
+        *w = (diff * diff * color_coeff).exp() as f32;
+    }
+
+    let raw = src.as_raw();
+    let stride = width as usize;
+    let (w, h) = (width as i32, height as i32);
+    dst.par_chunks_mut(stride).enumerate().for_each(|(y, row)| {
+        let y = y as i32;
+        for (x, out) in row.iter_mut().enumerate() {
+            let center = raw[y as usize * stride + x];
+            let mut sum = 0.0f32;
+            let mut weight_sum = 0.0f32;
+            for &(dy, dx, space_w) in &taps {
+                let ny = reflect_101(y + dy, h);
+                let nx = reflect_101(x as i32 + dx, w);
+                let val = raw[ny * stride + nx];
+                let weight = space_w * color_w[val.abs_diff(center) as usize];
+                sum += val as f32 * weight;
+                weight_sum += weight;
+            }
+            // The centre tap has weight `space_w(0) * 1 = 1`, so
+            // `weight_sum >= 1`.
+            *out = (sum / weight_sum).round_ties_even().clamp(0.0, 255.0) as u8;
+        }
+    });
+    dst
 }
 
 impl BilateralFilterParams {
@@ -455,6 +523,7 @@ pub fn joint_bilateral_filter_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::Luma;
 
     #[test]
     fn test_bilateral_preserves_uniform() {
@@ -567,6 +636,89 @@ mod tests {
             "uniform joint drifted to {}",
             joint_out[0]
         );
+    }
+
+    /// Spatial exp once per offset, times a 256-entry range exp, accumulated in
+    /// the same neighbour order as `exp(space + color)`. u8 output stays identical.
+    ///
+    /// The reference below follows the same OpenCV semantics as
+    /// `bilateral_filter_gray` (disc support, reflect-101 border, `cvRound` radius
+    /// clamped to 1); only the weight evaluation differs.
+    #[test]
+    fn precomputed_exps_match_fused_exp_bytes() {
+        let images = [
+            GrayImage::from_fn(32, 8, |x, _| Luma([if x < 16 { 100 } else { 101 }])),
+            GrayImage::from_fn(17, 13, |x, y| Luma([((x * 13 + y * 7) % 256) as u8])),
+            GrayImage::from_fn(9, 9, |x, y| Luma([if (x + y) % 5 == 0 { 0 } else { 255 }])),
+        ];
+        let params = [
+            (5, 50.0, 2.0),
+            (5, 30.0, 3.0),
+            (-1, 10.0, 5.0),
+            (4, 20.0, 15.0),
+        ];
+        for img in &images {
+            for &(d, sc, ss) in &params {
+                let fast = bilateral_filter_gray(img, d, sc, ss);
+                let fused = fused_exp_bilateral(img, d, sc, ss);
+                assert_eq!(
+                    fast.as_raw(),
+                    fused.as_raw(),
+                    "d={d} sigma_color={sc} sigma_space={ss}"
+                );
+            }
+        }
+    }
+
+    fn fused_exp_bilateral(
+        src: &GrayImage,
+        d: i32,
+        sigma_color: f32,
+        sigma_space: f32,
+    ) -> GrayImage {
+        let width = src.width() as usize;
+        let height = src.height() as usize;
+        let mut dst = GrayImage::new(src.width(), src.height());
+        let sigma_color = if sigma_color > 0.0 { sigma_color } else { 1.0 };
+        let sigma_space = if sigma_space > 0.0 { sigma_space } else { 1.0 };
+        let radius = if d <= 0 {
+            (sigma_space * 1.5).round_ties_even() as i32
+        } else {
+            d / 2
+        }
+        .max(1);
+        let gauss_color_coeff = -0.5 / (sigma_color * sigma_color);
+        let gauss_space_coeff = -0.5 / (sigma_space * sigma_space);
+        for y in 0..height {
+            for x in 0..width {
+                let mut sum_weight = 0.0f32;
+                let mut sum_val = 0.0f32;
+                let center_val = src.get_pixel(x as u32, y as u32)[0] as f32;
+                for dy in -radius..=radius {
+                    for dx in -radius..=radius {
+                        if dx * dx + dy * dy > radius * radius {
+                            continue;
+                        }
+                        let sy = reflect_101(y as i32 + dy, height as i32);
+                        let sx = reflect_101(x as i32 + dx, width as i32);
+                        let val = src.get_pixel(sx as u32, sy as u32)[0] as f32;
+                        let dist_sq = (dx * dx + dy * dy) as f32;
+                        let color_diff = val - center_val;
+                        let weight = (dist_sq * gauss_space_coeff
+                            + color_diff * color_diff * gauss_color_coeff)
+                            .exp();
+                        sum_val += val * weight;
+                        sum_weight += weight;
+                    }
+                }
+                dst.put_pixel(
+                    x as u32,
+                    y as u32,
+                    Luma([(sum_val / sum_weight).round_ties_even().clamp(0.0, 255.0) as u8]),
+                );
+            }
+        }
+        dst
     }
 
     /// The precomputed disc and colour tables reproduce a direct evaluation of

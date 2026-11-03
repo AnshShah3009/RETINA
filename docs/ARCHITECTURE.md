@@ -27,7 +27,6 @@ layer 1  cv-hal        ->  core                       CPU / GPU / MLX / CubeCL b
          cv-io         ->  core                       file formats and datasets
          cv-math       ->  core                       math primitives, special functions, k-d tree
          cv-eval       ->  core                       trajectory, reconstruction, retrieval metrics
-         cv-photo      ->  core                       computational photography
          cv-rendering  ->  core                       Gaussian splatting, mesh rendering
          cv-videoio    ->  core                       video capture (FFmpeg, V4L2)
          cv-viewer     ->  core                       egui/wgpu 3-D viewer
@@ -47,6 +46,7 @@ layer 5  cv-calib3d    ->  core, hal, imgproc, math, runtime      calibration, P
          cv-features   ->  core, hal, imgproc, runtime            detectors, descriptors, matching
          cv-registration -> 3d, core, hal, pointcloud             ICP, global registration
          cv-dnn        ->  core, imgproc, runtime                 DNN pre/post-processing
+         cv-photo      ->  core, imgproc                          computational photography
 
 layer 6  cv-objdetect  ->  calib3d, core, hal, imgproc            ArUco, ChArUco, AprilTag, HOG, cascades
          cv-cli        ->  core, eval, io                         cv-bench evaluation CLI
@@ -160,7 +160,8 @@ macOS runner has a Metal GPU; the Linux runner has none.
 | A marker, board or object detector (ArUco, HOG, cascades) | `cv-objdetect` |
 | A robust estimator (RANSAC, USAC) | `cv-calib3d` |
 | Calibration, PnP, epipolar geometry, stereo | `cv-calib3d` |
-| Point-cloud or mesh processing | `cv-3d` (or `cv-pointcloud` for lightweight, dependency-free algorithms) |
+| A point-cloud filter or estimator (outlier removal, voxel downsampling, normals, FPFH) | `cv-pointcloud` (f64 kernel); `cv-3d` re-exports or wraps it |
+| Meshing, TSDF, GPU point-cloud paths | `cv-3d` |
 | Registration (ICP, FPFH, global) | `cv-registration` |
 | A file format or dataset loader | `cv-io` |
 | An optimiser or factor | `cv-optimize` |

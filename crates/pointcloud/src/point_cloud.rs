@@ -1,29 +1,7 @@
 use cv_core::PointCloud;
-use nalgebra::{Matrix3, Point3, Vector3};
+use nalgebra::{Point3, Vector3};
 use rayon::prelude::*;
-use rstar::PointDistance;
 use rstar::{AABB, RTree, RTreeObject};
-
-/// Analytic minimum eigenvector of a 3×3 symmetric matrix.
-///
-/// The shared implementation in `cv-math` (Open3D `PointCloudImpl.h` /
-/// Geometric Tools `RobustEigenSymmetric3x3`) is generic over the element type,
-/// and its `f32` instantiation cannot resolve a three-point neighbourhood: the
-/// out-of-plane eigenvalue is exactly zero while the in-plane spread is thin, so
-/// `det((A - qI) / p)` saturates at its `±1` clamp, the two small eigenvalues
-/// look repeated, and the returned vector is an arbitrary element of their shared
-/// span - for a planar cloud, one that lies *in* the plane. Solving the same
-/// covariance in `f64` separates the eigenvalues, so upcast the matrix, run the
-/// solver, and cast the unit eigenvector back.
-fn fast_eigen3x3_min(m: &Matrix3<f32>) -> Vector3<f32> {
-    let v = cv_math::linalg::min_eigenvector_3x3(&m.map(|value| value as f64));
-    Vector3::new(v.x as f32, v.y as f32, v.z as f32)
-}
-
-/// The normal given to a point whose neighbourhood cannot determine one.
-fn default_normal() -> Vector3<f32> {
-    Vector3::new(0.0, 0.0, 1.0)
-}
 
 /// Whether a point has a position at all.
 ///
@@ -37,124 +15,52 @@ fn has_position(p: &Point3<f32>) -> bool {
 
 /// Downsample a point cloud with a voxel grid.
 /// Returns a new point cloud with one point per voxel (the centroid).
+///
+/// An `f32` wrapper over [`crate::filters::voxel_downsample`]: the points,
+/// colours and normals are converted to `f64`, reduced there (global grid,
+/// sorted voxel-key order, normals averaged and re-normalised) and converted
+/// back.
+///
+/// A voxel size that is not a positive finite number returns the cloud
+/// unchanged, as does an empty cloud. Points with a non-finite coordinate are
+/// skipped: they join no voxel.
 pub fn voxel_down_sample(pc: &PointCloud, voxel_size: f32) -> PointCloud {
     // Written as `!(voxel_size > 0.0)` rather than `voxel_size <= 0.0`: NaN is
     // neither greater than zero nor less than or equal to it, so a NaN voxel
     // size used to slip past the guard and `(p.x / NaN).floor() as i32` then
     // saturated to 0 for every coordinate - a 16-point cloud came back as a
-    // single point, the centroid of the whole input.
-    if !(voxel_size > 0.0) || pc.is_empty() {
+    // single point, the centroid of the whole input. The shared filter returns
+    // an empty result for an invalid size; this function's contract is the
+    // unchanged cloud.
+    if !(voxel_size > 0.0 && voxel_size.is_finite()) || pc.is_empty() {
         return pc.clone();
     }
 
-    let n = pc.len();
-    let mut indices: Vec<(i32, i32, i32, usize)> = Vec::with_capacity(n);
+    let points: Vec<Point3<f64>> = pc.points.iter().map(|p| p.cast::<f64>()).collect();
+    let normals: Option<Vec<Vector3<f64>>> = pc
+        .normals
+        .as_ref()
+        .map(|n| n.iter().map(|v| v.cast::<f64>()).collect());
+    let colors: Option<Vec<Vector3<f64>>> = pc
+        .colors
+        .as_ref()
+        .map(|c| c.iter().map(|p| p.coords.cast::<f64>()).collect());
 
-    // 1. Compute indices
-    for i in 0..n {
-        let p = pc.points[i];
-        // `(NaN / vs).floor() as i32` saturates to 0, so a point without a
-        // position joined voxel (0, 0, 0) and turned a real point's centroid
-        // into NaN. Skip it, as the rest of this module does.
-        if !has_position(&p) {
-            continue;
-        }
-        let hx = (p.x / voxel_size).floor() as i32;
-        let hy = (p.y / voxel_size).floor() as i32;
-        let hz = (p.z / voxel_size).floor() as i32;
-        indices.push((hx, hy, hz, i));
-    }
-
-    // 2. Sort by voxel index
-    // Parallel sort if large enough, otherwise sequential
-    if n > 10000 {
-        indices.par_sort_unstable_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.cmp(&b.2))
-        });
-    } else {
-        indices.sort_unstable_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.cmp(&b.2))
-        });
-    }
-
-    // 3. Aggregate
-    let mut new_points = Vec::new();
-    let has_colors = pc.colors.is_some();
-    let has_normals = pc.normals.is_some();
-
-    let mut new_colors = if has_colors { Some(Vec::new()) } else { None };
-    let mut new_normals = if has_normals { Some(Vec::new()) } else { None };
-
-    if indices.is_empty() {
-        return PointCloud::default();
-    }
-
-    let mut current_voxel = (indices[0].0, indices[0].1, indices[0].2);
-    let mut sum_p = Vector3::zeros();
-    let mut sum_c = Vector3::zeros();
-    let mut sum_n = Vector3::zeros();
-    let mut count = 0;
-
-    for &(hx, hy, hz, idx) in &indices {
-        if (hx, hy, hz) != current_voxel {
-            // Push previous voxel
-            let factor = 1.0 / count as f32;
-            new_points.push(Point3::from(sum_p * factor));
-
-            if let Some(nc) = &mut new_colors {
-                nc.push(Point3::from(sum_c * factor));
-            }
-            if let Some(nn) = &mut new_normals {
-                let mut n = sum_n * factor;
-                if n.norm_squared() > 1e-6 {
-                    n.normalize_mut();
-                }
-                nn.push(n);
-            }
-
-            // Reset
-            current_voxel = (hx, hy, hz);
-            sum_p = Vector3::zeros();
-            sum_c = Vector3::zeros();
-            sum_n = Vector3::zeros();
-            count = 0;
-        }
-
-        sum_p += pc.points[idx].coords;
-        if has_colors && let Some(colors) = &pc.colors {
-            sum_c += colors[idx].coords;
-        }
-        if has_normals && let Some(normals) = &pc.normals {
-            sum_n += normals[idx];
-        }
-        count += 1;
-    }
-
-    // Push last voxel
-    if count > 0 {
-        let factor = 1.0 / count as f32;
-        new_points.push(Point3::from(sum_p * factor));
-
-        if let Some(nc) = &mut new_colors {
-            nc.push(Point3::from(sum_c * factor));
-        }
-        if let Some(nn) = &mut new_normals {
-            let mut n = sum_n * factor;
-            if n.norm_squared() > 1e-6 {
-                n.normalize_mut();
-            }
-            nn.push(n);
-        }
-    }
+    let r = crate::filters::voxel_downsample(
+        &points,
+        normals.as_deref(),
+        colors.as_deref(),
+        voxel_size as f64,
+    );
 
     PointCloud {
-        points: new_points,
-        colors: new_colors,
-        normals: new_normals,
+        points: r.points.iter().map(|p| p.cast::<f32>()).collect(),
+        colors: r
+            .colors
+            .map(|c| c.iter().map(|v| Point3::from(v.cast::<f32>())).collect()),
+        normals: r
+            .normals
+            .map(|n| n.iter().map(|v| v.cast::<f32>()).collect()),
     }
 }
 
@@ -178,8 +84,12 @@ impl rstar::PointDistance for PointWrapper {
 }
 
 /// Estimate normals for the point cloud using K-nearest neighbors.
-/// Uses PCA/SVD on the covariance matrix of the neighborhood.
+/// Uses PCA on the covariance matrix of the neighborhood.
 /// Modifies the point cloud in place to add normals.
+///
+/// An `f32` wrapper over [`crate::normals::estimate_normals_knn`]: the points
+/// are converted to `f64`, the normals estimated there and converted back. An
+/// empty cloud is left without normals.
 ///
 /// The neighbourhood of a point is its `k` nearest points *including the point
 /// itself*, as Open3D's `estimate_normals(KDTreeSearchParamKNN(k))`; fewer than
@@ -196,54 +106,9 @@ pub fn estimate_normals(pc: &mut PointCloud, k: usize) {
         return;
     }
 
-    let wrappers: Vec<PointWrapper> = pc
-        .points
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| has_position(p))
-        .map(|(i, p)| PointWrapper(i, *p))
-        .collect();
-
-    let tree = RTree::bulk_load(wrappers);
-
-    let normals: Vec<Vector3<f32>> = pc
-        .points
-        .par_iter()
-        .map(|p| {
-            if !has_position(p) {
-                return default_normal();
-            }
-            let query_point = [p.x, p.y, p.z];
-            // The nearest result is the point itself (or a duplicate of it).
-            let neighbors: Vec<&PointWrapper> =
-                tree.nearest_neighbor_iter(query_point).take(k).collect();
-
-            if neighbors.len() < 3 {
-                return default_normal(); // Default up
-            }
-
-            // Compute centroid
-            let mut centroid = Vector3::zeros();
-            for n in &neighbors {
-                centroid += n.1.coords;
-            }
-            centroid /= neighbors.len() as f32;
-
-            // Compute covariance matrix
-            let mut cov = Matrix3::zeros();
-            for n in &neighbors {
-                let d = n.1.coords - centroid;
-                cov += d * d.transpose();
-            }
-            cov /= neighbors.len() as f32;
-
-            // Analytic minimum eigenvector (Open3D / Geometric Tools algorithm).
-            // Faster and more numerically stable than full SymmetricEigen decomposition.
-            fast_eigen3x3_min(&cov)
-        })
-        .collect();
-
-    pc.normals = Some(normals);
+    let points: Vec<Point3<f64>> = pc.points.iter().map(|p| p.cast::<f64>()).collect();
+    let normals = crate::normals::estimate_normals_knn(&points, k);
+    pc.normals = Some(normals.iter().map(|n| n.cast::<f32>()).collect());
 }
 
 /// Orient normals consistently using simple neighbor voting.
@@ -419,13 +284,18 @@ pub fn compute_normals_from_depth(
 
 /// Remove statistical outliers (Open3D's `remove_statistical_outlier`).
 ///
+/// An `f32` wrapper over [`crate::filters::statistical_outlier_removal`]: the
+/// points are converted to `f64`, filtered there, and the kept points' colours
+/// and normals are carried along by index.
+///
 /// For each point, the mean distance to its `k` nearest points **including
 /// itself** (Open3D's `KNN(k)` returns the query point first, at distance 0,
 /// and averages over all `k`). A point is kept when its mean is below
 /// `global_mean + std_ratio * std_dev`, with `std_dev` the sample standard
 /// deviation (`n - 1`) of the per-point means. A point whose mean is exactly 0
 /// (all of its neighbours coincide with it) is kept; Open3D drops it, as a side
-/// effect of using "mean > 0" as its validity flag.
+/// effect of using "mean > 0" as its validity flag. `k == 0` returns the cloud
+/// unchanged, with every index.
 ///
 /// A point with a non-finite coordinate has no distance to measure, so it is
 /// never an inlier and is left out of the mean and standard deviation.
@@ -438,103 +308,24 @@ pub fn remove_statistical_outliers(
         return (pc.clone(), (0..pc.len()).collect());
     }
 
-    let wrappers: Vec<PointWrapper> = pc
-        .points
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| has_position(p))
-        .map(|(i, p)| PointWrapper(i, *p))
-        .collect();
-    let tree = RTree::bulk_load(wrappers);
+    let points: Vec<Point3<f64>> = pc.points.iter().map(|p| p.cast::<f64>()).collect();
+    let (_, inliers) = crate::filters::statistical_outlier_removal(&points, k, std_ratio);
+    (gather(pc, &inliers), inliers)
+}
 
-    let distances: Vec<f32> = pc
-        .points
-        .par_iter()
-        .map(|p| {
-            if !has_position(p) {
-                // No position, so no neighbour distance exists. NaN is never
-                // `<=` the threshold below, so such a point is dropped rather
-                // than panicking the tree query.
-                return f32::NAN;
-            }
-            let query_point = [p.x, p.y, p.z];
-            // The neighbourhood includes the point itself: the first hit is
-            // the query (or a duplicate of it) at distance 0. This used to
-            // skip that hit and average over `k` *other* points, with a
-            // population standard deviation and an inclusive threshold - the
-            // same parameters then kept a different set from Open3D (measured
-            // on 500 spread points: (5, 0.5) kept 358 where Open3D keeps 364).
-            let neighbors: Vec<&PointWrapper> =
-                tree.nearest_neighbor_iter(query_point).take(k).collect();
-            if neighbors.is_empty() {
-                return f32::NAN;
-            }
-            let sum_dist: f32 = neighbors
-                .iter()
-                .map(|n| n.distance_2(&query_point).sqrt())
-                .sum();
-            sum_dist / neighbors.len() as f32
-        })
-        .collect();
-
-    // Only the points that have a distance take part in the statistics: a single
-    // NaN in the mean would put NaN in the threshold and reject the whole cloud.
-    let measured: Vec<f64> = distances
-        .iter()
-        .filter(|d| d.is_finite())
-        .map(|&d| d as f64)
-        .collect();
-    let mean_dist = cv_math::mean(&measured).unwrap_or(0.0);
-    // Sample standard deviation, as Open3D.
-    let variance = measured
-        .iter()
-        .map(|&d| (d - mean_dist) * (d - mean_dist))
-        .sum::<f64>()
-        / measured.len().saturating_sub(1).max(1) as f64;
-    let std_dev = variance.sqrt();
-
-    let threshold = mean_dist + std_ratio * std_dev;
-
-    let mut inliers: Vec<usize> = Vec::new();
-    let mut new_points = Vec::new();
-    let mut new_colors = if pc.colors.is_some() {
-        Some(Vec::new())
-    } else {
-        None
-    };
-    let mut new_normals = if pc.normals.is_some() {
-        Some(Vec::new())
-    } else {
-        None
-    };
-
-    for (i, &dist) in distances.iter().enumerate() {
-        // Strict, as Open3D; a point with no spread at all (mean 0) is kept.
-        // NaN (no position) fails both tests and is dropped.
-        if (dist as f64) < threshold || dist == 0.0 {
-            inliers.push(i);
-            new_points.push(pc.points[i]);
-            if let Some(c) = &pc.colors
-                && let Some(nc) = &mut new_colors
-            {
-                nc.push(c[i]);
-            }
-            if let Some(n) = &pc.normals
-                && let Some(nn) = &mut new_normals
-            {
-                nn.push(n[i]);
-            }
-        }
+/// The points of `pc` at `indices`, with their colours and normals.
+///
+/// A colour or normal list shorter than the points contributes only the
+/// entries it has, rather than panicking.
+fn gather(pc: &PointCloud, indices: &[usize]) -> PointCloud {
+    fn pick<T: Copy>(v: &[T], indices: &[usize]) -> Vec<T> {
+        indices.iter().filter_map(|&i| v.get(i).copied()).collect()
     }
-
-    (
-        PointCloud {
-            points: new_points,
-            colors: new_colors,
-            normals: new_normals,
-        },
-        inliers,
-    )
+    PointCloud {
+        points: pick(&pc.points, indices),
+        colors: pc.colors.as_deref().map(|c| pick(c, indices)),
+        normals: pc.normals.as_deref().map(|n| pick(n, indices)),
+    }
 }
 
 /// Remove radius outliers.
@@ -1067,25 +858,5 @@ mod tests {
                 n
             );
         }
-    }
-
-    #[test]
-    fn test_analytic_eigensolver_known() {
-        // A matrix with eigenvalues 2, 1, 0 along x, y, z axes.
-        // Minimum eigenvector should be (0, 0, ±1).
-        let mut m = nalgebra::Matrix3::zeros();
-        m[(0, 0)] = 2.0;
-        m[(1, 1)] = 1.0;
-        m[(2, 2)] = 0.0;
-        let n = fast_eigen3x3_min(&m);
-        assert!(n.z.abs() > 0.99, "Expected z-eigenvector, got {:?}", n);
-    }
-
-    #[test]
-    fn test_analytic_eigensolver_isotropic() {
-        // Isotropic matrix: all eigenvalues equal. Any unit vector is valid.
-        let m = nalgebra::Matrix3::identity() * 3.0;
-        let n = fast_eigen3x3_min(&m);
-        assert!((n.norm() - 1.0).abs() < 1e-5, "Not unit length: {:?}", n);
     }
 }

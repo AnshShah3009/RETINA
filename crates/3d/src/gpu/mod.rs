@@ -392,6 +392,7 @@ pub mod point_cloud {
         vs.clamp(1e-6, max_vs)
     }
 
+    /// Voxel downsampling; the same as [`super::voxel_downsample`].
     pub fn voxel_downsample(points: &[Point3<f32>], voxel_size: f32) -> Vec<Point3<f32>> {
         super::voxel_downsample(points, voxel_size)
     }
@@ -782,9 +783,9 @@ pub mod point_cloud {
     /// occupied voxels of the grid built from `points` at `voxel_size` are
     /// ordered lexicographically by `(x, y, z)` key, and `normals[j]` is the
     /// normal of the j-th voxel in that order. Every point copies the normal
-    /// of its voxel. (Pairing against `voxel_downsample`'s output would not
-    /// work: that runs through a `HashMap`, whose iteration order is not
-    /// reproducible, so the same call can number voxels differently.)
+    /// of its voxel. (`voxel_downsample` returns its centroids in the same
+    /// lexicographic key order, but it computes the keys in `f64`, so a point
+    /// within rounding of a voxel boundary can land in a different voxel.)
     ///
     /// It previously returned `Vec::new()` - before that a zero vector per
     /// point. Both are `points.len()`-shaped answers carrying no normals; this
@@ -908,17 +909,25 @@ pub mod raycasting;
 pub mod registration;
 pub mod tsdf;
 
-/// Voxel downsample
+/// Voxel downsampling: one centroid per occupied voxel of the global grid,
+/// in sorted voxel-key order.
+///
+/// An `f32` wrapper over [`crate::filters::voxel_downsample`] (implemented in
+/// `cv_pointcloud::filters`): the points are converted to `f64`, reduced there
+/// and converted back. An empty cloud or a zero, negative, NaN or infinite
+/// `voxel_size` gives an empty result; points with a non-finite coordinate
+/// are skipped.
+///
+/// This used to anchor a `VoxelGrid` at `points[0]`, so the voxel boundaries
+/// moved with whichever point came first, and returned the voxels in
+/// `HashMap` order, which differs between runs.
 pub fn voxel_downsample(points: &[Point3<f32>], voxel_size: f32) -> Vec<Point3<f32>> {
-    if points.is_empty() {
-        return Vec::new();
-    }
-    use crate::spatial::VoxelGrid;
-    let mut grid = VoxelGrid::new(points[0], voxel_size);
-    for (i, p) in points.iter().enumerate() {
-        grid.insert(*p, i);
-    }
-    grid.downsample(points)
+    let points: Vec<Point3<f64>> = points.iter().map(|p| p.cast::<f64>()).collect();
+    crate::filters::voxel_downsample(&points, None, None, voxel_size as f64)
+        .points
+        .iter()
+        .map(|p| p.cast::<f32>())
+        .collect()
 }
 
 pub fn is_gpu_available() -> bool {

@@ -44,6 +44,14 @@ also get a row in [docs/bug-log.md](docs/bug-log.md).
     `cv-pointcloud` directly.
 - RETINA is licensed under MIT (`license = "MIT"` in every crate). OpenCV- and
   AprilTag-derived content keeps its notices in `THIRD_PARTY_NOTICES.md`.
+- One implementation each for statistical outlier removal, voxel downsampling
+  and kNN normal estimation (f64 kernels in `cv-pointcloud`; `cv-3d` and the
+  `cv-pointcloud` `PointCloud` functions delegate), and for the gray bilateral
+  filter (`cv_imgproc::bilateral_filter_gray`; `cv_photo::bilateral_filter`
+  delegates, and `cv-photo` now depends on `cv-imgproc`).
+- `cv_3d::gpu::voxel_downsample` uses the global voxel grid and returns sorted,
+  deterministic output (it anchored the grid at the first point and returned
+  hash-map order).
 - Every crate shares the workspace version (0.2.0), edition, MSRV 1.95, licence
   and repository through `[workspace.package]`. `tests/crate_layers.rs` enforces
   the crate layer order, and CI runs `cargo deny` (advisories, licences, sources).
@@ -65,6 +73,14 @@ also get a row in [docs/bug-log.md](docs/bug-log.md).
   rstar 0.14, las 0.11, pollster 1.0, criterion 0.8.
 
 ### Fixed
+
+- `cv-3d` statistical outlier removal and kNN normal estimation panicked
+  ("comparison function does not correctly implement a total order") on a NaN
+  point; non-finite points are now left out of neighbourhoods and statistics
+  (outlier removal drops them, normals give them (0, 0, 1)).
+- `cv_pointcloud::voxel_down_sample` treated an infinite voxel size as valid and
+  merged every point into one voxel; it now returns the cloud unchanged, as for
+  other invalid sizes.
 
 - Hundreds of defects (420 `fix` commits since 0.2.0), each with a test that failed before the fix; see
   [docs/bug-log.md](docs/bug-log.md). Highlights: SIFT scale space, ChArUco
