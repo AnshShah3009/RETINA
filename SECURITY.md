@@ -51,8 +51,8 @@ Out of scope:
 - Wrong numerical results that are not exploitable (please open a normal bug or
   parity issue).
 - Vulnerabilities in dependencies without a demonstrated impact on RETINA (report
-  them upstream; Dependabot raises dependency updates, and maintainers run
-  `cargo audit` before each release).
+  them upstream; Dependabot raises dependency updates, and CI runs
+  `cargo deny`, which fails on RustSec advisories).
 - Denial of service by deliberately huge but well-formed inputs, unless a small
   input causes disproportionate resource use.
 

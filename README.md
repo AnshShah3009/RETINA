@@ -7,11 +7,12 @@
 **A native Rust computer-vision workspace with CPU and GPU backends, built to
 match OpenCV, Open3D, SciPy and Matplotlib — and to prove it.**
 
-RETINA covers image processing, features, calibration, 3-D point clouds and
-meshes, registration, SfM/SLAM, localization, signal processing, plotting and
-I/O, in about 30 crates. The default build has no C or C++ dependencies. GPU
-kernels run through [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12) and are tested
-against the CPU implementation, many of them bit for bit.
+RETINA covers image processing, features, object detection, calibration, 3-D
+point clouds and meshes, registration, SfM/SLAM, localization, signal
+processing, plotting and I/O, in 30 crates in this one repository. The default
+build has no C or C++ dependencies. GPU kernels run through
+[wgpu](https://wgpu.rs) (Vulkan, Metal, DX12) and are tested against the CPU
+implementation, many of them bit for bit.
 
 What sets it apart is how results are checked:
 
@@ -90,9 +91,10 @@ python -c "import cv_native"
 | Foundations | `cv-core` | Tensors (planar CHW), camera models, keypoints, errors |
 | | `cv-hal` | CPU, GPU (wgpu), MLX and CubeCL backends behind `ComputeContext` |
 | | `cv-runtime` | Scheduling, resource groups, device selection |
-| | `cv-math`, `cv-geometry2d`, `cv-scientific` | Math primitives, 2-D geometry, scientific utilities |
+| | `cv-math`, `cv-geometry2d` | Math primitives, special functions, sparse solvers, k-d tree; 2-D geometry |
 | Images | `cv-imgproc` | Filters, morphology, colour, thresholds, histograms, warps, contours, template matching |
-| | `cv-features` | FAST, ORB, SIFT, AKAZE, BRIEF, HOG, Harris, GFTT, ArUco/ChArUco/AprilTag, matchers, RANSAC/USAC |
+| | `cv-features` | FAST, ORB, SIFT, AKAZE, BRIEF, Harris, GFTT, LBD, matchers, FLANN, retrieval |
+| | `cv-objdetect` | ArUco, ChArUco and AprilTag markers, HOG, Haar cascades |
 | | `cv-photo` | Bilateral filtering, HDR, denoising, inpainting |
 | | `cv-video` | Background subtraction, optical flow, Kalman filtering, tracking |
 | | `cv-dnn` | ONNX inference via `tract` with OpenCV-style pre-processing |

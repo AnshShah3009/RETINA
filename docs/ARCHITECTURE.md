@@ -6,53 +6,79 @@ before adding a crate or a new operation.
 
 ## Crate layers
 
-Arrows point from a crate to what it depends on. A crate only depends on crates
-in lower layers, so the graph has no cycles; keep it that way.
+RETINA is one repository and one Cargo workspace; there are no git submodules.
+The crates change together (a HAL change touches the kernel, the CPU reference,
+the parity tests and the domain wrapper at once), so one workspace keeps every
+change atomic and tested as a whole, as wgpu, Bevy and tokio do. The reasoning
+is in the [workspace-structure decision record](superpowers/specs/2026-11-03-workspace-structure-design.md).
+
+Arrows point from a crate to what it depends on (normal dependencies; tests may
+use anything). A crate depends only on crates in **lower** layers, so the graph
+has no cycles and low-level crates stay light. `tests/crate_layers.rs` enforces
+this: it fails on any dependency on the same or a higher layer, and on any crate
+without a layer.
 
 ```text
-layer 0  cv-core            types, tensors, camera models, errors
-         cv-geometry2d      2-D primitives and predicates (no internal deps)
-         cv-plot            plotting (no internal deps)
+layer 0  cv-core            types, tensors, point clouds, meshes, camera models, errors
+         cv-geometry2d      2-D primitives and predicates
+         cv-plot            plotting
 
-layer 1  cv-hal        ->  core           CPU / GPU / MLX / CubeCL backends
-         cv-math       ->  core           math primitives, special functions
-         cv-eval       ->  core           trajectory, reconstruction, retrieval metrics
-         cv-photo      ->  core           computational photography
-         cv-rendering  ->  core           Gaussian splatting, mesh rendering
-         cv-videoio    ->  core           video capture (FFmpeg, V4L2)
-         cv-viewer     ->  core           egui/wgpu 3-D viewer
+layer 1  cv-hal        ->  core                       CPU / GPU / MLX / CubeCL backends
+         cv-io         ->  core                       file formats and datasets
+         cv-math       ->  core                       math primitives, special functions, k-d tree
+         cv-eval       ->  core                       trajectory, reconstruction, retrieval metrics
+         cv-photo      ->  core                       computational photography
+         cv-rendering  ->  core                       Gaussian splatting, mesh rendering
+         cv-videoio    ->  core                       video capture (FFmpeg, V4L2)
+         cv-viewer     ->  core                       egui/wgpu 3-D viewer
 
-layer 2  cv-optimize   ->  core, hal, math        factor graphs, sparse solvers, ISAM2, LM
-         cv-pointcloud ->  core, math             point-cloud processing
-         cv-signal     ->  math                   signal processing (SciPy-style)
-         cv-video      ->  core, hal              background subtraction, optical flow, tracking
-         cv-distributed -> hal                    cross-process shared memory / VRAM coordination
+layer 2  cv-optimize   ->  core, hal, math            factor graphs, sparse solvers, ISAM2, LM
+         cv-pointcloud ->  core, math                 point-cloud algorithms (normals, FPFH, filters)
+         cv-signal     ->  math                       signal processing (SciPy-style)
+         cv-video      ->  core, hal                  background subtraction, optical flow, tracking
+         cv-distributed -> hal                        cross-process shared memory / VRAM coordination
 
-layer 3  cv-runtime    ->  core, hal, distributed scheduler, resource groups, device registry
-         cv-scientific ->  geometry2d, math, pointcloud, signal
+layer 3  cv-runtime    ->  core, distributed, hal     scheduler, resource groups, device registry
 
-layer 4  cv-imgproc    ->  core, hal, runtime     image processing
-         cv-3d         ->  core, hal, math, runtime, scientific   point clouds, meshes, TSDF
+layer 4  cv-imgproc    ->  core, hal, runtime         image processing, cornerSubPix
+         cv-3d         ->  core, hal, math, pointcloud, runtime   meshing, TSDF, GPU point clouds
 
-layer 5  cv-calib3d    ->  core, hal, imgproc, math, runtime      calibration, PnP, stereo
-         cv-registration -> 3d, core, hal         ICP, global registration, FPFH
-         cv-io         ->  3d, core               file formats and datasets
-         cv-dnn        ->  core, imgproc, runtime DNN pre/post-processing
+layer 5  cv-calib3d    ->  core, hal, imgproc, math, runtime      calibration, PnP, stereo, RANSAC/USAC
+         cv-features   ->  core, hal, imgproc, runtime            detectors, descriptors, matching
+         cv-registration -> 3d, core, hal, pointcloud             ICP, global registration
+         cv-dnn        ->  core, imgproc, runtime                 DNN pre/post-processing
 
-layer 6  cv-features   ->  calib3d, core, hal, imgproc, runtime   detectors, descriptors, matching
-         cv-cli        ->  core, eval, io         cv-bench evaluation CLI
+layer 6  cv-objdetect  ->  calib3d, core, hal, imgproc            ArUco, ChArUco, AprilTag, HOG, cascades
+         cv-cli        ->  core, eval, io                         cv-bench evaluation CLI
 
-layer 7  cv-sfm        ->  calib3d, features, optimize, ...       structure from motion
-         cv-slam       ->  calib3d, features, optimize, video, ... SLAM
-         cv-localization -> calib3d, eval, features, io           retrieval + PnP localization
+layer 7  cv-sfm        ->  calib3d, core, features, hal, optimize, runtime   structure from motion
+         cv-slam       ->  calib3d, core, features, hal, optimize, runtime, video   SLAM
+         cv-localization -> calib3d, core, eval, features, io     retrieval + PnP localization
          cv-examples   (examples)
 
 layer 8  cv-python     (PyO3 bindings)
-         rust-cv-native (root package: re-exports, workspace-level tests and benches)
+         rust-cv-native (root: facade re-exporting every library crate, workspace tests and benches)
 ```
 
-Regenerate this from the manifests with
+**Adding a crate:** give it the lowest layer its dependencies allow, add it to
+`LAYERS` in `tests/crate_layers.rs` and to the diagram above, inherit the
+`[workspace.package]` fields, and re-export it from the root facade
+(`src/lib.rs`, checked by `tests/facade_reexports.rs`).
+
+Regenerate the dependency lists with
 `cargo metadata --format-version 1 --no-deps` if crates change.
+
+### Workspace conventions
+
+- **One version.** Every crate inherits `version`, `edition`, `rust-version`
+  (1.95), `license` (MIT OR Apache-2.0) and `repository` from
+  `[workspace.package]` and is released in lockstep.
+- **One dependency table.** Crates name external and internal dependencies with
+  `{ workspace = true }`; versions live in the root `[workspace.dependencies]`.
+- **Supply chain.** `deny.toml` (checked in CI by `cargo deny`) allows permissive
+  licences only, crates.io as the only source, and fails on RustSec advisories.
+- **Names on crates.io.** `cv-core` and `retina` are taken there, so the first
+  release publishes the crates as `retina-*` with a `retina-cv` facade.
 
 ## The hardware abstraction layer (`cv-hal`)
 
@@ -105,7 +131,7 @@ which GPU to use (`DeviceSelector`).
 | `cv-hal` | `cpu`, `simd` | Backend selection in CI builds |
 | `cv-io` | `las`, `gltf` | LAS/LAZ point clouds, glTF meshes |
 | `cv-videoio` | `ffmpeg`, `v4l2`, `native` | Video capture backends |
-| `cv-features`, `cv-calib3d` | `gpu` | GPU-accelerated paths |
+| `cv-features`, `cv-calib3d`, `cv-objdetect` | `gpu` | GPU-accelerated paths |
 | `cv-localization` | `synthetic` | The synthetic-scene example |
 
 ## Testing layers
@@ -127,10 +153,12 @@ macOS runner has a Metal GPU; the Linux runner has none.
 
 | You are adding... | Put it in |
 | --- | --- |
-| A tensor type, error variant, camera model | `cv-core` |
+| A tensor type, error variant, camera model, geometry container (point cloud, mesh) | `cv-core` |
 | An op with CPU and GPU implementations | `cv-hal` (`ComputeContext`), then a friendly wrapper in the domain crate |
 | An image filter or transform | `cv-imgproc` |
 | A detector, descriptor or matcher | `cv-features` |
+| A marker, board or object detector (ArUco, HOG, cascades) | `cv-objdetect` |
+| A robust estimator (RANSAC, USAC) | `cv-calib3d` |
 | Calibration, PnP, epipolar geometry, stereo | `cv-calib3d` |
 | Point-cloud or mesh processing | `cv-3d` (or `cv-pointcloud` for lightweight, dependency-free algorithms) |
 | Registration (ICP, FPFH, global) | `cv-registration` |

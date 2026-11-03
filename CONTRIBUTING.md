@@ -230,7 +230,9 @@ GPU code lives in `crates/hal`: WGSL shaders in `crates/hal/shaders/`, host code
 1. Open a feature request first if the API is new; say which reference function
    it mirrors and how it will be tested.
 2. Put it in the crate that owns the domain (see
-   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)). Follow the reference library's
+   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)). A new crate needs an agreed
+   issue first, a layer in `tests/crate_layers.rs`, and the
+   `[workspace.package]` fields; a crate may depend only on lower layers. Follow the reference library's
    semantics and parameter conventions (units, border defaults, coordinate
    conventions), and say in the doc comment which function it mirrors.
 3. Validate inputs and return `Result` errors for bad input; public functions do
