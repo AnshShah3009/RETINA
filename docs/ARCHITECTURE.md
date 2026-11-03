@@ -160,7 +160,8 @@ macOS runner has a Metal GPU; the Linux runner has none.
 | A marker, board or object detector (ArUco, HOG, cascades) | `cv-objdetect` |
 | A robust estimator (RANSAC, USAC) | `cv-calib3d` |
 | Calibration, PnP, epipolar geometry, stereo | `cv-calib3d` |
-| Point-cloud or mesh processing | `cv-3d` (or `cv-pointcloud` for lightweight, dependency-free algorithms) |
+| A point-cloud filter or estimator (outlier removal, voxel downsampling, normals, FPFH) | `cv-pointcloud` (f64 kernel); `cv-3d` re-exports or wraps it |
+| Meshing, TSDF, GPU point-cloud paths | `cv-3d` |
 | Registration (ICP, FPFH, global) | `cv-registration` |
 | A file format or dataset loader | `cv-io` |
 | An optimiser or factor | `cv-optimize` |
