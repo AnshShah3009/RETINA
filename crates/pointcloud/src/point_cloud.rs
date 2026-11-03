@@ -1,7 +1,6 @@
 use cv_core::PointCloud;
 use nalgebra::{Matrix3, Point3, Vector3};
 use rayon::prelude::*;
-use rstar::PointDistance;
 use rstar::{AABB, RTree, RTreeObject};
 
 /// Analytic minimum eigenvector of a 3×3 symmetric matrix.
@@ -419,13 +418,18 @@ pub fn compute_normals_from_depth(
 
 /// Remove statistical outliers (Open3D's `remove_statistical_outlier`).
 ///
+/// An `f32` wrapper over [`crate::filters::statistical_outlier_removal`]: the
+/// points are converted to `f64`, filtered there, and the kept points' colours
+/// and normals are carried along by index.
+///
 /// For each point, the mean distance to its `k` nearest points **including
 /// itself** (Open3D's `KNN(k)` returns the query point first, at distance 0,
 /// and averages over all `k`). A point is kept when its mean is below
 /// `global_mean + std_ratio * std_dev`, with `std_dev` the sample standard
 /// deviation (`n - 1`) of the per-point means. A point whose mean is exactly 0
 /// (all of its neighbours coincide with it) is kept; Open3D drops it, as a side
-/// effect of using "mean > 0" as its validity flag.
+/// effect of using "mean > 0" as its validity flag. `k == 0` returns the cloud
+/// unchanged, with every index.
 ///
 /// A point with a non-finite coordinate has no distance to measure, so it is
 /// never an inlier and is left out of the mean and standard deviation.
@@ -438,103 +442,24 @@ pub fn remove_statistical_outliers(
         return (pc.clone(), (0..pc.len()).collect());
     }
 
-    let wrappers: Vec<PointWrapper> = pc
-        .points
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| has_position(p))
-        .map(|(i, p)| PointWrapper(i, *p))
-        .collect();
-    let tree = RTree::bulk_load(wrappers);
+    let points: Vec<Point3<f64>> = pc.points.iter().map(|p| p.cast::<f64>()).collect();
+    let (_, inliers) = crate::filters::statistical_outlier_removal(&points, k, std_ratio);
+    (gather(pc, &inliers), inliers)
+}
 
-    let distances: Vec<f32> = pc
-        .points
-        .par_iter()
-        .map(|p| {
-            if !has_position(p) {
-                // No position, so no neighbour distance exists. NaN is never
-                // `<=` the threshold below, so such a point is dropped rather
-                // than panicking the tree query.
-                return f32::NAN;
-            }
-            let query_point = [p.x, p.y, p.z];
-            // The neighbourhood includes the point itself: the first hit is
-            // the query (or a duplicate of it) at distance 0. This used to
-            // skip that hit and average over `k` *other* points, with a
-            // population standard deviation and an inclusive threshold - the
-            // same parameters then kept a different set from Open3D (measured
-            // on 500 spread points: (5, 0.5) kept 358 where Open3D keeps 364).
-            let neighbors: Vec<&PointWrapper> =
-                tree.nearest_neighbor_iter(query_point).take(k).collect();
-            if neighbors.is_empty() {
-                return f32::NAN;
-            }
-            let sum_dist: f32 = neighbors
-                .iter()
-                .map(|n| n.distance_2(&query_point).sqrt())
-                .sum();
-            sum_dist / neighbors.len() as f32
-        })
-        .collect();
-
-    // Only the points that have a distance take part in the statistics: a single
-    // NaN in the mean would put NaN in the threshold and reject the whole cloud.
-    let measured: Vec<f64> = distances
-        .iter()
-        .filter(|d| d.is_finite())
-        .map(|&d| d as f64)
-        .collect();
-    let mean_dist = cv_math::mean(&measured).unwrap_or(0.0);
-    // Sample standard deviation, as Open3D.
-    let variance = measured
-        .iter()
-        .map(|&d| (d - mean_dist) * (d - mean_dist))
-        .sum::<f64>()
-        / measured.len().saturating_sub(1).max(1) as f64;
-    let std_dev = variance.sqrt();
-
-    let threshold = mean_dist + std_ratio * std_dev;
-
-    let mut inliers: Vec<usize> = Vec::new();
-    let mut new_points = Vec::new();
-    let mut new_colors = if pc.colors.is_some() {
-        Some(Vec::new())
-    } else {
-        None
-    };
-    let mut new_normals = if pc.normals.is_some() {
-        Some(Vec::new())
-    } else {
-        None
-    };
-
-    for (i, &dist) in distances.iter().enumerate() {
-        // Strict, as Open3D; a point with no spread at all (mean 0) is kept.
-        // NaN (no position) fails both tests and is dropped.
-        if (dist as f64) < threshold || dist == 0.0 {
-            inliers.push(i);
-            new_points.push(pc.points[i]);
-            if let Some(c) = &pc.colors
-                && let Some(nc) = &mut new_colors
-            {
-                nc.push(c[i]);
-            }
-            if let Some(n) = &pc.normals
-                && let Some(nn) = &mut new_normals
-            {
-                nn.push(n[i]);
-            }
-        }
+/// The points of `pc` at `indices`, with their colours and normals.
+///
+/// A colour or normal list shorter than the points contributes only the
+/// entries it has, rather than panicking.
+fn gather(pc: &PointCloud, indices: &[usize]) -> PointCloud {
+    fn pick<T: Copy>(v: &[T], indices: &[usize]) -> Vec<T> {
+        indices.iter().filter_map(|&i| v.get(i).copied()).collect()
     }
-
-    (
-        PointCloud {
-            points: new_points,
-            colors: new_colors,
-            normals: new_normals,
-        },
-        inliers,
-    )
+    PointCloud {
+        points: pick(&pc.points, indices),
+        colors: pc.colors.as_deref().map(|c| pick(c, indices)),
+        normals: pc.normals.as_deref().map(|n| pick(n, indices)),
+    }
 }
 
 /// Remove radius outliers.
