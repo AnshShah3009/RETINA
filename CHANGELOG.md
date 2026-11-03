@@ -74,6 +74,12 @@ also get a row in [docs/bug-log.md](docs/bug-log.md).
 
 ### Fixed
 
+- `GpuBufferPool` keyed buffers by the `&Device` address, so a device handle
+  allocated where a dropped one had been inherited its pooled buffers; on Metal
+  the next copy failed wgpu validation ("Source and destination cannot be the
+  same buffer") and CI failed intermittently. **Breaking:** `get` and
+  `return_buffer` take `&Arc<Device>`; buffers are only handed back to the same
+  `Arc`, and entries of dropped devices are released.
 - `cv-3d` statistical outlier removal and kNN normal estimation panicked
   ("comparison function does not correctly implement a total order") on a NaN
   point; non-finite points are now left out of neighbourhoods and statistics

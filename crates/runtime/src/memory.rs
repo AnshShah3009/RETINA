@@ -243,7 +243,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                     }
 
                     let device = match runtime.context() {
-                        crate::device_registry::BackendContext::Gpu(ctx) => ctx.device(),
+                        crate::device_registry::BackendContext::Gpu(ctx) => &ctx.device,
                         _ => {
                             return Err(crate::Error::NotSupported(
                                 "sync_to_device only supports GPU".into(),
@@ -255,7 +255,7 @@ impl<T: bytemuck::Pod + Clone + Default + Send + 'static + std::fmt::Debug> Unif
                 }
             } else {
                 let device = match runtime.context() {
-                    crate::device_registry::BackendContext::Gpu(ctx) => ctx.device(),
+                    crate::device_registry::BackendContext::Gpu(ctx) => &ctx.device,
                     _ => {
                         return Err(crate::Error::NotSupported(
                             "sync_to_device only supports GPU".into(),

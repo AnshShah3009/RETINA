@@ -16,8 +16,9 @@
 //! wrong buffer changes what is read back, which is what makes these tests fail
 //! when the behaviour is wrong instead of passing either way.
 //!
-//! The pool keys buckets by `(device address, usage, size-bucket)`, so the
-//! questions these answer are:
+//! The pool files buffers under the `Arc<Device>` that created them (holding a
+//! `Weak` so the address cannot be reused while the entry lives), then by usage
+//! and size bucket, so the questions these answer are:
 //!   * does a buffer returned under usage A ever come back for usage B?
 //!   * does a buffer returned at one size satisfy a *larger* request?
 //!   * does a request below the pool's 256-byte floor still get a big enough
@@ -663,16 +664,12 @@ fn uniform_requests_do_not_borrow_storage_buffers() {
     );
 }
 
-/// The pool is keyed by the *address* of the `&Device` handed to `get` /
-/// `return_buffer`, and that key stays valid after the `Arc<Device>` is dropped.
-/// A new `Device` allocated at the same address therefore inherits the old
-/// device's pooled buffers. wgpu 28 shares one `Device` between `Instance`s, so
-/// on a single-adapter box there is no way to observe a cross-device hand-off;
-/// what *is* observable - and tested here - is that the key is the address and
-/// not the device: buffers returned through a `&Device` borrowed from an `Arc`
-/// that has since been dropped are still found again.
+/// A context created after another was dropped gets a usable buffer: either a
+/// fresh one (a different device) or the one it returned (the same device,
+/// when wgpu shares it). It used to inherit the dropped device's buffers when
+/// its `&Device` landed at the same address, which failed wgpu validation.
 #[test]
-fn device_key_is_the_address_of_the_borrowed_device() {
+fn a_new_context_after_a_dropped_one_gets_a_usable_buffer() {
     let Some(ctx) = ctx_or_skip() else { return };
     let pool = GpuBufferPool::new();
 
@@ -687,8 +684,8 @@ fn device_key_is_the_address_of_the_borrowed_device() {
     }
     drop(ctx);
 
-    // A new context on the same adapter: the pooled buffer must still be
-    // findable, and still be a usable buffer with exactly the returned flags.
+    // A new context on the same adapter: whatever the pool hands out must be a
+    // buffer of this device, with exactly the requested flags.
     let Some(ctx_b) = ctx_or_skip() else { return };
     let b = pool.get(&ctx_b.device, 4096, usage);
     assert!(b.size() >= 4096, "pool handed out an undersized buffer");
@@ -697,6 +694,39 @@ fn device_key_is_the_address_of_the_borrowed_device() {
     assert!(
         got == 0 || got == stamp(404),
         "pool handed out a buffer that was never returned to it (stamp {got:#x})"
+    );
+}
+
+/// A context created after another was dropped must not inherit the dropped
+/// context's pooled buffers. The pool used to key buffers by the `&Device`
+/// address; the allocator hands a new context's device the freed address
+/// straight away, so the new device received buffers created by the old one.
+/// When the two are different wgpu devices (Metal creates one per instance) the
+/// next command using such a buffer fails validation - CI saw "Source and
+/// destination cannot be the same buffer", because each device numbers its
+/// buffers from zero.
+#[test]
+fn a_new_context_never_inherits_a_dropped_contexts_buffers() {
+    let Some(ctx) = ctx_or_skip() else { return };
+    let pool = GpuBufferPool::new();
+    let usage = BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC;
+
+    // Two device handles allocated one after the other, the first dropped
+    // before the second exists, the way one context replaces another.
+    let device_a = Arc::new((*ctx.device).clone());
+    let from_a = pool.get(&device_a, 4096, usage);
+    write_stamp(&ctx, &from_a, 505);
+    pool.return_buffer(&device_a, from_a, usage);
+    let addr_a = Arc::as_ptr(&device_a) as usize;
+    drop(device_a);
+
+    let device_b = Arc::new((*ctx.device).clone());
+    let reused = Arc::as_ptr(&device_b) as usize == addr_a;
+    let for_b = pool.get(&device_b, 4096, usage);
+    assert_eq!(
+        read_stamp(&ctx, &for_b),
+        0,
+        "the new device handle got the dropped one's buffer (address reused: {reused})"
     );
 }
 

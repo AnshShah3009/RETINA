@@ -100,7 +100,7 @@ impl MemoryManager {
     }
 
     /// Get a buffer from the pool.
-    pub fn get_buffer(&self, device: &wgpu::Device, size: u64, usage: BufferUsages) -> Buffer {
+    pub fn get_buffer(&self, device: &Arc<wgpu::Device>, size: u64, usage: BufferUsages) -> Buffer {
         cv_hal::gpu_kernels::buffer_utils::global_pool().get(device, size, usage)
     }
 }

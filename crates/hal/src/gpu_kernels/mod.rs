@@ -405,14 +405,29 @@ pub mod shaders {
 /// GPU Buffer utilities
 pub mod buffer_utils {
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
     use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, MapMode};
 
-    /// A bucketed pool for reusing GPU buffers
-    #[allow(clippy::type_complexity)]
+    /// Pooled buffers of one device, by usage and then size bucket.
+    struct DevicePool {
+        /// Keeps the `Arc<Device>` allocation reserved, so its address (the map
+        /// key) cannot be reused by another device while this entry exists.
+        /// When the device itself is gone (`strong_count() == 0`) the entry and
+        /// its buffers are dropped.
+        device: Weak<Device>,
+        by_usage: HashMap<BufferUsages, HashMap<u64, Vec<Buffer>>>,
+    }
+
+    /// A bucketed pool for reusing GPU buffers.
+    ///
+    /// Buffers are filed under the `Arc<Device>` that created them, by usage
+    /// and size bucket, and only ever handed back to that same `Arc` (or a
+    /// clone of it). A device handle created after another was dropped never
+    /// inherits its buffers: a buffer used with a device other than its own
+    /// fails wgpu validation.
     pub struct GpuBufferPool {
-        // Buckets: (device_addr, usage) -> (size_bucket -> Vec<Buffer>)
-        buckets: Mutex<HashMap<(usize, BufferUsages), HashMap<u64, Vec<Buffer>>>>,
+        // Arc<Device> address -> that device's buffers
+        devices: Mutex<HashMap<usize, DevicePool>>,
     }
 
     impl Default for GpuBufferPool {
@@ -424,7 +439,7 @@ pub mod buffer_utils {
     impl GpuBufferPool {
         pub fn new() -> Self {
             Self {
-                buckets: Mutex::new(HashMap::new()),
+                devices: Mutex::new(HashMap::new()),
             }
         }
 
@@ -437,16 +452,36 @@ pub mod buffer_utils {
             }
         }
 
-        pub fn get(&self, device: &Device, size: u64, usage: BufferUsages) -> Buffer {
-            let bucket_size = Self::get_size_bucket(size);
-            let dev_key = (device as *const Device) as usize;
+        /// This device's buffers, after dropping every entry whose device is
+        /// gone. Holding a `Weak` keeps a dead device's address reserved until
+        /// its entry is dropped here, so a live entry's key always names the
+        /// device it was created for.
+        fn device_pool<'a>(
+            devices: &'a mut HashMap<usize, DevicePool>,
+            device: &Arc<Device>,
+        ) -> &'a mut HashMap<BufferUsages, HashMap<u64, Vec<Buffer>>> {
+            devices.retain(|_, pool| pool.device.strong_count() > 0);
+            &mut devices
+                .entry(Arc::as_ptr(device) as usize)
+                .or_insert_with(|| DevicePool {
+                    device: Arc::downgrade(device),
+                    by_usage: HashMap::new(),
+                })
+                .by_usage
+        }
 
-            let mut buckets = match self.buckets.lock() {
-                Ok(b) => b,
+        /// A buffer of at least `size` bytes with exactly `usage`, reused from
+        /// this device's pool when one is free, otherwise newly created.
+        pub fn get(&self, device: &Arc<Device>, size: u64, usage: BufferUsages) -> Buffer {
+            let bucket_size = Self::get_size_bucket(size);
+            let mut devices = match self.devices.lock() {
+                Ok(d) => d,
                 Err(poisoned) => poisoned.into_inner(),
             };
 
-            let usage_map = buckets.entry((dev_key, usage)).or_insert_with(HashMap::new);
+            let usage_map = Self::device_pool(&mut devices, device)
+                .entry(usage)
+                .or_default();
             if let Some(pool) = usage_map.get_mut(&bucket_size)
                 && let Some(buffer) = pool.pop()
             {
@@ -461,27 +496,30 @@ pub mod buffer_utils {
             })
         }
 
-        pub fn return_buffer(&self, device: &Device, buffer: Buffer, usage: BufferUsages) {
+        /// Return a buffer created by `device` with `usage`. At most 8 buffers
+        /// are kept per device, usage and size; extra ones are dropped.
+        pub fn return_buffer(&self, device: &Arc<Device>, buffer: Buffer, usage: BufferUsages) {
             let size = buffer.size();
-            let dev_key = (device as *const Device) as usize;
-
-            let mut buckets = match self.buckets.lock() {
-                Ok(b) => b,
+            let mut devices = match self.devices.lock() {
+                Ok(d) => d,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            let usage_map = buckets.entry((dev_key, usage)).or_insert_with(HashMap::new);
-            let pool = usage_map.entry(size).or_insert_with(Vec::new);
+            let pool = Self::device_pool(&mut devices, device)
+                .entry(usage)
+                .or_default()
+                .entry(size)
+                .or_default();
             if pool.len() < 8 {
                 pool.push(buffer);
             }
         }
 
         pub fn clear(&self) {
-            let mut buckets = match self.buckets.lock() {
-                Ok(b) => b,
+            let mut devices = match self.devices.lock() {
+                Ok(d) => d,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            buckets.clear();
+            devices.clear();
         }
     }
 
