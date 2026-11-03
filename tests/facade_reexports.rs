@@ -7,8 +7,8 @@
 #[allow(unused_imports)]
 use rust_cv_native::{
     calib3d, core, d3, distributed, dnn, eval, features, geometry2d, hal, imgproc, io,
-    localization, math, optimize, photo, plot, pointcloud, registration, rendering, runtime,
-    scientific, sfm, signal, slam, video, videoio, viewer,
+    localization, math, objdetect, optimize, photo, plot, pointcloud, registration, rendering,
+    runtime, sfm, signal, slam, video, videoio, viewer,
 };
 
 #[test]
@@ -20,7 +20,7 @@ fn every_library_crate_is_a_module_of_the_facade() {
         std::mem::size_of::<usize>(),
         stringify!(
             calib3d core d3 distributed dnn eval features geometry2d hal imgproc io localization
-            math optimize photo plot pointcloud registration rendering runtime scientific sfm
+            math objdetect optimize photo plot pointcloud registration rendering runtime sfm
             signal slam video videoio viewer
         ),
     );

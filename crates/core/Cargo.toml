@@ -1,8 +1,12 @@
 [package]
 name = "cv-core"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 description = "Core types for computer vision"
 
 [dependencies]
@@ -12,6 +16,7 @@ rayon = { workspace = true }
 wide = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
+rand_distr = { workspace = true }
 num-traits = { version = "0.2", default-features = false }
 bytemuck = { workspace = true, features = ["derive"] }
 # `bytemuck` makes `f16`/`bf16` `Pod`, which every GPU upload and kernel needs.

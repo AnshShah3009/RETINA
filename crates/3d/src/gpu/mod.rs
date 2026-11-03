@@ -301,7 +301,7 @@ pub mod point_cloud {
             .map(|p| vec![p.x as f64, p.y as f64, p.z as f64])
             .collect();
 
-        let tree = match cv_scientific::spatial::KDTree::new(&pts_vec) {
+        let tree = match cv_math::spatial::KDTree::new(&pts_vec) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("[CPU-KDTREE] Failed to build KDTree: {}", e);

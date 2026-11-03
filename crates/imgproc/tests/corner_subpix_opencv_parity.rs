@@ -22,7 +22,7 @@
 //! (`cv2.ipp.setUseIPP(False)`), as `f32` bit patterns, plus the corners
 //! where default cv2 (IPP enabled) returned something else.
 
-use cv_calib3d::{SubpixCriteria, corner_subpix_with};
+use cv_imgproc::{SubpixCriteria, corner_subpix_with};
 use image::GrayImage;
 use nalgebra::Point2;
 

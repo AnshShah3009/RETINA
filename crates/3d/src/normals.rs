@@ -158,7 +158,7 @@ pub fn estimate_normals_from_depth(
     cx: f32,
     cy: f32,
 ) -> Vec<Vector3<f32>> {
-    cv_scientific::point_cloud::compute_normals_from_depth(depth, width, height, fx, fy, cx, cy)
+    cv_pointcloud::point_cloud::compute_normals_from_depth(depth, width, height, fx, fy, cx, cy)
 }
 
 // ── Config-based API (for users who prefer a settings struct) ─────────────────

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 use cv_core::{PointCloud, Rect};
-use cv_scientific::geometry::*;
-use cv_scientific::point_cloud::*;
+use cv_math::geometry::*;
+use cv_pointcloud::point_cloud::*;
 use nalgebra::Point3;
 
 #[test]

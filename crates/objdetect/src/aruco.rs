@@ -12,7 +12,7 @@
 //!
 //! ```
 //! use cv_core::{CpuTensor, TensorShape};
-//! use cv_features::aruco::*;
+//! use cv_objdetect::aruco::*;
 //!
 //! let dict = ArucoDictionary::Dict4x4_50;
 //! let marker = draw_marker(dict, 7, 60).unwrap();

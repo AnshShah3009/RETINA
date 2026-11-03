@@ -32,6 +32,16 @@ interested.
 - Disagreements are settled with evidence where possible: a test, a benchmark, or
   the reference library's behaviour. Otherwise the project lead decides.
 
+## Repository structure
+
+RETINA is a single repository and Cargo workspace; it does not use git
+submodules. Crates that change together are tested together, and a crate moves
+to its own repository only if it gains an independent release cadence and users
+outside RETINA. New crates are agreed in an issue, take a layer in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#crate-layers), and are released in
+lockstep with the rest. See the
+[decision record](docs/superpowers/specs/2026-11-03-workspace-structure-design.md).
+
 ## Review standards
 
 Reviewers check the [contract in CONTRIBUTING.md](CONTRIBUTING.md#the-projects-contract):
@@ -51,7 +61,8 @@ change merges, a maintainer merges `master` into `develop` and
 
 1. Make sure `master` is green on Linux and macOS CI.
 2. Move the **Unreleased** section of [CHANGELOG.md](CHANGELOG.md) under the new
-   version and date; bump `version` in the workspace manifests.
+   version and date; bump `version` in `[workspace.package]` and the internal
+   entries of `[workspace.dependencies]` (all crates share one version).
 3. Tag `vX.Y.Z` on `master` and publish release notes from the changelog.
 
 Versions follow [Semantic Versioning](https://semver.org). Before 1.0, minor

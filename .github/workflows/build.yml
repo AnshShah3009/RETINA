@@ -11,6 +11,7 @@ on:
       - '**/*.npy'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - 'deny.toml'
       - '.github/workflows/build.yml'
   pull_request:
     branches: [ master, develop, research/cubecl ]
@@ -22,6 +23,7 @@ on:
       - '**/*.npy'
       - '**/Cargo.toml'
       - '**/Cargo.lock'
+      - 'deny.toml'
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
@@ -67,6 +69,11 @@ jobs:
       # left two compile errors in it and the las 0.11 upgrade needed a port.
       run: cargo test -p cv-io --features las
 
+    - name: Test GPU marker scan feature
+      # cv-objdetect's `gpu` feature is not enabled by any other workspace
+      # crate, so the workspace test run does not compile it.
+      run: cargo test -p cv-objdetect --features gpu
+
     - name: Check CubeCL feature
       # The CubeCL kernels, their tests and benches are behind a feature
       # nothing else builds; this runner has no GPU, so macOS runs the tests.
@@ -105,6 +112,20 @@ jobs:
       # the first thing a user copies, a doc example that has never been run is
       # not documentation.
       run: cargo test --doc --workspace
+
+  deny:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v7
+    - name: Check advisories, bans, licences and sources
+      uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        # Every feature, so optional backends (CubeCL, MLX, FFmpeg) are checked too.
+        command: check
+        arguments: --all-features
 
   ci-macos:
     name: CI (macOS)

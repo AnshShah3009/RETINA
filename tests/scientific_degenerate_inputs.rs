@@ -17,7 +17,7 @@ use cv_core::{PointCloud, Rect};
 /// cases are the ones where `len - 1` and `0..len` disagree.
 #[test]
 fn the_shortest_ffts_are_the_samples_themselves() {
-    use cv_scientific::fft::{fft, ifft};
+    use cv_signal::fft::{fft, ifft};
 
     assert!(fft(&[]).is_empty(), "the DFT of nothing is nothing");
     assert!(ifft(&[]).is_empty());
@@ -54,7 +54,7 @@ fn the_shortest_ffts_are_the_samples_themselves() {
 /// zero-width interval is zero rather than `NaN`.
 #[test]
 fn integration_survives_empty_and_degenerate_intervals() {
-    use cv_scientific::integrate::{quad, simpson, trapezoid};
+    use cv_math::integrate::{quad, simpson, trapezoid};
 
     // `quad` is adaptive Gauss-Kronrod (G7-K15): a single panel is exact for
     // polynomials up to degree 22, so x^2 comes out to rounding.
@@ -96,7 +96,7 @@ fn integration_survives_empty_and_degenerate_intervals() {
 /// reaches for: the empty/identity/symmetry cases.
 #[test]
 fn the_special_functions_agree_with_published_values() {
-    use cv_scientific::special::{bessel_j0, erf, erfc, gamma};
+    use cv_math::special::{bessel_j0, erf, erfc, gamma};
 
     // erf(0) is 0 exactly. The A&S 7.1.26 form `erf` uses sums its five
     // coefficients to 0.999999999, so it returns **1.0e-9** here (measured)
@@ -206,7 +206,7 @@ fn the_special_functions_agree_with_published_values() {
 /// empty signal and one shorter than its own transient.
 #[test]
 fn filtering_degenerate_signals_keeps_the_length_and_stays_finite() {
-    use cv_scientific::signal::{butter, filtfilt};
+    use cv_signal::signal::{butter, filtfilt};
 
     let (b, a) = butter(2, 100.0, 1000.0);
     assert!(filtfilt(&b, &a, &[]).is_empty(), "nothing in, nothing out");
@@ -239,7 +239,7 @@ fn filtering_degenerate_signals_keeps_the_length_and_stays_finite() {
 /// The point-cloud routines must not invent geometry for an empty cloud.
 #[test]
 fn point_cloud_routines_do_not_invent_geometry() {
-    use cv_scientific::point_cloud::{
+    use cv_pointcloud::point_cloud::{
         estimate_normals, remove_radius_outliers, remove_statistical_outliers, segment_plane,
     };
 
@@ -285,7 +285,7 @@ fn point_cloud_routines_do_not_invent_geometry() {
 /// a constant would be fabricated.
 #[test]
 fn iou_of_degenerate_boxes_is_not_a_fabricated_ratio() {
-    use cv_scientific::geometry::vectorized_iou;
+    use cv_math::geometry::vectorized_iou;
 
     assert_eq!(vectorized_iou(&[], &[]).shape(), &[0, 0]);
     assert_eq!(
@@ -320,7 +320,7 @@ fn iou_of_degenerate_boxes_is_not_a_fabricated_ratio() {
 /// than exist returns what exists.
 #[test]
 fn the_kdtree_refuses_input_it_cannot_index() {
-    use cv_scientific::spatial::KDTree;
+    use cv_math::spatial::KDTree;
 
     assert!(KDTree::new(&[]).is_err(), "an empty point set has no tree");
     assert!(
@@ -346,18 +346,18 @@ fn the_kdtree_refuses_input_it_cannot_index() {
     assert!(hit[0].1.abs() < 1e-12);
 }
 
-/// `cv_scientific::mean` and `std` report "no answer" for an empty sample.
+/// `cv_math::mean` and `std` report "no answer" for an empty sample.
 ///
 /// The `stats` module's same-named functions do not - see the ignored test
 /// below, which records that measurement and the reason it is not fixed here.
 #[test]
 fn the_top_level_mean_and_std_are_none_for_an_empty_sample() {
-    assert_eq!(cv_scientific::mean(&[]), None);
-    assert_eq!(cv_scientific::std(&[]), None);
-    assert_eq!(cv_scientific::mean(&[2.0, 4.0]), Some(3.0));
-    assert_eq!(cv_scientific::std(&[2.0, 4.0]), Some(1.0));
+    assert_eq!(cv_math::mean(&[]), None);
+    assert_eq!(cv_math::std(&[]), None);
+    assert_eq!(cv_math::mean(&[2.0, 4.0]), Some(3.0));
+    assert_eq!(cv_math::std(&[2.0, 4.0]), Some(1.0));
 
-    use cv_scientific::stats;
+    use cv_math::stats;
     assert_eq!(stats::mean(&[2.0, 4.0]), 3.0);
     assert!(
         stats::median(&[]).is_nan(),
@@ -370,9 +370,9 @@ fn the_top_level_mean_and_std_are_none_for_an_empty_sample() {
 /// MEASURED in this workspace (`cargo test -p cv-scientific`):
 ///
 /// ```text
-/// cv_scientific::stats::mean(&[])   == 0.0    <- fabricated
-/// cv_scientific::stats::median(&[]) -> NaN    <- honest
-/// cv_scientific::mean(&[])          == None   <- honest
+/// cv_math::stats::mean(&[])   == 0.0    <- fabricated
+/// cv_math::stats::median(&[]) -> NaN    <- honest
+/// cv_math::mean(&[])          == None   <- honest
 /// ```
 ///
 /// The re-export layer puts both `mean`s in front of one user: `mean` (crate
@@ -387,9 +387,9 @@ fn the_top_level_mean_and_std_are_none_for_an_empty_sample() {
 #[ignore = "cv_math::stats::mean returns 0.0 for an empty slice; the fix belongs to crates/math"]
 fn stats_mean_of_nothing_must_not_be_zero() {
     assert!(
-        cv_scientific::stats::mean(&[]).is_nan(),
+        cv_math::stats::mean(&[]).is_nan(),
         "the mean of an empty sample must not be 0.0, which is indistinguishable \
          from the mean of [-1.0, 1.0]; measured {}",
-        cv_scientific::stats::mean(&[])
+        cv_math::stats::mean(&[])
     );
 }

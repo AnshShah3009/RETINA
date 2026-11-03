@@ -27,6 +27,18 @@ pub use project::{
 pub mod pattern;
 pub use pattern::{SubpixCriteria, corner_subpix, corner_subpix_with, find_chessboard_corners};
 
+/// RANSAC estimation of homographies and fundamental matrices from feature
+/// matches, and match filtering by inliers.
+pub mod ransac;
+pub use ransac::{
+    MatchPair, RansacConfig, RansacMatcher, RansacResult, estimate_fundamental,
+    estimate_homography, filter_matches_by_inliers,
+};
+
+/// USAC/NAPSAC/MAGSAC: enhanced RANSAC sampling and scoring strategies.
+pub mod usac;
+pub use usac::*;
+
 pub mod pnp;
 pub use pnp::{solve_pnp_dlt, solve_pnp_ransac, solve_pnp_refine};
 

@@ -34,7 +34,7 @@ impl RobustModel<MatchPair> for HomographyEstimator {
         // Normalised DLT, shared with `cv-calib3d`. This estimator previously
         // solved the raw (unnormalised) system, which loses accuracy for
         // large pixel coordinates.
-        cv_calib3d::dlt::solve_dlt_homography(&src, &dst)
+        crate::dlt::solve_dlt_homography(&src, &dst)
     }
 
     fn compute_error(&self, model: &Self::Model, data: &MatchPair) -> f64 {
@@ -66,7 +66,7 @@ impl RobustModel<MatchPair> for FundamentalEstimator {
         // Normalised 8-point algorithm, shared with `cv-calib3d` (this
         // estimator previously solved the raw system and enforced rank 2 by
         // recomposition).
-        cv_calib3d::dlt::solve_dlt_fundamental(&pts1, &pts2)
+        crate::dlt::solve_dlt_fundamental(&pts1, &pts2)
     }
 
     fn compute_error(&self, model: &Self::Model, data: &MatchPair) -> f64 {
@@ -268,7 +268,7 @@ mod tests {
         // Points in general position. The previous fixture laid them out on the
         // ray `y = x/2`, so *every* 4-point sample — every sample RANSAC draws —
         // was collinear. The DLT solver now rejects a collinear sample as rank
-        // deficient (`cv_calib3d::dlt::DLT_RANK_TOLERANCE`), so the estimator
+        // deficient (`crate::dlt::DLT_RANK_TOLERANCE`), so the estimator
         // correctly returned no model for every iteration and the test failed.
         // A ray of points was never a valid homography fixture.
         let mut matches = Matches::new();
@@ -395,7 +395,7 @@ mod tests {
 
         let flat1: Vec<[f64; 2]> = pts1.iter().map(|p| [p.0, p.1]).collect();
         let flat2: Vec<[f64; 2]> = pts2.iter().map(|p| [p.0, p.1]).collect();
-        let f_solver = cv_calib3d::fundamental::FundamentalSolver::estimate(&flat1, &flat2)
+        let f_solver = crate::fundamental::FundamentalSolver::estimate(&flat1, &flat2)
             .expect("FundamentalSolver");
 
         let p1: Vec<nalgebra::Point2<f64>> = pts1
@@ -406,7 +406,7 @@ mod tests {
             .iter()
             .map(|p| nalgebra::Point2::new(p.0, p.1))
             .collect();
-        let f_free = cv_calib3d::find_fundamental_mat(&p1, &p2).expect("find_fundamental_mat");
+        let f_free = crate::find_fundamental_mat(&p1, &p2).expect("find_fundamental_mat");
 
         let data: Vec<MatchPair> = pts1
             .iter()

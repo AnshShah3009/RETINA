@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-use cv_scientific::fft::{fft, ifft};
-use cv_scientific::spatial::KDTree;
+use cv_math::spatial::KDTree;
+use cv_signal::fft::{fft, ifft};
 use std::time::Instant;
 
 #[test]

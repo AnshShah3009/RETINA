@@ -7,6 +7,7 @@
 | [../README.md](../README.md) | What RETINA is, quick start, crate overview |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | How the crates fit together, the HAL, tensor conventions, where code goes |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Setting up, what a pull request needs, recipes for common changes |
+| [Workspace structure](superpowers/specs/2026-11-03-workspace-structure-design.md) | Why one repository with layered crates, and no submodules |
 
 ## Correctness
 

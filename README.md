@@ -1,17 +1,18 @@
 # RETINA
 
 [![Build and Test](https://github.com/AnshShah3009/RETINA/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/AnshShah3009/RETINA/actions/workflows/build.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 
 **A native Rust computer-vision workspace with CPU and GPU backends, built to
 match OpenCV, Open3D, SciPy and Matplotlib — and to prove it.**
 
-RETINA covers image processing, features, calibration, 3-D point clouds and
-meshes, registration, SfM/SLAM, localization, signal processing, plotting and
-I/O, in about 30 crates. The default build has no C or C++ dependencies. GPU
-kernels run through [wgpu](https://wgpu.rs) (Vulkan, Metal, DX12) and are tested
-against the CPU implementation, many of them bit for bit.
+RETINA covers image processing, features, object detection, calibration, 3-D
+point clouds and meshes, registration, SfM/SLAM, localization, signal
+processing, plotting and I/O, in 30 crates in this one repository. The default
+build has no C or C++ dependencies. GPU kernels run through
+[wgpu](https://wgpu.rs) (Vulkan, Metal, DX12) and are tested against the CPU
+implementation, many of them bit for bit.
 
 What sets it apart is how results are checked:
 
@@ -90,9 +91,10 @@ python -c "import cv_native"
 | Foundations | `cv-core` | Tensors (planar CHW), camera models, keypoints, errors |
 | | `cv-hal` | CPU, GPU (wgpu), MLX and CubeCL backends behind `ComputeContext` |
 | | `cv-runtime` | Scheduling, resource groups, device selection |
-| | `cv-math`, `cv-geometry2d`, `cv-scientific` | Math primitives, 2-D geometry, scientific utilities |
+| | `cv-math`, `cv-geometry2d` | Math primitives, special functions, sparse solvers, k-d tree; 2-D geometry |
 | Images | `cv-imgproc` | Filters, morphology, colour, thresholds, histograms, warps, contours, template matching |
-| | `cv-features` | FAST, ORB, SIFT, AKAZE, BRIEF, HOG, Harris, GFTT, ArUco/ChArUco/AprilTag, matchers, RANSAC/USAC |
+| | `cv-features` | FAST, ORB, SIFT, AKAZE, BRIEF, Harris, GFTT, LBD, matchers, FLANN, retrieval |
+| | `cv-objdetect` | ArUco, ChArUco and AprilTag markers, HOG, Haar cascades |
 | | `cv-photo` | Bilateral filtering, HDR, denoising, inpainting |
 | | `cv-video` | Background subtraction, optical flow, Kalman filtering, tracking |
 | | `cv-dnn` | ONNX inference via `tract` with OpenCV-style pre-processing |
@@ -205,13 +207,9 @@ Issue forms ask for what a maintainer needs to reproduce a problem.
 
 ## License
 
-Licensed under either of
+RETINA is free and open source under the [MIT license](LICENSE). Contributions
+are accepted under the same license.
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual licensed as above, without any additional terms or conditions.
+Some content is derived from other open-source projects (OpenCV's ArUco and
+AprilTag dictionaries, and algorithms that port specific OpenCV sources); their
+notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

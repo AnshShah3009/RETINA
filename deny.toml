@@ -1,0 +1,42 @@
+# Supply-chain checks run by `cargo deny check` in CI and `scripts/check.sh full`.
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Security advisories and unmaintained crates from the RustSec database.
+# An ignore needs a reason and an issue that tracks its removal.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licences only, all compatible with RETINA's MIT license.
+# Dual-licensed crates (e.g. "MIT OR Apache-2.0 OR LGPL-2.1-or-later") pass
+# on their permissive option.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[[licenses.exceptions]]
+# egui's bundled fonts (the viewer): Hack, Ubuntu and emoji fonts.
+crate = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
+
+[bans]
+# Duplicate versions are reported, not failed: several come from upstream
+# crates (wgpu, egui, image) that pin different majors.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

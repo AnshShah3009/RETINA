@@ -1,7 +1,12 @@
 [package]
 name = "cv-calib3d"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 description = "Camera calibration and 3D reconstruction for Rust Computer Vision"
 
 [dependencies]
@@ -15,6 +20,7 @@ image = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 rayon = { workspace = true }
+rand = { workspace = true }
 wide = { workspace = true }
 wgpu = { workspace = true, optional = true }
 bytemuck = { workspace = true, features = ["derive"], optional = true }

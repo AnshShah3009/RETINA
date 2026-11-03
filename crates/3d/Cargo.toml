@@ -1,14 +1,19 @@
 [package]
 name = "cv-3d"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
 
 [dependencies]
 bytemuck = { workspace = true }
 nalgebra = { workspace = true }
 cv-core = { workspace = true }
 cv-math = { workspace = true }
-cv-scientific = { workspace = true }
+cv-pointcloud = { workspace = true }
 cv-runtime = { workspace = true }
 cv-hal = { workspace = true }
 image = { workspace = true }
