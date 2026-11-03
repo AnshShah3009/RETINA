@@ -138,9 +138,9 @@ that touches Rust code, manifests, shaders or test fixtures:
 
 | Job | Checks |
 | --- | --- |
-| Linux | fmt, build, half-precision and CubeCL feature checks, LAS feature tests, no warnings, examples, clippy, nextest, doctests |
+| Linux | fmt, half-precision and CubeCL feature checks, optional-feature tests (LAS, glTF, GPU marker scan), no warnings (all targets, including benches), examples, clippy, nextest, doctests |
 | Supply chain | `cargo deny check` against [`deny.toml`](deny.toml): RustSec advisories, permissive licences only, crates.io as the only source |
-| macOS | CPU and MLX backend builds and tests, plus the CubeCL and f16/bf16 GPU kernel tests on the runner's **Metal GPU** |
+| macOS | The workspace tests and examples on the runner's **Metal GPU**, the MLX context, and the CubeCL and f16/bf16 GPU kernel tests |
 
 The Linux runner has no GPU, so the macOS job is where GPU code is tested in CI.
 Metal fuses multiply-adds and flushes subnormals, so arithmetic that is exact on
